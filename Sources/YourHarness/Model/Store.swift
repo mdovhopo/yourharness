@@ -1,0 +1,220 @@
+import AppKit
+import HarnessCore
+
+enum PermissionMode: String, Codable, CaseIterable, Identifiable {
+    case ask, acceptEdits, plan, bypass
+
+    var id: String { rawValue }
+
+    var cliValue: String? {
+        switch self {
+        case .ask: nil
+        case .acceptEdits: "acceptEdits"
+        case .plan: "plan"
+        case .bypass: "bypassPermissions"
+        }
+    }
+
+    /// For the live `set_permission_mode` control request, which has no "unset".
+    var controlValue: String { cliValue ?? "default" }
+
+    var shortLabel: String {
+        switch self {
+        case .ask: "Ask"
+        case .acceptEdits: "Accept Edits"
+        case .plan: "Plan"
+        case .bypass: "Bypass"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .ask: "Claude asks before editing files or running commands."
+        case .acceptEdits: "File edits go through. Commands still ask."
+        case .plan: "Claude explores and plans, but changes nothing."
+        case .bypass: "Everything runs without asking. Use with care."
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .ask: "Ask Before Changes"
+        case .acceptEdits: "Auto-Accept Edits"
+        case .plan: "Plan Only"
+        case .bypass: "Bypass Permissions"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .ask: "hand.raised"
+        case .acceptEdits: "pencil.and.outline"
+        case .plan: "list.bullet.clipboard"
+        case .bypass: "exclamationmark.shield"
+        }
+    }
+}
+
+struct Project: Codable, Identifiable, Hashable {
+    var id = UUID()
+    var name: String
+    var path: String
+    var permissionMode = PermissionMode.ask
+
+    var url: URL { URL(fileURLWithPath: path, isDirectory: true) }
+}
+
+struct ThreadMeta: Codable {
+    var id: UUID
+    var projectID: UUID
+    var title: String
+    var createdAt: Date
+    var updatedAt: Date
+    var sessionID: String?
+    var model: String?
+    // Optionals decode as absent from older files, so these are safe to add.
+    var effort: String?
+    var contextTokens: Int?
+    var contextWindow: Int?
+}
+
+struct PersistedState: Codable {
+    var projects: [Project] = []
+    var threads: [ThreadMeta] = []
+    var selectedThreadID: UUID?
+    /// The always-present project threads start in when you haven't picked a folder.
+    var homeProjectID: UUID?
+    /// User-chosen executable paths, keyed by `AgentCLI.id`.
+    var cliPathOverrides: [String: String] = [:]
+    var defaults = ThreadDefaults()
+    /// Last known catalog, so pickers are populated instantly at launch.
+    var claudeModels: [ClaudeModel] = []
+    /// Context window sizes seen so far, keyed by resolved model ID.
+    var contextWindows: [String: Int] = [:]
+    var rateLimit: RateLimitInfo?
+    var rateLimitUpdatedAt: Date?
+
+    init() {}
+
+    // Every field is optional on decode, so adding fields never wipes existing state.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        projects = try container.decodeIfPresent([Project].self, forKey: .projects) ?? []
+        threads = try container.decodeIfPresent([ThreadMeta].self, forKey: .threads) ?? []
+        selectedThreadID = try container.decodeIfPresent(UUID.self, forKey: .selectedThreadID)
+        homeProjectID = try container.decodeIfPresent(UUID.self, forKey: .homeProjectID)
+        cliPathOverrides = try container.decodeIfPresent([String: String].self, forKey: .cliPathOverrides) ?? [:]
+        defaults = try container.decodeIfPresent(ThreadDefaults.self, forKey: .defaults) ?? ThreadDefaults()
+        claudeModels = try container.decodeIfPresent([ClaudeModel].self, forKey: .claudeModels) ?? []
+        contextWindows = try container.decodeIfPresent([String: Int].self, forKey: .contextWindows) ?? [:]
+        rateLimit = try container.decodeIfPresent(RateLimitInfo.self, forKey: .rateLimit)
+        rateLimitUpdatedAt = try container.decodeIfPresent(Date.self, forKey: .rateLimitUpdatedAt)
+    }
+}
+
+/// What new threads and projects start with. Nil means "let the CLI decide".
+struct ThreadDefaults: Codable, Equatable {
+    var model: String?
+    var effort: String?
+    var permissionMode: PermissionMode?
+}
+
+enum EffortLevel: String, CaseIterable, Identifiable {
+    case low, medium, high, xhigh, max
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .low: "Low"
+        case .medium: "Medium"
+        case .high: "High"
+        case .xhigh: "Extra High"
+        case .max: "Max"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .low: "Quickest replies, light reasoning"
+        case .medium: "Balanced speed and depth"
+        case .high: "Thinks things through"
+        case .xhigh: "Deep reasoning for hard problems"
+        case .max: "Everything it's got. Slowest."
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .low: "gauge.with.dots.needle.0percent"
+        case .medium: "gauge.with.dots.needle.33percent"
+        case .high: "gauge.with.dots.needle.50percent"
+        case .xhigh: "gauge.with.dots.needle.67percent"
+        case .max: "gauge.with.dots.needle.100percent"
+        }
+    }
+}
+
+/// JSON files under Application Support. Thread metadata loads at launch; transcripts
+/// load lazily when a thread is first opened, so startup cost doesn't grow with history.
+struct Store: Sendable {
+    let root: URL
+    private let queue = DispatchQueue(label: "yourharness.store", qos: .utility)
+
+    init() {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        root = base.appending(path: "YourHarness", directoryHint: .isDirectory)
+        try? FileManager.default.createDirectory(at: threadsDirectory, withIntermediateDirectories: true)
+    }
+
+    private var stateURL: URL { root.appending(path: "state.json") }
+    private var threadsDirectory: URL { root.appending(path: "threads", directoryHint: .isDirectory) }
+    private func transcriptURL(_ id: UUID) -> URL { threadsDirectory.appending(path: "\(id.uuidString).json") }
+
+    func loadState() -> PersistedState {
+        guard let data = try? Data(contentsOf: stateURL),
+              let state = try? Self.decoder.decode(PersistedState.self, from: data)
+        else { return PersistedState() }
+        return state
+    }
+
+    func saveState(_ state: PersistedState) {
+        write(state, to: stateURL)
+    }
+
+    func revealInFinder() {
+        NSWorkspace.shared.activateFileViewerSelecting([root])
+    }
+
+    func loadTranscript(_ id: UUID) -> [EntrySnapshot] {
+        guard let data = try? Data(contentsOf: transcriptURL(id)) else { return [] }
+        return (try? Self.decoder.decode([EntrySnapshot].self, from: data)) ?? []
+    }
+
+    func saveTranscript(_ id: UUID, entries: [EntrySnapshot]) {
+        write(entries, to: transcriptURL(id))
+    }
+
+    func deleteTranscript(_ id: UUID) {
+        let url = transcriptURL(id)
+        queue.async { try? FileManager.default.removeItem(at: url) }
+    }
+
+    /// Encodes on the caller, writes on a serial background queue so writes stay ordered.
+    private func write(_ value: some Encodable, to url: URL) {
+        guard let data = try? Self.encoder.encode(value) else { return }
+        queue.async { try? data.write(to: url, options: .atomic) }
+    }
+
+    private static let encoder: JSONEncoder = {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        return encoder
+    }()
+
+    private static let decoder: JSONDecoder = {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
+    }()
+}

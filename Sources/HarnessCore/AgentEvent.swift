@@ -1,0 +1,97 @@
+import Foundation
+
+/// A normalized event emitted by an agent session. Adapters (Claude today, others later)
+/// translate their wire protocol into these, and the UI only ever consumes these.
+public enum AgentEvent: Sendable, Equatable {
+    case sessionStarted(SessionInfo)
+    case status(String)
+    case blockStarted(BlockRef, BlockKind)
+    case textDelta(BlockRef, String)
+    case thinkingDelta(BlockRef, String)
+    case toolInputDelta(BlockRef, String)
+    /// A complete assistant message. Authoritative for tool inputs; text may already
+    /// have arrived as deltas.
+    case assistantMessage(messageID: String, blocks: [ContentBlock], parentToolUseID: String?)
+    case toolResults([ToolResult], parentToolUseID: String?)
+    case permissionRequest(PermissionRequest)
+    case rateLimit(RateLimitInfo)
+    /// Tokens in the context window after the latest top-level assistant message.
+    case contextUsage(tokens: Int)
+    /// Reply to `initialize`: models, effort levels, CLI version.
+    case catalog(ClaudeCatalog)
+    case controlFailed(requestID: String, message: String)
+    case turnCompleted(TurnResult)
+    case processExited(code: Int32, stderrTail: String)
+}
+
+/// Identifies a content block within a streamed assistant message.
+public struct BlockRef: Hashable, Sendable {
+    public var messageID: String
+    public var index: Int
+    public var parentToolUseID: String?
+
+    public init(messageID: String, index: Int, parentToolUseID: String? = nil) {
+        self.messageID = messageID
+        self.index = index
+        self.parentToolUseID = parentToolUseID
+    }
+}
+
+public enum BlockKind: Sendable, Equatable {
+    case text
+    case thinking
+    case toolUse(id: String, name: String)
+}
+
+public enum ContentBlock: Sendable, Equatable {
+    case text(String)
+    case thinking(String)
+    case toolUse(id: String, name: String, inputJSON: String)
+}
+
+public struct SessionInfo: Sendable, Equatable {
+    public var sessionID: String
+    public var model: String?
+    public var cwd: String?
+    public var permissionMode: String?
+    public var cliVersion: String?
+}
+
+public struct ToolResult: Sendable, Equatable {
+    public var toolUseID: String
+    public var content: String
+    public var isError: Bool
+}
+
+public struct PermissionRequest: Sendable, Equatable, Identifiable {
+    public var id: String { requestID }
+    public var requestID: String
+    public var toolName: String
+    public var description: String?
+    /// The raw tool input, echoed back as `updatedInput` when allowing.
+    public var inputJSON: String
+}
+
+public struct RateLimitInfo: Sendable, Equatable, Codable {
+    public struct Window: Sendable, Equatable, Codable, Identifiable {
+        public var id: String { name }
+        /// e.g. "five_hour", "seven_day"
+        public var name: String
+        /// 0...1
+        public var utilization: Double
+        public var resetsAt: Date?
+    }
+
+    public var status: String
+    public var windows: [Window]
+}
+
+public struct TurnResult: Sendable, Equatable {
+    public var isError: Bool
+    public var subtype: String
+    public var durationMs: Int?
+    public var costUSD: Double?
+    public var resultText: String?
+    /// Context window size per model used this turn, keyed by resolved model ID.
+    public var contextWindows: [String: Int] = [:]
+}
