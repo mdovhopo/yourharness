@@ -18,6 +18,19 @@ struct ClaudeMark: View {
     }
 }
 
+/// The mark, slowly turning: Claude is working.
+struct SpinningClaudeMark: View {
+    var size: CGFloat = 11
+    @State private var turning = false
+
+    var body: some View {
+        ClaudeMark(size: size)
+            .rotationEffect(.degrees(turning ? 360 : 0))
+            .animation(.linear(duration: 2.4).repeatForever(autoreverses: false), value: turning)
+            .onAppear { turning = true }
+    }
+}
+
 private struct StarburstShape: Shape {
     /// Slightly irregular ray lengths give it the hand-drawn feel of the original.
     private static let rays: [CGFloat] = [1.0, 0.86, 0.95, 0.8, 0.98, 0.84, 0.92, 0.82, 1.0, 0.87, 0.94, 0.81]

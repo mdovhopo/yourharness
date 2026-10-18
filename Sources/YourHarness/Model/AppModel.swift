@@ -22,8 +22,12 @@ final class AppModel {
     private(set) var projects: [Project] = []
     private(set) var threads: [ThreadModel] = []
     var selectedThreadID: UUID? {
-        didSet { save() }
+        didSet {
+            selectedThread?.markRead()
+            save()
+        }
     }
+    private(set) var collapsedProjectIDs: Set<UUID> = []
     /// Last usage report from the CLI. Persisted, so limits show right after launch.
     private(set) var rateLimit: RateLimitInfo?
     private(set) var rateLimitUpdatedAt: Date?
@@ -60,6 +64,7 @@ final class AppModel {
         contextWindows = state.contextWindows
         rateLimit = state.rateLimit
         rateLimitUpdatedAt = state.rateLimitUpdatedAt
+        collapsedProjectIDs = state.collapsedProjectIDs
 
         threads = state.threads.map { ThreadModel(meta: $0, app: self) }
         selectedThreadID = state.selectedThreadID
@@ -96,6 +101,26 @@ final class AppModel {
 
     func threads(in project: Project) -> [ThreadModel] {
         threads.filter { $0.projectID == project.id }.sorted { $0.updatedAt > $1.updatedAt }
+    }
+
+    /// Everything the sidebar shows, in order. Lets the list animate inserts and reorders.
+    var sidebarOrder: [UUID] {
+        projects.flatMap { project in
+            [project.id] + (isCollapsed(project) ? [] : threads(in: project).map(\.id))
+        }
+    }
+
+    func isCollapsed(_ project: Project) -> Bool {
+        collapsedProjectIDs.contains(project.id)
+    }
+
+    func setCollapsed(_ collapsed: Bool, for project: Project) {
+        if collapsed {
+            collapsedProjectIDs.insert(project.id)
+        } else {
+            collapsedProjectIDs.remove(project.id)
+        }
+        save()
     }
 
     // MARK: - Projects
@@ -165,6 +190,7 @@ final class AppModel {
 
     @discardableResult
     func newThread(in project: Project) -> ThreadModel {
+        if isCollapsed(project) { setCollapsed(false, for: project) }
         // Reuse an untouched empty thread instead of piling up blanks.
         if let blank = threads(in: project).first(where: { $0.entries.isEmpty && $0.sessionID == nil && $0.title == ThreadModel.untitled }) {
             selectedThreadID = blank.id
@@ -344,6 +370,7 @@ final class AppModel {
         state.contextWindows = contextWindows
         state.rateLimit = rateLimit
         state.rateLimitUpdatedAt = rateLimitUpdatedAt
+        state.collapsedProjectIDs = collapsedProjectIDs
         store.saveState(state)
     }
 

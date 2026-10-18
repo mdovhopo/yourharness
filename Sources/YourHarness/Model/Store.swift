@@ -93,6 +93,7 @@ struct PersistedState: Codable {
     var contextWindows: [String: Int] = [:]
     var rateLimit: RateLimitInfo?
     var rateLimitUpdatedAt: Date?
+    var collapsedProjectIDs: Set<UUID> = []
 
     init() {}
 
@@ -109,6 +110,7 @@ struct PersistedState: Codable {
         contextWindows = try container.decodeIfPresent([String: Int].self, forKey: .contextWindows) ?? [:]
         rateLimit = try container.decodeIfPresent(RateLimitInfo.self, forKey: .rateLimit)
         rateLimitUpdatedAt = try container.decodeIfPresent(Date.self, forKey: .rateLimitUpdatedAt)
+        collapsedProjectIDs = try container.decodeIfPresent(Set<UUID>.self, forKey: .collapsedProjectIDs) ?? []
     }
 }
 

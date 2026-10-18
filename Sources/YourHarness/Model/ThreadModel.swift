@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 import HarnessCore
 
 /// A conversation with one agent session, plus the reducer that turns `AgentEvent`s
@@ -30,6 +31,8 @@ final class ThreadModel: Identifiable {
     private(set) var entries: [TranscriptEntry] = []
     private(set) var phase = Phase.idle
     private(set) var pendingPermissions: [PermissionRequest] = []
+    /// A reply finished while you were looking at another thread.
+    private(set) var hasUnread = false
     var draft = ""
 
     @ObservationIgnored private unowned let app: AppModel
@@ -96,9 +99,17 @@ final class ThreadModel: Identifiable {
     func loadTranscriptIfNeeded() {
         guard !transcriptLoaded else { return }
         transcriptLoaded = true
-        entries = app.store.loadTranscript(id)
+        let loaded = app.store.loadTranscript(id)
             .filter { !($0.kind == .thinking && $0.text.isEmpty) }
             .map(TranscriptEntry.init(snapshot:))
+        // History should just be there; only new messages animate in.
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) { entries = loaded }
+    }
+
+    func markRead() {
+        hasUnread = false
     }
 
     // MARK: - Actions
@@ -360,6 +371,7 @@ final class ThreadModel: Identifiable {
 
     /// Marks the turn finished: nothing is streaming, nothing is awaiting approval.
     private func settle() {
+        if phase == .running, app.selectedThreadID != id { hasUnread = true }
         phase = .idle
         pendingPermissions.removeAll()
         for entry in blocks.values where entry.isStreaming { entry.isStreaming = false }
@@ -404,7 +416,9 @@ final class ThreadModel: Identifiable {
 
     /// Seeds a transcript directly; used by the stress test.
     func seed(_ seeded: [TranscriptEntry]) {
-        entries = seeded
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) { entries = seeded }
     }
 
     func appendForStress(_ entry: TranscriptEntry) {

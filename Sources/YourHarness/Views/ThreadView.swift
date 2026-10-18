@@ -14,11 +14,19 @@ struct ThreadView: View {
             LazyVStack(alignment: .leading, spacing: 18) {
                 ForEach(thread.entries) { entry in
                     EntryView(entry: entry)
+                        .transition(.asymmetric(
+                            insertion: .opacity.combined(with: .offset(y: 12)),
+                            removal: .opacity
+                        ))
                 }
                 if showsTypingIndicator {
                     TypingIndicator()
+                        .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .leading)))
                 }
             }
+            // Keyed on count, so streaming text doesn't animate, only new rows.
+            .animation(.smooth(duration: 0.32), value: thread.entries.count)
+            .animation(.smooth(duration: 0.25), value: showsTypingIndicator)
             .frame(maxWidth: 820)
             .frame(maxWidth: .infinity)
             .padding(.horizontal, 28)
@@ -54,14 +62,18 @@ struct ThreadView: View {
 }
 
 private struct TypingIndicator: View {
+    @State private var dimmed = false
+
     var body: some View {
         HStack(spacing: 8) {
-            ProgressView()
-                .controlSize(.small)
+            SpinningClaudeMark(size: 14)
             Text("Working…")
                 .foregroundStyle(.secondary)
+                .opacity(dimmed ? 0.45 : 1)
+                .animation(.easeInOut(duration: 1.1).repeatForever(), value: dimmed)
         }
         .font(.callout)
+        .onAppear { dimmed = true }
     }
 }
 

@@ -8,12 +8,18 @@ struct RootView: View {
             SidebarView()
                 .navigationSplitViewColumnWidth(min: 220, ideal: 270, max: 380)
         } detail: {
-            if let thread = app.selectedThread {
-                ThreadView(thread: thread)
-                    .id(thread.id)
-            } else {
-                EmptyDetailView()
+            ZStack {
+                if let thread = app.selectedThread {
+                    ThreadView(thread: thread)
+                        .id(thread.id)
+                        .transition(.opacity)
+                } else {
+                    EmptyDetailView()
+                        .transition(.opacity)
+                }
             }
+            // A quick crossfade when switching threads, not a hard cut.
+            .animation(.easeInOut(duration: 0.16), value: app.selectedThreadID)
         }
     }
 }
