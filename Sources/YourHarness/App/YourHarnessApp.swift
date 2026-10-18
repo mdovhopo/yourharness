@@ -20,6 +20,15 @@ struct YourHarnessApp: App {
                     .keyboardShortcut("o")
             }
             CommandMenu("Thread") {
+                Button("Previous Thread") {
+                    withAnimation(SidebarMetrics.selectionSpring) { app.selectAdjacentThread(-1) }
+                }
+                .keyboardShortcut(.upArrow, modifiers: [.command, .option])
+                Button("Next Thread") {
+                    withAnimation(SidebarMetrics.selectionSpring) { app.selectAdjacentThread(1) }
+                }
+                .keyboardShortcut(.downArrow, modifiers: [.command, .option])
+                Divider()
                 Button("Stop") { app.selectedThread?.stop() }
                     .keyboardShortcut(".")
                     .disabled(app.selectedThread?.phase != .running)

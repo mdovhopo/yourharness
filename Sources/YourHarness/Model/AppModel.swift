@@ -110,6 +110,21 @@ final class AppModel {
         }
     }
 
+    /// Threads in sidebar order, skipping collapsed projects. For keyboard navigation.
+    var visibleThreadIDs: [UUID] {
+        projects.flatMap { isCollapsed($0) ? [] : threads(in: $0).map(\.id) }
+    }
+
+    func selectAdjacentThread(_ offset: Int) {
+        let ids = visibleThreadIDs
+        guard !ids.isEmpty else { return }
+        guard let current = selectedThreadID, let index = ids.firstIndex(of: current) else {
+            selectedThreadID = offset > 0 ? ids.first : ids.last
+            return
+        }
+        selectedThreadID = ids[min(max(index + offset, 0), ids.count - 1)]
+    }
+
     func isCollapsed(_ project: Project) -> Bool {
         collapsedProjectIDs.contains(project.id)
     }

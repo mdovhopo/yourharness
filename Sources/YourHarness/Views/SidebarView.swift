@@ -1,39 +1,46 @@
 import HarnessCore
 import SwiftUI
 
+/// Hand-built rather than a `List`: the system selection highlight can't animate, and a
+/// pill that glides between threads is the point.
 struct SidebarView: View {
     @Environment(AppModel.self) private var app
+    @Namespace private var selection
+    @FocusState private var focused: Bool
 
     var body: some View {
-        @Bindable var app = app
-        List(selection: $app.selectedThreadID) {
-            NewThreadButton()
-                .listRowInsets(EdgeInsets(top: 2, leading: 0, bottom: 10, trailing: 0))
-                .listRowSeparator(.hidden)
-                .selectionDisabled()
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 1) {
+                ForEach(app.projects) { project in
+                    ProjectHeader(project: project)
+                        .padding(.top, project.id == app.projects.first?.id ? 2 : 12)
+                        .padding(.bottom, 2)
 
-            ForEach(app.projects) { project in
-                Section {
                     if !app.isCollapsed(project) {
                         ForEach(app.threads(in: project)) { thread in
-                            ThreadRow(thread: thread)
-                                .tag(thread.id)
+                            ThreadRow(thread: thread, selection: selection)
                                 .transition(.opacity.combined(with: .move(edge: .top)))
-                                .contextMenu {
-                                    Button("Delete Thread", systemImage: "trash", role: .destructive) {
-                                        withAnimation(.snappy) { app.deleteThread(thread) }
-                                    }
-                                }
                         }
                     }
-                } header: {
-                    ProjectHeader(project: project)
                 }
             }
+            .padding(.horizontal, 10)
+            .padding(.bottom, 8)
+            // Inserts, deletes, collapses and recency reorders all glide instead of jumping.
+            .animation(.snappy(duration: 0.28), value: app.sidebarOrder)
         }
-        .listStyle(.sidebar)
-        // Inserts, deletes, collapses and recency reorders all glide instead of jumping.
-        .animation(.snappy(duration: 0.28), value: app.sidebarOrder)
+        .scrollIndicators(.never)
+        .focusable()
+        .focused($focused)
+        .focusEffectDisabled()
+        .onKeyPress(.upArrow) { move(-1) }
+        .onKeyPress(.downArrow) { move(1) }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            NewThreadButton()
+                .padding(.horizontal, 10)
+                .padding(.top, 4)
+                .padding(.bottom, 10)
+        }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             UsageFooter()
         }
@@ -46,6 +53,21 @@ struct SidebarView: View {
             }
         }
     }
+
+    private func move(_ offset: Int) -> KeyPress.Result {
+        withAnimation(SidebarMetrics.selectionSpring) { app.selectAdjacentThread(offset) }
+        return .handled
+    }
+}
+
+enum SidebarMetrics {
+    /// Fixed columns so thread titles line up under project names:
+    /// [chevron][gap][icon][gap][name] over [indent][status][gap][title].
+    static let chevron: CGFloat = 10
+    static let icon: CGFloat = 18
+    static let gap: CGFloat = 6
+    static let rowPadding: CGFloat = 8
+    static let selectionSpring = Animation.spring(response: 0.32, dampingFraction: 0.82)
 }
 
 // MARK: - New thread
@@ -55,7 +77,7 @@ private struct NewThreadButton: View {
 
     var body: some View {
         Button {
-            app.newThreadInCurrentProject()
+            withAnimation(SidebarMetrics.selectionSpring) { app.newThreadInCurrentProject() }
         } label: {
             HStack(spacing: 9) {
                 Image(systemName: "square.and.pencil")
@@ -126,22 +148,22 @@ private struct ProjectHeader: View {
     }
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: SidebarMetrics.gap) {
             Button {
                 withAnimation(.snappy(duration: 0.25)) { app.setCollapsed(!collapsed, for: project) }
             } label: {
-                HStack(spacing: 6) {
+                HStack(spacing: SidebarMetrics.gap) {
                     Image(systemName: "chevron.right")
                         .font(.system(size: 9, weight: .bold))
                         .foregroundStyle(.tertiary)
                         .rotationEffect(.degrees(collapsed ? 0 : 90))
-                        .frame(width: 10)
+                        .frame(width: SidebarMetrics.chevron)
                     Image(systemName: app.isHome(project) ? "house.fill" : "folder.fill")
                         .font(.callout)
                         .foregroundStyle(app.isHome(project) ? AnyShapeStyle(Color.claude) : AnyShapeStyle(.secondary))
+                        .frame(width: SidebarMetrics.icon)
                     Text(project.name)
                         .font(.callout.weight(.semibold))
-                        .foregroundStyle(.primary)
                         .lineLimit(1)
                     if collapsed {
                         if hasActivity {
@@ -166,7 +188,7 @@ private struct ProjectHeader: View {
             Spacer(minLength: 4)
 
             Button("New Thread in \(project.name)", systemImage: "plus") {
-                app.newThread(in: project)
+                withAnimation(SidebarMetrics.selectionSpring) { _ = app.newThread(in: project) }
             }
             .labelStyle(.iconOnly)
             .buttonStyle(.borderless)
@@ -174,8 +196,8 @@ private struct ProjectHeader: View {
             .foregroundStyle(hovering ? .secondary : .tertiary)
             .help("New thread in \(project.name)")
         }
-        .padding(.trailing, 6)
-        .padding(.vertical, 2)
+        .padding(.horizontal, SidebarMetrics.rowPadding - 4)
+        .padding(.vertical, 4)
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.15), value: hovering)
         .help(project.path)
@@ -197,12 +219,19 @@ private struct ProjectHeader: View {
 // MARK: - Threads
 
 private struct ThreadRow: View {
+    @Environment(AppModel.self) private var app
     let thread: ThreadModel
+    let selection: Namespace.ID
+    @State private var hovering = false
+
+    private var isSelected: Bool { app.selectedThreadID == thread.id }
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: SidebarMetrics.gap) {
+            // Status sits under the project icon; the title lines up with the project name.
             ThreadStatus(thread: thread)
-                .frame(width: 12, height: 12)
+                .frame(width: SidebarMetrics.icon, height: 14)
+                .padding(.leading, SidebarMetrics.chevron + SidebarMetrics.gap)
             Text(thread.title)
                 .fontWeight(thread.hasUnread ? .semibold : .regular)
                 .lineLimit(1)
@@ -215,9 +244,31 @@ private struct ThreadRow: View {
                     .contentTransition(.numericText())
             }
         }
-        .padding(.vertical, 3)
-        .padding(.leading, 6)
+        .padding(.horizontal, SidebarMetrics.rowPadding - 4)
+        .padding(.vertical, 6)
+        .background {
+            if isSelected {
+                // One pill, shared across rows: it slides to wherever the selection goes.
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color.primary.opacity(0.1))
+                    .matchedGeometryEffect(id: "selection", in: selection)
+            } else if hovering {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color.primary.opacity(0.045))
+            }
+        }
+        .contentShape(.rect)
+        .onTapGesture {
+            withAnimation(SidebarMetrics.selectionSpring) { app.selectedThreadID = thread.id }
+        }
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovering)
         .animation(.snappy, value: thread.hasUnread)
+        .contextMenu {
+            Button("Delete Thread", systemImage: "trash", role: .destructive) {
+                withAnimation(.snappy) { app.deleteThread(thread) }
+            }
+        }
     }
 
     /// Compact like Mail: "now", "53m", "2h", "Yesterday", "Mon", "Oct 3".
