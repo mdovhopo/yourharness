@@ -85,7 +85,13 @@ struct ThreadMeta: Codable {
     var contextTokens: Int?
     var contextWindow: Int?
     var isPinned: Bool?
-    var isArchived: Bool?
+    /// When the thread moved to the Settled shelf; nil while it's active.
+    var settledAt: Date?
+    /// False keeps the thread out of automatic settling.
+    var autoSettle: Bool?
+    /// Set by un-settling: the thread sorts as fresh, and isn't auto-settled again until
+    /// you send something new.
+    var reactivatedAt: Date?
 }
 
 struct PersistedState: Codable {
@@ -108,6 +114,8 @@ struct PersistedState: Codable {
     var collapsedProjectIDs: Set<UUID> = []
     /// Tell agents they can answer with diagrams. On unless turned off.
     var diagramInstructions = true
+    /// Idle threads move to the Settled shelf after this many days; 0 turns it off.
+    var autoSettleDays = 3
 
     init() {}
 
@@ -127,6 +135,7 @@ struct PersistedState: Codable {
         rateLimitUpdatedAt = try container.decodeIfPresent(Date.self, forKey: .rateLimitUpdatedAt)
         collapsedProjectIDs = try container.decodeIfPresent(Set<UUID>.self, forKey: .collapsedProjectIDs) ?? []
         diagramInstructions = try container.decodeIfPresent(Bool.self, forKey: .diagramInstructions) ?? true
+        autoSettleDays = try container.decodeIfPresent(Int.self, forKey: .autoSettleDays) ?? 3
     }
 }
 

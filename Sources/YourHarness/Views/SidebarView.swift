@@ -21,11 +21,11 @@ struct SidebarView: View {
                             ThreadRow(thread: thread, selection: selection)
                                 .transition(.opacity.combined(with: .move(edge: .top)))
                         }
-                        let archived = app.archivedThreads(in: project)
-                        if !archived.isEmpty {
-                            ArchivedToggle(project: project, count: archived.count)
-                            if app.expandedArchives.contains(project.id) {
-                                ForEach(archived) { thread in
+                        let settled = app.settledThreads(in: project)
+                        if !settled.isEmpty {
+                            SettledShelfToggle(project: project, count: settled.count)
+                            if app.expandedShelves.contains(project.id) {
+                                ForEach(settled) { thread in
                                     ThreadRow(thread: thread, selection: selection)
                                         .transition(.opacity.combined(with: .move(edge: .top)))
                                 }
@@ -274,6 +274,7 @@ private struct ThreadRow: View {
     let thread: ThreadModel
     let selection: Namespace.ID
     @State private var hovering = false
+    @State private var confirmingDelete = false
 
     private var isSelected: Bool { app.visibleThreadID == thread.id }
 
@@ -285,12 +286,12 @@ private struct ThreadRow: View {
                 .padding(.leading, SidebarMetrics.chevron + SidebarMetrics.gap)
             Text(thread.title)
                 .fontWeight(thread.hasUnread ? .semibold : .regular)
-                .foregroundStyle(thread.isArchived ? .secondary : .primary)
+                .foregroundStyle(thread.isSettled ? .secondary : .primary)
                 .lineLimit(1)
                 .truncationMode(.tail)
             Spacer(minLength: 6)
             if hovering {
-                RowActions(thread: thread)
+                RowActions(thread: thread, confirmDelete: $confirmingDelete)
                     .transition(.opacity)
             } else if thread.isPinned {
                 Image(systemName: "pin.fill")
@@ -327,40 +328,74 @@ private struct ThreadRow: View {
         .animation(.easeOut(duration: 0.12), value: hovering)
         .animation(.snappy, value: thread.hasUnread)
         .animation(.snappy, value: thread.isPinned)
-        .contextMenu {
-            if !thread.isArchived {
-                Button(thread.isPinned ? "Unpin" : "Pin", systemImage: thread.isPinned ? "pin.slash" : "pin") {
-                    withAnimation(.snappy) { app.setPinned(!thread.isPinned, thread) }
-                }
-            }
-            Button(thread.isArchived ? "Unarchive" : "Archive", systemImage: thread.isArchived ? "tray.and.arrow.up" : "archivebox") {
-                withAnimation(.snappy) { app.setArchived(!thread.isArchived, thread) }
-            }
-            Divider()
-            Button("Delete Thread", systemImage: "trash", role: .destructive) {
+        .contextMenu { ThreadMenuItems(thread: thread, confirmDelete: $confirmingDelete) }
+        .confirmationDialog("Delete “\(thread.title)”?", isPresented: $confirmingDelete) {
+            Button("Delete Thread", role: .destructive) {
                 withAnimation(.snappy) { app.deleteThread(thread) }
             }
+        } message: {
+            Text("The conversation is removed from YourHarness. Claude Code keeps its own copy of the session in ~/.claude.")
         }
     }
 }
 
-/// Pin and archive, shown while the pointer is over a row.
+/// Everything you can do to a thread, shared by its context menu and its "…" button.
+private struct ThreadMenuItems: View {
+    @Environment(AppModel.self) private var app
+    let thread: ThreadModel
+    @Binding var confirmDelete: Bool
+
+    var body: some View {
+        if !thread.isSettled {
+            Button(thread.isPinned ? "Unpin" : "Pin", systemImage: thread.isPinned ? "pin.slash" : "pin") {
+                withAnimation(.snappy) { app.setPinned(!thread.isPinned, thread) }
+            }
+        }
+        Button(thread.isSettled ? "Un-settle" : "Settle", systemImage: thread.isSettled ? "arrow.uturn.backward.circle" : "checkmark.circle") {
+            withAnimation(.snappy) { app.setSettled(!thread.isSettled, thread) }
+        }
+        Toggle(isOn: Binding(get: { thread.autoSettle }, set: { app.setAutoSettle($0, thread) })) {
+            Label("Settle Automatically When Idle", systemImage: "clock.arrow.circlepath")
+        }
+        Divider()
+        Button("Copy Session ID", systemImage: "doc.on.doc") {
+            if let session = thread.sessionID { Pasteboard.copy(session) }
+        }
+        .disabled(thread.sessionID == nil)
+        .help("Claude Code's session ID, for `claude --resume`")
+        Button("Copy Thread ID", systemImage: "number") { Pasteboard.copy(thread.id.uuidString) }
+        Divider()
+        Button("Delete Thread…", systemImage: "trash", role: .destructive) { confirmDelete = true }
+    }
+}
+
+/// Pin, settle and a "…" menu, shown while the pointer is over a row.
 private struct RowActions: View {
     @Environment(AppModel.self) private var app
     let thread: ThreadModel
+    @Binding var confirmDelete: Bool
 
     var body: some View {
         HStack(spacing: 8) {
-            if !thread.isArchived {
+            if !thread.isSettled {
                 Button(thread.isPinned ? "Unpin" : "Pin", systemImage: thread.isPinned ? "pin.slash" : "pin") {
                     withAnimation(.snappy) { app.setPinned(!thread.isPinned, thread) }
                 }
                 .help(thread.isPinned ? "Unpin" : "Pin to the top")
             }
-            Button(thread.isArchived ? "Unarchive" : "Archive", systemImage: thread.isArchived ? "tray.and.arrow.up" : "archivebox") {
-                withAnimation(.snappy) { app.setArchived(!thread.isArchived, thread) }
+            Button(thread.isSettled ? "Un-settle" : "Settle", systemImage: thread.isSettled ? "arrow.uturn.backward.circle" : "checkmark.circle") {
+                withAnimation(.snappy) { app.setSettled(!thread.isSettled, thread) }
             }
-            .help(thread.isArchived ? "Move back to the list" : "Archive: hide from the list and stop its session")
+            .help(thread.isSettled ? "Move back to active work" : "Settle: move finished work to the shelf and stop its session")
+            Menu {
+                ThreadMenuItems(thread: thread, confirmDelete: $confirmDelete)
+            } label: {
+                Image(systemName: "ellipsis")
+            }
+            .menuIndicator(.hidden)
+            .menuStyle(.button)
+            .fixedSize()
+            .help("More")
         }
         .labelStyle(.iconOnly)
         .buttonStyle(.borderless)
@@ -369,25 +404,25 @@ private struct RowActions: View {
     }
 }
 
-/// "Archived · 3" at the end of a project's threads; opens the archived ones inline.
-private struct ArchivedToggle: View {
+/// "Settled · 3" at the end of a project's threads; opens the shelf inline.
+private struct SettledShelfToggle: View {
     @Environment(AppModel.self) private var app
     let project: Project
     let count: Int
     @State private var hovering = false
 
-    private var expanded: Bool { app.expandedArchives.contains(project.id) }
+    private var expanded: Bool { app.expandedShelves.contains(project.id) }
 
     var body: some View {
         Button {
-            withAnimation(.snappy(duration: 0.25)) { app.setArchiveExpanded(!expanded, for: project) }
+            withAnimation(.snappy(duration: 0.25)) { app.setShelfExpanded(!expanded, for: project) }
         } label: {
             HStack(spacing: SidebarMetrics.gap) {
-                Image(systemName: "archivebox")
+                Image(systemName: "checkmark.circle")
                     .font(.system(size: 10, weight: .medium))
                     .frame(width: SidebarMetrics.icon)
                     .padding(.leading, SidebarMetrics.chevron + SidebarMetrics.gap)
-                Text("Archived")
+                Text("Settled")
                 Text("\(count)")
                     .monospacedDigit()
                     .foregroundStyle(.tertiary)
@@ -406,7 +441,7 @@ private struct ArchivedToggle: View {
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.12), value: hovering)
-        .help(expanded ? "Hide archived threads" : "Show archived threads")
+        .help(expanded ? "Hide settled threads" : "Show settled threads")
     }
 }
 

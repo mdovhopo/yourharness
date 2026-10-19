@@ -35,8 +35,14 @@ final class ThreadModel: Identifiable {
     private(set) var hasUnread = false
     /// Pinned threads sit at the top of their project.
     var isPinned = false
-    /// Archived threads leave the sidebar list but keep their history.
-    var isArchived = false
+    /// Settled threads move to their project's Settled shelf; history stays.
+    var settledAt: Date?
+    var autoSettle = true
+    var reactivatedAt: Date?
+
+    var isSettled: Bool { settledAt != nil }
+    /// Where the thread sorts among active ones: its last activity, or when it was brought back.
+    var sortDate: Date { max(updatedAt, reactivatedAt ?? .distantPast) }
     var draft = ""
 
     @ObservationIgnored private unowned let app: AppModel
@@ -80,7 +86,9 @@ final class ThreadModel: Identifiable {
         contextTokens = meta.contextTokens
         contextWindow = meta.contextWindow
         isPinned = meta.isPinned ?? false
-        isArchived = meta.isArchived ?? false
+        settledAt = meta.settledAt
+        autoSettle = meta.autoSettle ?? true
+        reactivatedAt = meta.reactivatedAt
         transcriptLoaded = false
     }
 
@@ -88,7 +96,8 @@ final class ThreadModel: Identifiable {
         ThreadMeta(id: id, projectID: projectID, title: title, createdAt: createdAt,
                    updatedAt: updatedAt, sessionID: sessionID, model: model, effort: effort,
                    contextTokens: contextTokens, contextWindow: contextWindow,
-                   isPinned: isPinned ? true : nil, isArchived: isArchived ? true : nil)
+                   isPinned: isPinned ? true : nil, settledAt: settledAt,
+                   autoSettle: autoSettle ? nil : false, reactivatedAt: reactivatedAt)
     }
 
     var hasLiveSession: Bool { sessionStart != nil }
@@ -125,8 +134,10 @@ final class ThreadModel: Identifiable {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         loadTranscriptIfNeeded()
-        // Picking an archived thread back up brings it back to the list.
-        if isArchived { app.setArchived(false, self) }
+        // Picking a settled thread back up brings it back to the list, and new activity
+        // lifts the hold an un-settle puts on automatic settling.
+        if isSettled { app.setSettled(false, self) }
+        reactivatedAt = nil
         if title == Self.untitled { title = Self.title(from: text) }
         entries.append(TranscriptEntry(kind: .user, text: text))
         phase = .running

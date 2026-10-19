@@ -421,6 +421,23 @@ private struct GeneralSettingsView: View {
             }
 
             Section {
+                Picker(selection: Binding(get: { app.autoSettleDays }, set: { app.setAutoSettleDays($0) })) {
+                    Text("Never").tag(0)
+                    Text("After 1 day").tag(1)
+                    Text("After 3 days").tag(3)
+                    Text("After 1 week").tag(7)
+                    Text("After 2 weeks").tag(14)
+                } label: {
+                    Label("Settle idle threads", systemImage: "checkmark.circle")
+                }
+            } header: {
+                Text("Threads")
+            } footer: {
+                Text("Settled threads move to a shelf at the end of their project and stop their Claude process; the conversation stays. Threads that are working or waiting on you never settle.")
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
                 Toggle(isOn: Binding(get: { app.diagramInstructions }, set: { app.setDiagramInstructions($0) })) {
                     Label("Let agents draw diagrams", systemImage: "point.3.connected.trianglepath.dotted")
                 }

@@ -79,6 +79,7 @@ final class AppModel {
         rateLimitUpdatedAt = state.rateLimitUpdatedAt
         collapsedProjectIDs = state.collapsedProjectIDs
         diagramInstructions = state.diagramInstructions
+        autoSettleDays = state.autoSettleDays
 
         threads = state.threads.map { ThreadModel(meta: $0, app: self) }
         selectedThreadID = state.selectedThreadID
@@ -93,6 +94,7 @@ final class AppModel {
         Task {
             await bootstrap?.value
             refreshWorkspaces()
+            settleIdleThreads()
         }
         startWorkspacePolling()
     }
@@ -142,20 +144,21 @@ final class AppModel {
 
     /// Active threads: pinned first, then most recent.
     func threads(in project: Project) -> [ThreadModel] {
-        threads.filter { $0.projectID == project.id && !$0.isArchived }.sorted { a, b in
-            a.isPinned != b.isPinned ? a.isPinned : a.updatedAt > b.updatedAt
+        threads.filter { $0.projectID == project.id && !$0.isSettled }.sorted { a, b in
+            a.isPinned != b.isPinned ? a.isPinned : a.sortDate > b.sortDate
         }
     }
 
-    func archivedThreads(in project: Project) -> [ThreadModel] {
-        threads.filter { $0.projectID == project.id && $0.isArchived }.sorted { $0.updatedAt > $1.updatedAt }
+    /// The Settled shelf, most recently settled first.
+    func settledThreads(in project: Project) -> [ThreadModel] {
+        threads.filter { $0.projectID == project.id && $0.isSettled }.sorted { ($0.settledAt ?? .distantPast) > ($1.settledAt ?? .distantPast) }
     }
 
-    /// Projects whose archived threads are showing in the sidebar.
-    private(set) var expandedArchives: Set<UUID> = []
+    /// Projects whose Settled shelf is open in the sidebar.
+    private(set) var expandedShelves: Set<UUID> = []
 
-    func setArchiveExpanded(_ expanded: Bool, for project: Project) {
-        if expanded { expandedArchives.insert(project.id) } else { expandedArchives.remove(project.id) }
+    func setShelfExpanded(_ expanded: Bool, for project: Project) {
+        if expanded { expandedShelves.insert(project.id) } else { expandedShelves.remove(project.id) }
     }
 
     func setPinned(_ pinned: Bool, _ thread: ThreadModel) {
@@ -163,31 +166,70 @@ final class AppModel {
         save()
     }
 
-    /// Hides a thread from the list and frees its `claude` process. History stays.
-    func setArchived(_ archived: Bool, _ thread: ThreadModel) {
-        if archived {
-            // Move the selection to a neighbour first, so the sidebar doesn't go blank.
+    /// Settling moves finished work to the shelf, drops its pin and frees its `claude`
+    /// process; the conversation stays. Un-settling brings it back to the top and holds
+    /// off automatic settling until there's new activity.
+    func setSettled(_ settled: Bool, _ thread: ThreadModel) {
+        if settled {
+            guard !thread.isSettled else { return }
+            // Move the selection to a neighbour first, so the detail pane doesn't go blank.
             if visibleThreadID == thread.id {
                 let ids = visibleThreadIDs
                 let index = ids.firstIndex(of: thread.id) ?? 0
-                let neighbour = ids.indices.contains(index + 1) ? ids[index + 1] : (index > 0 ? ids[index - 1] : nil)
-                selectedThreadID = neighbour
+                selectedThreadID = ids.indices.contains(index + 1) ? ids[index + 1] : (index > 0 ? ids[index - 1] : nil)
             }
-            thread.isArchived = true
+            thread.settledAt = .now
             thread.isPinned = false
-            thread.endSession()
+            if thread.phase == .idle { thread.endSession() }
         } else {
-            thread.isArchived = false
+            guard thread.isSettled else { return }
+            thread.settledAt = nil
+            thread.reactivatedAt = .now
         }
         save()
+    }
+
+    func setAutoSettle(_ enabled: Bool, _ thread: ThreadModel) {
+        thread.autoSettle = enabled
+        save()
+    }
+
+    private(set) var autoSettleDays: Int
+
+    func setAutoSettleDays(_ days: Int) {
+        autoSettleDays = days
+        save()
+        settleIdleThreads()
+    }
+
+    /// Settles threads with no activity for `autoSettleDays`, the way T3 Code does: never
+    /// while working or waiting on you, never one you've opted out, and never one you
+    /// un-settled until you've sent it something new.
+    func settleIdleThreads(now: Date = .now) {
+        guard autoSettleDays > 0 else { return }
+        let cutoff = now.addingTimeInterval(-Double(autoSettleDays) * 86_400)
+        var changed = false
+        for thread in threads {
+            guard !thread.isSettled, !thread.isEphemeral, thread.autoSettle, thread.reactivatedAt == nil,
+                  thread.phase == .idle, thread.pendingPermissions.isEmpty,
+                  // Not the one on screen, and not an untouched blank.
+                  visibleThreadID != thread.id, thread.sessionID != nil || thread.title != ThreadModel.untitled,
+                  thread.updatedAt < cutoff
+            else { continue }
+            thread.settledAt = now
+            thread.isPinned = false
+            thread.endSession()
+            changed = true
+        }
+        if changed { save() }
     }
 
     /// Everything the sidebar shows, in order. Lets the list animate inserts and reorders.
     var sidebarOrder: [UUID] {
         projects.flatMap { project in
             guard !isCollapsed(project) else { return [project.id] }
-            let archived = expandedArchives.contains(project.id) ? archivedThreads(in: project).map(\.id) : []
-            return [project.id] + threads(in: project).map(\.id) + archived
+            let settled = expandedShelves.contains(project.id) ? settledThreads(in: project).map(\.id) : []
+            return [project.id] + threads(in: project).map(\.id) + settled
         }
     }
 
@@ -379,7 +421,9 @@ final class AppModel {
         workspacePoller = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(300))
-                guard let self, NSApp.isActive else { continue }
+                guard let self else { continue }
+                self.settleIdleThreads()
+                guard NSApp.isActive else { continue }
                 self.refreshWorkspaces(pullsMaxAge: 240)
             }
         }
@@ -585,6 +629,7 @@ final class AppModel {
         state.rateLimitUpdatedAt = rateLimitUpdatedAt
         state.collapsedProjectIDs = collapsedProjectIDs
         state.diagramInstructions = diagramInstructions
+        state.autoSettleDays = autoSettleDays
         store.saveState(state)
     }
 
