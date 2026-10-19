@@ -157,7 +157,7 @@ Small, optional, in two layers:
 ## Phases
 
 1. **Workspace and repo awareness:** detection at all three levels, repo states, branch and dirty and ahead/behind, read-only PR/MR visibility on GitHub and GitLab, stack discovery.
-2. **Thread footprint:** affected repos, PR linking from tool output, mentioned ticket keys, per-turn snapshots, rewind.
+2. **Thread footprint:** affected repos, PR linking from tool output, mentioned ticket keys, per-turn snapshots, rewind. Once threads know their PRs: settle a thread automatically when its PR merges (and an idle one when it closes), as T3 Code does.
 3. **Composite worktrees:** lifecycle hooks, clonefile dependencies, env files. Stack actions (new layer, restack, submit).
 4. **Environments:** generated compose overrides, swap-in and isolated modes, idle shutdown.
 5. **Onboarding from a URL,** PRs back to the shell.
