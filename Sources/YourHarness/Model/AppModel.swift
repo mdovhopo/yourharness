@@ -23,10 +23,13 @@ final class AppModel {
     private(set) var threads: [ThreadModel] = []
     var selectedThreadID: UUID? {
         didSet {
+            overviewProjectID = nil
             selectedThread?.markRead()
             save()
         }
     }
+    /// When set, the detail pane shows this project's repos and PRs instead of a thread.
+    private(set) var overviewProjectID: UUID?
     private(set) var collapsedProjectIDs: Set<UUID> = []
     /// Last usage report from the CLI. Persisted, so limits show right after launch.
     private(set) var rateLimit: RateLimitInfo?
@@ -36,6 +39,8 @@ final class AppModel {
     /// Discovery results keyed by `AgentCLI.id`.
     private(set) var cliStatuses: [String: CLIStatus] = [:]
     private(set) var claudeAccount: ClaudeAccount?
+    /// `git`, `gh` and `glab`, keyed by executable name.
+    private(set) var toolStatuses: [String: CLIStatus] = [:]
     private(set) var isRefreshingAgents = false
     private(set) var cliPathOverrides: [String: String]
     private(set) var defaults: ThreadDefaults
@@ -45,6 +50,9 @@ final class AppModel {
     @ObservationIgnored let store = Store()
     @ObservationIgnored private var environment: [String: String] = [:]
     @ObservationIgnored private var bootstrap: Task<Void, Never>?
+    @ObservationIgnored private var workspaceModels: [UUID: WorkspaceModel] = [:]
+    @ObservationIgnored private var workspacePoller: Task<Void, Never>?
+    @ObservationIgnored private var activationObserver: NSObjectProtocol?
 
     private init() {
         let state = store.loadState()
@@ -69,10 +77,18 @@ final class AppModel {
         threads = state.threads.map { ThreadModel(meta: $0, app: self) }
         selectedThreadID = state.selectedThreadID
         if selectedThread == nil { newThreadInCurrentProject() }
+        if let id = state.overviewProjectID, let project = project(id: id), !isHome(project) {
+            overviewProjectID = id
+        }
         bootstrap = Task {
             await loadEnvironment()
             await refreshAgents()
         }
+        Task {
+            await bootstrap?.value
+            refreshWorkspaces()
+        }
+        startWorkspacePolling()
     }
 
     var homeProject: Project {
@@ -89,6 +105,25 @@ final class AppModel {
 
     var selectedThread: ThreadModel? {
         threads.first { $0.id == selectedThreadID }
+    }
+
+    /// The thread on screen right now; nil while a project overview is showing.
+    var visibleThreadID: UUID? {
+        overviewProjectID == nil ? selectedThreadID : nil
+    }
+
+    var overviewProject: Project? {
+        overviewProjectID.flatMap(project(id:))
+    }
+
+    func showOverview(of project: Project) {
+        guard !isHome(project) else { return }
+        overviewProjectID = project.id
+        save()
+        if let workspace = workspace(for: project) {
+            let tools = workspaceTools
+            Task { await workspace.refresh(tools: tools, pullsMaxAge: 60) }
+        }
     }
 
     var selectedProject: Project {
@@ -118,7 +153,7 @@ final class AppModel {
     func selectAdjacentThread(_ offset: Int) {
         let ids = visibleThreadIDs
         guard !ids.isEmpty else { return }
-        guard let current = selectedThreadID, let index = ids.firstIndex(of: current) else {
+        guard let current = visibleThreadID, let index = ids.firstIndex(of: current) else {
             selectedThreadID = offset > 0 ? ids.first : ids.last
             return
         }
@@ -160,12 +195,15 @@ final class AppModel {
                               permissionMode: defaults.permissionMode ?? .ask)
         projects.append(project)
         newThread(in: project)
+        refreshWorkspaces()
     }
 
     func removeProject(_ project: Project) {
         guard !isHome(project) else { return }
         for thread in threads(in: project) { deleteThread(thread) }
         projects.removeAll { $0.id == project.id }
+        workspaceModels[project.id] = nil
+        if overviewProjectID == project.id { overviewProjectID = nil }
         save()
     }
 
@@ -227,6 +265,67 @@ final class AppModel {
         store.deleteTranscript(thread.id)
         if selectedThreadID == thread.id { selectedThreadID = nil }
         save()
+    }
+
+    // MARK: - Workspaces
+
+    /// Repos and PRs for a project. Home is never scanned: it's usually your whole home
+    /// folder, not a workspace.
+    func workspace(for project: Project) -> WorkspaceModel? {
+        guard !isHome(project) else { return nil }
+        if let existing = workspaceModels[project.id], existing.root == project.url { return existing }
+        let model = WorkspaceModel(projectID: project.id, root: project.url)
+        workspaceModels[project.id] = model
+        return model
+    }
+
+    /// The account a forge CLI reported in any workspace refresh.
+    func forgeAccount(for forge: Forge) -> String? {
+        workspaceModels.values.lazy.compactMap { $0.forgeAccounts[forge] }.first
+    }
+
+    var workspaceTools: WorkspaceTools {
+        let ready = { (name: String) in self.toolStatuses[name].flatMap { $0.isReady ? $0.path : nil } }
+        return WorkspaceTools(
+            git: ready("git").map { Git(executable: $0, environment: environment) },
+            github: ready("gh").map { GitHubClient(executable: $0, environment: environment) },
+            gitlab: ready("glab").map { GitLabClient(executable: $0, environment: environment) }
+        )
+    }
+
+    func refreshWorkspaces(rescan: Bool = false, pullsMaxAge: TimeInterval = 120) {
+        guard environmentReady else { return }
+        let tools = workspaceTools
+        for project in projects {
+            guard let workspace = workspace(for: project) else { continue }
+            Task { await workspace.refresh(tools: tools, rescan: rescan, pullsMaxAge: pullsMaxAge) }
+        }
+    }
+
+    /// An agent may have edited files, committed, or opened a PR.
+    func turnFinished(in projectID: UUID) {
+        guard let project = project(id: projectID), let workspace = workspace(for: project) else { return }
+        let tools = workspaceTools
+        Task {
+            await workspace.refreshStatus(tools: tools, minInterval: 0)
+            await workspace.refreshPulls(tools: tools, maxAge: 15)
+        }
+    }
+
+    /// Refresh when you come back to the app, and every few minutes while it's frontmost.
+    private func startWorkspacePolling() {
+        activationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { _ in
+            MainActor.assumeIsolated { AppModel.shared.refreshWorkspaces() }
+        }
+        workspacePoller = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(300))
+                guard let self, NSApp.isActive else { continue }
+                self.refreshWorkspaces(pullsMaxAge: 240)
+            }
+        }
     }
 
     // MARK: - Launching
@@ -340,6 +439,16 @@ final class AppModel {
         }
         cliStatuses = statuses
 
+        let tools = await withTaskGroup(of: (String, CLIStatus).self) { group in
+            for name in ["git", Forge.github.cliName, Forge.gitlab.cliName] {
+                group.addTask { (name, await CLIDiscovery.probe(executableNames: [name], environment: environment)) }
+            }
+            var tools: [String: CLIStatus] = [:]
+            for await (name, status) in group { tools[name] = status }
+            return tools
+        }
+        toolStatuses = tools
+
         if let claude = statuses[AgentCLI.claude.id], claude.isReady, let path = claude.path {
             async let account = ClaudeAccount.load(executable: path, environment: environment)
             async let catalog = ClaudeCatalog.load(executable: path, environment: environment)
@@ -378,6 +487,7 @@ final class AppModel {
         state.projects = projects
         state.threads = threads.filter { !$0.isEphemeral }.map(\.meta)
         state.selectedThreadID = selectedThreadID
+        state.overviewProjectID = overviewProjectID
         state.homeProjectID = homeProjectID
         state.cliPathOverrides = cliPathOverrides
         state.defaults = defaults

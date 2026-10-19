@@ -9,7 +9,11 @@ struct RootView: View {
                 .navigationSplitViewColumnWidth(min: 220, ideal: 270, max: 380)
         } detail: {
             ZStack {
-                if let thread = app.selectedThread {
+                if let project = app.overviewProject, let workspace = app.workspace(for: project) {
+                    WorkspaceView(project: project, workspace: workspace)
+                        .id(project.id)
+                        .transition(.opacity)
+                } else if let thread = app.selectedThread {
                     ThreadView(thread: thread)
                         .id(thread.id)
                         .transition(.opacity)
@@ -20,6 +24,7 @@ struct RootView: View {
             }
             // A quick crossfade when switching threads, not a hard cut.
             .animation(.easeInOut(duration: 0.16), value: app.selectedThreadID)
+            .animation(.easeInOut(duration: 0.16), value: app.overviewProjectID)
         }
     }
 }

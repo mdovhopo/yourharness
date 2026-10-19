@@ -20,7 +20,8 @@ public enum CommandRunner {
         _ executable: URL,
         arguments: [String],
         environment: [String: String]? = nil,
-        timeout: TimeInterval = 8
+        timeout: TimeInterval = 8,
+        outputLimit: Int = 256 * 1024
     ) async -> CommandOutput {
         let process = Process()
         process.executableURL = executable
@@ -32,7 +33,7 @@ public enum CommandRunner {
         process.standardOutput = stdout
         process.standardError = stderr
 
-        let collector = Collector()
+        let collector = Collector(limit: outputLimit)
         stdout.fileHandleForReading.readabilityHandler = { handle in
             let chunk = handle.availableData
             if chunk.isEmpty { handle.readabilityHandler = nil } else { collector.append(chunk, isStderr: false) }
@@ -81,7 +82,11 @@ public enum CommandRunner {
         }
 
         private let state = Mutex(State())
-        private static let limit = 256 * 1024
+        private let limit: Int
+
+        init(limit: Int) {
+            self.limit = limit
+        }
 
         func setContinuation(_ continuation: CheckedContinuation<CommandOutput, Never>) {
             state.withLock { $0.continuation = continuation }
@@ -90,9 +95,9 @@ public enum CommandRunner {
         func append(_ data: Data, isStderr: Bool) {
             state.withLock { state in
                 if isStderr {
-                    if state.stderr.count < Self.limit { state.stderr.append(data) }
+                    if state.stderr.count < limit { state.stderr.append(data) }
                 } else {
-                    if state.stdout.count < Self.limit { state.stdout.append(data) }
+                    if state.stdout.count < limit { state.stdout.append(data) }
                 }
             }
         }

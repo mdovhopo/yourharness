@@ -24,6 +24,7 @@ private struct AgentsSettingsView: View {
     var body: some View {
         Form {
             ClaudeSection()
+            GitToolsSection()
 
             Section {
                 ForEach(AgentCLI.all.filter { !$0.isSupported }) { cli in
@@ -51,6 +52,76 @@ private struct AgentsSettingsView: View {
             .help("Detect agents again")
         }
         .task { await app.refreshAgents() }
+    }
+}
+
+/// The CLIs repo and pull request views drive. Their own logins are used as-is.
+private struct GitToolsSection: View {
+    @Environment(AppModel.self) private var app
+
+    var body: some View {
+        Section {
+            GitToolRow(name: "Git", tool: "git", symbol: "arrow.triangle.branch", installURL: URL(string: "https://git-scm.com/download/mac")!)
+            ForEach([Forge.github, .gitlab], id: \.self) { forge in
+                GitToolRow(
+                    name: "\(forge.displayName) CLI",
+                    tool: forge.cliName,
+                    symbol: "arrow.triangle.pull",
+                    installURL: forge.installURL,
+                    account: app.forgeAccount(for: forge)
+                )
+            }
+        } header: {
+            Text("Git & Code Hosting")
+        } footer: {
+            Text("Pull requests come from `gh` and `glab`, signed in as you. YourHarness never sees their tokens.")
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
+private struct GitToolRow: View {
+    @Environment(AppModel.self) private var app
+    let name: String
+    let tool: String
+    let symbol: String
+    let installURL: URL
+    var account: String?
+
+    private var status: CLIStatus? { app.toolStatuses[tool] }
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Image(systemName: symbol)
+                .foregroundStyle(.secondary)
+                .frame(width: 20)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(name)
+                    if let account {
+                        Text(account)
+                            .font(.caption.weight(.medium))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 1)
+                            .background(.tint.opacity(0.15), in: .capsule)
+                            .help("Signed in as \(account)")
+                    }
+                }
+                if let path = status?.path {
+                    Text(path.path)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            Spacer()
+            if status?.state == .notFound {
+                Link("Get", destination: installURL)
+                    .font(.callout)
+            }
+            StatusLabel(status: status, refreshing: status == nil)
+        }
     }
 }
 

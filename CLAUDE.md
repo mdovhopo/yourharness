@@ -13,7 +13,9 @@ swift test
 scripts/bundle.sh   # → build/YourHarness.app
 ```
 
-Integration tests spawn the real `claude` CLI on Haiku: `YH_INTEGRATION=1 swift test --filter Integration`.
+Integration tests spawn the real `claude` CLI on Haiku and the real `git`/`gh`: `YH_INTEGRATION=1 swift test --filter Integration`.
+
+For manual runs, point the app at a throwaway state so it never scans the user's real projects: `YH_DATA_DIR=<scratch dir> build/YourHarness.app/Contents/MacOS/YourHarness`. Set it up with a `state.json` that lists only folders you're allowed to touch.
 
 ## Principles
 

@@ -1,6 +1,6 @@
 # Workspaces
 
-Status: agreed design, not implemented yet. Roadmap item 1.
+Status: agreed design. Phase 1 (read-only workspace and repo awareness) is implemented; the rest is not. Roadmap item 1.
 
 ## What a workspace is
 

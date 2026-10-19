@@ -348,6 +348,7 @@ final class ThreadModel: Identifiable {
             }
             interruptRequested = false
             settle()
+            app.turnFinished(in: projectID)
             scheduleIdleReap()
             if restartWhenIdle {
                 restartWhenIdle = false
@@ -371,7 +372,7 @@ final class ThreadModel: Identifiable {
 
     /// Marks the turn finished: nothing is streaming, nothing is awaiting approval.
     private func settle() {
-        if phase == .running, app.selectedThreadID != id { hasUnread = true }
+        if phase == .running, app.visibleThreadID != id { hasUnread = true }
         phase = .idle
         pendingPermissions.removeAll()
         for entry in blocks.values where entry.isStreaming { entry.isStreaming = false }

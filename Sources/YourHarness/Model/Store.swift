@@ -82,6 +82,8 @@ struct PersistedState: Codable {
     var projects: [Project] = []
     var threads: [ThreadMeta] = []
     var selectedThreadID: UUID?
+    /// A project overview that was open at quit, shown again at launch.
+    var overviewProjectID: UUID?
     /// The always-present project threads start in when you haven't picked a folder.
     var homeProjectID: UUID?
     /// User-chosen executable paths, keyed by `AgentCLI.id`.
@@ -103,6 +105,7 @@ struct PersistedState: Codable {
         projects = try container.decodeIfPresent([Project].self, forKey: .projects) ?? []
         threads = try container.decodeIfPresent([ThreadMeta].self, forKey: .threads) ?? []
         selectedThreadID = try container.decodeIfPresent(UUID.self, forKey: .selectedThreadID)
+        overviewProjectID = try container.decodeIfPresent(UUID.self, forKey: .overviewProjectID)
         homeProjectID = try container.decodeIfPresent(UUID.self, forKey: .homeProjectID)
         cliPathOverrides = try container.decodeIfPresent([String: String].self, forKey: .cliPathOverrides) ?? [:]
         defaults = try container.decodeIfPresent(ThreadDefaults.self, forKey: .defaults) ?? ThreadDefaults()
@@ -164,8 +167,13 @@ struct Store: Sendable {
     private let queue = DispatchQueue(label: "yourharness.store", qos: .utility)
 
     init() {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        root = base.appending(path: "YourHarness", directoryHint: .isDirectory)
+        if let override = ProcessInfo.processInfo.environment["YH_DATA_DIR"], !override.isEmpty {
+            // Development: run against a throwaway state instead of your real one.
+            root = URL(fileURLWithPath: override, isDirectory: true)
+        } else {
+            let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            root = base.appending(path: "YourHarness", directoryHint: .isDirectory)
+        }
         try? FileManager.default.createDirectory(at: threadsDirectory, withIntermediateDirectories: true)
     }
 

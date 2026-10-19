@@ -12,7 +12,7 @@ struct SidebarView: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 1) {
                 ForEach(app.projects) { project in
-                    ProjectHeader(project: project)
+                    ProjectHeader(project: project, selection: selection)
                         .padding(.top, project.id == app.projects.first?.id ? 2 : 12)
                         .padding(.bottom, 2)
 
@@ -139,6 +139,7 @@ private struct KeyCap: View {
 private struct ProjectHeader: View {
     @Environment(AppModel.self) private var app
     let project: Project
+    let selection: Namespace.ID
     @State private var hovering = false
 
     private var collapsed: Bool { app.isCollapsed(project) }
@@ -146,46 +147,72 @@ private struct ProjectHeader: View {
     private var hasActivity: Bool {
         app.threads(in: project).contains { $0.phase == .running || $0.hasUnread || !$0.pendingPermissions.isEmpty }
     }
+    private var workspace: WorkspaceModel? { app.workspace(for: project) }
+    private var isSelected: Bool { app.overviewProjectID == project.id }
+    private var reviewCount: Int {
+        workspace?.pullRequests.count(where: \.reviewRequestedFromMe) ?? 0
+    }
 
     var body: some View {
         HStack(spacing: SidebarMetrics.gap) {
             Button {
                 withAnimation(.snappy(duration: 0.25)) { app.setCollapsed(!collapsed, for: project) }
             } label: {
-                HStack(spacing: SidebarMetrics.gap) {
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundStyle(.tertiary)
-                        .rotationEffect(.degrees(collapsed ? 0 : 90))
-                        .frame(width: SidebarMetrics.chevron)
-                    Image(systemName: app.isHome(project) ? "house.fill" : "folder.fill")
-                        .font(.callout)
-                        .foregroundStyle(app.isHome(project) ? AnyShapeStyle(Color.claude) : AnyShapeStyle(.secondary))
-                        .frame(width: SidebarMetrics.icon)
-                    Text(project.name)
-                        .font(.callout.weight(.semibold))
-                        .lineLimit(1)
-                    if collapsed {
-                        if hasActivity {
-                            Circle()
-                                .fill(Color.accentColor)
-                                .frame(width: 6, height: 6)
-                                .transition(.scale.combined(with: .opacity))
-                        } else if threadCount > 0 {
-                            Text("\(threadCount)")
-                                .font(.caption2.weight(.semibold).monospacedDigit())
-                                .foregroundStyle(.secondary)
-                                .padding(.horizontal, 5)
-                                .background(.fill.tertiary, in: .capsule)
-                                .transition(.scale.combined(with: .opacity))
-                        }
-                    }
-                }
-                .contentShape(.rect)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.tertiary)
+                    .rotationEffect(.degrees(collapsed ? 0 : 90))
+                    .frame(width: SidebarMetrics.chevron, height: 18)
+                    .contentShape(.rect)
             }
             .buttonStyle(.plain)
+            .help(collapsed ? "Show threads" : "Hide threads")
 
-            Spacer(minLength: 4)
+            HStack(spacing: SidebarMetrics.gap) {
+                Image(systemName: app.isHome(project) ? "house.fill" : ProjectIcon.symbol(for: workspace?.layout?.kind))
+                    .font(.callout)
+                    .foregroundStyle(app.isHome(project) ? AnyShapeStyle(Color.claude) : AnyShapeStyle(.secondary))
+                    .frame(width: SidebarMetrics.icon)
+                    .contentTransition(.symbolEffect(.replace))
+                Text(project.name)
+                    .font(.callout.weight(.semibold))
+                    .lineLimit(1)
+                if collapsed {
+                    if hasActivity {
+                        Circle()
+                            .fill(Color.accentColor)
+                            .frame(width: 6, height: 6)
+                            .transition(.scale.combined(with: .opacity))
+                    } else if threadCount > 0 {
+                        Text("\(threadCount)")
+                            .font(.caption2.weight(.semibold).monospacedDigit())
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 5)
+                            .background(.fill.tertiary, in: .capsule)
+                            .transition(.scale.combined(with: .opacity))
+                    }
+                }
+                Spacer(minLength: 4)
+                if reviewCount > 0 {
+                    Label("\(reviewCount)", systemImage: "eye")
+                        .font(.caption2.weight(.semibold).monospacedDigit())
+                        .labelStyle(.titleAndIcon)
+                        .foregroundStyle(Color.accentColor)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(Color.accentColor.opacity(0.14), in: .capsule)
+                        .help("\(reviewCount) pull request\(reviewCount == 1 ? "" : "s") waiting for your review")
+                        .transition(.scale.combined(with: .opacity))
+                }
+            }
+            .contentShape(.rect)
+            .onTapGesture {
+                if app.isHome(project) {
+                    withAnimation(.snappy(duration: 0.25)) { app.setCollapsed(!collapsed, for: project) }
+                } else {
+                    withAnimation(SidebarMetrics.selectionSpring) { app.showOverview(of: project) }
+                }
+            }
 
             Button("New Thread in \(project.name)", systemImage: "plus") {
                 withAnimation(SidebarMetrics.selectionSpring) { _ = app.newThread(in: project) }
@@ -198,11 +225,25 @@ private struct ProjectHeader: View {
         }
         .padding(.horizontal, SidebarMetrics.rowPadding - 4)
         .padding(.vertical, 4)
+        .background {
+            if isSelected {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color.primary.opacity(0.1))
+                    .matchedGeometryEffect(id: "selection", in: selection)
+            } else if hovering, !app.isHome(project) {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color.primary.opacity(0.045))
+            }
+        }
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.15), value: hovering)
-        .help(project.path)
+        .animation(.snappy, value: reviewCount)
+        .help(app.isHome(project) ? project.path : "Repos and pull requests in \(project.name)")
         .contextMenu {
             Button("New Thread", systemImage: "square.and.pencil") { app.newThread(in: project) }
+            if !app.isHome(project) {
+                Button("Repos & Pull Requests", systemImage: "arrow.triangle.pull") { app.showOverview(of: project) }
+            }
             Button("Show in Finder", systemImage: "folder") { app.revealInFinder(project) }
             if app.isHome(project) {
                 Button("Change Default Folder…", systemImage: "house") { app.presentChooseHomeFolder() }
@@ -224,7 +265,7 @@ private struct ThreadRow: View {
     let selection: Namespace.ID
     @State private var hovering = false
 
-    private var isSelected: Bool { app.selectedThreadID == thread.id }
+    private var isSelected: Bool { app.visibleThreadID == thread.id }
 
     var body: some View {
         HStack(spacing: SidebarMetrics.gap) {
@@ -238,7 +279,7 @@ private struct ThreadRow: View {
                 .truncationMode(.tail)
             Spacer(minLength: 6)
             TimelineView(.everyMinute) { context in
-                Text(Self.shortAge(from: thread.updatedAt, to: context.date))
+                Text(ShortAge.string(from: thread.updatedAt, to: context.date))
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
                     .contentTransition(.numericText())
@@ -268,21 +309,6 @@ private struct ThreadRow: View {
             Button("Delete Thread", systemImage: "trash", role: .destructive) {
                 withAnimation(.snappy) { app.deleteThread(thread) }
             }
-        }
-    }
-
-    /// Compact like Mail: "now", "53m", "2h", "Yesterday", "Mon", "Oct 3".
-    static func shortAge(from date: Date, to now: Date) -> String {
-        let seconds = now.timeIntervalSince(date)
-        let calendar = Calendar.current
-        switch seconds {
-        case ..<60: return "now"
-        case ..<3_600: return "\(Int(seconds / 60))m"
-        case ..<86_400 where calendar.isDate(date, inSameDayAs: now): return "\(Int(seconds / 3_600))h"
-        default:
-            if calendar.isDateInYesterday(date) { return "Yesterday" }
-            if seconds < 6 * 86_400 { return date.formatted(.dateTime.weekday(.abbreviated)) }
-            return date.formatted(.dateTime.month(.abbreviated).day())
         }
     }
 }
@@ -386,5 +412,22 @@ private struct UsageFooter: View {
         .glassEffect(.regular, in: .rect(cornerRadius: 14))
         .padding(10)
         .animation(.smooth, value: app.rateLimit)
+    }
+}
+
+enum ShortAge {
+    /// Compact like Mail: "now", "53m", "2h", "Yesterday", "Mon", "Oct 3".
+    static func string(from date: Date, to now: Date) -> String {
+        let seconds = now.timeIntervalSince(date)
+        let calendar = Calendar.current
+        switch seconds {
+        case ..<60: return "now"
+        case ..<3_600: return "\(Int(seconds / 60))m"
+        case ..<86_400 where calendar.isDate(date, inSameDayAs: now): return "\(Int(seconds / 3_600))h"
+        default:
+            if calendar.isDateInYesterday(date) { return "Yesterday" }
+            if seconds < 6 * 86_400 { return date.formatted(.dateTime.weekday(.abbreviated)) }
+            return date.formatted(.dateTime.month(.abbreviated).day())
+        }
     }
 }

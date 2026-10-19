@@ -53,7 +53,11 @@ public struct CLIStatus: Sendable, Equatable {
 public enum CLIDiscovery {
     /// Locates `cli` (or uses `override`) and checks that it actually runs.
     public static func probe(_ cli: AgentCLI, environment: [String: String], override: URL? = nil) async -> CLIStatus {
-        let path = override ?? cli.executableNames.lazy
+        await probe(executableNames: cli.executableNames, environment: environment, override: override)
+    }
+
+    public static func probe(executableNames: [String], environment: [String: String], override: URL? = nil) async -> CLIStatus {
+        let path = override ?? executableNames.lazy
             .compactMap { ShellEnvironment.which($0, in: environment) }
             .first
         guard let path else { return CLIStatus(path: nil, state: .notFound) }
