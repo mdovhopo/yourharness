@@ -101,6 +101,8 @@ public actor ClaudeSession {
         try process.run()
         self.process = process
         self.stdin = stdinPipe.fileHandleForWriting
+        // Writing to a process that just died should throw, not kill the app with SIGPIPE.
+        _ = fcntl(stdinPipe.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
         self.events = events
     }
 

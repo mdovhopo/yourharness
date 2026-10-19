@@ -9,6 +9,7 @@ A fast, native macOS home for AI coding agents. Bring your own subscription: You
 An early spike. What works today:
 
 - Projects (local folders) and multiple threads per project, persisted across launches. Threads can be pinned, settled (moved to a per-project Settled shelf with their session stopped and history kept, automatically after 3 idle days by default, as in T3 Code), or deleted; the thread menu also copies the Claude session ID (for `claude --resume`) and the thread ID
+- Generated thread titles, following T3 Code: a thread is named after its first message right away, then retitled in the background by a one-shot request with no tools, in an empty folder (Claude Code on Haiku by default; provider and model in Settings → General → Thread Titles, or off). Linked GitHub PRs and issues are read for context. Regenerate a title from the whole conversation, or rename inline, from the thread menu
 - Streaming Claude Code sessions: markdown (headings, nested and task lists, tables, code, quotes), thinking, tool calls with inline Edit diffs. Replies are revealed at a steady, word-by-word pace instead of in network bursts, and half-typed syntax never flashes. `#12`, `repo#12` and `owner/repo#12` link to the right PR or issue using the project's repos and open PRs
 - Native permission prompts (Allow ⌘↩ / Deny ⌘⌫) via the CLI's `can_use_tool` control protocol
 - Stop (⌘.) mid-turn without killing the session

@@ -10,7 +10,7 @@ final class ThreadModel: Identifiable {
         case idle, running
     }
 
-    static let untitled = "New Thread"
+    static let untitled = ThreadTitlePrompt.fallback
 
     let id: UUID
     let projectID: UUID
@@ -44,6 +44,8 @@ final class ThreadModel: Identifiable {
     /// Where the thread sorts among active ones: its last activity, or when it was brought back.
     var sortDate: Date { max(updatedAt, reactivatedAt ?? .distantPast) }
     var draft = ""
+    /// A generated title is on its way; the current one is a placeholder.
+    private(set) var isGeneratingTitle = false
 
     @ObservationIgnored private unowned let app: AppModel
     @ObservationIgnored private var sessionStart: Task<ClaudeSession, Error>?
@@ -57,6 +59,10 @@ final class ThreadModel: Identifiable {
     @ObservationIgnored private var tools: [String: TranscriptEntry] = [:]
     @ObservationIgnored private var streamedMessageIDs: Set<String> = []
     @ObservationIgnored private var idleReaper: Task<Void, Never>?
+    /// The title request whose answer still counts; renaming or a newer request voids it.
+    @ObservationIgnored private var titleRequest: UUID?
+    /// The first message didn't say what this is about; retitle once a turn has.
+    @ObservationIgnored private var titleNeedsRefinement = false
 
     /// Idle `claude` processes cost hundreds of MB each; drop them and `--resume` later.
     private static let idleTimeout = Duration.seconds(10 * 60)
@@ -138,8 +144,10 @@ final class ThreadModel: Identifiable {
         // lifts the hold an un-settle puts on automatic settling.
         if isSettled { app.setSettled(false, self) }
         reactivatedAt = nil
-        if title == Self.untitled { title = Self.title(from: text) }
+        let isFirstMessage = title == Self.untitled && !entries.contains { $0.kind == .user }
+        if isFirstMessage { title = ThreadTitlePrompt.seed(from: text) }
         entries.append(TranscriptEntry(kind: .user, text: text))
+        if isFirstMessage { app.generateTitle(for: self, from: .firstMessage(text)) }
         phase = .running
         idleReaper?.cancel()
         touch()
@@ -369,6 +377,10 @@ final class ThreadModel: Identifiable {
             interruptRequested = false
             settle()
             app.turnFinished(in: projectID)
+            if titleNeedsRefinement, !result.isError {
+                titleNeedsRefinement = false
+                app.generateTitle(for: self, from: .conversation)
+            }
             scheduleIdleReap()
             if restartWhenIdle {
                 restartWhenIdle = false
@@ -428,9 +440,48 @@ final class ThreadModel: Identifiable {
         app.save()
     }
 
-    private static func title(from text: String) -> String {
-        let firstLine = text.split(whereSeparator: \.isNewline).first.map(String.init) ?? text
-        return firstLine.count > 60 ? String(firstLine.prefix(60)) + "…" : firstLine
+    // MARK: - Title
+
+    func rename(_ newTitle: String) {
+        let newTitle = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !newTitle.isEmpty else { return }
+        // Your name wins over anything still being generated.
+        titleRequest = nil
+        titleNeedsRefinement = false
+        isGeneratingTitle = false
+        guard newTitle != title else { return }
+        title = newTitle
+        app.save()
+    }
+
+    /// User and assistant messages, oldest first; what a regenerated title reads.
+    var titleMessages: [ThreadTitlePrompt.Message] {
+        loadTranscriptIfNeeded()
+        return entries.compactMap { entry in
+            switch entry.kind {
+            case .user: ThreadTitlePrompt.Message(role: .user, text: entry.text)
+            case .assistant where !entry.isStreaming: ThreadTitlePrompt.Message(role: .assistant, text: entry.text)
+            default: nil
+            }
+        }
+    }
+
+    func beginTitleGeneration() -> UUID {
+        let request = UUID()
+        titleRequest = request
+        isGeneratingTitle = true
+        return request
+    }
+
+    /// Applies a generated title unless you renamed the thread or asked again meanwhile.
+    func finishTitleGeneration(_ request: UUID, with generated: GeneratedTitle?, regenerating: Bool) {
+        guard titleRequest == request else { return }
+        titleRequest = nil
+        isGeneratingTitle = false
+        guard let generated, generated.title != ThreadTitlePrompt.fallback, generated.title != title else { return }
+        title = generated.title
+        if !regenerating, generated.needsRefinement { titleNeedsRefinement = true }
+        app.save()
     }
 
     // MARK: - Debug

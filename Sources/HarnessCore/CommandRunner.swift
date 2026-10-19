@@ -21,14 +21,23 @@ public enum CommandRunner {
         arguments: [String],
         environment: [String: String]? = nil,
         timeout: TimeInterval = 8,
-        outputLimit: Int = 256 * 1024
+        outputLimit: Int = 256 * 1024,
+        input: String? = nil,
+        currentDirectory: URL? = nil
     ) async -> CommandOutput {
         let process = Process()
         process.executableURL = executable
         process.arguments = arguments
         if let environment { process.environment = environment }
-        process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
-        process.standardInput = FileHandle.nullDevice
+        process.currentDirectoryURL = currentDirectory ?? FileManager.default.homeDirectoryForCurrentUser
+        let stdin: Pipe? = input == nil ? nil : Pipe()
+        if let stdin {
+            process.standardInput = stdin
+            // A child that exits without reading must not take the app down with SIGPIPE.
+            _ = fcntl(stdin.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
+        } else {
+            process.standardInput = FileHandle.nullDevice
+        }
         let stdout = Pipe(), stderr = Pipe()
         process.standardOutput = stdout
         process.standardError = stderr
@@ -62,6 +71,15 @@ public enum CommandRunner {
                 collector.finish(status: -1, timedOut: false, launchFailed: true, message: error.localizedDescription)
                 detach()
                 return
+            }
+            if let stdin, let input {
+                // Written off the caller's thread: a prompt bigger than the pipe buffer
+                // blocks until the child reads it.
+                let writer = stdin.fileHandleForWriting
+                DispatchQueue.global().async {
+                    try? writer.write(contentsOf: Data(input.utf8))
+                    try? writer.close()
+                }
             }
             let pid = process.processIdentifier
             DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {

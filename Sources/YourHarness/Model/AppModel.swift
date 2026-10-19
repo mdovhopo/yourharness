@@ -50,6 +50,9 @@ final class AppModel {
     private(set) var claudeModels: [ClaudeModel]
     /// Whether agents are told this app draws Mermaid diagrams.
     private(set) var diagramInstructions: Bool
+    private(set) var titleGeneration: TitleGenerationSettings
+    /// Why the last generated title didn't arrive, for Settings; cleared by the next success.
+    private(set) var titleGenerationError: String?
     @ObservationIgnored private var contextWindows: [String: Int]
 
     @ObservationIgnored let store = Store()
@@ -80,6 +83,7 @@ final class AppModel {
         collapsedProjectIDs = state.collapsedProjectIDs
         diagramInstructions = state.diagramInstructions
         autoSettleDays = state.autoSettleDays
+        titleGeneration = state.titleGeneration
 
         threads = state.threads.map { ThreadModel(meta: $0, app: self) }
         selectedThreadID = state.selectedThreadID
@@ -537,6 +541,76 @@ final class AppModel {
         for thread in threads { thread.restartSession() }
     }
 
+    // MARK: - Titles
+
+    enum TitleSource {
+        /// A new thread's first message; retried twice, as it's the one you'll see.
+        case firstMessage(String)
+        /// The whole conversation, replacing the current title only if it's improved.
+        case conversation
+    }
+
+    func setTitleGeneration(_ settings: TitleGenerationSettings) {
+        titleGeneration = settings
+        titleGenerationError = nil
+        save()
+    }
+
+    func canGenerateTitles(with provider: TitleGenerationSettings.Provider) -> Bool {
+        cliStatuses[provider.cli.id]?.isReady == true
+    }
+
+    /// Names a thread in the background with the provider from Settings, as T3 Code does:
+    /// a one-shot request with no tools, in an empty folder.
+    func generateTitle(for thread: ThreadModel, from source: TitleSource) {
+        guard !thread.isEphemeral, let provider = titleGeneration.provider, let model = titleGeneration.effectiveModel else { return }
+        let regenerating: Bool
+        let messages: [ThreadTitlePrompt.Message]
+        switch source {
+        case .firstMessage(let text):
+            regenerating = false
+            messages = [ThreadTitlePrompt.Message(role: .user, text: text)]
+        case .conversation:
+            regenerating = true
+            messages = thread.titleMessages
+            guard messages.contains(where: { $0.role == .user }) else { return }
+        }
+        let previousTitle = thread.title
+        let request = thread.beginTitleGeneration()
+        Task {
+            await bootstrap?.value
+            guard let executable = cliStatuses[provider.cli.id].flatMap({ $0.isReady ? $0.path : nil }) else {
+                titleGenerationError = "\(provider.cli.name) isn't available."
+                thread.finishTitleGeneration(request, with: nil, regenerating: regenerating)
+                return
+            }
+            let environment = environment
+            let text = regenerating ? ThreadTitlePrompt.context(for: messages) : messages[0].text
+            let linked = await TitleLinkedContext.resolve(message: text, gh: toolStatuses["gh"].flatMap { $0.isReady ? $0.path : nil },
+                environment: environment)
+            let prompt = regenerating
+                ? ThreadTitlePrompt.regenerate(contents: text, previousTitle: previousTitle, linkedContext: linked)
+                : ThreadTitlePrompt.initial(message: text, linkedContext: linked)
+
+            var result = await TitleGenerator.generate(
+                prompt: prompt, provider: provider, model: model, executable: executable, environment: environment)
+            for attempt in regenerating ? 0..<0 : 0..<2 {
+                guard case .failure = result else { break }
+                try? await Task.sleep(for: .seconds(2 << attempt))
+                result = await TitleGenerator.generate(
+                    prompt: prompt, provider: provider, model: model, executable: executable, environment: environment)
+            }
+            switch result {
+            case .success(let title):
+                titleGenerationError = nil
+                thread.finishTitleGeneration(request, with: title, regenerating: regenerating)
+            case .failure(let error):
+                titleGenerationError = error.description
+                thread.finishTitleGeneration(request, with: nil, regenerating: regenerating)
+            }
+        }
+    }
+
     func setDefaultPermissionMode(_ mode: PermissionMode?) {
         defaults.permissionMode = mode
         save()
@@ -630,6 +704,7 @@ final class AppModel {
         state.collapsedProjectIDs = collapsedProjectIDs
         state.diagramInstructions = diagramInstructions
         state.autoSettleDays = autoSettleDays
+        state.titleGeneration = titleGeneration
         store.saveState(state)
     }
 

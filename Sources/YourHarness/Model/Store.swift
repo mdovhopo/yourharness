@@ -116,6 +116,8 @@ struct PersistedState: Codable {
     var diagramInstructions = true
     /// Idle threads move to the Settled shelf after this many days; 0 turns it off.
     var autoSettleDays = 3
+    /// Who names new threads. Claude Code's Haiku unless changed.
+    var titleGeneration = TitleGenerationSettings()
 
     init() {}
 
@@ -136,6 +138,7 @@ struct PersistedState: Codable {
         collapsedProjectIDs = try container.decodeIfPresent(Set<UUID>.self, forKey: .collapsedProjectIDs) ?? []
         diagramInstructions = try container.decodeIfPresent(Bool.self, forKey: .diagramInstructions) ?? true
         autoSettleDays = try container.decodeIfPresent(Int.self, forKey: .autoSettleDays) ?? 3
+        titleGeneration = try container.decodeIfPresent(TitleGenerationSettings.self, forKey: .titleGeneration) ?? TitleGenerationSettings()
     }
 }
 

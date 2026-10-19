@@ -275,6 +275,7 @@ private struct ThreadRow: View {
     let selection: Namespace.ID
     @State private var hovering = false
     @State private var confirmingDelete = false
+    @State private var renaming = false
 
     private var isSelected: Bool { app.visibleThreadID == thread.id }
 
@@ -284,14 +285,22 @@ private struct ThreadRow: View {
             ThreadStatus(thread: thread)
                 .frame(width: SidebarMetrics.icon, height: 14)
                 .padding(.leading, SidebarMetrics.chevron + SidebarMetrics.gap)
-            Text(thread.title)
-                .fontWeight(thread.hasUnread ? .semibold : .regular)
-                .foregroundStyle(thread.isSettled ? .secondary : .primary)
-                .lineLimit(1)
-                .truncationMode(.tail)
+            if renaming {
+                RenameField(thread: thread, isPresented: $renaming)
+            } else {
+                Text(thread.title)
+                    .fontWeight(thread.hasUnread ? .semibold : .regular)
+                    .foregroundStyle(thread.isSettled ? .secondary : .primary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    // A placeholder until the generated title arrives.
+                    .opacity(thread.isGeneratingTitle ? 0.55 : 1)
+                    .contentTransition(.opacity)
+                    .accessibilityValue(thread.isGeneratingTitle ? "Generating title" : "")
+            }
             Spacer(minLength: 6)
-            if hovering {
-                RowActions(thread: thread, confirmDelete: $confirmingDelete)
+            if hovering && !renaming {
+                RowActions(thread: thread, confirmDelete: $confirmingDelete, renaming: $renaming)
                     .transition(.opacity)
             } else if thread.isPinned {
                 Image(systemName: "pin.fill")
@@ -328,7 +337,8 @@ private struct ThreadRow: View {
         .animation(.easeOut(duration: 0.12), value: hovering)
         .animation(.snappy, value: thread.hasUnread)
         .animation(.snappy, value: thread.isPinned)
-        .contextMenu { ThreadMenuItems(thread: thread, confirmDelete: $confirmingDelete) }
+        .animation(.easeInOut(duration: 0.25), value: thread.title)
+        .contextMenu { ThreadMenuItems(thread: thread, confirmDelete: $confirmingDelete, renaming: $renaming) }
         .confirmationDialog("Delete “\(thread.title)”?", isPresented: $confirmingDelete) {
             Button("Delete Thread", role: .destructive) {
                 withAnimation(.snappy) { app.deleteThread(thread) }
@@ -344,6 +354,7 @@ private struct ThreadMenuItems: View {
     @Environment(AppModel.self) private var app
     let thread: ThreadModel
     @Binding var confirmDelete: Bool
+    @Binding var renaming: Bool
 
     var body: some View {
         if !thread.isSettled {
@@ -351,6 +362,12 @@ private struct ThreadMenuItems: View {
                 withAnimation(.snappy) { app.setPinned(!thread.isPinned, thread) }
             }
         }
+        Button("Rename…", systemImage: "pencil") { renaming = true }
+        Button(thread.isGeneratingTitle ? "Regenerating Title…" : "Regenerate Title", systemImage: "sparkles") {
+            app.generateTitle(for: thread, from: .conversation)
+        }
+        .disabled(thread.isGeneratingTitle || app.titleGeneration.provider == nil || thread.sessionID == nil && thread.entries.isEmpty)
+        Divider()
         Button(thread.isSettled ? "Un-settle" : "Settle", systemImage: thread.isSettled ? "arrow.uturn.backward.circle" : "checkmark.circle") {
             withAnimation(.snappy) { app.setSettled(!thread.isSettled, thread) }
         }
@@ -369,11 +386,41 @@ private struct ThreadMenuItems: View {
     }
 }
 
+/// Edits a thread's title in place. Return saves, Escape cancels, clicking away saves.
+private struct RenameField: View {
+    let thread: ThreadModel
+    @Binding var isPresented: Bool
+    @State private var text = ""
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        TextField("Title", text: $text)
+            .textFieldStyle(.plain)
+            .focused($focused)
+            .onSubmit(commit)
+            .onExitCommand { isPresented = false }
+            .onChange(of: focused) { _, isFocused in
+                if !isFocused { commit() }
+            }
+            .onAppear {
+                text = thread.title
+                focused = true
+            }
+    }
+
+    private func commit() {
+        guard isPresented else { return }
+        thread.rename(text)
+        isPresented = false
+    }
+}
+
 /// Pin, settle and a "…" menu, shown while the pointer is over a row.
 private struct RowActions: View {
     @Environment(AppModel.self) private var app
     let thread: ThreadModel
     @Binding var confirmDelete: Bool
+    @Binding var renaming: Bool
 
     var body: some View {
         HStack(spacing: 8) {
@@ -388,7 +435,7 @@ private struct RowActions: View {
             }
             .help(thread.isSettled ? "Move back to active work" : "Settle: move finished work to the shelf and stop its session")
             Menu {
-                ThreadMenuItems(thread: thread, confirmDelete: $confirmDelete)
+                ThreadMenuItems(thread: thread, confirmDelete: $confirmDelete, renaming: $renaming)
             } label: {
                 Image(systemName: "ellipsis")
             }

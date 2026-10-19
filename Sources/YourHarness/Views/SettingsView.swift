@@ -437,6 +437,8 @@ private struct GeneralSettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
+            TitleGenerationSection()
+
             Section {
                 Toggle(isOn: Binding(get: { app.diagramInstructions }, set: { app.setDiagramInstructions($0) })) {
                     Label("Let agents draw diagrams", systemImage: "point.3.connected.trianglepath.dotted")
@@ -475,5 +477,84 @@ private struct GeneralSettingsView: View {
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+/// Which CLI and model name new threads.
+private struct TitleGenerationSection: View {
+    @Environment(AppModel.self) private var app
+
+    /// Codex models offered for titles; the first is T3 Code's pick for short text.
+    private static let codexModels = ["gpt-6-luna", "gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra"]
+
+    private var settings: TitleGenerationSettings { app.titleGeneration }
+
+    private var provider: Binding<TitleGenerationSettings.Provider?> {
+        Binding(get: { settings.provider }, set: { app.setTitleGeneration(TitleGenerationSettings(provider: $0)) })
+    }
+
+    private var model: Binding<String?> {
+        Binding(get: { settings.model }, set: { app.setTitleGeneration(TitleGenerationSettings(provider: settings.provider, model: $0)) })
+    }
+
+    var body: some View {
+        Section {
+            Picker(selection: provider) {
+                ForEach(TitleGenerationSettings.Provider.allCases) { provider in
+                    let ready = app.canGenerateTitles(with: provider)
+                    Text(ready ? provider.cli.name : "\(provider.cli.name) (not installed)")
+                        .tag(Optional(provider))
+                        .selectionDisabled(!ready && settings.provider != provider)
+                }
+                Divider()
+                Text("Off: use the first message").tag(TitleGenerationSettings.Provider?.none)
+            } label: {
+                Label("Generate with", systemImage: "text.badge.star")
+            }
+
+            if let current = settings.provider {
+                Picker(selection: model) {
+                    Text("Default · \(displayName(current.defaultModel, for: current))").tag(String?.none)
+                    Divider()
+                    ForEach(models(for: current).filter { $0 != current.defaultModel }, id: \.self) { value in
+                        Text(displayName(value, for: current)).tag(Optional(value))
+                    }
+                } label: {
+                    Label("Model", systemImage: "cpu")
+                }
+            }
+        } header: {
+            Text("Thread Titles")
+        } footer: {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(settings.provider == nil
+                     ? "Threads are named after the first words of their first message. Rename one from its menu."
+                     : "After your first message, a short request with no tools or project access names the thread. Regenerate or rename it from the thread's menu.")
+                if let error = app.titleGenerationError, settings.provider != nil {
+                    Label("Last title failed: \(error)", systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                }
+            }
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    private func models(for provider: TitleGenerationSettings.Provider) -> [String] {
+        switch provider {
+        case .claude:
+            app.claudeModels.filter { $0.value != "default" }.map(\.value)
+        case .codex:
+            Self.codexModels
+        }
+    }
+
+    private func displayName(_ value: String, for provider: TitleGenerationSettings.Provider) -> String {
+        switch provider {
+        case .claude:
+            guard let model = app.claudeModel(for: value) else { return value.capitalized }
+            return model.isAlias ? model.displayName : "\(model.displayName) (pinned)"
+        case .codex:
+            return value
+        }
     }
 }

@@ -64,6 +64,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate()
         // Development: stream the markdown sample into the selected thread, for checking
         // streaming without clicking through the Debug menu.
+        if let message = ProcessInfo.processInfo.environment["YH_SEND_MESSAGE"], !message.isEmpty {
+            MainActor.assumeIsolated {
+                AppModel.shared.newThreadInCurrentProject()
+                AppModel.shared.selectedThread?.send(message)
+            }
+        }
         if ProcessInfo.processInfo.environment["YH_SIMULATE_STREAMING"] == "1" {
             MainActor.assumeIsolated {
                 if let thread = AppModel.shared.selectedThread {
