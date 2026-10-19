@@ -2,12 +2,16 @@ import AppKit
 import HarnessCore
 
 enum PermissionMode: String, Codable, CaseIterable, Identifiable {
-    case ask, acceptEdits, plan, bypass
+    case auto, ask, acceptEdits, plan, bypass
+
+    /// What new projects start with unless Settings says otherwise.
+    static let standard = PermissionMode.auto
 
     var id: String { rawValue }
 
     var cliValue: String? {
         switch self {
+        case .auto: "auto"
         case .ask: nil
         case .acceptEdits: "acceptEdits"
         case .plan: "plan"
@@ -20,6 +24,7 @@ enum PermissionMode: String, Codable, CaseIterable, Identifiable {
 
     var shortLabel: String {
         switch self {
+        case .auto: "Auto"
         case .ask: "Ask"
         case .acceptEdits: "Accept Edits"
         case .plan: "Plan"
@@ -29,6 +34,7 @@ enum PermissionMode: String, Codable, CaseIterable, Identifiable {
 
     var detail: String {
         switch self {
+        case .auto: "Claude runs what looks safe and asks when something looks risky."
         case .ask: "Claude asks before editing files or running commands."
         case .acceptEdits: "File edits go through. Commands still ask."
         case .plan: "Claude explores and plans, but changes nothing."
@@ -38,6 +44,7 @@ enum PermissionMode: String, Codable, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
+        case .auto: "Auto"
         case .ask: "Ask Before Changes"
         case .acceptEdits: "Auto-Accept Edits"
         case .plan: "Plan Only"
@@ -47,6 +54,7 @@ enum PermissionMode: String, Codable, CaseIterable, Identifiable {
 
     var symbol: String {
         switch self {
+        case .auto: "checkmark.shield"
         case .ask: "hand.raised"
         case .acceptEdits: "pencil.and.outline"
         case .plan: "list.bullet.clipboard"
@@ -59,7 +67,7 @@ struct Project: Codable, Identifiable, Hashable {
     var id = UUID()
     var name: String
     var path: String
-    var permissionMode = PermissionMode.ask
+    var permissionMode = PermissionMode.standard
 
     var url: URL { URL(fileURLWithPath: path, isDirectory: true) }
 }

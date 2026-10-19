@@ -128,7 +128,7 @@ struct ClaudeStreamParserTests {
 
     @Test func initializeResponseBecomesCatalog() {
         var parser = ClaudeStreamParser()
-        let line = #"{"type":"control_response","response":{"subtype":"success","request_id":"yh-1","response":{"claude_code_version":"2.1.302","models":[{"value":"default","resolvedModel":"claude-opus-5-5","displayName":"Default (recommended)","description":"Opus 5.5","supportedEffortLevels":["low","high"]},{"value":"claude-opus-5","displayName":"Opus 5"},{"bogus":true}]}}}"#
+        let line = #"{"type":"control_response","response":{"subtype":"success","request_id":"yh-1","response":{"claude_code_version":"2.1.302","models":[{"value":"default","resolvedModel":"claude-opus-5-5","displayName":"Default (recommended)","description":"Opus 5.5","supportedEffortLevels":["low","high"],"supportsAutoMode":true},{"value":"claude-opus-5","displayName":"Opus 5"},{"bogus":true}]}}}"#
         guard case .catalog(let catalog) = parser.parse(line: Data(line.utf8)).first else {
             Issue.record("expected a catalog")
             return
@@ -138,6 +138,9 @@ struct ClaudeStreamParserTests {
         #expect(catalog.models[0].supportedEffortLevels == ["low", "high"])
         #expect(catalog.models[0].isAlias)
         #expect(!catalog.models[1].isAlias)
+        // Models without auto mode simply omit the key.
+        #expect(catalog.models[0].supportsAutoMode == true)
+        #expect(catalog.models[1].supportsAutoMode == false)
     }
 
     @Test func controlErrorsAreSurfaced() {

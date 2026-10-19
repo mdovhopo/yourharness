@@ -12,7 +12,7 @@ An early spike. What works today:
 - Streaming Claude Code sessions: markdown, code blocks, thinking, tool calls with inline Edit diffs
 - Native permission prompts (Allow ⌘↩ / Deny ⌘⌫) via the CLI's `can_use_tool` control protocol
 - Stop (⌘.) mid-turn without killing the session
-- Composer with model, reasoning-effort and permission pickers, plus a context-window ring. Models and effort levels come live from the CLI's `initialize` catalog. Model and permission changes apply instantly mid-session
+- Composer with model, reasoning-effort and permission pickers (Auto by default: the CLI's classifier runs what looks safe and asks about the rest), plus a context-window ring. Models and effort levels come live from the CLI's `initialize` catalog. Model and permission changes apply instantly mid-session
 - A Home project, so you can start a thread without picking a folder
 - Settings (⌘,): agent discovery (Claude Code, plus Codex, Cursor, Gemini and OpenCode detection), account and plan from `claude auth status`, custom executable paths, and defaults for new threads
 - 5-hour and weekly usage limits from the CLI's `rate_limit_event`, with an on-demand refresh that sends one tiny Haiku request (no tools, MCP, settings or saved session)

@@ -9,6 +9,9 @@ public struct ClaudeModel: Sendable, Equatable, Codable, Identifiable {
     public var displayName: String
     public var description: String?
     public var supportedEffortLevels: [String]
+    /// Whether `--permission-mode auto` works with this model. The CLI quietly falls back
+    /// to asking when it doesn't. Nil in catalogs cached before the CLI reported it.
+    public var supportsAutoMode: Bool?
 
     /// Aliases that track the latest model, as opposed to pinned versions.
     public var isAlias: Bool { !value.hasPrefix("claude-") }
@@ -20,6 +23,8 @@ public struct ClaudeModel: Sendable, Equatable, Codable, Identifiable {
         self.displayName = displayName
         self.description = json["description"] as? String
         self.supportedEffortLevels = json["supportedEffortLevels"] as? [String] ?? []
+        // The CLI omits the key for models without auto mode.
+        self.supportsAutoMode = json["supportsAutoMode"] as? Bool ?? false
     }
 }
 

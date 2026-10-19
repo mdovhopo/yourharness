@@ -195,7 +195,7 @@ final class AppModel {
             return
         }
         let project = Project(name: url.lastPathComponent, path: url.path,
-                              permissionMode: defaults.permissionMode ?? .ask)
+                              permissionMode: defaults.permissionMode ?? .standard)
         projects.append(project)
         newThread(in: project)
         refreshWorkspaces()
@@ -363,6 +363,11 @@ final class AppModel {
             return concrete.displayName
         }
         return model.displayName
+    }
+
+    /// Old cached catalogs don't say; assume yes until a fresh one arrives.
+    func supportsAutoMode(_ modelValue: String?) -> Bool {
+        claudeModel(for: modelValue)?.supportsAutoMode ?? true
     }
 
     func effortLevels(for modelValue: String?) -> [EffortLevel] {

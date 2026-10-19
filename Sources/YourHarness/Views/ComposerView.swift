@@ -117,7 +117,14 @@ private struct PermissionChip: View {
 
     var body: some View {
         if let project = app.project(id: thread.projectID) {
-            PickerChip(isOpen: $open, help: "Permissions for \(project.name)") {
+            let autoUnavailable = !app.supportsAutoMode(thread.effectiveModel)
+            let modelName = app.modelDisplayName(for: thread.effectiveModel)
+            PickerChip(
+                isOpen: $open,
+                help: project.permissionMode == .auto && autoUnavailable
+                    ? "\(modelName) doesn't support Auto, so Claude asks before changes"
+                    : "Permissions for \(project.name)"
+            ) {
                 Image(systemName: project.permissionMode.symbol)
                     .foregroundStyle(project.permissionMode == .bypass ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
                 Text(project.permissionMode.shortLabel)
@@ -125,7 +132,10 @@ private struct PermissionChip: View {
                 PickerPanel {
                     PickerSectionHeader("Permissions · \(project.name)")
                     ForEach(PermissionMode.allCases) { mode in
-                        PickerRow(symbol: mode.symbol, title: mode.label, subtitle: mode.detail,
+                        PickerRow(symbol: mode.symbol, title: mode.label,
+                                  subtitle: mode == .auto && autoUnavailable
+                                      ? "Not available with \(modelName). Claude asks instead."
+                                      : mode.detail,
                                   isSelected: project.permissionMode == mode,
                                   tint: mode == .bypass ? .red : nil) {
                             app.setPermissionMode(mode, for: project.id)

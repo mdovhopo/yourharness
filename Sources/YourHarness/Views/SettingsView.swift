@@ -369,7 +369,7 @@ private struct GeneralSettingsView: View {
     }
 
     private var defaultPermissionMode: Binding<PermissionMode> {
-        Binding(get: { app.defaults.permissionMode ?? .ask }, set: { app.setDefaultPermissionMode($0) })
+        Binding(get: { app.defaults.permissionMode ?? .standard }, set: { app.setDefaultPermissionMode($0) })
     }
 
     var body: some View {
