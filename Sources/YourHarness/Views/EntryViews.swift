@@ -8,7 +8,7 @@ struct EntryView: View {
         case .user:
             UserMessageView(text: entry.text)
         case .assistant:
-            MarkdownView(text: entry.text)
+            StreamingMarkdown(entry: entry)
         case .thinking:
             ThinkingView(entry: entry)
         case .tool:

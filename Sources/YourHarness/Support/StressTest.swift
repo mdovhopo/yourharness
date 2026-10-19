@@ -53,20 +53,58 @@ enum StressTest {
         """
     }
 
-    /// Appends a streaming assistant entry and feeds it tokens at ~60 Hz, to see how
-    /// streaming behaves at the bottom of a long transcript.
-    static func simulateStreaming(into thread: ThreadModel, duration: Duration = .seconds(15)) {
+    /// Every construct the renderer handles, for eyeballing styles and streaming.
+    static let markdownSample = """
+        The build is green and the parser work is done. Two things are left, and one needs your call.
+
+        ## Current state
+
+        **Repos** (checked just now)
+
+        - `main` is 2 commits ahead of origin. Open PRs #4 (`table-parser`) and #5 are probably redundant now.
+        - The fix landed in mdovhopo/yourharness#1, see https://github.com/mdovhopo/yourharness for details.
+          It also needs a follow-up in the *docs*.
+            - nested point with ~~old~~ new wording
+        - [x] Parser handles tables
+        - [ ] Streaming doesn't flicker
+
+        | Area | Status | Owner |
+        |---|:---:|--:|
+        | 1. Block parser | Done, with tables and task lists | you |
+        | 2. Inline styles (`code`, links) | Done, except images | me |
+        | 3. Syntax highlighting | **Planned** | — |
+
+        ### Next steps
+
+        1. Profile a 10,000-entry transcript.
+        2. Add syntax highlighting to code blocks.
+        3. Check that `swift test` still passes on a clean checkout.
+
+        ```swift
+        let blocks = MarkdownParser.parse(text, streaming: true)
+        ```
+
+        > Note: tables, lists and code render natively; nothing is a web view.
+
+        ---
+
+        That's everything. Want me to start on step 1?
+        """
+
+    /// Appends a streaming assistant entry and feeds it the markdown sample in bursty,
+    /// network-like chunks, to see how streaming looks at the bottom of a transcript.
+    static func simulateStreaming(into thread: ThreadModel) {
         let entry = TranscriptEntry(kind: .assistant, isStreaming: true)
         thread.appendForStress(entry)
-        let words = assistantText(0).split(separator: " ", omittingEmptySubsequences: false)
+        let text = markdownSample
         Task {
-            let clock = ContinuousClock()
-            let deadline = clock.now + duration
-            var index = 0
-            while clock.now < deadline {
-                entry.text += words[index % words.count] + " "
-                index += 1
-                try? await Task.sleep(for: .milliseconds(16))
+            var index = text.startIndex
+            while index < text.endIndex {
+                let size = Int.random(in: 4...48)
+                let end = text.index(index, offsetBy: size, limitedBy: text.endIndex) ?? text.endIndex
+                entry.text += text[index..<end]
+                index = end
+                try? await Task.sleep(for: .milliseconds(Int.random(in: 30...140)))
             }
             entry.isStreaming = false
         }

@@ -54,6 +54,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Needed when running the bare executable (`swift run`) rather than the .app bundle.
         NSApp.setActivationPolicy(.regular)
         NSApp.activate()
+        // Development: stream the markdown sample into the selected thread, for checking
+        // streaming without clicking through the Debug menu.
+        if ProcessInfo.processInfo.environment["YH_SIMULATE_STREAMING"] == "1" {
+            MainActor.assumeIsolated {
+                if let thread = AppModel.shared.selectedThread {
+                    thread.loadTranscriptIfNeeded()
+                    StressTest.simulateStreaming(into: thread)
+                }
+            }
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

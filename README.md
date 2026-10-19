@@ -9,7 +9,7 @@ A fast, native macOS home for AI coding agents. Bring your own subscription: You
 An early spike. What works today:
 
 - Projects (local folders) and multiple threads per project, persisted across launches
-- Streaming Claude Code sessions: markdown, code blocks, thinking, tool calls with inline Edit diffs
+- Streaming Claude Code sessions: markdown (headings, nested and task lists, tables, code, quotes), thinking, tool calls with inline Edit diffs. Replies are revealed at a steady, word-by-word pace instead of in network bursts, and half-typed syntax never flashes. `#12`, `repo#12` and `owner/repo#12` link to the right PR or issue using the project's repos and open PRs
 - Native permission prompts (Allow ⌘↩ / Deny ⌘⌫) via the CLI's `can_use_tool` control protocol
 - Stop (⌘.) mid-turn without killing the session
 - Composer with model, reasoning-effort and permission pickers (Auto by default: the CLI's classifier runs what looks safe and asks about the rest), plus a context-window ring. Models and effort levels come live from the CLI's `initialize` catalog. Model and permission changes apply instantly mid-session
@@ -51,6 +51,7 @@ Sources/
     Git/                  read-only git status and remote parsing
     Workspace/            finds repos in a project folder (nested clones, compose build contexts)
     Forge/                open PRs/MRs via `gh`/`glab` GraphQL, stack detection
+    Markdown/             block parser (streaming-aware), PR/issue reference linking
   YourHarness/            SwiftUI app
     Model/                AppModel, ThreadModel (event reducer), Store (JSON persistence)
     Views/                sidebar, thread, composer, tool calls, markdown

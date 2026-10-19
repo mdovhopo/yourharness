@@ -49,6 +49,7 @@ struct ThreadView: View {
             .padding(.bottom, 16)
             .animation(.snappy, value: thread.pendingPermissions)
         }
+        .environment(\.issueLinker, app.issueLinker(for: thread))
         .navigationTitle(thread.title)
         .navigationSubtitle(subtitle)
         .task { thread.loadTranscriptIfNeeded() }

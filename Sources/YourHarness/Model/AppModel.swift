@@ -287,6 +287,17 @@ final class AppModel {
         workspaceModels.values.lazy.compactMap { $0.forgeAccounts[forge] }.first
     }
 
+    /// What `#12` in this thread's text can link to: the project's repos and open PRs.
+    func issueLinker(for thread: ThreadModel) -> IssueLinker {
+        guard let project = project(id: thread.projectID), let workspace = workspace(for: project) else {
+            return IssueLinker(repos: [], openPullRequests: [])
+        }
+        let repos = workspace.clonedRepos.compactMap { repo in
+            workspace.remotes[repo.id].map { IssueLinker.Repo(name: repo.url.lastPathComponent, remote: $0) }
+        }
+        return IssueLinker(repos: repos, openPullRequests: workspace.pullRequests)
+    }
+
     var workspaceTools: WorkspaceTools {
         let ready = { (name: String) in self.toolStatuses[name].flatMap { $0.isReady ? $0.path : nil } }
         return WorkspaceTools(
