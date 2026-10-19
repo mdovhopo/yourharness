@@ -21,6 +21,16 @@ struct SidebarView: View {
                             ThreadRow(thread: thread, selection: selection)
                                 .transition(.opacity.combined(with: .move(edge: .top)))
                         }
+                        let archived = app.archivedThreads(in: project)
+                        if !archived.isEmpty {
+                            ArchivedToggle(project: project, count: archived.count)
+                            if app.expandedArchives.contains(project.id) {
+                                ForEach(archived) { thread in
+                                    ThreadRow(thread: thread, selection: selection)
+                                        .transition(.opacity.combined(with: .move(edge: .top)))
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -275,9 +285,20 @@ private struct ThreadRow: View {
                 .padding(.leading, SidebarMetrics.chevron + SidebarMetrics.gap)
             Text(thread.title)
                 .fontWeight(thread.hasUnread ? .semibold : .regular)
+                .foregroundStyle(thread.isArchived ? .secondary : .primary)
                 .lineLimit(1)
                 .truncationMode(.tail)
             Spacer(minLength: 6)
+            if hovering {
+                RowActions(thread: thread)
+                    .transition(.opacity)
+            } else if thread.isPinned {
+                Image(systemName: "pin.fill")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+                    .rotationEffect(.degrees(40))
+                    .transition(.opacity)
+            }
             TimelineView(.everyMinute) { context in
                 Text(ShortAge.string(from: thread.updatedAt, to: context.date))
                     .font(.caption.monospacedDigit())
@@ -305,11 +326,87 @@ private struct ThreadRow: View {
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.12), value: hovering)
         .animation(.snappy, value: thread.hasUnread)
+        .animation(.snappy, value: thread.isPinned)
         .contextMenu {
+            if !thread.isArchived {
+                Button(thread.isPinned ? "Unpin" : "Pin", systemImage: thread.isPinned ? "pin.slash" : "pin") {
+                    withAnimation(.snappy) { app.setPinned(!thread.isPinned, thread) }
+                }
+            }
+            Button(thread.isArchived ? "Unarchive" : "Archive", systemImage: thread.isArchived ? "tray.and.arrow.up" : "archivebox") {
+                withAnimation(.snappy) { app.setArchived(!thread.isArchived, thread) }
+            }
+            Divider()
             Button("Delete Thread", systemImage: "trash", role: .destructive) {
                 withAnimation(.snappy) { app.deleteThread(thread) }
             }
         }
+    }
+}
+
+/// Pin and archive, shown while the pointer is over a row.
+private struct RowActions: View {
+    @Environment(AppModel.self) private var app
+    let thread: ThreadModel
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if !thread.isArchived {
+                Button(thread.isPinned ? "Unpin" : "Pin", systemImage: thread.isPinned ? "pin.slash" : "pin") {
+                    withAnimation(.snappy) { app.setPinned(!thread.isPinned, thread) }
+                }
+                .help(thread.isPinned ? "Unpin" : "Pin to the top")
+            }
+            Button(thread.isArchived ? "Unarchive" : "Archive", systemImage: thread.isArchived ? "tray.and.arrow.up" : "archivebox") {
+                withAnimation(.snappy) { app.setArchived(!thread.isArchived, thread) }
+            }
+            .help(thread.isArchived ? "Move back to the list" : "Archive: hide from the list and stop its session")
+        }
+        .labelStyle(.iconOnly)
+        .buttonStyle(.borderless)
+        .font(.system(size: 11, weight: .medium))
+        .foregroundStyle(.secondary)
+    }
+}
+
+/// "Archived · 3" at the end of a project's threads; opens the archived ones inline.
+private struct ArchivedToggle: View {
+    @Environment(AppModel.self) private var app
+    let project: Project
+    let count: Int
+    @State private var hovering = false
+
+    private var expanded: Bool { app.expandedArchives.contains(project.id) }
+
+    var body: some View {
+        Button {
+            withAnimation(.snappy(duration: 0.25)) { app.setArchiveExpanded(!expanded, for: project) }
+        } label: {
+            HStack(spacing: SidebarMetrics.gap) {
+                Image(systemName: "archivebox")
+                    .font(.system(size: 10, weight: .medium))
+                    .frame(width: SidebarMetrics.icon)
+                    .padding(.leading, SidebarMetrics.chevron + SidebarMetrics.gap)
+                Text("Archived")
+                Text("\(count)")
+                    .monospacedDigit()
+                    .foregroundStyle(.tertiary)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 8, weight: .bold))
+                    .rotationEffect(.degrees(expanded ? 90 : 0))
+                    .opacity(hovering || expanded ? 1 : 0)
+                Spacer()
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, SidebarMetrics.rowPadding - 4)
+            .padding(.vertical, 4)
+            .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovering)
+        .help(expanded ? "Hide archived threads" : "Show archived threads")
     }
 }
 
@@ -346,7 +443,9 @@ private struct ThreadStatus: View {
                     .frame(width: 7, height: 7)
                     .transition(.scale.combined(with: .opacity))
             case .idle:
-                Color.clear
+                Circle()
+                    .fill(.tertiary)
+                    .frame(width: 6, height: 6)
             }
         }
         .animation(.spring(response: 0.3, dampingFraction: 0.75), value: state)
@@ -518,18 +617,18 @@ private struct LimitMeter: View {
 }
 
 enum ShortAge {
-    /// Compact like Mail: "now", "53m", "2h", "Yesterday", "Mon", "Oct 3".
+    /// Compact and relative: "now", "5m", "3h", "2d", "3w", "1mo", "2y".
     static func string(from date: Date, to now: Date) -> String {
-        let seconds = now.timeIntervalSince(date)
-        let calendar = Calendar.current
+        let seconds = max(now.timeIntervalSince(date), 0)
+        let minutes = seconds / 60, hours = minutes / 60, days = hours / 24
         switch seconds {
         case ..<60: return "now"
-        case ..<3_600: return "\(Int(seconds / 60))m"
-        case ..<86_400 where calendar.isDate(date, inSameDayAs: now): return "\(Int(seconds / 3_600))h"
-        default:
-            if calendar.isDateInYesterday(date) { return "Yesterday" }
-            if seconds < 6 * 86_400 { return date.formatted(.dateTime.weekday(.abbreviated)) }
-            return date.formatted(.dateTime.month(.abbreviated).day())
+        case ..<3_600: return "\(Int(minutes))m"
+        case ..<86_400: return "\(Int(hours))h"
+        case ..<(7 * 86_400): return "\(Int(days))d"
+        case ..<(30 * 86_400): return "\(Int(days / 7))w"
+        case ..<(365 * 86_400): return "\(max(Int(days / 30), 1))mo"
+        default: return "\(Int(days / 365))y"
         }
     }
 }

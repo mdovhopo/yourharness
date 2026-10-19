@@ -8,7 +8,7 @@ A fast, native macOS home for AI coding agents. Bring your own subscription: You
 
 An early spike. What works today:
 
-- Projects (local folders) and multiple threads per project, persisted across launches
+- Projects (local folders) and multiple threads per project, persisted across launches. Threads can be pinned to the top or archived (hidden, session stopped, history kept; sending a message brings one back)
 - Streaming Claude Code sessions: markdown (headings, nested and task lists, tables, code, quotes), thinking, tool calls with inline Edit diffs. Replies are revealed at a steady, word-by-word pace instead of in network bursts, and half-typed syntax never flashes. `#12`, `repo#12` and `owner/repo#12` link to the right PR or issue using the project's repos and open PRs
 - Native permission prompts (Allow ⌘↩ / Deny ⌘⌫) via the CLI's `can_use_tool` control protocol
 - Stop (⌘.) mid-turn without killing the session

@@ -84,6 +84,8 @@ struct ThreadMeta: Codable {
     var effort: String?
     var contextTokens: Int?
     var contextWindow: Int?
+    var isPinned: Bool?
+    var isArchived: Bool?
 }
 
 struct PersistedState: Codable {

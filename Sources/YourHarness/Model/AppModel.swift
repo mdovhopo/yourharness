@@ -140,14 +140,54 @@ final class AppModel {
         projects.first { $0.id == id }
     }
 
+    /// Active threads: pinned first, then most recent.
     func threads(in project: Project) -> [ThreadModel] {
-        threads.filter { $0.projectID == project.id }.sorted { $0.updatedAt > $1.updatedAt }
+        threads.filter { $0.projectID == project.id && !$0.isArchived }.sorted { a, b in
+            a.isPinned != b.isPinned ? a.isPinned : a.updatedAt > b.updatedAt
+        }
+    }
+
+    func archivedThreads(in project: Project) -> [ThreadModel] {
+        threads.filter { $0.projectID == project.id && $0.isArchived }.sorted { $0.updatedAt > $1.updatedAt }
+    }
+
+    /// Projects whose archived threads are showing in the sidebar.
+    private(set) var expandedArchives: Set<UUID> = []
+
+    func setArchiveExpanded(_ expanded: Bool, for project: Project) {
+        if expanded { expandedArchives.insert(project.id) } else { expandedArchives.remove(project.id) }
+    }
+
+    func setPinned(_ pinned: Bool, _ thread: ThreadModel) {
+        thread.isPinned = pinned
+        save()
+    }
+
+    /// Hides a thread from the list and frees its `claude` process. History stays.
+    func setArchived(_ archived: Bool, _ thread: ThreadModel) {
+        if archived {
+            // Move the selection to a neighbour first, so the sidebar doesn't go blank.
+            if visibleThreadID == thread.id {
+                let ids = visibleThreadIDs
+                let index = ids.firstIndex(of: thread.id) ?? 0
+                let neighbour = ids.indices.contains(index + 1) ? ids[index + 1] : (index > 0 ? ids[index - 1] : nil)
+                selectedThreadID = neighbour
+            }
+            thread.isArchived = true
+            thread.isPinned = false
+            thread.endSession()
+        } else {
+            thread.isArchived = false
+        }
+        save()
     }
 
     /// Everything the sidebar shows, in order. Lets the list animate inserts and reorders.
     var sidebarOrder: [UUID] {
         projects.flatMap { project in
-            [project.id] + (isCollapsed(project) ? [] : threads(in: project).map(\.id))
+            guard !isCollapsed(project) else { return [project.id] }
+            let archived = expandedArchives.contains(project.id) ? archivedThreads(in: project).map(\.id) : []
+            return [project.id] + threads(in: project).map(\.id) + archived
         }
     }
 

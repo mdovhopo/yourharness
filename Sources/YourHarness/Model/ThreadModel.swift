@@ -33,6 +33,10 @@ final class ThreadModel: Identifiable {
     private(set) var pendingPermissions: [PermissionRequest] = []
     /// A reply finished while you were looking at another thread.
     private(set) var hasUnread = false
+    /// Pinned threads sit at the top of their project.
+    var isPinned = false
+    /// Archived threads leave the sidebar list but keep their history.
+    var isArchived = false
     var draft = ""
 
     @ObservationIgnored private unowned let app: AppModel
@@ -75,13 +79,16 @@ final class ThreadModel: Identifiable {
         effort = meta.effort
         contextTokens = meta.contextTokens
         contextWindow = meta.contextWindow
+        isPinned = meta.isPinned ?? false
+        isArchived = meta.isArchived ?? false
         transcriptLoaded = false
     }
 
     var meta: ThreadMeta {
         ThreadMeta(id: id, projectID: projectID, title: title, createdAt: createdAt,
                    updatedAt: updatedAt, sessionID: sessionID, model: model, effort: effort,
-                   contextTokens: contextTokens, contextWindow: contextWindow)
+                   contextTokens: contextTokens, contextWindow: contextWindow,
+                   isPinned: isPinned ? true : nil, isArchived: isArchived ? true : nil)
     }
 
     var hasLiveSession: Bool { sessionStart != nil }
@@ -118,6 +125,8 @@ final class ThreadModel: Identifiable {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         loadTranscriptIfNeeded()
+        // Picking an archived thread back up brings it back to the list.
+        if isArchived { app.setArchived(false, self) }
         if title == Self.untitled { title = Self.title(from: text) }
         entries.append(TranscriptEntry(kind: .user, text: text))
         phase = .running
