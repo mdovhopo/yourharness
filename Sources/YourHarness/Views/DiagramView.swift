@@ -68,9 +68,9 @@ struct MermaidBlockView: View {
     let source: String
     @State private var showSource = false
     @State private var hovering = false
-    @State private var expanded = false
     @State private var copied = false
     @State private var availableWidth: CGFloat = 0
+    @Environment(\.openWindow) private var openWindow
 
     /// Shrink wide diagrams to the column, but not past where text gets hard to read.
     private func fitScale(_ entry: DiagramCache.Entry) -> CGFloat {
@@ -129,9 +129,6 @@ struct MermaidBlockView: View {
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.15), value: hovering)
         .animation(.smooth(duration: 0.2), value: showSource)
-        .sheet(isPresented: $expanded) {
-            DiagramZoomView(entry: entry, source: source)
-        }
     }
 
     private func header(_ entry: DiagramCache.Entry) -> some View {
@@ -163,8 +160,10 @@ struct MermaidBlockView: View {
                 .menuIndicator(.hidden)
                 .fixedSize()
                 .help("Export")
-                Button("Expand", systemImage: "arrow.up.left.and.arrow.down.right") { expanded = true }
-                    .help("Open larger")
+                Button("Open Large", systemImage: "arrow.up.left.and.arrow.down.right") {
+                    openWindow(id: "diagram", value: source)
+                }
+                .help("Open in a large window")
             }
             .labelStyle(.iconOnly)
             .buttonStyle(.borderless)
@@ -216,46 +215,90 @@ struct DiagramPlaceholder: View {
     }
 }
 
-private struct DiagramZoomView: View {
-    let entry: DiagramCache.Entry
+/// A diagram in its own window that fills most of the screen: starts fitted, zooms with
+/// pinch or ⌘+ / ⌘−, and Esc closes it.
+struct DiagramWindow: View {
     let source: String
     @Environment(\.dismiss) private var dismiss
     @State private var zoom: CGFloat = 1
+    /// Until you zoom yourself, the diagram keeps fitting the window (it grows when the
+    /// window goes full screen).
+    @State private var userZoomed = false
     @GestureState private var pinch: CGFloat = 1
+    @State private var viewport: CGSize = .zero
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Button("Zoom Out", systemImage: "minus.magnifyingglass") { zoom = max(0.4, zoom / 1.25) }
-                    .keyboardShortcut("-")
-                Text(zoom * pinch, format: .percent.precision(.fractionLength(0)))
+        let entry = DiagramCache.entry(for: source)
+        let size = DiagramCanvas.size(of: entry)
+        let scale = zoom * pinch
+        ScrollView([.horizontal, .vertical]) {
+            DiagramCanvas(entry: entry)
+                .scaleEffect(scale, anchor: .topLeading)
+                .frame(width: size.width * scale, height: size.height * scale, alignment: .topLeading)
+                .padding(40)
+                // Small diagrams sit in the middle instead of the top-left corner.
+                .frame(minWidth: viewport.width, minHeight: viewport.height)
+        }
+        .onGeometryChange(for: CGSize.self) { $0.size } action: { newSize in
+            viewport = newSize
+            if !userZoomed, newSize.width > 0 { zoom = fitZoom(size) }
+        }
+        .gesture(MagnifyGesture().updating($pinch) { value, state, _ in state = value.magnification }
+            .onEnded {
+                zoom = min(4, max(0.25, zoom * $0.magnification))
+                userZoomed = true
+            })
+        .background(Color(nsColor: .windowBackgroundColor))
+        .toolbar {
+            ToolbarItemGroup {
+                Button("Zoom Out", systemImage: "minus.magnifyingglass") {
+                    zoom = max(0.25, zoom / 1.25)
+                    userZoomed = true
+                }
+                .keyboardShortcut("-")
+                Text(scale, format: .percent.precision(.fractionLength(0)))
                     .monospacedDigit()
                     .frame(width: 48)
-                Button("Zoom In", systemImage: "plus.magnifyingglass") { zoom = min(4, zoom * 1.25) }
-                    .keyboardShortcut("=")
-                Button("Actual Size") { zoom = 1 }
-                    .keyboardShortcut("0")
-                Spacer()
+                Button("Zoom In", systemImage: "plus.magnifyingglass") {
+                    zoom = min(4, zoom * 1.25)
+                    userZoomed = true
+                }
+                .keyboardShortcut("=")
+                Button("Fit", systemImage: "arrow.up.left.and.down.right.magnifyingglass") {
+                    zoom = fitZoom(size)
+                    userZoomed = false
+                }
+                .keyboardShortcut("0")
+                    .help("Fit to window (⌘0)")
                 Button("Save as PNG…", systemImage: "square.and.arrow.down") { DiagramExport.savePNG(entry) }
                 Button("Done") { dismiss() }
-                    .keyboardShortcut(.defaultAction)
+                    .keyboardShortcut(.cancelAction)
             }
-            .labelStyle(.iconOnly)
-            .padding(12)
-            Divider()
-            ScrollView([.horizontal, .vertical]) {
-                DiagramCanvas(entry: entry)
-                    .scaleEffect(zoom * pinch, anchor: .topLeading)
-                    .frame(width: canvasSize.width * zoom * pinch, height: canvasSize.height * zoom * pinch, alignment: .topLeading)
-                    .padding(24)
-            }
-            .gesture(MagnifyGesture().updating($pinch) { value, state, _ in state = value.magnification }
-                .onEnded { zoom = min(4, max(0.4, zoom * $0.magnification)) })
         }
-        .frame(minWidth: 720, idealWidth: 1000, minHeight: 520, idealHeight: 760)
+        .navigationTitle(DiagramCanvas.title(of: entry))
+        .background(FillsScreenOnAppear())
     }
 
-    private var canvasSize: CGSize { DiagramCanvas.size(of: entry) }
+    private func fitZoom(_ size: CGSize) -> CGFloat {
+        guard size.width > 0, size.height > 0, viewport.width > 0 else { return 1 }
+        return min(2, max(0.25, min((viewport.width - 80) / size.width, (viewport.height - 80) / size.height)))
+    }
+}
+
+/// Grows its window to most of the screen it's on, centered, the first time it appears.
+private struct FillsScreenOnAppear: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async {
+            guard let window = view.window, let screen = window.screen ?? NSScreen.main else { return }
+            let visible = screen.visibleFrame
+            let frame = visible.insetBy(dx: visible.width * 0.04, dy: visible.height * 0.04)
+            window.setFrame(frame, display: true, animate: true)
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
 }
 
 // MARK: - Export
@@ -293,6 +336,14 @@ enum DiagramExport {
 
 struct DiagramCanvas: View {
     let entry: DiagramCache.Entry
+
+    static func title(of entry: DiagramCache.Entry) -> String {
+        switch entry {
+        case .flowchart: "Flowchart"
+        case .sequence(_, let title): title ?? "Sequence Diagram"
+        case .failed: "Diagram"
+        }
+    }
 
     static func size(of entry: DiagramCache.Entry) -> CGSize {
         switch entry {
@@ -364,6 +415,56 @@ enum DiagramPaint {
         return path
     }
 
+    /// Smooth S-curves between consecutive points, with tangents along the flow axis at
+    /// every point. Unlike a spline through the points, it can't overshoot or loop.
+    static func flowCurve(_ points: [CGPoint], vertical: Bool, trimStart: Double = 0, trimEnd: Double = 0) -> Path {
+        var points = points
+        guard points.count >= 2 else { return Path() }
+        if trimEnd > 0 { points[points.count - 1] = alongFlowStep(points[points.count - 1], from: points[points.count - 2], by: trimEnd, vertical: vertical) }
+        if trimStart > 0 { points[0] = alongFlowStep(points[0], from: points[1], by: trimStart, vertical: vertical) }
+        var path = Path()
+        path.move(to: points[0])
+        for (a, b) in zip(points, points.dropFirst()) {
+            if vertical {
+                let half = (b.y - a.y) / 2
+                path.addCurve(to: b, control1: CGPoint(x: a.x, y: a.y + half), control2: CGPoint(x: b.x, y: b.y - half))
+            } else {
+                let half = (b.x - a.x) / 2
+                path.addCurve(to: b, control1: CGPoint(x: a.x + half, y: a.y), control2: CGPoint(x: b.x - half, y: b.y))
+            }
+        }
+        return path
+    }
+
+    /// A point just behind `tip` along the flow axis, for aiming an arrowhead.
+    static func alongFlow(_ tip: CGPoint, from previous: CGPoint, vertical: Bool) -> CGPoint {
+        vertical
+            ? CGPoint(x: tip.x, y: tip.y - (tip.y >= previous.y ? 10 : -10))
+            : CGPoint(x: tip.x - (tip.x >= previous.x ? 10 : -10), y: tip.y)
+    }
+
+    static func alongFlowStep(_ tip: CGPoint, from previous: CGPoint, by distance: Double, vertical: Bool) -> CGPoint {
+        let span = vertical ? abs(tip.y - previous.y) : abs(tip.x - previous.x)
+        let step = min(distance, span / 2)
+        return vertical
+            ? CGPoint(x: tip.x, y: tip.y - (tip.y >= previous.y ? step : -step))
+            : CGPoint(x: tip.x - (tip.x >= previous.x ? step : -step), y: tip.y)
+    }
+
+    /// Straight segments with rounded corners, for loops.
+    static func rounded(_ points: [CGPoint], trimEnd: Double = 0) -> Path {
+        var points = points
+        guard points.count >= 2 else { return Path() }
+        if trimEnd > 0 { points[points.count - 1] = moved(points[points.count - 1], toward: points[points.count - 2], by: trimEnd) }
+        var path = Path()
+        path.move(to: points[0])
+        for index in 1..<points.count - 1 {
+            path.addArc(tangent1End: points[index], tangent2End: points[index + 1], radius: 8)
+        }
+        path.addLine(to: points[points.count - 1])
+        return path
+    }
+
     static func moved(_ point: CGPoint, toward target: CGPoint, by distance: Double) -> CGPoint {
         let dx = target.x - point.x, dy = target.y - point.y
         let length = (dx * dx + dy * dy).squareRoot()
@@ -409,7 +510,8 @@ enum FlowchartPainter {
         for group in geometry.subgraphs {
             let shape = Path(roundedRect: group.frame, cornerRadius: 12, style: .continuous)
             let style = group.subgraph.style
-            context.fill(shape, with: .color(DiagramStyle.groupFill))
+            // Nested boxes get lighter so a stack of them doesn't turn grey.
+            context.fill(shape, with: .color(DiagramStyle.groupFill.opacity(group.depth == 0 ? 1 : 0.6)))
             if let fill = style.fill { context.fill(shape, with: .color(DiagramStyle.tint(fill))) }
             context.stroke(shape, with: .color(style.stroke.map(DiagramStyle.color) ?? DiagramStyle.groupStroke),
                            style: StrokeStyle(lineWidth: style.strokeWidth ?? 1, dash: style.dashed ? [6, 4] : []))
@@ -418,13 +520,25 @@ enum FlowchartPainter {
         }
 
         for edge in geometry.edges where edge.edge.line != .invisible && edge.points.count >= 2 {
+            let vertical = edge.vertical
             let points = edge.points
             let width: Double = edge.edge.line == .thick ? 2.6 : 1.3
             let style = StrokeStyle(lineWidth: width, lineCap: .round, lineJoin: .round, dash: edge.edge.line == .dotted ? [4, 4] : [])
-            let path = DiagramPaint.curve(points, trimStart: edge.edge.start == .arrow ? 7 : 0, trimEnd: edge.edge.end == .arrow ? 7 : 0)
+            let path: Path
+            let endFrom: CGPoint, startFrom: CGPoint
+            if edge.isSelfLoop {
+                path = DiagramPaint.rounded(points, trimEnd: edge.edge.end == .arrow ? 7 : 0)
+                endFrom = points[points.count - 2]
+                startFrom = points[1]
+            } else {
+                path = DiagramPaint.flowCurve(points, vertical: vertical, trimStart: edge.edge.start == .arrow ? 7 : 0, trimEnd: edge.edge.end == .arrow ? 7 : 0)
+                // Curves arrive along the flow, so heads point along it too.
+                endFrom = DiagramPaint.alongFlow(points[points.count - 1], from: points[points.count - 2], vertical: vertical)
+                startFrom = DiagramPaint.alongFlow(points[0], from: points[1], vertical: vertical)
+            }
             context.stroke(path, with: .color(DiagramStyle.edge), style: style)
-            DiagramPaint.head(edge.edge.end, tip: points[points.count - 1], from: points[points.count - 2], color: DiagramStyle.edge, context: &context)
-            DiagramPaint.head(edge.edge.start, tip: points[0], from: points[1], color: DiagramStyle.edge, context: &context)
+            DiagramPaint.head(edge.edge.end, tip: points[points.count - 1], from: endFrom, color: DiagramStyle.edge, context: &context)
+            DiagramPaint.head(edge.edge.start, tip: points[0], from: startFrom, color: DiagramStyle.edge, context: &context)
         }
 
         for edge in geometry.edges {

@@ -121,6 +121,26 @@ struct FlowchartParserTests {
 struct LayeredLayoutTests {
     private let metrics = TextMetrics.monospaced()
 
+    /// Edges between nodes outside a box don't bend through it.
+    private func assertEdgesAvoidForeignBoxes(_ geometry: FlowchartGeometry, sourceLocation: SourceLocation = #_sourceLocation) {
+        let frames = Dictionary(uniqueKeysWithValues: geometry.nodes.map { ($0.node.id, $0.frame) })
+        for box in geometry.subgraphs {
+            for edge in geometry.edges where !edge.isSelfLoop {
+                guard let from = frames[edge.edge.from], let to = frames[edge.edge.to],
+                      !box.frame.intersects(from), !box.frame.intersects(to) else { continue }
+                // Sample each segment, not just the bends: a straight run can cut through too.
+                let inner = box.frame.insetBy(dx: 2, dy: 2)
+                let crosses = zip(edge.points, edge.points.dropFirst()).contains { a, b in
+                    (1..<20).contains { step in
+                        let t = Double(step) / 20
+                        return inner.contains(CGPoint(x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t))
+                    }
+                }
+                #expect(!crosses, "\(edge.edge.from)→\(edge.edge.to) runs through \(box.subgraph.id)", sourceLocation: sourceLocation)
+            }
+        }
+    }
+
     private func assertNoOverlaps(_ frames: [CGRect], sourceLocation: SourceLocation = #_sourceLocation) {
         for i in frames.indices {
             for j in frames.indices where j > i {
@@ -258,6 +278,147 @@ struct LayeredLayoutTests {
         let boxes = geometry.subgraphs.map(\.frame)
         #expect(boxes.count == 2)
         #expect(!boxes[0].intersects(boxes[1]), "subgraph boxes overlap")
+    }
+
+    /// The shape of a real system diagram that came out badly: nested subgraphs, a
+    /// separate external box, nodes outside everything, edges crossing every border.
+    static let nestedSystem = """
+    flowchart TB
+        admin([Admin laptop])
+        subgraph cloud [Cloud provider: node-1]
+            fw{{Firewall: no inbound except SSH}}
+            subgraph k8s [Kubernetes]
+                subgraph ns1 [ns ingress]
+                    tunnel[Tunnel x2]
+                end
+                proxy[Ingress proxy]
+                subgraph ns2 [ns app]
+                    app[App] --> db[(Postgres)]
+                    job[Migration job] --> db
+                end
+                gitops[GitOps controller]
+            end
+        end
+        subgraph ext [External services]
+            dns[DNS + Access]
+            registry[(Image registry)]
+            git[Git hosting]
+        end
+        admin -->|SSH / API tunnel| fw
+        fw --> tunnel
+        tunnel -->|outbound tunnel| dns
+        dns -->|app.example.com| proxy
+        proxy --> app
+        gitops -->|pulls manifests| git
+        gitops --> app
+        registry -.->|images| app
+        classDef gap stroke:#e5484d,stroke-dasharray:4
+        class fw gap
+    """
+
+    @Test(arguments: [Flowchart.Direction.topBottom, .leftRight])
+    func nestedSubgraphsStaySeparateAndTidy(_ direction: Flowchart.Direction) throws {
+        var chart = try FlowchartParser.parse(Self.nestedSystem)
+        chart.direction = direction
+        let geometry = FlowchartLayout.layout(chart, metrics: metrics)
+        let frames = Dictionary(uniqueKeysWithValues: geometry.nodes.map { ($0.node.id, $0.frame) })
+        let byID = Dictionary(uniqueKeysWithValues: geometry.subgraphs.map { ($0.subgraph.id, $0) })
+        func members(_ id: String) -> Set<String> {
+            var result = Set(chart.subgraphs.first { $0.id == id }!.nodeIDs)
+            for child in chart.subgraphs where child.parent == id { result.formUnion(members(child.id)) }
+            return result
+        }
+        for placed in geometry.subgraphs {
+            let inside = members(placed.subgraph.id)
+            for (id, frame) in frames {
+                if inside.contains(id) {
+                    #expect(placed.frame.contains(frame), "\(id) sticks out of \(placed.subgraph.id)")
+                } else {
+                    #expect(!placed.frame.intersects(frame), "\(placed.subgraph.id) covers \(id)")
+                }
+                // The title has its own strip.
+                let title = CGRect(x: placed.frame.minX + 12, y: placed.frame.minY + 6, width: placed.title.size.width, height: placed.title.size.height)
+                #expect(!title.intersects(frame), "\(placed.subgraph.id)'s title hits \(id)")
+            }
+            for other in geometry.subgraphs where other.subgraph.id != placed.subgraph.id {
+                let nested = placed.frame.contains(other.frame) || other.frame.contains(placed.frame)
+                #expect(nested || !placed.frame.intersects(other.frame), "\(placed.subgraph.id) overlaps \(other.subgraph.id)")
+            }
+        }
+        #expect(byID["k8s"]!.frame.contains(byID["ns2"]!.frame))
+        assertNoOverlaps(geometry.nodes.map(\.frame))
+        assertEdgesAvoidForeignBoxes(geometry)
+
+        // Every edge moves one way along the flow, so the drawn curve can't loop back.
+        let vertical = direction == .topBottom
+        for edge in geometry.edges where !edge.isSelfLoop {
+            let along = edge.points.map { vertical ? $0.y : $0.x }
+            let steps = zip(along, along.dropFirst()).map { $1 - $0 }
+            #expect(steps.allSatisfy { $0 >= -0.5 } || steps.allSatisfy { $0 <= 0.5 }, "\(edge.edge.from)→\(edge.edge.to) doubles back")
+        }
+    }
+
+    /// A subgraph that both produces and receives: repos build images, and a bot commits
+    /// the new tag back into one of the repos.
+    static let delivery = """
+    flowchart LR
+        subgraph repos [Repos]
+            app[app]
+            mig[migrations]
+            infra["infra (Terraform + scripts)"]
+            gitops[gitops]
+        end
+        app -->|"CI: test + integration"| imgA[(registry/app:sha)]
+        mig -->|"CI: migrate throwaway DB, check grants"| imgB[(registry/migrations:sha)]
+        imgA --> bot[image-update action]
+        imgB --> bot
+        bot -->|"App token, commit tag to main"| gitops
+        gitops -->|reconcile| cluster[Cluster]
+        infra -->|"terraform apply (manual)"| server[Server + firewall]
+        infra -->|"install.sh steps 00-50"| k8s[K8s on node]
+        infra -.->|"admin scripts: tunnel, access"| cluster
+    """
+
+    @Test func subgraphThatFeedsItselfStillFlowsForward() throws {
+        let chart = try FlowchartParser.parse(Self.delivery)
+        let geometry = FlowchartLayout.layout(chart, metrics: metrics)
+        let f = Dictionary(uniqueKeysWithValues: geometry.nodes.map { ($0.node.id, $0.frame) })
+        // Left to right through the whole chain, not doubling back around the box.
+        #expect(f["app"]!.midX < f["imgA"]!.midX)
+        #expect(f["imgA"]!.midX < f["bot"]!.midX)
+        #expect(f["bot"]!.midX < f["gitops"]!.midX)
+        #expect(f["gitops"]!.midX < f["cluster"]!.midX)
+        let box = try #require(geometry.subgraphs.first).frame
+        for id in ["imgA", "imgB", "bot", "cluster", "server", "k8s"] {
+            #expect(!box.intersects(f[id]!), "the Repos box covers \(id)")
+        }
+        for id in ["app", "mig", "infra", "gitops"] {
+            #expect(box.contains(f[id]!), "\(id) sticks out of Repos")
+        }
+        assertNoOverlaps(geometry.nodes.map(\.frame))
+        assertEdgesAvoidForeignBoxes(geometry)
+    }
+
+    @Test func subgraphDirectionAppliesWhenSelfContained() throws {
+        let chart = try FlowchartParser.parse("""
+        flowchart TB
+            subgraph row [Row]
+                direction LR
+                A --> B --> C
+            end
+            subgraph col [Column]
+                direction LR
+                D --> E
+            end
+            X --> D
+        """)
+        let geometry = FlowchartLayout.layout(chart, metrics: metrics)
+        let f = Dictionary(uniqueKeysWithValues: geometry.nodes.map { ($0.node.id, $0.frame) })
+        // `row` has no edges across its border, so it runs left to right.
+        #expect(f["A"]!.midX < f["B"]!.midX && f["B"]!.midX < f["C"]!.midX)
+        #expect(abs(f["A"]!.midY - f["C"]!.midY) < 1)
+        // `col` is linked from outside, so it follows the chart (top to bottom).
+        #expect(f["D"]!.midY < f["E"]!.midY)
     }
 
     @Test func largeGraphsAreFast() throws {

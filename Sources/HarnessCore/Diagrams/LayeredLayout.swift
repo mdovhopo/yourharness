@@ -1,10 +1,14 @@
 import CoreGraphics
 import Foundation
 
-/// Layered ("Sugiyama") graph layout, the same family of algorithm dagre and Graphviz's
-/// `dot` use: break cycles, assign layers, insert dummy nodes for long edges, reduce
-/// crossings with barycenter sweeps plus adjacent swaps, then place nodes in each layer
-/// with weighted isotonic regression so edges run as straight as the spacing allows.
+/// Layered ("Sugiyama") graph layout with clusters, the same family of algorithm dagre and
+/// Graphviz's `dot` use: break cycles, assign layers, insert dummy nodes for long edges,
+/// order each layer (barycenter sweeps plus adjacent swaps) while keeping every cluster
+/// contiguous, then place nodes with weighted isotonic regression so edges run straight.
+///
+/// Clusters get invisible left and right border vertices on every layer they span. Borders
+/// take part in ordering and placement like any vertex, which is what keeps each cluster a
+/// clean rectangle that nothing else intrudes on.
 ///
 /// Everything is computed top-to-bottom; other directions are a transform at the end.
 public enum LayeredLayout {
@@ -21,13 +25,13 @@ public enum LayeredLayout {
     public struct Node: Sendable {
         public var size: CGSize
         public var boundary: Boundary
-        /// Nodes sharing a group are kept next to each other within each layer.
-        public var group: Int?
+        /// The innermost cluster this node is in.
+        public var cluster: Int?
 
-        public init(size: CGSize, boundary: Boundary = .rectangle, group: Int? = nil) {
+        public init(size: CGSize, boundary: Boundary = .rectangle, cluster: Int? = nil) {
             self.size = size
             self.boundary = boundary
-            self.group = group
+            self.cluster = cluster
         }
     }
 
@@ -43,13 +47,25 @@ public enum LayeredLayout {
         }
     }
 
+    public struct Cluster: Sendable {
+        public var parent: Int?
+        /// Drawn at the cluster's top-left, inside its box.
+        public var titleSize: CGSize
+
+        public init(parent: Int? = nil, titleSize: CGSize = .zero) {
+            self.parent = parent
+            self.titleSize = titleSize
+        }
+    }
+
     public struct Options: Sendable {
         public var nodeSpacing: Double = 36
         public var edgeSpacing: Double = 14
         public var rankSpacing: Double = 52
-        public var sweeps: Int = 10
-        /// Room kept between a group's members and the nodes around it, for its box.
-        public var groupClearance: Double = 24
+        public var clusterPadding: Double = 16
+        public var clusterGap: Double = 28
+        public var titleGap: Double = 8
+        public var sweeps: Int = 12
 
         public init() {}
     }
@@ -65,10 +81,16 @@ public enum LayeredLayout {
         public var frames: [CGRect]
         /// By edge index.
         public var routes: [Route]
+        /// By cluster index; `.null` for clusters with no nodes.
+        public var clusterFrames: [CGRect]
         public var size: CGSize
     }
 
     // MARK: - Internal graph
+
+    enum Border: Equatable {
+        case left, right
+    }
 
     struct Vertex {
         var width: Double
@@ -76,20 +98,52 @@ public enum LayeredLayout {
         var rank = 0
         var x = 0.0
         var isDummy: Bool
-        var group: Int?
+        /// Innermost cluster; for a border vertex, the cluster it bounds.
+        var cluster: Int?
+        var border: Border?
     }
 
-    public static func layout(nodes: [Node], edges: [Edge], direction: Direction, options: Options = Options()) -> Result {
-        guard !nodes.isEmpty else { return Result(frames: [], routes: edges.map { _ in Route(points: [], labelCenter: nil) }, size: .zero) }
+    public static func layout(nodes: [Node], edges: [Edge], clusters: [Cluster] = [], direction: Direction, options: Options = Options()) -> Result {
+        guard !nodes.isEmpty else {
+            return Result(frames: [], routes: edges.map { _ in Route(points: [], labelCenter: nil) },
+                          clusterFrames: clusters.map { _ in .null }, size: .zero)
+        }
         let horizontal = direction.isHorizontal
         // Work top-to-bottom; for left-to-right, a node's width runs along the layer.
         func internalSize(_ size: CGSize) -> (Double, Double) {
             horizontal ? (size.height, size.width) : (size.width, size.height)
         }
 
+        // Cluster tree helpers.
+        let chains: [[Int]] = clusters.indices.map { cluster in
+            var chain: [Int] = []
+            var current: Int? = cluster
+            while let index = current {
+                chain.insert(index, at: 0)
+                current = clusters[index].parent
+            }
+            return chain
+        }
+        func chain(_ cluster: Int?) -> [Int] { cluster.map { chains[$0] } ?? [] }
+        func commonCluster(_ a: Int?, _ b: Int?) -> Int? {
+            var shared: Int?
+            for (p, q) in zip(chain(a), chain(b)) {
+                guard p == q else { break }
+                shared = p
+            }
+            return shared
+        }
+        /// Title room along the layers (vertical flow) or across them (horizontal flow).
+        func titleAlong(_ cluster: Int) -> Double {
+            horizontal ? 0 : clusters[cluster].titleSize.height + options.titleGap
+        }
+        func titleAcross(_ cluster: Int) -> Double {
+            horizontal ? clusters[cluster].titleSize.height + options.titleGap : 0
+        }
+
         var vertices = nodes.map { node -> Vertex in
             let (width, height) = internalSize(node.size)
-            return Vertex(width: width, height: height, isDummy: false, group: node.group)
+            return Vertex(width: width, height: height, isDummy: false, cluster: node.cluster)
         }
         let hasLabels = edges.contains { $0.labelSize != nil && $0.from != $0.to }
         let minLength = hasLabels ? 2 : 1
@@ -139,38 +193,67 @@ public enum LayeredLayout {
             vertices[node].rank = max(vertices[node].rank, lowest)
         }
 
-        // 3. Long edges become chains through dummy vertices, one per layer crossed.
-        var chains: [Int: [Int]] = [:]
+        // 3. Long edges become chains through dummy vertices, one per layer crossed. A dummy
+        // belongs to the innermost cluster holding both ends, so it never cuts through a
+        // box it has no business in.
+        var chainsByEdge: [Int: [Int]] = [:]
         var labelVertex: [Int: Int] = [:]
         var down = Array(repeating: [Int](), count: nodes.count)
         var up = Array(repeating: [Int](), count: nodes.count)
-        func connect(_ a: Int, _ b: Int) {
-            down[a].append(b)
-            up[b].append(a)
-        }
         for edge in directed {
-            var chain = [edge.from]
+            var path = [edge.from]
             let span = vertices[edge.to].rank - vertices[edge.from].rank
             let labelRank = vertices[edge.from].rank + span / 2
+            let home = commonCluster(vertices[edge.from].cluster, vertices[edge.to].cluster)
             for rank in stride(from: vertices[edge.from].rank + 1, to: vertices[edge.to].rank, by: 1) {
-                var dummy = Vertex(width: 0, height: 0, rank: rank, isDummy: true, group: nil)
+                var dummy = Vertex(width: 0, height: 0, rank: rank, isDummy: true, cluster: home)
                 if rank == labelRank, let label = edges[edge.index].labelSize {
                     (dummy.width, dummy.height) = internalSize(label)
                     labelVertex[edge.index] = vertices.count
                 }
-                // Dummies between two members of the same group stay inside it.
-                if let group = vertices[edge.from].group, group == vertices[edge.to].group { dummy.group = group }
                 vertices.append(dummy)
                 down.append([])
                 up.append([])
-                chain.append(vertices.count - 1)
+                path.append(vertices.count - 1)
             }
-            chain.append(edge.to)
-            for (a, b) in zip(chain, chain.dropFirst()) { connect(a, b) }
-            chains[edge.index] = chain
+            path.append(edge.to)
+            for (a, b) in zip(path, path.dropFirst()) {
+                down[a].append(b)
+                up[b].append(a)
+            }
+            chainsByEdge[edge.index] = path
         }
 
-        // 4. Order within layers.
+        // 4. Cluster spans, and border vertices on every layer of each span.
+        var span: [Int: ClosedRange<Int>] = [:]
+        for vertex in vertices {
+            for cluster in chain(vertex.cluster) {
+                span[cluster] = span[cluster].map { min($0.lowerBound, vertex.rank)...max($0.upperBound, vertex.rank) } ?? vertex.rank...vertex.rank
+            }
+        }
+        var borderUp: [Int: Int] = [:]
+        var borderDown: [Int: Int] = [:]
+        var leftBorders: [Int: [Int]] = [:], rightBorders: [Int: [Int]] = [:]
+        for cluster in clusters.indices {
+            guard let ranks = span[cluster] else { continue }
+            for side in [Border.left, .right] {
+                var previous: Int?
+                for rank in ranks {
+                    vertices.append(Vertex(width: 0, height: 0, rank: rank, isDummy: true, cluster: cluster, border: side))
+                    down.append([])
+                    up.append([])
+                    let index = vertices.count - 1
+                    if let previous {
+                        borderUp[index] = previous
+                        borderDown[previous] = index
+                    }
+                    previous = index
+                    if side == .left { leftBorders[cluster, default: []].append(index) } else { rightBorders[cluster, default: []].append(index) }
+                }
+            }
+        }
+
+        // 5. Order within layers.
         let rankCount = (vertices.map(\.rank).max() ?? 0) + 1
         var layers = Array(repeating: [Int](), count: rankCount)
         do {
@@ -182,80 +265,162 @@ public enum LayeredLayout {
                 layers[vertices[vertex].rank].append(vertex)
                 for next in down[vertex] { place(next) }
             }
-            for vertex in vertices.indices where up[vertex].isEmpty { place(vertex) }
+            for vertex in vertices.indices where up[vertex].isEmpty && vertices[vertex].border == nil { place(vertex) }
             for vertex in vertices.indices { place(vertex) }
         }
-        layers = minimizeCrossings(layers, vertices: vertices, up: up, down: down, sweeps: options.sweeps)
+        // For counting crossings, cluster walls are edges too: an edge cutting through a
+        // box crosses its walls, so the ordering steers it around instead.
+        var walls = down
+        for (upper, lower) in borderDown { walls[upper].append(lower) }
+        let ordering = Ordering(vertices: vertices, chains: chains, up: up, down: down, walls: walls)
+        layers = ordering.minimize(layers, sweeps: options.sweeps)
 
-        // 5. Coordinates across each layer.
+        // 6. Coordinates across each layer.
         func separation(_ a: Int, _ b: Int) -> Double {
-            let gap: Double = switch (vertices[a].isDummy, vertices[b].isDummy) {
-            case (true, true): options.edgeSpacing
-            case (false, false): options.nodeSpacing
-            default: (options.nodeSpacing + options.edgeSpacing) / 2
+            let va = vertices[a], vb = vertices[b]
+            let gap: Double
+            switch (va.border, vb.border) {
+            case (.right, .left):
+                gap = options.clusterGap + titleAcross(vb.cluster!)
+            case (.left, _):
+                // Into a cluster: its padding, plus its title when titles sit across.
+                gap = options.clusterPadding + titleAcross(va.cluster!)
+            case (_, .right):
+                gap = options.clusterPadding
+            case (.right, _):
+                gap = options.nodeSpacing * 0.75
+            case (_, .left):
+                gap = options.nodeSpacing * 0.75 + titleAcross(vb.cluster!)
+            default:
+                gap = switch (va.isDummy, vb.isDummy) {
+                case (true, true): options.edgeSpacing
+                case (false, false): options.nodeSpacing
+                default: (options.nodeSpacing + options.edgeSpacing) / 2
+                }
             }
-            return (vertices[a].width + vertices[b].width) / 2 + gap
+            return (va.width + vb.width) / 2 + gap
         }
-        for layer in layers {
-            var x = 0.0
-            for (position, vertex) in layer.enumerated() {
-                if position > 0 { x += separation(layer[position - 1], vertex) }
-                vertices[vertex].x = x
+        func placeLayer(_ layer: [Int], targets: [Double], weights: [Double]) {
+            var offsets = [0.0]
+            for position in layer.indices.dropFirst() {
+                offsets.append(offsets[position - 1] + separation(layer[position - 1], layer[position]))
             }
+            let solved = isotonic(targets: zip(targets, offsets).map { $0 - $1 }, weights: weights)
+            for (position, vertex) in layer.enumerated() { vertices[vertex].x = solved[position] + offsets[position] }
         }
-        for iteration in 0..<16 {
+        for layer in layers where !layer.isEmpty {
+            placeLayer(layer, targets: Array(repeating: 0, count: layer.count), weights: Array(repeating: 1, count: layer.count))
+        }
+        for iteration in 0..<20 {
             let useUp = iteration % 2 == 0
-            let order = useUp ? Array(layers.indices) : Array(layers.indices.reversed())
-            for rank in order {
+            let both = iteration >= 16
+            for rank in (useUp ? Array(layers.indices) : Array(layers.indices.reversed())) {
                 let layer = layers[rank]
                 guard !layer.isEmpty else { continue }
-                var targets: [Double] = []
-                var weights: [Double] = []
+                var targets: [Double] = [], weights: [Double] = []
                 for vertex in layer {
-                    let neighbours = iteration >= 14 ? up[vertex] + down[vertex] : (useUp ? up[vertex] : down[vertex])
+                    if vertices[vertex].border != nil {
+                        // Borders line up with themselves above and below: straight walls.
+                        let neighbours = [borderUp[vertex], borderDown[vertex]].compactMap { $0 }
+                        targets.append(neighbours.isEmpty ? vertices[vertex].x : neighbours.map { vertices[$0].x }.reduce(0, +) / Double(neighbours.count))
+                        weights.append(neighbours.isEmpty ? 0.01 : 6)
+                        continue
+                    }
+                    let neighbours = both ? up[vertex] + down[vertex] : (useUp ? up[vertex] : down[vertex])
                     if neighbours.isEmpty {
                         targets.append(vertices[vertex].x)
                         weights.append(0.01)
                     } else {
-                        let xs = neighbours.map { vertices[$0].x }.sorted()
-                        targets.append(median(xs))
+                        targets.append(median(neighbours.map { vertices[$0].x }.sorted()))
                         // Keep dummy chains (long edges) straight above all else.
                         weights.append(Double(neighbours.count) * (vertices[vertex].isDummy ? 4 : 1))
                     }
                 }
-                var offsets = [0.0]
-                for position in 1..<layer.count {
-                    offsets.append(offsets[position - 1] + separation(layer[position - 1], layer[position]))
-                }
-                let solved = isotonic(targets: zip(targets, offsets).map { $0 - $1 }, weights: weights)
-                for (position, vertex) in layer.enumerated() {
-                    vertices[vertex].x = solved[position] + offsets[position]
-                }
+                placeLayer(layer, targets: targets, weights: weights)
             }
         }
-        separateGroups(&vertices, layers: layers, options: options)
+
+        // Square up: each cluster wall becomes one position shared by all its layers (the
+        // widest point), then every layer's spacing is enforced in one longest-path pass
+        // over the constraint graph. Clusters keep one order everywhere, so the graph is
+        // acyclic, and the result has rectangular boxes with nothing intruding.
+        let byDepth = clusters.indices.filter { span[$0] != nil }.sorted { chains[$0].count > chains[$1].count }
+        if !byDepth.isEmpty {
+            func variable(_ vertex: Int) -> Int {
+                guard let side = vertices[vertex].border, let cluster = vertices[vertex].cluster else { return vertex }
+                return vertices.count + cluster * 2 + (side == .left ? 0 : 1)
+            }
+            let count = vertices.count + clusters.count * 2
+            var position = Array(repeating: 0.0, count: count)
+            for (index, vertex) in vertices.enumerated() where vertex.border == nil { position[index] = vertex.x }
+            for cluster in byDepth {
+                position[vertices.count + cluster * 2] = leftBorders[cluster]!.map { vertices[$0].x }.min()!
+                position[vertices.count + cluster * 2 + 1] = rightBorders[cluster]!.map { vertices[$0].x }.max()!
+            }
+            var after: [Int: [(Int, Double)]] = [:]
+            var indegree = Array(repeating: 0, count: count)
+            for layer in layers {
+                for (a, b) in zip(layer, layer.dropFirst()) {
+                    after[variable(a), default: []].append((variable(b), separation(a, b)))
+                    indegree[variable(b)] += 1
+                }
+            }
+            var ready = (0..<count).filter { indegree[$0] == 0 }
+            var visited = 0
+            while let current = ready.popLast() {
+                visited += 1
+                for (next, gap) in after[current] ?? [] {
+                    position[next] = max(position[next], position[current] + gap)
+                    indegree[next] -= 1
+                    if indegree[next] == 0 { ready.append(next) }
+                }
+            }
+            if visited == count {
+                for index in vertices.indices { vertices[index].x = position[variable(index)] }
+            }
+        }
         let minX = vertices.map { $0.x - $0.width / 2 }.min() ?? 0
         for index in vertices.indices { vertices[index].x -= minX }
 
-        // 6. Layer positions down the page.
+        // 7. Layer positions down the page, with room for cluster padding and titles where
+        // clusters open and close.
         let rankSpacing = hasLabels ? options.rankSpacing / 2 : options.rankSpacing
         var layerHeight = Array(repeating: 0.0, count: rankCount)
         for vertex in vertices { layerHeight[vertex.rank] = max(layerHeight[vertex.rank], vertex.height) }
+        var opening = Array(repeating: 0.0, count: rankCount), closing = Array(repeating: 0.0, count: rankCount)
+        for (cluster, ranks) in span {
+            opening[ranks.lowerBound] += options.clusterPadding + titleAlong(cluster)
+            closing[ranks.upperBound] += options.clusterPadding
+        }
         var layerY = Array(repeating: 0.0, count: rankCount)
         var y = 0.0
         for rank in 0..<rankCount {
-            if rank > 0 {
-                // Empty layers (only possible with labels) still keep some room.
-                y += layerHeight[rank - 1] / 2 + rankSpacing + layerHeight[rank] / 2
-            } else {
-                y = layerHeight[0] / 2
-            }
+            y += rank == 0
+                ? opening[0] + layerHeight[0] / 2
+                : layerHeight[rank - 1] / 2 + closing[rank - 1] + rankSpacing + opening[rank] + layerHeight[rank] / 2
             layerY[rank] = y
         }
-        let internalWidth = vertices.map { $0.x + $0.width / 2 }.max() ?? 0
-        let internalHeight = y + (layerHeight.last ?? 0) / 2
+        let internalHeight = y + (layerHeight.last ?? 0) / 2 + (closing.last ?? 0)
 
-        // 7. Back to the requested direction.
+        // Cluster boxes in internal coordinates, inner ones first so parents can wrap them.
+        var internalBoxes = Array(repeating: CGRect.null, count: clusters.count)
+        for cluster in byDepth {
+            let ranks = span[cluster]!
+            let left = leftBorders[cluster]!.map { vertices[$0].x }.min()!
+            let right = rightBorders[cluster]!.map { vertices[$0].x }.max()!
+            var top = layerY[ranks.lowerBound] - layerHeight[ranks.lowerBound] / 2
+            var bottom = layerY[ranks.upperBound] + layerHeight[ranks.upperBound] / 2
+            for child in clusters.indices where clusters[child].parent == cluster && !internalBoxes[child].isNull {
+                top = min(top, internalBoxes[child].minY)
+                bottom = max(bottom, internalBoxes[child].maxY)
+            }
+            top -= options.clusterPadding + titleAlong(cluster)
+            bottom += options.clusterPadding
+            internalBoxes[cluster] = CGRect(x: left, y: top, width: right - left, height: bottom - top)
+        }
+        let internalWidth = max(vertices.map { $0.x + $0.width / 2 }.max() ?? 0, internalBoxes.filter { !$0.isNull }.map(\.maxX).max() ?? 0)
+
+        // 8. Back to the requested direction.
         func point(_ x: Double, _ y: Double) -> CGPoint {
             switch direction {
             case .topBottom: CGPoint(x: x, y: y)
@@ -265,197 +430,183 @@ public enum LayeredLayout {
             }
         }
         func center(_ vertex: Int) -> CGPoint { point(vertices[vertex].x, layerY[vertices[vertex].rank]) }
+        func rect(_ box: CGRect) -> CGRect {
+            guard !box.isNull else { return .null }
+            let a = point(box.minX, box.minY), b = point(box.maxX, box.maxY)
+            return CGRect(x: min(a.x, b.x), y: min(a.y, b.y), width: abs(a.x - b.x), height: abs(a.y - b.y))
+        }
 
         let frames = nodes.indices.map { index -> CGRect in
             let c = center(index)
             return CGRect(x: c.x - nodes[index].size.width / 2, y: c.y - nodes[index].size.height / 2,
                           width: nodes[index].size.width, height: nodes[index].size.height)
         }
-
         var routes: [Route] = []
         for (index, edge) in edges.enumerated() {
             if edge.from == edge.to {
                 routes.append(selfLoop(frames[edge.from], horizontal: horizontal, labelSize: edge.labelSize))
                 continue
             }
-            guard var chain = chains[index] else {
+            guard var path = chainsByEdge[index] else {
                 routes.append(Route(points: [], labelCenter: nil))
                 continue
             }
-            if reversed.contains(index) { chain.reverse() }
-            var points = chain.map(center)
+            if reversed.contains(index) { path.reverse() }
+            var points = path.map(center)
             points[0] = clip(frames[edge.from], nodes[edge.from].boundary, toward: points[1])
             points[points.count - 1] = clip(frames[edge.to], nodes[edge.to].boundary, toward: points[points.count - 2])
             routes.append(Route(points: points, labelCenter: labelVertex[index].map(center)))
         }
 
         let size = horizontal ? CGSize(width: internalHeight, height: internalWidth) : CGSize(width: internalWidth, height: internalHeight)
-        return Result(frames: frames, routes: routes, size: size)
-    }
-
-    // MARK: - Groups
-
-    /// A group's box spans every layer from its first member to its last, so nodes outside
-    /// the group in those layers are pushed clear of it, to whichever side they already lean.
-    static func separateGroups(_ vertices: inout [Vertex], layers: [[Int]], options: Options) {
-        let groups = Set(vertices.compactMap(\.group))
-        guard !groups.isEmpty else { return }
-        let clearance = options.groupClearance
-        func separation(_ a: Int, _ b: Int) -> Double {
-            let gap: Double = switch (vertices[a].isDummy, vertices[b].isDummy) {
-            case (true, true): options.edgeSpacing
-            case (false, false): options.nodeSpacing
-            default: (options.nodeSpacing + options.edgeSpacing) / 2
-            }
-            return (vertices[a].width + vertices[b].width) / 2 + gap
-        }
-        for _ in 0..<2 {
-            for group in groups.sorted() {
-                let members = vertices.indices.filter { vertices[$0].group == group }
-                guard let left = members.map({ vertices[$0].x - vertices[$0].width / 2 }).min(),
-                      let right = members.map({ vertices[$0].x + vertices[$0].width / 2 }).max()
-                else { continue }
-                let center = (left + right) / 2
-                // The box only covers the layers its members are in.
-                let ranks = members.map { vertices[$0].rank }
-                guard let top = ranks.min(), let bottom = ranks.max() else { continue }
-                for layer in layers[top...bottom] {
-                    let firstMember = layer.firstIndex { vertices[$0].group == group }
-                    let lastMember = layer.lastIndex { vertices[$0].group == group }
-                    // Decide each outsider's side: by order when the layer has members, else by position.
-                    var leftSide: [Int] = [], rightSide: [Int] = []
-                    for (position, vertex) in layer.enumerated() where vertices[vertex].group != group {
-                        let goesLeft = firstMember.map { position < $0 } ?? (vertices[vertex].x < center)
-                        if goesLeft { leftSide.append(position) } else if lastMember.map({ position > $0 }) ?? true { rightSide.append(position) }
-                    }
-                    // Right side: push right, keeping everything after it separated.
-                    var floor = right + clearance
-                    for position in rightSide.sorted() {
-                        let vertex = layer[position]
-                        floor = max(floor, position > 0 ? vertices[layer[position - 1]].x + separation(layer[position - 1], vertex) - vertices[vertex].width / 2 : floor)
-                        if vertices[vertex].x - vertices[vertex].width / 2 < floor { vertices[vertex].x = floor + vertices[vertex].width / 2 }
-                        floor = -.infinity
-                    }
-                    for position in layer.indices.dropFirst() {
-                        let minimum = vertices[layer[position - 1]].x + separation(layer[position - 1], layer[position])
-                        if vertices[layer[position]].x < minimum { vertices[layer[position]].x = minimum }
-                    }
-                    // Left side: push left, keeping everything before it separated.
-                    var ceiling = left - clearance
-                    for position in leftSide.sorted(by: >) {
-                        let vertex = layer[position]
-                        if vertices[vertex].x + vertices[vertex].width / 2 > ceiling { vertices[vertex].x = ceiling - vertices[vertex].width / 2 }
-                        ceiling = .infinity
-                    }
-                    for position in layer.indices.dropLast().reversed() {
-                        let maximum = vertices[layer[position + 1]].x - separation(layer[position], layer[position + 1])
-                        if vertices[layer[position]].x > maximum { vertices[layer[position]].x = maximum }
-                    }
-                }
-            }
-        }
+        return Result(frames: frames, routes: routes, clusterFrames: internalBoxes.map(rect), size: size)
     }
 
     // MARK: - Crossing reduction
 
-    static func minimizeCrossings(_ initial: [[Int]], vertices: [Vertex], up: [[Int]], down: [[Int]], sweeps: Int) -> [[Int]] {
-        var layers = initial
-        var best = layers
-        var bestCrossings = totalCrossings(layers, down: down)
-        guard bestCrossings > 0 || vertices.contains(where: { $0.group != nil }) else { return layers }
+    /// Barycenter ordering with cluster constraints: within every layer each cluster's
+    /// vertices stay together between its borders, and sibling clusters keep one relative
+    /// order across all layers so their boxes can't cross.
+    struct Ordering {
+        let vertices: [Vertex]
+        let chains: [[Int]]
+        let up: [[Int]]
+        let down: [[Int]]
+        /// `down` plus cluster walls, for counting crossings.
+        let walls: [[Int]]
 
-        for sweep in 0..<sweeps {
-            let downward = sweep % 2 == 0
-            let ranks = downward ? Array(1..<max(layers.count, 1)) : Array((0..<max(layers.count - 1, 0)).reversed())
-            for rank in ranks where rank >= 0 && rank < layers.count {
-                let fixed = downward ? layers[rank - 1] : layers[rank + 1]
-                var position: [Int: Double] = [:]
-                for (index, vertex) in fixed.enumerated() { position[vertex] = Double(index) }
-                let current = layers[rank]
-                let keys = current.enumerated().map { index, vertex -> (Int, Double) in
-                    let neighbours = (downward ? up[vertex] : down[vertex]).compactMap { position[$0] }
-                    // Vertices without neighbours on that side keep their place.
-                    return (vertex, neighbours.isEmpty ? Double(index) : neighbours.reduce(0, +) / Double(neighbours.count))
+        func minimize(_ initial: [[Int]], sweeps: Int) -> [[Int]] {
+            var keys = clusterKeys(initial)
+            var layers = initial.map { layer in
+                let width = Double(max(layer.count - 1, 1))
+                let fraction = Dictionary(uniqueKeysWithValues: layer.enumerated().map { ($1, Double($0) / width) })
+                return arrange(layer, fraction: { fraction[$0]! }, clusterKeys: keys)
+            }
+            var best = layers
+            var bestCrossings = totalCrossings(layers)
+            // A few sweeps even at zero crossings: clusters still need settling.
+            for sweep in 0..<sweeps where bestCrossings > 0 || sweep < 4 {
+                let downward = sweep % 2 == 0
+                let ranks = downward ? Array(layers.indices.dropFirst()) : Array(layers.indices.dropLast().reversed())
+                keys = clusterKeys(layers)
+                for rank in ranks {
+                    // Every key is a 0…1 position, measured in the layer it comes from, so
+                    // vertices and whole clusters compare on the same scale.
+                    let fixed = downward ? layers[rank - 1] : layers[rank + 1]
+                    let fixedWidth = Double(max(fixed.count - 1, 1))
+                    let ownWidth = Double(max(layers[rank].count - 1, 1))
+                    var position: [Int: Double] = [:]
+                    for (index, vertex) in fixed.enumerated() { position[vertex] = Double(index) / fixedWidth }
+                    var fraction: [Int: Double] = [:]
+                    for (index, vertex) in layers[rank].enumerated() {
+                        let neighbours = (downward ? up[vertex] : down[vertex]).compactMap { position[$0] }
+                        // Vertices without neighbours on that side keep their place.
+                        fraction[vertex] = neighbours.isEmpty ? Double(index) / ownWidth : neighbours.reduce(0, +) / Double(neighbours.count)
+                    }
+                    layers[rank] = arrange(layers[rank], fraction: { fraction[$0]! }, clusterKeys: keys)
                 }
-                layers[rank] = keys.enumerated().sorted { a, b in
-                    a.element.1 != b.element.1 ? a.element.1 < b.element.1 : a.offset < b.offset
-                }.map(\.element.0)
-                layers[rank] = groupContiguously(layers[rank], vertices: vertices)
-            }
-            transpose(&layers, vertices: vertices, up: up, down: down)
-            let crossings = totalCrossings(layers, down: down)
-            if crossings < bestCrossings {
-                bestCrossings = crossings
-                best = layers
-            }
-            if bestCrossings == 0 { break }
-        }
-        return best.map { groupContiguously($0, vertices: vertices) }
-    }
-
-    /// Members of a group move together, to where the group sits on average.
-    static func groupContiguously(_ layer: [Int], vertices: [Vertex]) -> [Int] {
-        guard layer.contains(where: { vertices[$0].group != nil }) else { return layer }
-        var slots: [(key: Double, members: [Int])] = []
-        var groupSlot: [Int: Int] = [:]
-        for (index, vertex) in layer.enumerated() {
-            if let group = vertices[vertex].group {
-                if let slot = groupSlot[group] {
-                    slots[slot].members.append(vertex)
-                    let count = Double(slots[slot].members.count)
-                    slots[slot].key += (Double(index) - slots[slot].key) / count
-                } else {
-                    groupSlot[group] = slots.count
-                    slots.append((Double(index), [vertex]))
+                transpose(&layers)
+                let crossings = totalCrossings(layers)
+                if crossings < bestCrossings || (crossings == bestCrossings && sweep < 4) {
+                    bestCrossings = crossings
+                    best = layers
                 }
-            } else {
-                slots.append((Double(index), [vertex]))
             }
+            return best
         }
-        return slots.enumerated().sorted { a, b in
-            a.element.key != b.element.key ? a.element.key < b.element.key : a.offset < b.offset
-        }.flatMap(\.element.members)
-    }
 
-    /// Swaps neighbours wherever that removes crossings. Only the two vertices' own edges
-    /// change when they swap, so each decision looks at just those.
-    static func transpose(_ layers: inout [[Int]], vertices: [Vertex], up: [[Int]], down: [[Int]]) {
-        var positions = Array(repeating: 0, count: vertices.count)
-        for layer in layers {
-            for (index, vertex) in layer.enumerated() { positions[vertex] = index }
-        }
-        /// Crossings between u's and v's edges into one neighbouring layer, with u left of v.
-        func pairCrossings(_ u: Int, _ v: Int, _ neighbours: [[Int]]) -> Int {
-            var count = 0
-            for a in neighbours[u] {
-                for b in neighbours[v] where positions[b] < positions[a] { count += 1 }
+        func chain(_ cluster: Int?) -> [Int] { cluster.map { chains[$0] } ?? [] }
+
+        /// Where each cluster sits on average over all its layers, as a fraction of layer
+        /// width: one key per cluster, so siblings sort the same way everywhere.
+        func clusterKeys(_ layers: [[Int]]) -> [Int: Double] {
+            var sums: [Int: (total: Double, count: Double)] = [:]
+            for layer in layers {
+                let width = Double(max(layer.count - 1, 1))
+                for (index, vertex) in layer.enumerated() where vertices[vertex].border == nil {
+                    for cluster in chain(vertices[vertex].cluster) {
+                        sums[cluster, default: (0, 0)].total += Double(index) / width
+                        sums[cluster, default: (0, 0)].count += 1
+                    }
+                }
             }
-            return count
+            return sums.mapValues { $0.total / $0.count }
         }
-        var improved = true
-        var passes = 0
-        while improved, passes < 4 {
-            improved = false
-            passes += 1
-            for rank in layers.indices where layers[rank].count > 1 {
-                for index in 0..<(layers[rank].count - 1) {
-                    let u = layers[rank][index], v = layers[rank][index + 1]
-                    if vertices[u].group != vertices[v].group { continue }
-                    let now = pairCrossings(u, v, up) + pairCrossings(u, v, down)
-                    let swapped = pairCrossings(v, u, up) + pairCrossings(v, u, down)
-                    if swapped < now {
-                        layers[rank].swapAt(index, index + 1)
-                        positions[u] = index + 1
-                        positions[v] = index
-                        improved = true
+
+        /// Sorts a layer by `fraction`, cluster by cluster: a cluster's members stay
+        /// contiguous, flanked by its borders, and the cluster as a whole sorts by its
+        /// global key.
+        func arrange(_ layer: [Int], fraction: (Int) -> Double, clusterKeys: [Int: Double]) -> [Int] {
+            func items(in parent: Int?, from members: [Int]) -> [Int] {
+                var entries: [(key: Double, vertices: [Int])] = []
+                var children: [Int: [Int]] = [:]
+                var leftBorder: Int?, rightBorder: Int?
+                let depth = parent.map { chains[$0].count } ?? 0
+                for vertex in members {
+                    let v = vertices[vertex]
+                    if let side = v.border, v.cluster == parent {
+                        if side == .left { leftBorder = vertex } else { rightBorder = vertex }
+                        continue
+                    }
+                    let owners = chain(v.cluster)
+                    if owners.count > depth {
+                        children[owners[depth], default: []].append(vertex)
+                    } else {
+                        entries.append((fraction(vertex), [vertex]))
+                    }
+                }
+                for (cluster, members) in children {
+                    // Where the cluster sits overall, the same in every layer.
+                    let local = members.map(fraction).reduce(0, +) / Double(members.count)
+                    entries.append((clusterKeys[cluster] ?? local, items(in: cluster, from: members)))
+                }
+                let sorted = entries.enumerated().sorted { a, b in
+                    a.element.key != b.element.key ? a.element.key < b.element.key : a.offset < b.offset
+                }.flatMap(\.element.vertices)
+                return (leftBorder.map { [$0] } ?? []) + sorted + (rightBorder.map { [$0] } ?? [])
+            }
+            return items(in: nil, from: layer)
+        }
+
+        /// Swaps neighbours in the same cluster wherever that removes crossings. Only the two
+        /// vertices' own edges change when they swap, so each decision looks at just those.
+        func transpose(_ layers: inout [[Int]]) {
+            var positions = Array(repeating: 0, count: vertices.count)
+            for layer in layers {
+                for (index, vertex) in layer.enumerated() { positions[vertex] = index }
+            }
+            func pairCrossings(_ u: Int, _ v: Int, _ neighbours: [[Int]]) -> Int {
+                var count = 0
+                for a in neighbours[u] {
+                    for b in neighbours[v] where positions[b] < positions[a] { count += 1 }
+                }
+                return count
+            }
+            var improved = true
+            var passes = 0
+            while improved, passes < 4 {
+                improved = false
+                passes += 1
+                for rank in layers.indices where layers[rank].count > 1 {
+                    for index in 0..<(layers[rank].count - 1) {
+                        let u = layers[rank][index], v = layers[rank][index + 1]
+                        guard vertices[u].border == nil, vertices[v].border == nil, vertices[u].cluster == vertices[v].cluster else { continue }
+                        let now = pairCrossings(u, v, up) + pairCrossings(u, v, down)
+                        let swapped = pairCrossings(v, u, up) + pairCrossings(v, u, down)
+                        if swapped < now {
+                            layers[rank].swapAt(index, index + 1)
+                            positions[u] = index + 1
+                            positions[v] = index
+                            improved = true
+                        }
                     }
                 }
             }
         }
-    }
 
-    static func totalCrossings(_ layers: [[Int]], down: [[Int]]) -> Int {
-        zip(layers, layers.dropFirst()).reduce(0) { $0 + crossings($1.0, $1.1, down: down) }
+        func totalCrossings(_ layers: [[Int]]) -> Int {
+            zip(layers, layers.dropFirst()).reduce(0) { $0 + LayeredLayout.crossings($1.0, $1.1, down: walls) }
+        }
     }
 
     /// Edge crossings between two adjacent layers: inversions among the lower endpoints,

@@ -2,6 +2,7 @@ import SwiftUI
 
 struct RootView: View {
     @Environment(AppModel.self) private var app
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         NavigationSplitView {
@@ -25,6 +26,13 @@ struct RootView: View {
             // A quick crossfade when switching threads, not a hard cut.
             .animation(.easeInOut(duration: 0.16), value: app.selectedThreadID)
             .animation(.easeInOut(duration: 0.16), value: app.overviewProjectID)
+        }
+        .onAppear {
+            // Development: open a Mermaid file in the diagram window, for checking it without clicking.
+            if let path = ProcessInfo.processInfo.environment["YH_OPEN_DIAGRAM"],
+               let source = try? String(contentsOfFile: path, encoding: .utf8) {
+                openWindow(id: "diagram", value: source)
+            }
         }
     }
 }

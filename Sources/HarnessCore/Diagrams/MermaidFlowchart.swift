@@ -44,6 +44,8 @@ public struct Flowchart: Sendable, Equatable {
         public var nodeIDs: [String]
         public var parent: String?
         public var style = ShapeStyle()
+        /// Its own `direction`, used when no edge crosses its border.
+        public var direction: Direction?
     }
 
     public var direction: Direction
@@ -157,7 +159,8 @@ public enum FlowchartParser {
                 return
             }
             if lower.hasPrefix("direction ") {
-                if subgraphStack.isEmpty { direction = FlowchartParser.direction(String(statement.dropFirst(10))) }
+                let value = FlowchartParser.direction(String(statement.dropFirst(10)).trimmingCharacters(in: .whitespaces))
+                if let current = subgraphStack.last { subgraphs[current].direction = value } else { direction = value }
                 return
             }
             if lower == "end" {

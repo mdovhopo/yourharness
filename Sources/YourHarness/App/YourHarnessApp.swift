@@ -42,6 +42,14 @@ struct YourHarnessApp: App {
             }
         }
 
+        WindowGroup("Diagram", id: "diagram", for: String.self) { $source in
+            if let source {
+                DiagramWindow(source: source)
+            }
+        }
+        .defaultSize(width: 1100, height: 800)
+        .restorationBehavior(.disabled)
+
         Settings {
             SettingsView()
                 .environment(app)
