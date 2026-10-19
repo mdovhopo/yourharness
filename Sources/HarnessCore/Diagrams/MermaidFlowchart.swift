@@ -1,8 +1,9 @@
 import CoreGraphics
 import Foundation
 
-/// A Mermaid `flowchart` / `graph`: nodes, edges and subgraphs. Styling directives
-/// (`classDef`, `style`, `linkStyle`, `click`) are accepted and ignored; we use our theme.
+/// A Mermaid `flowchart` / `graph`: nodes, edges and subgraphs. Node and subgraph styling
+/// (`classDef`, `class`, `:::name`, `style`) is honored for fill, outline and dashes;
+/// `linkStyle` and `click` are accepted and ignored.
 public struct Flowchart: Sendable, Equatable {
     public enum Direction: Sendable, Equatable {
         case topBottom, bottomTop, leftRight, rightLeft
@@ -17,6 +18,7 @@ public struct Flowchart: Sendable, Equatable {
         public var id: String
         public var label: String
         public var shape: Shape
+        public var style = ShapeStyle()
     }
 
     public enum Line: Sendable, Equatable {
@@ -41,6 +43,7 @@ public struct Flowchart: Sendable, Equatable {
         public var title: String
         public var nodeIDs: [String]
         public var parent: String?
+        public var style = ShapeStyle()
     }
 
     public var direction: Direction
@@ -86,6 +89,17 @@ public enum FlowchartParser {
         var edges: [Flowchart.Edge] = []
         var subgraphs: [Flowchart.Subgraph] = []
         var subgraphStack: [Int] = []
+        var classDefinitions: [String: ShapeStyle] = [:]
+        var classes: [String: [String]] = [:]
+        var inlineStyles: [String: ShapeStyle] = [:]
+
+        func style(for id: String) -> ShapeStyle {
+            var style = classDefinitions["default"] ?? ShapeStyle()
+            for name in classes[id] ?? [] {
+                if let definition = classDefinitions[name] { style = style.merged(with: definition) }
+            }
+            return style.merged(with: inlineStyles[id] ?? ShapeStyle())
+        }
 
         var flowchart: Flowchart {
             // An edge to a subgraph lands on its first node: close to Mermaid's look, and
@@ -99,12 +113,47 @@ public enum FlowchartParser {
                 if nodeIndex[edge.to] == nil { edge.to = subgraphTargets[edge.to] ?? edge.to }
                 return nodeIndex[edge.from] != nil && nodeIndex[edge.to] != nil ? edge : nil
             }
-            return Flowchart(direction: direction, nodes: nodes, edges: resolved, subgraphs: subgraphs)
+            let styledNodes = nodes.map { node in
+                var node = node
+                node.style = style(for: node.id)
+                return node
+            }
+            let styledSubgraphs = subgraphs.map { subgraph in
+                var subgraph = subgraph
+                // `default` is for nodes; subgraphs only take what's aimed at them.
+                var style = ShapeStyle()
+                for name in classes[subgraph.id] ?? [] {
+                    if let definition = classDefinitions[name] { style = style.merged(with: definition) }
+                }
+                subgraph.style = style.merged(with: inlineStyles[subgraph.id] ?? ShapeStyle())
+                return subgraph
+            }
+            return Flowchart(direction: direction, nodes: styledNodes, edges: resolved, subgraphs: styledSubgraphs)
         }
 
         mutating func add(_ statement: String) throws {
             let lower = statement.lowercased()
-            for ignored in ["classdef ", "class ", "style ", "linkstyle ", "click ", "accTitle", "accDescr"] where lower.hasPrefix(ignored.lowercased()) {
+            if lower.hasPrefix("classdef ") {
+                let rest = statement.dropFirst("classDef ".count).trimmingCharacters(in: .whitespaces)
+                guard let space = rest.firstIndex(of: " ") else { return }
+                let style = ShapeStyle.parse(String(rest[space...]))
+                for name in rest[..<space].split(separator: ",") { classDefinitions[String(name)] = style }
+                return
+            }
+            if lower.hasPrefix("class ") {
+                let parts = statement.dropFirst("class ".count).split(separator: " ", omittingEmptySubsequences: true)
+                guard parts.count >= 2 else { return }
+                for id in parts[0].split(separator: ",") { classes[String(id), default: []].append(String(parts[1])) }
+                return
+            }
+            if lower.hasPrefix("style ") {
+                let rest = statement.dropFirst("style ".count).trimmingCharacters(in: .whitespaces)
+                guard let space = rest.firstIndex(of: " ") else { return }
+                let id = String(rest[..<space])
+                inlineStyles[id] = (inlineStyles[id] ?? ShapeStyle()).merged(with: ShapeStyle.parse(String(rest[space...])))
+                return
+            }
+            for ignored in ["linkstyle ", "click ", "acctitle", "accdescr"] where lower.hasPrefix(ignored) {
                 return
             }
             if lower.hasPrefix("direction ") {
@@ -167,7 +216,8 @@ public enum FlowchartParser {
             var ids: [String] = []
             repeat {
                 scanner.skipSpaces()
-                guard let (id, shape, label) = scanner.parseNode() else { break }
+                guard let (id, shape, label, className) = scanner.parseNode() else { break }
+                if let className { classes[id, default: []].append(className) }
                 // A bare subgraph id is an edge to the subgraph, not a new node.
                 if shape != nil || label != nil || nodeIndex[id] != nil || !subgraphs.contains(where: { $0.id == id }) {
                     declare(id: id, shape: shape, label: label)
@@ -232,7 +282,7 @@ public enum FlowchartParser {
         }
 
         /// A node id, optionally followed by a shape with a label, and `:::class`.
-        mutating func parseNode() -> (String, Flowchart.Shape?, String?)? {
+        mutating func parseNode() -> (String, Flowchart.Shape?, String?, String?)? {
             let start = index
             while let character = current {
                 if Self.isIDCharacter(character) {
@@ -244,17 +294,23 @@ public enum FlowchartParser {
                     break
                 }
             }
-            // `:::className` is styling.
+            // `id:::className` names a class without a shape.
             var id = String(characters[start..<index])
-            if let range = id.range(of: ":::") { id = String(id[..<range.lowerBound]) }
+            var className: String?
+            if let range = id.range(of: ":::") {
+                className = String(id[range.upperBound...])
+                id = String(id[..<range.lowerBound])
+            }
             guard !id.isEmpty else { return nil }
             if id.hasSuffix(":") { id.removeLast() }
 
-            guard let (shape, label) = parseShape() else { return (id, nil, nil) }
+            guard let (shape, label) = parseShape() else { return (id, nil, nil, className.flatMap { $0.isEmpty ? nil : $0 }) }
             if consume(":::") {
+                let nameStart = index
                 while let character = current, Self.isIDCharacter(character) || character == "-" { index += 1 }
+                className = String(characters[nameStart..<index])
             }
-            return (id, shape, MermaidText.clean(label))
+            return (id, shape, MermaidText.clean(label), className.flatMap { $0.isEmpty ? nil : $0 })
         }
 
         /// Openers, longest first so `([` wins over `(`.

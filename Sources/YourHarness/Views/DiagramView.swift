@@ -48,6 +48,17 @@ enum DiagramStyle {
     static let noteFill = Color.yellow.opacity(0.16)
     static let noteStroke = Color.yellow.opacity(0.55)
     static let padding: CGFloat = 16
+
+    static func color(_ color: DiagramColor) -> Color {
+        Color(.sRGB, red: color.red, green: color.green, blue: color.blue, opacity: color.alpha)
+    }
+
+    /// Author fills are often pale pastels picked for a white page. Laid over our node
+    /// fill at partial strength they read as a tint in both light and dark mode, and the
+    /// label stays legible.
+    static func tint(_ fill: DiagramColor) -> Color {
+        color(fill).opacity(min(fill.alpha, 0.32))
+    }
 }
 
 // MARK: - Card
@@ -59,6 +70,14 @@ struct MermaidBlockView: View {
     @State private var hovering = false
     @State private var expanded = false
     @State private var copied = false
+    @State private var availableWidth: CGFloat = 0
+
+    /// Shrink wide diagrams to the column, but not past where text gets hard to read.
+    private func fitScale(_ entry: DiagramCache.Entry) -> CGFloat {
+        let width = DiagramCanvas.size(of: entry).width
+        guard availableWidth > 0, width > 0 else { return 1 }
+        return min(1, max(0.75, (availableWidth - DiagramStyle.padding * 2) / width))
+    }
 
     var body: some View {
         let entry = DiagramCache.entry(for: source)
@@ -89,8 +108,12 @@ struct MermaidBlockView: View {
                 .scrollIndicators(.never)
                 .transition(.opacity)
             } else {
+                let scale = fitScale(entry)
+                let size = DiagramCanvas.size(of: entry)
                 ScrollView(.horizontal) {
                     DiagramCanvas(entry: entry)
+                        .scaleEffect(scale, anchor: .topLeading)
+                        .frame(width: size.width * scale, height: size.height * scale, alignment: .topLeading)
                         .padding(DiagramStyle.padding)
                 }
                 .scrollIndicators(.automatic)
@@ -102,6 +125,7 @@ struct MermaidBlockView: View {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .strokeBorder(.separator.opacity(0.6))
         }
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { availableWidth = $0 }
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.15), value: hovering)
         .animation(.smooth(duration: 0.2), value: showSource)
@@ -384,8 +408,11 @@ enum FlowchartPainter {
     static func draw(_ geometry: FlowchartGeometry, in context: inout GraphicsContext) {
         for group in geometry.subgraphs {
             let shape = Path(roundedRect: group.frame, cornerRadius: 12, style: .continuous)
+            let style = group.subgraph.style
             context.fill(shape, with: .color(DiagramStyle.groupFill))
-            context.stroke(shape, with: .color(DiagramStyle.groupStroke), lineWidth: 1)
+            if let fill = style.fill { context.fill(shape, with: .color(DiagramStyle.tint(fill))) }
+            context.stroke(shape, with: .color(style.stroke.map(DiagramStyle.color) ?? DiagramStyle.groupStroke),
+                           style: StrokeStyle(lineWidth: style.strokeWidth ?? 1, dash: style.dashed ? [6, 4] : []))
             let titleFrame = CGRect(x: group.frame.minX + 12, y: group.frame.minY + 6, width: group.title.size.width, height: group.title.size.height)
             DiagramPaint.text(group.title, in: titleFrame, context: &context, color: .secondary, weight: .semibold, alignment: .leading)
         }
@@ -414,8 +441,15 @@ enum FlowchartPainter {
                 layer.addFilter(.shadow(color: .black.opacity(0.06), radius: 2, y: 1))
                 layer.fill(outline, with: .color(DiagramStyle.nodeFill))
             }
-            if isDecision { context.fill(outline, with: .color(Color.accentColor.opacity(0.07))) }
-            context.stroke(outline, with: .color(isDecision ? Color.accentColor.opacity(0.55) : DiagramStyle.nodeStroke), lineWidth: 1.2)
+            let style = node.node.style
+            if let fill = style.fill {
+                context.fill(outline, with: .color(DiagramStyle.tint(fill)))
+            } else if isDecision {
+                context.fill(outline, with: .color(Color.accentColor.opacity(0.07)))
+            }
+            let stroke = style.stroke.map(DiagramStyle.color) ?? (isDecision ? Color.accentColor.opacity(0.55) : DiagramStyle.nodeStroke)
+            context.stroke(outline, with: .color(stroke),
+                           style: StrokeStyle(lineWidth: style.strokeWidth.map { min(max($0, 1), 4) } ?? 1.2, dash: style.dashed ? [5, 4] : []))
             for detail in details(for: node.node.shape, in: node.frame) {
                 context.stroke(detail, with: .color(DiagramStyle.nodeStroke), lineWidth: 1.2)
             }

@@ -77,6 +77,34 @@ struct FlowchartParserTests {
         #expect(chart.nodes.first { $0.id == "A" }?.label == "Gateway")
     }
 
+    @Test func stylingIsHonored() throws {
+        let chart = try FlowchartParser.parse("""
+        flowchart LR
+            classDef gap stroke:#e5484d,stroke-dasharray:4,stroke-width:2px
+            classDef default fill:#f9f9f9
+            classDef ok,good fill:green
+            A[SSH open]:::gap --> B[Backups] --> C:::ok
+            D --> E
+            class D,E gap
+            style B fill:#ff996680,stroke:rgb(10, 20, 30)
+            subgraph risky [Risky]
+                F
+            end
+            style risky stroke:red,stroke-dasharray: 5 5
+        """)
+        func node(_ id: String) -> Flowchart.Node { chart.nodes.first { $0.id == id }! }
+        #expect(node("A").style.dashed && node("A").style.strokeWidth == 2)
+        #expect(node("A").style.stroke == ShapeStyle.parse("stroke:#e5484d").stroke)
+        #expect(node("A").style.fill == ShapeStyle.parse("fill:#f9f9f9").fill) // from `default`
+        #expect(node("B").style.fill?.alpha == 128.0 / 255)
+        #expect(node("B").style.stroke == DiagramColor(red: 10.0 / 255, green: 20.0 / 255, blue: 30.0 / 255))
+        #expect(node("C").style.fill == DiagramColor.parse("green"))
+        #expect(node("D").style.dashed && node("E").style.dashed)
+        #expect(chart.subgraphs[0].style.dashed && chart.subgraphs[0].style.stroke == DiagramColor.parse("red"))
+        #expect(DiagramColor.parse("#f96") == DiagramColor(red: 1, green: 0.6, blue: 0.4))
+        #expect(DiagramColor.parse("nonsense") == nil)
+    }
+
     @Test func labelsAreCleaned() throws {
         let chart = try FlowchartParser.parse(#"flowchart TD; A["Line one<br/>Line #quot;two#quot;"] --> B("**bold**")"#)
         #expect(chart.nodes[0].label == "Line one\nLine \"two\"")
@@ -207,6 +235,29 @@ struct LayeredLayoutTests {
             #expect(!box.intersects(node.frame), "\(node.node.id) overlaps the subgraph")
         }
         assertNoOverlaps(geometry.nodes.map(\.frame))
+    }
+
+    @Test(arguments: [Flowchart.Direction.topBottom, .leftRight])
+    func siblingSubgraphsDontOverlap(_ direction: Flowchart.Direction) throws {
+        var chart = try FlowchartParser.parse("""
+        flowchart LR
+            subgraph GitHub
+                D[Dependabot] -->|PRs| R[repos] --> GA[GitHub Actions]
+            end
+            subgraph VPS
+                E[.env secrets] --> DC[docker compose]
+                S[sshd :22] --> DC
+            end
+            I([Internet]) --> S
+            L([Admin laptop]) -->|SSH| S
+            L -.->|copied by hand| E
+            GA -->|pull| DC
+        """)
+        chart.direction = direction
+        let geometry = FlowchartLayout.layout(chart, metrics: metrics)
+        let boxes = geometry.subgraphs.map(\.frame)
+        #expect(boxes.count == 2)
+        #expect(!boxes[0].intersects(boxes[1]), "subgraph boxes overlap")
     }
 
     @Test func largeGraphsAreFast() throws {

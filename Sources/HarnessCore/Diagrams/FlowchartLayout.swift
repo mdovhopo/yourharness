@@ -68,7 +68,13 @@ public enum FlowchartLayout {
         }
         var options = LayeredLayout.Options()
         options.rankSpacing += extraRankSpacing
-        if !chart.subgraphs.isEmpty { options.nodeSpacing += subgraphPadding }
+        if !chart.subgraphs.isEmpty {
+            options.nodeSpacing += subgraphPadding
+            // Room for two boxes' padding side by side, and, when layers run left to right,
+            // the title that sits on that side of the box.
+            let horizontal = chart.direction == .leftRight || chart.direction == .rightLeft
+            options.groupClearance = subgraphPadding * 2 + 10 + (horizontal ? metrics.lineHeight + 6 : 0)
+        }
         let result = LayeredLayout.layout(nodes: layoutNodes, edges: layoutEdges, direction: direction(chart.direction), options: options)
 
         var nodes = chart.nodes.enumerated().map { offset, node in
