@@ -34,6 +34,9 @@ final class AppModel {
     /// Last usage report from the CLI. Persisted, so limits show right after launch.
     private(set) var rateLimit: RateLimitInfo?
     private(set) var rateLimitUpdatedAt: Date?
+    private(set) var isRefreshingLimits = false
+    /// Why the last on-demand refresh didn't produce a reading.
+    private(set) var limitsRefreshError: String?
     private(set) var environmentReady = false
     private(set) var homeProjectID: UUID
     /// Discovery results keyed by `AgentCLI.id`.
@@ -376,7 +379,28 @@ final class AppModel {
     func updateRateLimit(_ info: RateLimitInfo) {
         rateLimit = info
         rateLimitUpdatedAt = .now
+        limitsRefreshError = nil
         save()
+    }
+
+    /// Asks Claude for a fresh usage reading with a tiny throwaway request.
+    func refreshLimits() async {
+        guard !isRefreshingLimits else { return }
+        isRefreshingLimits = true
+        defer { isRefreshingLimits = false }
+        await bootstrap?.value
+        guard let executable = claudeExecutable else {
+            limitsRefreshError = HarnessError.claudeNotFound.errorDescription
+            return
+        }
+        switch await ClaudeUsageProbe.run(executable: executable, environment: environment) {
+        case .success(let info):
+            updateRateLimit(info)
+        case .failure(.timedOut):
+            limitsRefreshError = "Claude didn't answer in time."
+        case .failure(.noReport(let detail)):
+            limitsRefreshError = detail
+        }
     }
 
     func contextWindow(forModel model: String?) -> Int? {

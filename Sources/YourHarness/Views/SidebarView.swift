@@ -365,53 +365,155 @@ private struct ThreadStatus: View {
 
 // MARK: - Footer
 
-/// Subscription usage from the CLI's `rate_limit_event`, this app's own memory, and a way
-/// into Settings.
+/// Usage limits, this app's memory, a refresh, and Settings. Details live in tooltips.
 private struct UsageFooter: View {
     @Environment(AppModel.self) private var app
 
+    /// Always show these two, even before the first reading, so the footer never jumps.
+    private static let primaryWindows = ["five_hour", "seven_day"]
+
+    private var windows: [(name: String, window: RateLimitInfo.Window?)] {
+        let reported = app.rateLimit?.windows ?? []
+        let extra = reported.filter { !Self.primaryWindows.contains($0.name) }
+        return Self.primaryWindows.map { name in (name, reported.first { $0.name == name }) }
+            + extra.map { ($0.name, $0) }
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            if let rateLimit = app.rateLimit, !rateLimit.windows.isEmpty {
-                // Re-evaluate every minute so "resets in" and reset detection stay current.
-                TimelineView(.everyMinute) { context in
-                    VStack(alignment: .leading, spacing: 10) {
-                        ForEach(rateLimit.windows) { window in
-                            UsageBar(window: window, now: context.date)
-                        }
-                        if let updated = app.rateLimitUpdatedAt {
-                            Text("Updated \(updated, format: .relative(presentation: .named))")
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
-                        }
+        VStack(alignment: .leading, spacing: 9) {
+            TimelineView(.everyMinute) { context in
+                VStack(spacing: 7) {
+                    ForEach(windows, id: \.name) { item in
+                        LimitMeter(name: item.name, window: item.window, now: context.date)
                     }
                 }
-                .transition(.opacity)
-            } else {
-                Text("Usage limits appear after your first message.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
-            HStack {
+            HStack(spacing: 10) {
                 TimelineView(.periodic(from: .now, by: 2)) { _ in
-                    Label("App memory \(MemoryFootprint.formatted)", systemImage: "memorychip")
-                        .font(.caption2)
+                    Label(MemoryFootprint.formatted, systemImage: "memorychip")
+                        .font(.caption2.monospacedDigit())
                         .foregroundStyle(.tertiary)
                         .contentTransition(.numericText())
+                        .help("This app's memory use")
                 }
                 Spacer()
+                RefreshLimitsButton()
                 SettingsLink {
                     Image(systemName: "gearshape")
                 }
                 .buttonStyle(.borderless)
                 .help("Settings (⌘,)")
             }
+            .font(.callout)
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .glassEffect(.regular, in: .rect(cornerRadius: 14))
         .padding(10)
-        .animation(.smooth, value: app.rateLimit)
+    }
+}
+
+private struct RefreshLimitsButton: View {
+    @Environment(AppModel.self) private var app
+
+    private var help: String {
+        if let error = app.limitsRefreshError { return "Couldn't refresh: \(error)" }
+        var text = "Refresh usage limits (sends Claude a tiny Haiku request)"
+        if let updated = app.rateLimitUpdatedAt {
+            text += "\nUpdated \(updated.formatted(.relative(presentation: .named)))"
+        }
+        return text
+    }
+
+    var body: some View {
+        Button {
+            Task { await app.refreshLimits() }
+        } label: {
+            Image(systemName: app.limitsRefreshError == nil ? "arrow.clockwise" : "exclamationmark.arrow.trianglehead.counterclockwise")
+                .foregroundStyle(app.limitsRefreshError == nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.orange))
+                .symbolEffect(.rotate, options: .repeat(.continuous), isActive: app.isRefreshingLimits)
+                .contentTransition(.symbolEffect(.replace))
+        }
+        .buttonStyle(.borderless)
+        .disabled(app.isRefreshingLimits)
+        .help(help)
+    }
+}
+
+/// `5h ━━━━━━──────── 6%`, with reset timing on hover.
+private struct LimitMeter: View {
+    let name: String
+    let window: RateLimitInfo.Window?
+    let now: Date
+
+    /// A saved reading from before the window reset says nothing about now.
+    private var hasReset: Bool { window?.resetsAt.map { $0 <= now } ?? false }
+    private var utilization: Double? {
+        guard let window else { return nil }
+        return hasReset ? 0 : min(max(window.utilization, 0), 1)
+    }
+
+    private var label: String {
+        switch name {
+        case "five_hour": "5h"
+        case "seven_day": "7d"
+        case "seven_day_opus": "Opus"
+        case "seven_day_sonnet": "Sonnet"
+        default: String(name.prefix(4)).capitalized
+        }
+    }
+
+    private var title: String {
+        switch name {
+        case "five_hour": "5-hour limit"
+        case "seven_day": "Weekly limit"
+        case "seven_day_opus": "Weekly Opus limit"
+        case "seven_day_sonnet": "Weekly Sonnet limit"
+        default: name.replacing("_", with: " ").capitalized
+        }
+    }
+
+    private var tint: Color {
+        switch utilization ?? 0 {
+        case ..<0.7: .accentColor
+        case ..<0.9: .orange
+        default: .red
+        }
+    }
+
+    private var help: String {
+        guard let window else { return "\(title): no reading yet. Refresh to check." }
+        if hasReset { return "\(title): reset since the last reading. Refresh to update." }
+        guard let resetsAt = window.resetsAt else { return title }
+        return "\(title): resets \(resetsAt.formatted(.relative(presentation: .named)))"
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(label)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 36, alignment: .leading)
+            GeometryReader { proxy in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(.fill.tertiary)
+                    if let utilization {
+                        Capsule()
+                            .fill(tint)
+                            .frame(width: max(proxy.size.width * utilization, 4))
+                    }
+                }
+            }
+            .frame(height: 4)
+            Text(utilization.map { $0.formatted(.percent.precision(.fractionLength(0))) } ?? "–")
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(width: 30, alignment: .trailing)
+                .contentTransition(.numericText())
+        }
+        .contentShape(.rect)
+        .help(help)
+        .animation(.smooth(duration: 0.4), value: utilization)
     }
 }
 
