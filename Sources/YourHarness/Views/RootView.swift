@@ -27,7 +27,12 @@ struct RootView: View {
             .animation(.easeInOut(duration: 0.16), value: app.selectedThreadID)
             .animation(.easeInOut(duration: 0.16), value: app.overviewProjectID)
         }
+        .sheet(isPresented: Bindable(app).isResumingSession) {
+            ResumeSessionSheet()
+        }
         .onAppear {
+            // Development: open the resume sheet filled in, for checking it without clicking.
+            if ProcessInfo.processInfo.environment["YH_RESUME_SESSION"] != nil { app.isResumingSession = true }
             // Development: open a Mermaid file in the diagram window, for checking it without clicking.
             if let path = ProcessInfo.processInfo.environment["YH_OPEN_DIAGRAM"],
                let source = try? String(contentsOfFile: path, encoding: .utf8) {

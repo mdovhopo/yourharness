@@ -1,4 +1,5 @@
 import Foundation
+import HarnessCore
 
 /// One row in a thread's transcript. A class, so a streaming delta only invalidates the
 /// row it touches, not the whole list.
@@ -74,5 +75,27 @@ extension TranscriptEntry {
         toolResult = snapshot.toolResult
         toolIsError = snapshot.toolIsError ?? false
         noticeStyle = snapshot.noticeStyle ?? .info
+    }
+}
+
+extension TranscriptEntry {
+    /// A message from a resumed Claude Code session.
+    convenience init(item: ClaudeSessionArchive.Item) {
+        switch item {
+        case .user(let text):
+            self.init(kind: .user, text: text)
+        case .assistant(let text):
+            self.init(kind: .assistant, text: text)
+        case .thinking(let text):
+            self.init(kind: .thinking, text: text)
+        case .tool(let id, let name, let input, let result, let isError):
+            self.init(id: id, kind: .tool)
+            toolName = name
+            toolInput = input
+            toolResult = result
+            toolIsError = isError
+        case .notice(let text):
+            self.init(kind: .notice, text: text)
+        }
     }
 }

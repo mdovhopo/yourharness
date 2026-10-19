@@ -15,7 +15,7 @@ scripts/bundle.sh   # → build/YourHarness.app
 
 Integration tests spawn the real `claude` CLI on Haiku and the real `git`/`gh`: `YH_INTEGRATION=1 swift test --filter Integration`.
 
-For manual runs, point the app at a throwaway state so it never scans the user's real projects: `YH_DATA_DIR=<scratch dir> build/YourHarness.app/Contents/MacOS/YourHarness`. Set it up with a `state.json` that lists only folders you're allowed to touch. Add `YH_SIMULATE_STREAMING=1` to stream the markdown sample (`StressTest.markdownSample`) into the selected thread at launch, for checking rendering and streaming without clicking. `YH_OPEN_DIAGRAM=<file.mmd>` opens a Mermaid file in the large diagram window. `YH_SEND_MESSAGE=<text>` sends a message from a new thread at launch (a real Claude turn plus title generation), so keep the state's folders throwaway.
+For manual runs, point the app at a throwaway state so it never scans the user's real projects: `YH_DATA_DIR=<scratch dir> build/YourHarness.app/Contents/MacOS/YourHarness`. Set it up with a `state.json` that lists only folders you're allowed to touch. Add `YH_SIMULATE_STREAMING=1` to stream the markdown sample (`StressTest.markdownSample`) into the selected thread at launch, for checking rendering and streaming without clicking. `YH_OPEN_DIAGRAM=<file.mmd>` opens a Mermaid file in the large diagram window. `YH_SEND_MESSAGE=<text>` sends a message from a new thread at launch (a real Claude turn plus title generation), so keep the state's folders throwaway. `YH_RESUME_SESSION=<session id>` opens the Resume Claude Code Session sheet filled in.
 
 ## Principles
 

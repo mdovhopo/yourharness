@@ -611,6 +611,94 @@ final class AppModel {
         }
     }
 
+    // MARK: - Resuming Claude Code sessions
+
+    enum SessionImportError: LocalizedError, Equatable {
+        case notFound
+        case unreadable
+        case folderMissing(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .notFound: "No Claude Code session with this ID."
+            case .unreadable: "Couldn't read this session's history."
+            case .folderMissing(let path): "The session's folder no longer exists: \(path)"
+            }
+        }
+    }
+
+    /// Shows the "Resume Claude Code Session" sheet.
+    var isResumingSession = false
+
+    /// The thread that already continues this session, if any.
+    func thread(forSession sessionID: String) -> ThreadModel? {
+        threads.first { $0.sessionID?.lowercased() == sessionID.lowercased() }
+    }
+
+    /// Finds and reads a session from Claude Code's history, off the main thread.
+    func loadClaudeSession(_ sessionID: String) async -> Result<ClaudeSessionArchive, SessionImportError> {
+        await bootstrap?.value
+        let config = ClaudeSessionArchive.configDirectory(environment: environment)
+        return await Task.detached(priority: .userInitiated) {
+            guard let url = ClaudeSessionArchive.locate(sessionID: sessionID, configDirectory: config) else {
+                return .failure(.notFound)
+            }
+            do {
+                return .success(try ClaudeSessionArchive.load(from: url, sessionID: sessionID))
+            } catch {
+                return .failure(.unreadable)
+            }
+        }.value
+    }
+
+    /// Opens a thread that shows the session's history and continues it with `--resume`,
+    /// in the project for the folder it ran in (added if you don't have one yet).
+    @discardableResult
+    func resumeClaudeSession(_ archive: ClaudeSessionArchive) throws(SessionImportError) -> ThreadModel {
+        if let existing = thread(forSession: archive.sessionID) {
+            if existing.isSettled { setSettled(false, existing) }
+            selectedThreadID = existing.id
+            return existing
+        }
+        let project = try project(forSessionFolder: archive.cwd)
+        if isCollapsed(project) { setCollapsed(false, for: project) }
+
+        let meta = ThreadMeta(
+            id: UUID(), projectID: project.id,
+            title: archive.title ?? archive.firstMessage.map(ThreadTitlePrompt.seed) ?? ThreadModel.untitled,
+            createdAt: archive.startedAt ?? .now, updatedAt: archive.updatedAt ?? .now,
+            sessionID: archive.sessionID,
+            // Fresh in the list and safe from auto-settling until you send something.
+            reactivatedAt: .now
+        )
+        let thread = ThreadModel(meta: meta, app: self)
+        thread.importTranscript(archive.items.map(TranscriptEntry.init(item:)))
+        threads.append(thread)
+        selectedThreadID = thread.id
+        save()
+        // Claude Code titles a session from its first message and rarely revisits it; a
+        // name you gave it with /rename is kept as is.
+        if !archive.hasCustomTitle { generateTitle(for: thread, from: .conversation) }
+        return thread
+    }
+
+    private func project(forSessionFolder cwd: String?) throws(SessionImportError) -> Project {
+        guard let cwd else { return homeProject }
+        let path = URL(fileURLWithPath: cwd).standardizedFileURL.path
+        if let existing = projects.first(where: { URL(fileURLWithPath: $0.path).standardizedFileURL.path == path }) {
+            return existing
+        }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            throw .folderMissing(cwd)
+        }
+        let project = Project(name: URL(fileURLWithPath: path).lastPathComponent, path: path,
+                              permissionMode: defaults.permissionMode ?? .standard)
+        projects.append(project)
+        refreshWorkspaces()
+        return project
+    }
+
     func setDefaultPermissionMode(_ mode: PermissionMode?) {
         defaults.permissionMode = mode
         save()

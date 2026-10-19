@@ -160,7 +160,7 @@ public struct ClaudeStreamParser: Sendable {
 
     // MARK: - Helpers
 
-    private static func contentBlock(_ block: [String: Any]) -> ContentBlock? {
+    static func contentBlock(_ block: [String: Any]) -> ContentBlock? {
         switch block["type"] as? String {
         case "text":
             return (block["text"] as? String).map(ContentBlock.text)
@@ -174,7 +174,7 @@ public struct ClaudeStreamParser: Sendable {
         }
     }
 
-    private static func toolResult(_ block: [String: Any]) -> ToolResult? {
+    static func toolResult(_ block: [String: Any]) -> ToolResult? {
         guard block["type"] as? String == "tool_result",
               let id = block["tool_use_id"] as? String
         else { return nil }

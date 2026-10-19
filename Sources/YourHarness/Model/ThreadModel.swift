@@ -484,6 +484,13 @@ final class ThreadModel: Identifiable {
         app.save()
     }
 
+    /// History brought in from elsewhere (a resumed Claude Code session), shown as is.
+    func importTranscript(_ imported: [TranscriptEntry]) {
+        transcriptLoaded = true
+        seed(imported)
+        persist()
+    }
+
     // MARK: - Debug
 
     /// Seeds a transcript directly; used by the stress test.

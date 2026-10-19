@@ -18,6 +18,9 @@ struct YourHarnessApp: App {
                     .keyboardShortcut("n")
                 Button("Add Project…") { app.presentAddProject() }
                     .keyboardShortcut("o")
+                Divider()
+                Button("Resume Claude Code Session…") { app.isResumingSession = true }
+                    .keyboardShortcut("o", modifiers: [.command, .shift])
             }
             CommandMenu("Thread") {
                 Button("Previous Thread") {
