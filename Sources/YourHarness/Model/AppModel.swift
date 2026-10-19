@@ -448,12 +448,9 @@ final class AppModel {
     }
 
     private func loadEnvironment() async {
-        var environment = await ShellEnvironment.load()
-        // Inherited when launched from a Claude Code terminal; would confuse the child CLI.
-        for key in ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT"] {
-            environment.removeValue(forKey: key)
-        }
-        self.environment = environment
+        // Starts from a clean login shell, so a Claude Code session that launched this app
+        // can't leak its session into the threads' `claude` processes.
+        environment = await ShellEnvironment.load()
         environmentReady = true
     }
 

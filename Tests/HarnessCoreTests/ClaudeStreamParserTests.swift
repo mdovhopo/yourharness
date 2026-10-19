@@ -154,6 +154,15 @@ struct ClaudeStreamParserTests {
         #expect(parser.parse(line: Data(ack.utf8)).isEmpty)
     }
 
+    @Test func outerClaudeSessionVariablesAreDropped() {
+        let cleaned = ShellEnvironment.withoutSessionVariables([
+            "PATH": "/bin", "CLAUDECODE": "1", "CLAUDE_CODE_SESSION_ID": "x", "CLAUDE_CODE_MESSAGING_TOKEN": "t",
+            "CLAUDE_CODE_SESSION_SOMETHING_NEW": "y", "CLAUDE_CODE_USE_BEDROCK": "1", "CLAUDE_EFFORT": "max",
+        ])
+        // User configuration survives; the outer session's identity doesn't.
+        #expect(cleaned == ["PATH": "/bin", "CLAUDE_CODE_USE_BEDROCK": "1"])
+    }
+
     @Test func shellEnvironmentParsesAfterMarker() {
         let raw = "motd noise\n__YOURHARNESS_ENV__PATH=/usr/bin:/bin\0HOME=/Users/x\0EMPTY=\0"
         let env = ShellEnvironment.parse(Data(raw.utf8))

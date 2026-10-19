@@ -77,6 +77,12 @@ struct ClaudeSessionIntegrationTests {
         let environment = await ShellEnvironment.load()
         #expect(clock.now - start < .seconds(8))
         #expect(environment["PATH"] != nil)
+        #expect(environment["HOME"] != nil)
+        #expect(ShellEnvironment.which("claude", in: environment) != nil)
+        // Run from inside Claude Code, the test process has these; the agents must not.
+        for key in ShellEnvironment.sessionVariables {
+            #expect(environment[key] == nil, "\(key) leaked into the agent environment")
+        }
     }
 
     @Test func discoveryOfEveryCLIFinishesWithinTimeout() async throws {
