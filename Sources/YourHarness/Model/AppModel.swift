@@ -48,6 +48,8 @@ final class AppModel {
     private(set) var cliPathOverrides: [String: String]
     private(set) var defaults: ThreadDefaults
     private(set) var claudeModels: [ClaudeModel]
+    /// Whether agents are told this app draws Mermaid diagrams.
+    private(set) var diagramInstructions: Bool
     @ObservationIgnored private var contextWindows: [String: Int]
 
     @ObservationIgnored let store = Store()
@@ -76,6 +78,7 @@ final class AppModel {
         rateLimit = state.rateLimit
         rateLimitUpdatedAt = state.rateLimitUpdatedAt
         collapsedProjectIDs = state.collapsedProjectIDs
+        diagramInstructions = state.diagramInstructions
 
         threads = state.threads.map { ThreadModel(meta: $0, app: self) }
         selectedThreadID = state.selectedThreadID
@@ -355,7 +358,8 @@ final class AppModel {
             model: thread.effectiveModel,
             permissionMode: project.permissionMode.cliValue,
             effort: thread.effectiveEffort,
-            resumeSessionID: thread.sessionID
+            resumeSessionID: thread.sessionID,
+            appendSystemPrompt: diagramInstructions ? AgentInstructions.diagrams : nil
         )
     }
 
@@ -440,6 +444,13 @@ final class AppModel {
         defaults.effort = effort
         save()
         for thread in threads where thread.effort == nil { thread.restartSession() }
+    }
+
+    /// The instruction is part of the launch, so running sessions pick it up on restart.
+    func setDiagramInstructions(_ enabled: Bool) {
+        diagramInstructions = enabled
+        save()
+        for thread in threads { thread.restartSession() }
     }
 
     func setDefaultPermissionMode(_ mode: PermissionMode?) {
@@ -533,6 +544,7 @@ final class AppModel {
         state.rateLimit = rateLimit
         state.rateLimitUpdatedAt = rateLimitUpdatedAt
         state.collapsedProjectIDs = collapsedProjectIDs
+        state.diagramInstructions = diagramInstructions
         store.saveState(state)
     }
 

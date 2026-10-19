@@ -17,6 +17,7 @@ An early spike. What works today:
 - Settings (⌘,): agent discovery (Claude Code, plus Codex, Cursor, Gemini and OpenCode detection), account and plan from `claude auth status`, custom executable paths, and defaults for new threads
 - 5-hour and weekly usage limits from the CLI's `rate_limit_event`, with an on-demand refresh that sends one tiny Haiku request (no tools, MCP, settings or saved session)
 - Idle `claude` processes are reaped after 10 minutes and transparently `--resume`d
+- Native diagrams: ```` ```mermaid ```` flowcharts and sequence diagrams are parsed, laid out and drawn in Swift (no web view), with source, copy, PNG export and zoom. Agents are told they can use them via `--append-system-prompt` (Settings → General → Diagrams)
 - Workspaces: any project that is a git repo, a folder of repos, or a "shell" repo holding gitignored clones gets an overview (click the project name). It shows each repo's branch, ahead/behind and uncommitted changes, repos the workspace references but you haven't cloned (from its compose file), and open pull requests from GitHub (`gh`) and GitLab (`glab`): what needs your review, yours, everyone else's, and stacks. Read-only; see [docs/workspaces.md](docs/workspaces.md)
 - Live app memory readout; Debug menu with a 10,000-entry stress transcript
 
@@ -52,6 +53,7 @@ Sources/
     Workspace/            finds repos in a project folder (nested clones, compose build contexts)
     Forge/                open PRs/MRs via `gh`/`glab` GraphQL, stack detection
     Markdown/             block parser (streaming-aware), PR/issue reference linking
+    Diagrams/             Mermaid flowchart + sequence parsers, layered graph layout, sequence layout
   YourHarness/            SwiftUI app
     Model/                AppModel, ThreadModel (event reducer), Store (JSON persistence)
     Views/                sidebar, thread, composer, tool calls, markdown

@@ -421,6 +421,17 @@ private struct GeneralSettingsView: View {
             }
 
             Section {
+                Toggle(isOn: Binding(get: { app.diagramInstructions }, set: { app.setDiagramInstructions($0) })) {
+                    Label("Let agents draw diagrams", systemImage: "point.3.connected.trianglepath.dotted")
+                }
+            } header: {
+                Text("Diagrams")
+            } footer: {
+                Text("Mermaid flowcharts and sequence diagrams are always drawn natively. With this on, agents are also told they can use them (about 150 tokens per session).")
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
                 LabeledContent("Default folder") {
                     HStack(spacing: 8) {
                         Label(app.homeProject.path.replacingOccurrences(of: NSHomeDirectory(), with: "~"), systemImage: "house")

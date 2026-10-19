@@ -104,6 +104,8 @@ struct PersistedState: Codable {
     var rateLimit: RateLimitInfo?
     var rateLimitUpdatedAt: Date?
     var collapsedProjectIDs: Set<UUID> = []
+    /// Tell agents they can answer with diagrams. On unless turned off.
+    var diagramInstructions = true
 
     init() {}
 
@@ -122,6 +124,7 @@ struct PersistedState: Codable {
         rateLimit = try container.decodeIfPresent(RateLimitInfo.self, forKey: .rateLimit)
         rateLimitUpdatedAt = try container.decodeIfPresent(Date.self, forKey: .rateLimitUpdatedAt)
         collapsedProjectIDs = try container.decodeIfPresent(Set<UUID>.self, forKey: .collapsedProjectIDs) ?? []
+        diagramInstructions = try container.decodeIfPresent(Bool.self, forKey: .diagramInstructions) ?? true
     }
 }
 

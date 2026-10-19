@@ -11,6 +11,8 @@ public struct ClaudeLaunchOptions: Sendable {
     public var effort: String?
     /// Resume an existing Claude session (survives app restarts and idle reaping).
     public var resumeSessionID: String?
+    /// Extra instructions after Claude Code's own system prompt, e.g. what this app renders.
+    public var appendSystemPrompt: String?
 
     public init(
         executable: URL,
@@ -19,7 +21,8 @@ public struct ClaudeLaunchOptions: Sendable {
         model: String? = nil,
         permissionMode: String? = nil,
         effort: String? = nil,
-        resumeSessionID: String? = nil
+        resumeSessionID: String? = nil,
+        appendSystemPrompt: String? = nil
     ) {
         self.executable = executable
         self.workingDirectory = workingDirectory
@@ -28,6 +31,7 @@ public struct ClaudeLaunchOptions: Sendable {
         self.permissionMode = permissionMode
         self.effort = effort
         self.resumeSessionID = resumeSessionID
+        self.appendSystemPrompt = appendSystemPrompt
     }
 
     var arguments: [String] {
@@ -42,6 +46,7 @@ public struct ClaudeLaunchOptions: Sendable {
         ]
         if let model { args += ["--model", model] }
         if let permissionMode { args += ["--permission-mode", permissionMode] }
+        if let appendSystemPrompt { args += ["--append-system-prompt", appendSystemPrompt] }
         if let effort { args += ["--effort", effort] }
         if let resumeSessionID { args += ["--resume", resumeSessionID] }
         return args

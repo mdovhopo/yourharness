@@ -1,0 +1,27 @@
+sequenceDiagram
+    actor U as User (Browser)
+    participant A as App Server
+    participant S as Auth Server
+
+    U->>A: 1. Click "Log in"
+    A->>A: 2. Create PKCE verifier + challenge, state
+    A-->>U: 3. Redirect to /authorize (client_id, redirect_uri, code_challenge, state)
+    U->>S: 4. GET /authorize
+    S->>U: 5. Login + consent page
+    U->>S: 6. Credentials + consent
+    S-->>U: 7. Redirect to app callback (code, state)
+    U->>A: 8. GET /callback?code&state
+    A->>A: 9. Verify state
+    A->>S: 10. POST /token (code, code_verifier, client credentials)
+    S->>S: 11. Verify code + PKCE
+    S-->>A: 12. access_token, refresh_token, id_token
+    A->>A: 13. Store refresh token server-side, create session cookie
+    A-->>U: 14. Set session cookie, redirect to app
+
+    Note over U,S: Later, access token expires
+    U->>A: 15. API request (session cookie)
+    A->>S: 16. POST /token (grant_type=refresh_token, refresh_token)
+    S->>S: 17. Validate refresh token, rotate it
+    S-->>A: 18. New access_token (+ new refresh_token)
+    A->>A: 19. Store rotated refresh token
+    A-->>U: 20. Response to original request

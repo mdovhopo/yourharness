@@ -109,7 +109,16 @@ private struct BlockView: View, Equatable {
         case .list(let items):
             ListBlock(items: items, isTail: isTail)
         case .code(let language, let text):
-            CodeBlockView(language: language, code: text)
+            if language.lowercased() == "mermaid" {
+                if isTail {
+                    // Still streaming: the fence may not be closed yet.
+                    DiagramPlaceholder()
+                } else {
+                    MermaidBlockView(source: text)
+                }
+            } else {
+                CodeBlockView(language: language, code: text)
+            }
         case .quote(let text):
             HStack(alignment: .top, spacing: 12) {
                 Capsule()
@@ -301,7 +310,7 @@ private struct InlineText: View {
     }
 }
 
-private struct CodeBlockView: View {
+struct CodeBlockView: View {
     let language: String
     let code: String
     @State private var copied = false
