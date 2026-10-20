@@ -67,12 +67,7 @@ struct YourHarnessApp: App {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Development: force light or dark, for checking both without changing the system.
-        switch ProcessInfo.processInfo.environment["YH_APPEARANCE"] {
-        case "dark": NSApp.appearance = NSAppearance(named: .darkAqua)
-        case "light": NSApp.appearance = NSAppearance(named: .aqua)
-        default: break
-        }
+        MainActor.assumeIsolated { AppModel.shared.applyAppearance() }
         // Needed when running the bare executable (`swift run`) rather than the .app bundle.
         NSApp.setActivationPolicy(.regular)
         NSApp.activate()

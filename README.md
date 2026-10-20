@@ -19,7 +19,7 @@ An early spike. What works today:
 - Stop (⌘.) mid-turn without killing the session
 - Composer with model, reasoning-effort and permission pickers (Auto by default: the CLI's classifier runs what looks safe and asks about the rest), plus a context-window ring. Models and effort levels come live from the CLI's `initialize` catalog. Model and permission changes apply instantly mid-session
 - A Home project, so you can start a thread without picking a folder
-- Settings (⌘,): agent discovery (Claude Code, plus Codex, Cursor, Gemini and OpenCode detection), account and plan from `claude auth status`, custom executable paths, and defaults for new threads
+- Settings (⌘,): appearance (System, Light or Dark; System by default), agent discovery (Claude Code, plus Codex, Cursor, Gemini and OpenCode detection), account and plan from `claude auth status`, custom executable paths, and defaults for new threads
 - 5-hour and weekly usage limits from the CLI's `rate_limit_event`, with an on-demand refresh that sends one tiny Haiku request (no tools, MCP, settings or saved session)
 - Idle `claude` processes are reaped after 10 minutes and transparently `--resume`d
 - Native diagrams: ```` ```mermaid ```` flowcharts and sequence diagrams are parsed, laid out and drawn in Swift (no web view), with source, copy, PNG export and zoom. Agents are told they can use them via `--append-system-prompt` (Settings → General → Diagrams)

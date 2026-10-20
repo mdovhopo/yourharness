@@ -85,6 +85,7 @@ final class AppModel {
         autoSettleDays = state.autoSettleDays
         titleGeneration = state.titleGeneration
         showsInspector = state.showsInspector
+        appearance = state.appearance
 
         threads = state.threads.map { ThreadModel(meta: $0, app: self) }
         selectedThreadID = state.selectedThreadID
@@ -118,6 +119,22 @@ final class AppModel {
 
     var selectedThread: ThreadModel? {
         threads.first { $0.id == selectedThreadID }
+    }
+
+    private(set) var appearance: Appearance
+
+    func setAppearance(_ appearance: Appearance) {
+        guard appearance != self.appearance else { return }
+        self.appearance = appearance
+        save()
+        applyAppearance()
+    }
+
+    /// For the whole app, Settings included. `YH_APPEARANCE=light|dark` overrides it for a
+    /// development run without saving.
+    func applyAppearance() {
+        let override = ProcessInfo.processInfo.environment["YH_APPEARANCE"].flatMap(Appearance.init(rawValue:))
+        NSApp.appearance = (override ?? appearance).nsAppearance
     }
 
     /// The right sidebar, where you follow a thread's sub-agents. Stays as you left it.
@@ -811,6 +828,7 @@ final class AppModel {
         state.autoSettleDays = autoSettleDays
         state.titleGeneration = titleGeneration
         state.showsInspector = showsInspector
+        state.appearance = appearance
         store.saveState(state)
     }
 

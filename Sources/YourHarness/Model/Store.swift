@@ -120,6 +120,7 @@ struct PersistedState: Codable {
     var titleGeneration = TitleGenerationSettings()
     /// The right sidebar was open at quit.
     var showsInspector = false
+    var appearance = Appearance.system
 
     init() {}
 
@@ -142,6 +143,7 @@ struct PersistedState: Codable {
         autoSettleDays = try container.decodeIfPresent(Int.self, forKey: .autoSettleDays) ?? 3
         titleGeneration = try container.decodeIfPresent(TitleGenerationSettings.self, forKey: .titleGeneration) ?? TitleGenerationSettings()
         showsInspector = try container.decodeIfPresent(Bool.self, forKey: .showsInspector) ?? false
+        appearance = try container.decodeIfPresent(Appearance.self, forKey: .appearance) ?? .system
     }
 }
 
@@ -150,6 +152,30 @@ struct ThreadDefaults: Codable, Equatable {
     var model: String?
     var effort: String?
     var permissionMode: PermissionMode?
+}
+
+/// Light, dark, or whatever macOS is set to.
+enum Appearance: String, Codable, CaseIterable, Identifiable {
+    case system, light, dark
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .system: "System"
+        case .light: "Light"
+        case .dark: "Dark"
+        }
+    }
+
+    /// Nil follows the system, live.
+    var nsAppearance: NSAppearance? {
+        switch self {
+        case .system: nil
+        case .light: NSAppearance(named: .aqua)
+        case .dark: NSAppearance(named: .darkAqua)
+        }
+    }
 }
 
 enum EffortLevel: String, CaseIterable, Identifiable {

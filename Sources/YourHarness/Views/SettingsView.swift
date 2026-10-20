@@ -366,6 +366,20 @@ private struct GeneralSettingsView: View {
     var body: some View {
         Form {
             Section {
+                Picker(selection: Binding(get: { app.appearance }, set: { app.setAppearance($0) })) {
+                    ForEach(Appearance.allCases) { appearance in
+                        Text(appearance.label).tag(appearance)
+                    }
+                } label: {
+                    Label("Appearance", systemImage: "circle.lefthalf.filled")
+                }
+                .pickerStyle(.segmented)
+            } footer: {
+                Text("System follows macOS, including its automatic switch between light and dark.")
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
                 Picker(selection: defaultModel) {
                     Text("Claude Code Default · \(app.modelDisplayName(for: nil))").tag(String?.none)
                     Divider()
