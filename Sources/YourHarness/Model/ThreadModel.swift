@@ -31,6 +31,10 @@ final class ThreadModel: Identifiable {
     private(set) var entries: [TranscriptEntry] = []
     private(set) var phase = Phase.idle
     private(set) var pendingPermissions: [PermissionRequest] = []
+    /// Sub-agents still at work. Background ones outlive the turn that started them.
+    private(set) var liveSubagents: [SubagentRun] = []
+    /// The sub-agent the inspector follows; nil follows the latest.
+    var inspectedSubagentID: String?
     /// A reply finished while you were looking at another thread.
     private(set) var hasUnread = false
     /// Pinned threads sit at the top of their project.
@@ -60,6 +64,9 @@ final class ThreadModel: Identifiable {
     @ObservationIgnored private var blocks: [BlockRef: TranscriptEntry] = [:]
     @ObservationIgnored private var tools: [String: TranscriptEntry] = [:]
     @ObservationIgnored private var streamedMessageIDs: Set<String> = []
+    /// By Agent tool call ID. Unlike `tools`, kept across turns: background sub-agents
+    /// report after the turn that started them has ended.
+    @ObservationIgnored private var subagents: [String: SubagentRun] = [:]
     @ObservationIgnored private var idleReaper: Task<Void, Never>?
     /// The title request whose answer still counts; renaming or a newer request voids it.
     @ObservationIgnored private var titleRequest: UUID?
@@ -109,6 +116,12 @@ final class ThreadModel: Identifiable {
     }
 
     var hasLiveSession: Bool { sessionStart != nil }
+
+    /// A turn is running, or a sub-agent is still at work after one.
+    var isWorking: Bool { phase == .running || !liveSubagents.isEmpty }
+
+    /// Every sub-agent in the transcript, oldest first.
+    var subagentRuns: [SubagentRun] { entries.compactMap(\.subagent) }
 
     var effectiveModel: String? { model ?? app.defaults.model }
     var effectiveEffort: String? { effort ?? app.defaults.effort }
@@ -165,6 +178,11 @@ final class ThreadModel: Identifiable {
                 fail(error.localizedDescription)
             }
         }
+    }
+
+    func stopSubagent(_ run: SubagentRun) {
+        guard run.isRunning, let taskID = run.taskID, let start = sessionStart else { return }
+        Task { try? await start.value.stopTask(taskID) }
     }
 
     func stop() {
@@ -246,7 +264,7 @@ final class ThreadModel: Identifiable {
 
     /// Restart the process (keeping the conversation) so new launch options take effect.
     func restartSession() {
-        if phase == .idle { endSession() } else { restartWhenIdle = true }
+        if isWorking { restartWhenIdle = true } else { endSession() }
     }
 
     func endSession() {
@@ -254,6 +272,12 @@ final class ThreadModel: Identifiable {
         sessionStart = nil
         sessionGeneration += 1
         idleReaper?.cancel()
+        // Its exit event is ignored from here on, so end its sub-agents now.
+        if !liveSubagents.isEmpty {
+            for run in liveSubagents { run.abandon() }
+            liveSubagents.removeAll()
+            persist()
+        }
         Task {
             if let session = try? await start.value { await session.terminate() }
         }
@@ -338,7 +362,10 @@ final class ThreadModel: Identifiable {
             blocks[ref]?.toolInput += json
 
         case .assistantMessage(let messageID, let content, let parent):
-            guard parent == nil else { return }
+            if let parent {
+                subagent(for: parent)?.append(content)
+                return
+            }
             let streamed = streamedMessageIDs.contains(messageID)
             for block in content {
                 switch block {
@@ -365,12 +392,31 @@ final class ThreadModel: Identifiable {
             }
 
         case .toolResults(let results, let parent):
-            guard parent == nil else { return }
+            if let parent {
+                subagent(for: parent)?.apply(results)
+                return
+            }
             for result in results {
                 guard let entry = tools[result.toolUseID] else { continue }
                 entry.toolResult = result.content
                 entry.toolIsError = result.isError
                 entry.isStreaming = false
+            }
+
+        case .subagentStarted(let start):
+            subagent(for: start.toolUseID)?.start(start)
+
+        case .subagentProgress(let id, let activity, let usage):
+            subagent(for: id)?.update(activity: activity, usage: usage)
+
+        case .subagentFinished(let end):
+            guard let run = subagent(for: end.toolUseID) else { return }
+            run.finish(end)
+            liveSubagents.removeAll { $0 === run }
+            // A background one finishing after its turn: keep what it did.
+            if phase == .idle {
+                persist()
+                if liveSubagents.isEmpty { scheduleIdleReap() }
             }
 
         case .permissionRequest(let request):
@@ -411,7 +457,7 @@ final class ThreadModel: Identifiable {
                 app.generateTitle(for: self, from: .conversation)
             }
             scheduleIdleReap()
-            if restartWhenIdle {
+            if restartWhenIdle, liveSubagents.isEmpty {
                 restartWhenIdle = false
                 endSession()
             }
@@ -420,6 +466,8 @@ final class ThreadModel: Identifiable {
             guard generation == sessionGeneration else { return }
             sessionStart = nil
             let wasRunning = phase == .running
+            for run in liveSubagents { run.abandon() }
+            liveSubagents.removeAll()
             settle()
             if !receivedInit, sessionID != nil, code != 0 {
                 sessionID = nil
@@ -440,8 +488,22 @@ final class ThreadModel: Identifiable {
         for entry in tools.values where entry.isStreaming { entry.isStreaming = false }
         blocks.removeAll()
         streamedMessageIDs.removeAll()
+        // A foreground sub-agent can't outlive its turn; one still marked running was cut off.
+        for run in liveSubagents where !run.isBackground { run.abandon() }
+        liveSubagents.removeAll { !$0.isRunning }
         touch()
         persist()
+    }
+
+    /// The run for an Agent tool call, made on first sight of its tool call.
+    private func subagent(for toolUseID: String) -> SubagentRun? {
+        if let run = subagents[toolUseID] { return run }
+        guard let entry = tools[toolUseID], SubagentReport.toolNames.contains(entry.toolName) else { return nil }
+        let run = SubagentRun(toolCall: entry)
+        entry.subagent = run
+        subagents[toolUseID] = run
+        liveSubagents.append(run)
+        return run
     }
 
     private func fail(_ message: String) {
@@ -454,7 +516,7 @@ final class ThreadModel: Identifiable {
         idleReaper?.cancel()
         idleReaper = Task { [weak self] in
             try? await Task.sleep(for: Self.idleTimeout)
-            guard !Task.isCancelled, let self, self.phase == .idle else { return }
+            guard !Task.isCancelled, let self, !self.isWorking else { return }
             self.endSession()
         }
     }

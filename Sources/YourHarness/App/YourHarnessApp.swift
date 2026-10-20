@@ -23,6 +23,10 @@ struct YourHarnessApp: App {
                 Button("Resume Claude Code Session…") { app.isResumingSession = true }
                     .keyboardShortcut("o", modifiers: [.command, .shift])
             }
+            CommandGroup(after: .sidebar) {
+                Button(app.showsInspector ? "Hide Sub-agents" : "Show Sub-agents") { app.showsInspector.toggle() }
+                    .keyboardShortcut("0", modifiers: [.command, .option])
+            }
             CommandMenu("Thread") {
                 Button("Previous Thread") {
                     withAnimation(SidebarMetrics.selectionSpring) { app.selectAdjacentThread(-1) }

@@ -1,4 +1,5 @@
 import AppKit
+import HarnessCore
 import SwiftUI
 
 struct EntryView: View {
@@ -12,6 +13,8 @@ struct EntryView: View {
             StreamingMarkdown(entry: entry)
         case .thinking:
             ThinkingView(entry: entry)
+        case .tool where SubagentReport.toolNames.contains(entry.toolName):
+            SubagentCallView(entry: entry)
         case .tool:
             ToolCallView(entry: entry)
         case .notice:

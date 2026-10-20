@@ -26,6 +26,21 @@ struct RootView: View {
             // A quick crossfade when switching threads, not a hard cut.
             .animation(.easeInOut(duration: 0.16), value: app.selectedThreadID)
             .animation(.easeInOut(duration: 0.16), value: app.overviewProjectID)
+            .inspector(isPresented: Bindable(app).showsInspector) {
+                Group {
+                    if app.overviewProject == nil, let thread = app.selectedThread {
+                        SubagentInspector(thread: thread)
+                            .environment(\.issueLinker, app.issueLinker(for: thread))
+                    } else {
+                        ContentUnavailableView("No Thread Selected", systemImage: "person.2")
+                    }
+                }
+                .inspectorColumnWidth(min: 300, ideal: 380, max: 640)
+                .toolbar {
+                    Button("Sub-agents", systemImage: "sidebar.trailing") { app.showsInspector.toggle() }
+                        .help(app.showsInspector ? "Hide sub-agents (⌥⌘0)" : "Show sub-agents (⌥⌘0)")
+                }
+            }
         }
         .sheet(isPresented: Bindable(app).isResumingSession) {
             ResumeSessionSheet()

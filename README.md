@@ -14,6 +14,7 @@ An early spike. What works today:
 - Streaming Claude Code sessions: markdown (headings, nested and task lists, tables, code, quotes), thinking, tool calls with inline Edit diffs. Replies are revealed at a steady, word-by-word pace instead of in network bursts, and half-typed syntax never flashes. `#12`, `repo#12` and `owner/repo#12` link to the right PR or issue using the project's repos and open PRs
 - Native permission prompts (Allow ⌘↩ / Deny ⌘⌫) via the CLI's `can_use_tool` control protocol
 - Questions and plans get their own cards: when Claude asks (`AskUserQuestion`), pick options (single or multi-select) or write your own answer, or Skip; when it presents a plan (`ExitPlanMode`), read it as markdown and approve it into Auto, Accept Edits or Ask (that becomes the project's mode), or keep planning with feedback
+- Sub-agents: when Claude hands work to a sub-agent (the Agent tool), its call becomes a live card with what it's doing right now, its latest steps, tool count and time, then its report. The right sidebar (⌥⌘0, or the card's sidebar button) follows one step by step and can stop it. Background sub-agents keep the thread marked as working after the turn ends, and their history is saved with the thread
 - Images in messages: paste screenshots (⌘V), drop image files on a thread, or use the paperclip. They're scaled to the API's limits (2000 px, under 5 MB), shown in the message, and kept in the data folder
 - Stop (⌘.) mid-turn without killing the session
 - Composer with model, reasoning-effort and permission pickers (Auto by default: the CLI's classifier runs what looks safe and asks about the rest), plus a context-window ring. Models and effort levels come live from the CLI's `initialize` catalog. Model and permission changes apply instantly mid-session
@@ -71,6 +72,6 @@ See [ROADMAP.md](ROADMAP.md) for the bigger picture. Smaller gaps in what exists
 
 - Text selection across transcript blocks (SwiftUI limitation; an AppKit/TextKit 2 transcript would fix it if the stress test shows we need it anyway)
 - Syntax highlighting in code blocks
-- Subagent (Task) activity is hidden; it should nest under its tool call
+- Sub-agents in resumed Claude Code sessions show their report but not their steps (those live in separate session files)
 - Git worktree per thread
 - More adapters (Codex app-server, ACP)

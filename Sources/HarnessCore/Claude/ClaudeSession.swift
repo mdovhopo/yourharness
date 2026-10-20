@@ -121,6 +121,11 @@ public actor ClaudeSession {
         try control(["subtype": "interrupt"])
     }
 
+    /// Stops one sub-agent; the turn, and any other sub-agents, carry on.
+    public func stopTask(_ taskID: String) throws {
+        try control(["subtype": "stop_task", "task_id": taskID])
+    }
+
     /// Requests the catalog (models, effort levels); answered with a `.catalog` event.
     public func initialize() throws {
         try control(["subtype": "initialize"])

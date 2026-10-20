@@ -13,6 +13,11 @@ public enum AgentEvent: Sendable, Equatable {
     /// have arrived as deltas.
     case assistantMessage(messageID: String, blocks: [ContentBlock], parentToolUseID: String?)
     case toolResults([ToolResult], parentToolUseID: String?)
+    /// A sub-agent (the Agent tool) started, moved on, or ended. Its own messages arrive as
+    /// `assistantMessage`/`toolResults` whose parent is the Agent call.
+    case subagentStarted(SubagentStart)
+    case subagentProgress(toolUseID: String, activity: String?, usage: SubagentUsage)
+    case subagentFinished(SubagentEnd)
     case permissionRequest(PermissionRequest)
     case rateLimit(RateLimitInfo)
     /// Tokens in the context window after the latest top-level assistant message.
@@ -61,6 +66,41 @@ public struct ToolResult: Sendable, Equatable {
     public var toolUseID: String
     public var content: String
     public var isError: Bool
+}
+
+public struct SubagentStart: Sendable, Equatable {
+    /// The Agent tool call that started it.
+    public var toolUseID: String
+    /// What `stop_task` takes.
+    public var taskID: String
+    public var description: String
+    /// e.g. "general-purpose", "Explore".
+    public var agentType: String?
+    public var prompt: String?
+    /// Runs on while the main agent carries on; the turn can end before it does.
+    public var isBackground: Bool
+}
+
+public struct SubagentUsage: Sendable, Equatable {
+    public var tokens: Int?
+    public var toolUses: Int?
+    public var durationMs: Int?
+
+    init(_ json: Any?) {
+        let json = json as? [String: Any] ?? [:]
+        tokens = json["total_tokens"] as? Int
+        toolUses = json["tool_uses"] as? Int
+        durationMs = json["duration_ms"] as? Int
+    }
+}
+
+public struct SubagentEnd: Sendable, Equatable {
+    public var toolUseID: String
+    /// "completed", "failed", "stopped", ...
+    public var status: String
+    /// Its final report.
+    public var summary: String?
+    public var usage: SubagentUsage
 }
 
 public struct PermissionRequest: Sendable, Equatable, Identifiable {

@@ -24,6 +24,8 @@ final class TranscriptEntry: Identifiable {
     var toolInput = ""
     var toolResult: String?
     var toolIsError = false
+    /// For an Agent tool call: the sub-agent it started.
+    var subagent: SubagentRun?
 
     var noticeStyle = NoticeStyle.info
     /// Images sent with a user message: file names in the store's attachments folder.
@@ -55,6 +57,7 @@ struct EntrySnapshot: Codable, Sendable {
     var toolIsError: Bool?
     var noticeStyle: TranscriptEntry.NoticeStyle?
     var attachments: [String]?
+    var subagent: SubagentSnapshot?
 }
 
 extension TranscriptEntry {
@@ -68,7 +71,8 @@ extension TranscriptEntry {
             toolResult: toolResult,
             toolIsError: toolIsError ? true : nil,
             noticeStyle: kind == .notice ? noticeStyle : nil,
-            attachments: attachments.isEmpty ? nil : attachments
+            attachments: attachments.isEmpty ? nil : attachments,
+            subagent: subagent?.snapshot
         )
     }
 
@@ -80,6 +84,7 @@ extension TranscriptEntry {
         toolIsError = snapshot.toolIsError ?? false
         noticeStyle = snapshot.noticeStyle ?? .info
         attachments = snapshot.attachments ?? []
+        subagent = snapshot.subagent.map { SubagentRun(id: snapshot.id, snapshot: $0) }
     }
 }
 

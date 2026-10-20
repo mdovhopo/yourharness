@@ -72,6 +72,31 @@ public struct ClaudeStreamParser: Sendable {
             ))]
         case "status":
             return (object["status"] as? String).map { [.status($0)] } ?? []
+        case "task_started":
+            guard object["task_type"] as? String ?? "local_agent" == "local_agent",
+                  let toolUseID = object["tool_use_id"] as? String,
+                  let taskID = object["task_id"] as? String
+            else { return [] }
+            return [.subagentStarted(SubagentStart(
+                toolUseID: toolUseID,
+                taskID: taskID,
+                description: object["description"] as? String ?? "",
+                agentType: object["subagent_type"] as? String,
+                prompt: object["prompt"] as? String,
+                isBackground: object["is_backgrounded"] as? Bool ?? false
+            ))]
+        case "task_progress":
+            guard let toolUseID = object["tool_use_id"] as? String else { return [] }
+            return [.subagentProgress(toolUseID: toolUseID, activity: object["description"] as? String,
+                                      usage: SubagentUsage(object["usage"]))]
+        case "task_notification":
+            guard let toolUseID = object["tool_use_id"] as? String else { return [] }
+            return [.subagentFinished(SubagentEnd(
+                toolUseID: toolUseID,
+                status: object["status"] as? String ?? "completed",
+                summary: object["summary"] as? String,
+                usage: SubagentUsage(object["usage"])
+            ))]
         default:
             return []
         }

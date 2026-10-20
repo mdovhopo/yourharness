@@ -119,6 +119,15 @@ final class AppModel {
         threads.first { $0.id == selectedThreadID }
     }
 
+    /// The right sidebar, where you follow a thread's sub-agents.
+    var showsInspector = false
+
+    /// Opens the right sidebar on one sub-agent of the thread on screen.
+    func inspect(_ run: SubagentRun) {
+        selectedThread?.inspectedSubagentID = run.id
+        showsInspector = true
+    }
+
     /// The thread on screen right now; nil while a project overview is showing.
     var visibleThreadID: UUID? {
         overviewProjectID == nil ? selectedThreadID : nil
@@ -184,7 +193,7 @@ final class AppModel {
             }
             thread.settledAt = .now
             thread.isPinned = false
-            if thread.phase == .idle { thread.endSession() }
+            if !thread.isWorking { thread.endSession() }
         } else {
             guard thread.isSettled else { return }
             thread.settledAt = nil
@@ -215,7 +224,7 @@ final class AppModel {
         var changed = false
         for thread in threads {
             guard !thread.isSettled, !thread.isEphemeral, thread.autoSettle, thread.reactivatedAt == nil,
-                  thread.phase == .idle, thread.pendingPermissions.isEmpty,
+                  !thread.isWorking, thread.pendingPermissions.isEmpty,
                   // Not the one on screen, and not an untouched blank.
                   visibleThreadID != thread.id, thread.sessionID != nil || thread.title != ThreadModel.untitled,
                   thread.updatedAt < cutoff
