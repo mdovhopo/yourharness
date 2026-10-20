@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct EntryView: View {
@@ -6,7 +7,7 @@ struct EntryView: View {
     var body: some View {
         switch entry.kind {
         case .user:
-            UserMessageView(text: entry.text)
+            UserMessageView(text: entry.text, attachments: entry.attachments)
         case .assistant:
             StreamingMarkdown(entry: entry)
         case .thinking:
@@ -20,16 +21,36 @@ struct EntryView: View {
 }
 
 private struct UserMessageView: View {
+    @Environment(AppModel.self) private var app
     let text: String
+    let attachments: [String]
 
     var body: some View {
         HStack {
             Spacer(minLength: 80)
-            Text(text)
-                .textSelection(.enabled)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                .background(.tint.opacity(0.14), in: .rect(cornerRadius: 16))
+            VStack(alignment: .trailing, spacing: 6) {
+                if !attachments.isEmpty {
+                    HStack(spacing: 6) {
+                        ForEach(attachments, id: \.self) { name in
+                            let url = app.store.attachmentURL(name)
+                            Button {
+                                NSWorkspace.shared.open(url)
+                            } label: {
+                                AttachmentThumbnail(content: .file(url), maxSize: CGSize(width: 220, height: 160))
+                            }
+                            .buttonStyle(.plain)
+                            .help("Open in Preview")
+                        }
+                    }
+                }
+                if !text.isEmpty {
+                    Text(text)
+                        .textSelection(.enabled)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
+                        .background(.tint.opacity(0.14), in: .rect(cornerRadius: 16))
+                }
+            }
         }
     }
 }

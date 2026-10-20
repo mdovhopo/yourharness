@@ -26,6 +26,8 @@ final class TranscriptEntry: Identifiable {
     var toolIsError = false
 
     var noticeStyle = NoticeStyle.info
+    /// Images sent with a user message: file names in the store's attachments folder.
+    var attachments: [String] = []
 
     init(id: String = UUID().uuidString, kind: Kind, text: String = "", isStreaming: Bool = false) {
         self.id = id
@@ -52,6 +54,7 @@ struct EntrySnapshot: Codable, Sendable {
     var toolResult: String?
     var toolIsError: Bool?
     var noticeStyle: TranscriptEntry.NoticeStyle?
+    var attachments: [String]?
 }
 
 extension TranscriptEntry {
@@ -64,7 +67,8 @@ extension TranscriptEntry {
             toolInput: kind == .tool ? toolInput : nil,
             toolResult: toolResult,
             toolIsError: toolIsError ? true : nil,
-            noticeStyle: kind == .notice ? noticeStyle : nil
+            noticeStyle: kind == .notice ? noticeStyle : nil,
+            attachments: attachments.isEmpty ? nil : attachments
         )
     }
 
@@ -75,6 +79,7 @@ extension TranscriptEntry {
         toolResult = snapshot.toolResult
         toolIsError = snapshot.toolIsError ?? false
         noticeStyle = snapshot.noticeStyle ?? .info
+        attachments = snapshot.attachments ?? []
     }
 }
 

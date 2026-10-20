@@ -44,6 +44,8 @@ final class ThreadModel: Identifiable {
     /// Where the thread sorts among active ones: its last activity, or when it was brought back.
     var sortDate: Date { max(updatedAt, reactivatedAt ?? .distantPast) }
     var draft = ""
+    /// Images waiting to go with the next message.
+    var draftImages: [ImageAttachment] = []
     /// A generated title is on its way; the current one is a placeholder.
     private(set) var isGeneratingTitle = false
 
@@ -136,18 +138,21 @@ final class ThreadModel: Identifiable {
 
     // MARK: - Actions
 
-    func send(_ text: String) {
+    func send(_ text: String, images: [ImageAttachment] = []) {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
+        guard !text.isEmpty || !images.isEmpty else { return }
         loadTranscriptIfNeeded()
         // Picking a settled thread back up brings it back to the list, and new activity
         // lifts the hold an un-settle puts on automatic settling.
         if isSettled { app.setSettled(false, self) }
         reactivatedAt = nil
         let isFirstMessage = title == Self.untitled && !entries.contains { $0.kind == .user }
-        if isFirstMessage { title = ThreadTitlePrompt.seed(from: text) }
-        entries.append(TranscriptEntry(kind: .user, text: text))
-        if isFirstMessage { app.generateTitle(for: self, from: .firstMessage(text)) }
+        let subject = text.isEmpty ? (images.count == 1 ? "Attached image" : "Attached images") : text
+        if isFirstMessage { title = ThreadTitlePrompt.seed(from: subject) }
+        let entry = TranscriptEntry(kind: .user, text: text)
+        if !isEphemeral { entry.attachments = images.compactMap { app.store.saveAttachment($0, thread: id) } }
+        entries.append(entry)
+        if isFirstMessage { app.generateTitle(for: self, from: .firstMessage(subject)) }
         phase = .running
         idleReaper?.cancel()
         touch()
@@ -155,7 +160,7 @@ final class ThreadModel: Identifiable {
         Task {
             do {
                 let session = try await ensureSession()
-                try await session.send(text: text)
+                try await session.send(text: text, images: images)
             } catch {
                 fail(error.localizedDescription)
             }
@@ -176,11 +181,35 @@ final class ThreadModel: Identifiable {
     }
 
     func respond(to request: PermissionRequest, allow: Bool) {
+        respond(to: request, with: allow ? .allow() : .deny(message: "The user denied this action."))
+    }
+
+    /// Answers the agent's questions; your choices go back as the tool's result.
+    func answer(_ request: PermissionRequest, with answers: [String: [String]]) {
+        respond(to: request, with: .allow(updatedInputJSON: AgentQuestion.answeredInput(inputJSON: request.inputJSON, answers: answers)))
+    }
+
+    /// Approving a plan leaves plan mode for `mode`, for this thread's whole project, as
+    /// the permission chip shows. Rejecting it sends your feedback and keeps planning.
+    func decidePlan(_ request: PermissionRequest, approve mode: PermissionMode?, feedback: String) {
+        let feedback = feedback.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let mode else {
+            respond(to: request, with: .deny(message: feedback.isEmpty
+                ? "The user wants to keep planning. Ask what to change."
+                : "The user wants changes to the plan before you start: \(feedback)"))
+            return
+        }
+        respond(to: request, with: .allow(mode: mode.controlValue))
+        app.setPermissionMode(mode, for: projectID)
+        if !feedback.isEmpty { send(feedback) }
+    }
+
+    func respond(to request: PermissionRequest, with decision: PermissionDecision) {
         pendingPermissions.removeAll { $0.id == request.id }
         guard let start = sessionStart else { return }
         Task {
             do {
-                try await start.value.respond(to: request, allow: allow)
+                try await start.value.respond(to: request, with: decision)
             } catch {
                 fail(error.localizedDescription)
             }

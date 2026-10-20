@@ -4,13 +4,17 @@ import SwiftUI
 struct ComposerView: View {
     @Bindable var thread: ThreadModel
     @FocusState private var focused: Bool
+    @State private var pasteMonitor = ImagePasteMonitor()
 
     private var canSend: Bool {
-        !thread.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !thread.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !thread.draftImages.isEmpty
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
+            if !thread.draftImages.isEmpty {
+                DraftAttachments(thread: thread)
+            }
             TextField("Ask Claude…", text: $thread.draft, axis: .vertical)
                 .textFieldStyle(.plain)
                 .font(.body)
@@ -20,6 +24,14 @@ struct ComposerView: View {
                 .padding(.horizontal, 4)
 
             HStack(spacing: 4) {
+                Button("Attach Images", systemImage: "paperclip") {
+                    thread.attach(ImageIntake.choose())
+                }
+                .labelStyle(.iconOnly)
+                .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
+                .padding(.trailing, 2)
+                .help("Attach images (or paste and drop them)")
                 ModelChip(thread: thread)
                 EffortChip(thread: thread)
                 PermissionChip(thread: thread)
@@ -50,13 +62,20 @@ struct ComposerView: View {
         .padding(.top, 14)
         .padding(.bottom, 10)
         .glassEffect(.regular, in: .rect(cornerRadius: 22))
-        .onAppear { focused = true }
+        .animation(.snappy, value: thread.draftImages.isEmpty)
+        .onAppear {
+            focused = true
+            pasteMonitor.start { [thread] sources in thread.attach(sources) }
+        }
+        .onDisappear { pasteMonitor.stop() }
+        .onChange(of: focused, initial: true) { _, isFocused in pasteMonitor.isActive = isFocused }
     }
 
     private func send() {
         guard canSend else { return }
-        thread.send(thread.draft)
+        thread.send(thread.draft, images: thread.draftImages)
         thread.draft = ""
+        thread.draftImages = []
     }
 }
 

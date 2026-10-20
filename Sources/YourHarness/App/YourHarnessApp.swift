@@ -1,4 +1,5 @@
 import AppKit
+import HarnessCore
 import SwiftUI
 
 @main
@@ -70,7 +71,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let message = ProcessInfo.processInfo.environment["YH_SEND_MESSAGE"], !message.isEmpty {
             MainActor.assumeIsolated {
                 AppModel.shared.newThreadInCurrentProject()
-                AppModel.shared.selectedThread?.send(message)
+                let images = (ProcessInfo.processInfo.environment["YH_SEND_IMAGES"] ?? "")
+                    .split(separator: ":").compactMap { ImageAttachment.prepare(contentsOf: URL(fileURLWithPath: String($0))) }
+                AppModel.shared.selectedThread?.send(message, images: images)
             }
         }
         if ProcessInfo.processInfo.environment["YH_SIMULATE_STREAMING"] == "1" {

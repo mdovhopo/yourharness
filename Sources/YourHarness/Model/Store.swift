@@ -200,11 +200,38 @@ struct Store: Sendable {
             root = base.appending(path: "YourHarness", directoryHint: .isDirectory)
         }
         try? FileManager.default.createDirectory(at: threadsDirectory, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: attachmentsDirectory, withIntermediateDirectories: true)
     }
 
     private var stateURL: URL { root.appending(path: "state.json") }
     private var threadsDirectory: URL { root.appending(path: "threads", directoryHint: .isDirectory) }
     private func transcriptURL(_ id: UUID) -> URL { threadsDirectory.appending(path: "\(id.uuidString).json") }
+    /// Images you sent, one file each, named `<thread id>-<image id>.<ext>`.
+    private var attachmentsDirectory: URL { root.appending(path: "attachments", directoryHint: .isDirectory) }
+
+    func attachmentURL(_ name: String) -> URL { attachmentsDirectory.appending(path: name) }
+
+    /// Written right away: the message showing it is on screen a moment later.
+    func saveAttachment(_ image: ImageAttachment, thread: UUID) -> String? {
+        let name = "\(thread.uuidString)-\(image.id.uuidString).\(image.fileExtension)"
+        do {
+            try image.data.write(to: attachmentURL(name), options: .atomic)
+            return name
+        } catch {
+            return nil
+        }
+    }
+
+    func deleteAttachments(thread: UUID) {
+        let directory = attachmentsDirectory
+        let prefix = thread.uuidString + "-"
+        queue.async {
+            let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
+            for name in names where name.hasPrefix(prefix) {
+                try? FileManager.default.removeItem(at: directory.appending(path: name))
+            }
+        }
+    }
 
     func loadState() -> PersistedState {
         guard let data = try? Data(contentsOf: stateURL),

@@ -4,6 +4,7 @@ import SwiftUI
 struct ThreadView: View {
     @Environment(AppModel.self) private var app
     let thread: ThreadModel
+    @State private var dropTargeted = false
 
     private var showsTypingIndicator: Bool {
         thread.phase == .running && thread.pendingPermissions.isEmpty && !(thread.entries.last?.isStreaming ?? false)
@@ -37,10 +38,8 @@ struct ThreadView: View {
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 10) {
                 ForEach(thread.pendingPermissions) { request in
-                    PermissionCard(request: request) { allow in
-                        thread.respond(to: request, allow: allow)
-                    }
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    RequestCard(request: request, thread: thread)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
                 ComposerView(thread: thread)
             }
@@ -49,6 +48,22 @@ struct ThreadView: View {
             .padding(.bottom, 16)
             .animation(.snappy, value: thread.pendingPermissions)
         }
+        .onDrop(of: [.fileURL, .image], isTargeted: $dropTargeted) { providers in
+            Task { thread.attach(await ImageIntake.sources(from: providers)) }
+            return true
+        }
+        .overlay {
+            if dropTargeted {
+                RoundedRectangle(cornerRadius: 16)
+                    .strokeBorder(.tint, style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
+                    .background(.tint.opacity(0.05), in: .rect(cornerRadius: 16))
+                    .overlay { Label("Drop images to attach", systemImage: "photo.badge.plus").font(.title3) }
+                    .padding(8)
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.15), value: dropTargeted)
         .environment(\.issueLinker, app.issueLinker(for: thread))
         .navigationTitle(thread.title)
         .navigationSubtitle(subtitle)
@@ -75,6 +90,30 @@ private struct TypingIndicator: View {
         }
         .font(.callout)
         .onAppear { dimmed = true }
+    }
+}
+
+/// A question, a plan or a plain permission prompt, depending on the tool asking.
+private struct RequestCard: View {
+    let request: PermissionRequest
+    let thread: ThreadModel
+
+    var body: some View {
+        if request.toolName == AgentQuestion.toolName, let questions = AgentQuestion.parse(inputJSON: request.inputJSON) {
+            QuestionCard(questions: questions) { answers in
+                thread.answer(request, with: answers)
+            } skip: {
+                thread.respond(to: request, with: .deny(message: "The user chose not to answer. Continue with your best judgment, or ask in chat."))
+            }
+        } else if request.toolName == AgentPlan.toolName, let plan = AgentPlan.text(inputJSON: request.inputJSON) {
+            PlanCard(plan: plan, thread: thread) { mode, feedback in
+                thread.decidePlan(request, approve: mode, feedback: feedback)
+            }
+        } else {
+            PermissionCard(request: request) { allow in
+                thread.respond(to: request, allow: allow)
+            }
+        }
     }
 }
 

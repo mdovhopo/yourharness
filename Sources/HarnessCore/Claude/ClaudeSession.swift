@@ -106,10 +106,13 @@ public actor ClaudeSession {
         self.events = events
     }
 
-    public func send(text: String) throws {
+    /// Images go before the text, which is how the model reads them best.
+    public func send(text: String, images: [ImageAttachment] = []) throws {
+        var content: [[String: Any]] = images.map(\.messageBlock)
+        if !text.isEmpty || content.isEmpty { content.append(["type": "text", "text": text]) }
         try write([
             "type": "user",
-            "message": ["role": "user", "content": [["type": "text", "text": text]]],
+            "message": ["role": "user", "content": content],
         ])
     }
 
@@ -143,17 +146,31 @@ public actor ClaudeSession {
     }
 
     public func respond(to request: PermissionRequest, allow: Bool, denyMessage: String = "The user denied this action.") throws {
-        let decision: [String: Any]
-        if allow {
-            let input = (try? JSONSerialization.jsonObject(with: Data(request.inputJSON.utf8))) ?? [String: Any]()
-            decision = ["behavior": "allow", "updatedInput": input]
-        } else {
-            decision = ["behavior": "deny", "message": denyMessage]
+        try respond(to: request, with: allow ? .allow() : .deny(message: denyMessage))
+    }
+
+    public func respond(to request: PermissionRequest, with decision: PermissionDecision) throws {
+        try write(Self.response(to: request, with: decision))
+    }
+
+    static func response(to request: PermissionRequest, with decision: PermissionDecision) -> [String: Any] {
+        let body: [String: Any]
+        switch decision {
+        case .allow(let updatedInput, let mode):
+            let json = updatedInput ?? request.inputJSON
+            let input = (try? JSONSerialization.jsonObject(with: Data(json.utf8))) ?? [String: Any]()
+            var allow: [String: Any] = ["behavior": "allow", "updatedInput": input]
+            if let mode {
+                allow["updatedPermissions"] = [["type": "setMode", "mode": mode, "destination": "session"]]
+            }
+            body = allow
+        case .deny(let message):
+            body = ["behavior": "deny", "message": message]
         }
-        try write([
+        return [
             "type": "control_response",
-            "response": ["subtype": "success", "request_id": request.requestID, "response": decision],
-        ])
+            "response": ["subtype": "success", "request_id": request.requestID, "response": body],
+        ]
     }
 
     public func terminate() {

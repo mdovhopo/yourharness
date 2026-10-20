@@ -355,6 +355,7 @@ final class AppModel {
         thread.endSession()
         threads.removeAll { $0.id == thread.id }
         store.deleteTranscript(thread.id)
+        store.deleteAttachments(thread: thread.id)
         if selectedThreadID == thread.id { selectedThreadID = nil }
         save()
     }
