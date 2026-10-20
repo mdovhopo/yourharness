@@ -368,6 +368,7 @@ private struct PullRequestRow: View {
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.12), value: hovering)
         .onTapGesture { NSWorkspace.shared.open(pullRequest.url) }
+        .pointerStyle(.link)
         .help("Open \(pullRequest.remote.forge?.requestNoun ?? "pull request") in your browser")
         .contextMenu {
             Button("Open in Browser", systemImage: "safari") { NSWorkspace.shared.open(pullRequest.url) }

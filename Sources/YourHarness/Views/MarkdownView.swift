@@ -245,6 +245,68 @@ private struct TableBlock: View {
 
 /// Inline markdown via `AttributedString`, plus subtle backgrounds on code spans, bare
 /// URLs as links, and `#12`-style references linked to their PR or issue.
+/// Text with links that shows the pointing hand over them, as links do everywhere else
+/// on the Mac. Selectable text doesn't: its links keep the text cursor, and it's drawn
+/// without custom renderers. So an invisible, non-selectable twin with the same text in
+/// the same frame lays out identically, notes where its link pieces land, and draws
+/// nothing; hovering checks those frames.
+private struct LinkedText: View {
+    let text: AttributedString
+    @State private var linkFrames = LinkFrames()
+    @State private var overLink = false
+
+    var body: some View {
+        Text(text)
+            .textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
+            .background {
+                Self.tagged(text)
+                    .textRenderer(LinkFrameRenderer(frames: linkFrames))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+            }
+            .onContinuousHover { phase in
+                let isOver = switch phase {
+                case .active(let location): linkFrames.rects.contains { $0.contains(location) }
+                case .ended: false
+                }
+                if isOver != overLink { overLink = isOver }
+            }
+            .pointerStyle(overLink ? .link : nil)
+    }
+
+    /// One Text, with each link run carrying a marker the renderer can see.
+    private static func tagged(_ text: AttributedString) -> Text {
+        text.runs.reduce(Text(verbatim: "")) { result, run in
+            let piece = Text(AttributedString(text[run.range]))
+            return run.link == nil ? Text("\(result)\(piece)") : Text("\(result)\(piece.customAttribute(LinkMarker()))")
+        }
+    }
+}
+
+private struct LinkMarker: TextAttribute {}
+
+/// Written while drawing, read while hovering; never observed, so drawing doesn't loop.
+private final class LinkFrames {
+    var rects: [CGRect] = []
+}
+
+/// Draws nothing: it only notes where the link pieces are.
+private struct LinkFrameRenderer: TextRenderer {
+    let frames: LinkFrames
+
+    func draw(layout: Text.Layout, in context: inout GraphicsContext) {
+        var rects: [CGRect] = []
+        for line in layout {
+            for run in line where run[LinkMarker.self] != nil {
+                rects.append(run.typographicBounds.rect)
+            }
+        }
+        frames.rects = rects
+    }
+}
+
 private struct InlineText: View {
     let source: String
     var isTail = false
@@ -256,9 +318,14 @@ private struct InlineText: View {
     }
 
     var body: some View {
-        Text(Self.render(isTail ? MarkdownInline.closingUnterminated(source) : source, linker: linker))
-            .textSelection(.enabled)
-            .fixedSize(horizontal: false, vertical: true)
+        let rendered = Self.render(isTail ? MarkdownInline.closingUnterminated(source) : source, linker: linker)
+        if rendered.runs.contains(where: { $0.link != nil }) {
+            LinkedText(text: rendered)
+        } else {
+            Text(rendered)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     static func render(_ source: String, linker: IssueLinker) -> AttributedString {
