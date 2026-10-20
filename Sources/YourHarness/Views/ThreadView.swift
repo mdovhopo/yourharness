@@ -6,26 +6,30 @@ struct ThreadView: View {
     let thread: ThreadModel
     @State private var dropTargeted = false
     @State private var visibleHeight: CGFloat = 0
+    /// Keep the newest output in view as the transcript grows: while history loads, while
+    /// a reply streams. Your own scrolling turns it off; stopping at the bottom turns it
+    /// back on.
+    @State private var followsBottom = true
+    @State private var isAtBottom = true
+    private static let bottomID = "transcript-bottom"
 
     private var showsTypingIndicator: Bool {
         thread.phase == .running && thread.pendingPermissions.isEmpty && !(thread.entries.last?.isStreaming ?? false)
     }
 
     var body: some View {
+        ScrollViewReader { proxy in
+            transcript(proxy)
+        }
+        .environment(\.issueLinker, app.issueLinker(for: thread))
+        .navigationTitle(thread.title)
+        .navigationSubtitle(subtitle)
+        .task { thread.loadTranscriptIfNeeded() }
+    }
+
+    private func transcript(_ proxy: ScrollViewProxy) -> some View {
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 18) {
-                ForEach(thread.entries) { entry in
-                    EntryView(entry: entry)
-                        .transition(.asymmetric(
-                            insertion: .opacity.combined(with: .offset(y: 12)),
-                            removal: .opacity
-                        ))
-                }
-                if showsTypingIndicator {
-                    TypingIndicator()
-                        .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .leading)))
-                }
-            }
+            LazyVStack(alignment: .leading, spacing: 18) { rows }
             // Keyed on count, so streaming text doesn't animate, only new rows.
             .animation(.smooth(duration: 0.32), value: thread.entries.count)
             .animation(.smooth(duration: 0.25), value: showsTypingIndicator)
@@ -34,13 +38,44 @@ struct ThreadView: View {
             .padding(.horizontal, 28)
             .padding(.vertical, 24)
             .frame(minHeight: visibleHeight, alignment: .bottom)
+            .overlay(alignment: .bottom) { Color.clear.frame(height: 1).id(Self.bottomID) }
         }
-        .defaultScrollAnchor(.bottom)
-        .defaultScrollAnchor(.bottom, for: .sizeChanges)
-        // At least as tall as what's visible, messages at the bottom: a short thread would
-        // otherwise sit on a tall top inset, and the toolbar's edge effect tints all of it.
+        // Not for size changes: that anchor pulled you back down whenever any row's height
+        // changed, even while you were reading further up.
+        .defaultScrollAnchor(.bottom, for: .initialOffset)
+        .defaultScrollAnchor(.bottom, for: .alignment)
+        .onScrollGeometryChange(for: BottomTracking.self) { geometry in
+            // The reported content height counts the toolbar and composer insets; at the
+            // very bottom, offset + container + top inset equals it (measured both ways).
+            let reach = geometry.contentOffset.y + geometry.containerSize.height + geometry.contentInsets.top
+            return BottomTracking(contentHeight: geometry.contentSize.height,
+                                  isAtBottom: reach >= geometry.contentSize.height - 40)
+        } action: { old, new in
+            isAtBottom = new.isAtBottom
+            if followsBottom, new.contentHeight != old.contentHeight { proxy.scrollTo(Self.bottomID, anchor: .bottom) }
+        }
+        // Only scrolling decides, never a size change: while you scroll, nothing pulls you
+        // back down; once you stop, the bottom is followed again only if that's where you are.
+        .onScrollPhaseChange { old, phase in
+            if phase != .idle {
+                followsBottom = false
+            } else if old != .idle {
+                followsBottom = isAtBottom
+            }
+        }
+        // Sending a message takes you to it, wherever you'd scrolled.
+        .onChange(of: thread.entries.last?.id) {
+            guard thread.entries.last?.kind == .user else { return }
+            followsBottom = true
+            proxy.scrollTo(Self.bottomID, anchor: .bottom)
+        }
+        .modifier(ScrollProbe())
+        // At least as tall as what's visible between the toolbar and the composer, messages
+        // at the bottom: a short thread would otherwise sit on a tall top inset, and the
+        // toolbar's edge effect tints all of it. No taller, or an empty thread would already
+        // count as scrolled away from the bottom when its history loads.
         .onGeometryChange(for: CGFloat.self) { proxy in
-            proxy.size.height
+            proxy.size.height - proxy.safeAreaInsets.top - proxy.safeAreaInsets.bottom
         } action: { height in
             visibleHeight = height
         }
@@ -73,10 +108,21 @@ struct ThreadView: View {
             }
         }
         .animation(.easeOut(duration: 0.15), value: dropTargeted)
-        .environment(\.issueLinker, app.issueLinker(for: thread))
-        .navigationTitle(thread.title)
-        .navigationSubtitle(subtitle)
-        .task { thread.loadTranscriptIfNeeded() }
+    }
+
+    @ViewBuilder private var rows: some View {
+        ForEach(thread.entries) { entry in
+            EntryView(entry: entry)
+                .modifier(ScrollProbe.Row(id: entry.id))
+                .transition(.asymmetric(
+                    insertion: .opacity.combined(with: .offset(y: 12)),
+                    removal: .opacity
+                ))
+        }
+        if showsTypingIndicator {
+            TypingIndicator()
+                .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .leading)))
+        }
     }
 
     private var subtitle: String {
@@ -84,6 +130,11 @@ struct ThreadView: View {
         guard let model = thread.activeModelName else { return project }
         return "\(project) · \(model)"
     }
+}
+
+private struct BottomTracking: Equatable {
+    var contentHeight: CGFloat
+    var isAtBottom: Bool
 }
 
 private struct TypingIndicator: View {

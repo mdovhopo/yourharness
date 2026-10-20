@@ -63,21 +63,36 @@ enum DiagramStyle {
 
 // MARK: - Card
 
+/// Takes the width it's offered and the height the diagram needs at that width, in the
+/// same layout pass. Measuring the width first and rescaling after made every diagram
+/// change height just after it scrolled in, and the transcript jumped.
+private struct DiagramFrame: Layout {
+    let natural: CGSize
+
+    /// Shrink wide diagrams to the column, but not past where text gets hard to read.
+    static func scale(natural: CGSize, width: CGFloat) -> CGFloat {
+        guard natural.width > 0, width.isFinite, width > 0 else { return 1 }
+        return min(1, max(0.75, (width - DiagramStyle.padding * 2) / natural.width))
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let full = natural.width + DiagramStyle.padding * 2
+        let width = proposal.width.flatMap { $0.isFinite ? $0 : nil } ?? full
+        return CGSize(width: width, height: natural.height * Self.scale(natural: natural, width: width) + DiagramStyle.padding * 2)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        subviews.first?.place(at: bounds.origin, proposal: ProposedViewSize(bounds.size))
+    }
+}
+
 /// A ```mermaid block: drawn natively, with its source one click away.
 struct MermaidBlockView: View {
     let source: String
     @State private var showSource = false
     @State private var hovering = false
     @State private var copied = false
-    @State private var availableWidth: CGFloat = 0
     @Environment(\.openWindow) private var openWindow
-
-    /// Shrink wide diagrams to the column, but not past where text gets hard to read.
-    private func fitScale(_ entry: DiagramCache.Entry) -> CGFloat {
-        let width = DiagramCanvas.size(of: entry).width
-        guard availableWidth > 0, width > 0 else { return 1 }
-        return min(1, max(0.75, (availableWidth - DiagramStyle.padding * 2) / width))
-    }
 
     var body: some View {
         let entry = DiagramCache.entry(for: source)
@@ -108,24 +123,23 @@ struct MermaidBlockView: View {
                 .scrollIndicators(.never)
                 .transition(.opacity)
             } else {
-                let scale = fitScale(entry)
                 let size = DiagramCanvas.size(of: entry)
-                ScrollView(.horizontal) {
-                    DiagramCanvas(entry: entry)
-                        .scaleEffect(scale, anchor: .topLeading)
-                        .frame(width: size.width * scale, height: size.height * scale, alignment: .topLeading)
-                        .padding(DiagramStyle.padding)
+                DiagramFrame(natural: size) {
+                    GeometryReader { proxy in
+                        let scale = DiagramFrame.scale(natural: size, width: proxy.size.width)
+                        ScrollView(.horizontal) {
+                            DiagramCanvas(entry: entry)
+                                .scaleEffect(scale, anchor: .topLeading)
+                                .frame(width: size.width * scale, height: size.height * scale, alignment: .topLeading)
+                                .padding(DiagramStyle.padding)
+                        }
+                        .scrollIndicators(.automatic)
+                    }
                 }
-                .scrollIndicators(.automatic)
                 .transition(.opacity)
             }
         }
-        .background(Color.primary.opacity(0.025), in: .rect(cornerRadius: 12, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(.separator.opacity(0.6))
-        }
-        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { availableWidth = $0 }
+        .card()
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.15), value: hovering)
         .animation(.smooth(duration: 0.2), value: showSource)
