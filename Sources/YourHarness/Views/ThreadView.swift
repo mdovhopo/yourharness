@@ -5,6 +5,7 @@ struct ThreadView: View {
     @Environment(AppModel.self) private var app
     let thread: ThreadModel
     @State private var dropTargeted = false
+    @State private var visibleHeight: CGFloat = 0
 
     private var showsTypingIndicator: Bool {
         thread.phase == .running && thread.pendingPermissions.isEmpty && !(thread.entries.last?.isStreaming ?? false)
@@ -32,9 +33,17 @@ struct ThreadView: View {
             .frame(maxWidth: .infinity)
             .padding(.horizontal, 28)
             .padding(.vertical, 24)
+            .frame(minHeight: visibleHeight, alignment: .bottom)
         }
         .defaultScrollAnchor(.bottom)
         .defaultScrollAnchor(.bottom, for: .sizeChanges)
+        // At least as tall as what's visible, messages at the bottom: a short thread would
+        // otherwise sit on a tall top inset, and the toolbar's edge effect tints all of it.
+        .onGeometryChange(for: CGFloat.self) { proxy in
+            proxy.size.height
+        } action: { height in
+            visibleHeight = height
+        }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 10) {
                 ForEach(thread.pendingPermissions) { request in
@@ -156,6 +165,6 @@ struct PermissionCard: View {
             .controlSize(.large)
         }
         .padding(14)
-        .glassEffect(.regular.tint(.orange.opacity(0.12)), in: .rect(cornerRadius: 18))
+        .glassEffect(.regular.tint(.orange.opacity(0.12)), in: .rect(cornerRadius: Theme.floatingRadius))
     }
 }

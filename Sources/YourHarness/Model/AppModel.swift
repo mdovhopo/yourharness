@@ -84,6 +84,7 @@ final class AppModel {
         diagramInstructions = state.diagramInstructions
         autoSettleDays = state.autoSettleDays
         titleGeneration = state.titleGeneration
+        showsInspector = state.showsInspector
 
         threads = state.threads.map { ThreadModel(meta: $0, app: self) }
         selectedThreadID = state.selectedThreadID
@@ -119,13 +120,19 @@ final class AppModel {
         threads.first { $0.id == selectedThreadID }
     }
 
-    /// The right sidebar, where you follow a thread's sub-agents.
-    var showsInspector = false
+    /// The right sidebar, where you follow a thread's sub-agents. Stays as you left it.
+    private(set) var showsInspector = false
+
+    func setShowsInspector(_ shows: Bool) {
+        guard shows != showsInspector else { return }
+        showsInspector = shows
+        save()
+    }
 
     /// Opens the right sidebar on one sub-agent of the thread on screen.
     func inspect(_ run: SubagentRun) {
         selectedThread?.inspectedSubagentID = run.id
-        showsInspector = true
+        setShowsInspector(true)
     }
 
     /// The thread on screen right now; nil while a project overview is showing.
@@ -803,6 +810,7 @@ final class AppModel {
         state.diagramInstructions = diagramInstructions
         state.autoSettleDays = autoSettleDays
         state.titleGeneration = titleGeneration
+        state.showsInspector = showsInspector
         store.saveState(state)
     }
 

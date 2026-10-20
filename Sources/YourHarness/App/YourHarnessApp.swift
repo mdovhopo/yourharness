@@ -24,7 +24,7 @@ struct YourHarnessApp: App {
                     .keyboardShortcut("o", modifiers: [.command, .shift])
             }
             CommandGroup(after: .sidebar) {
-                Button(app.showsInspector ? "Hide Sub-agents" : "Show Sub-agents") { app.showsInspector.toggle() }
+                Button(app.showsInspector ? "Hide Sub-agents" : "Show Sub-agents") { app.setShowsInspector(!app.showsInspector) }
                     .keyboardShortcut("0", modifiers: [.command, .option])
             }
             CommandMenu("Thread") {
@@ -67,6 +67,12 @@ struct YourHarnessApp: App {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Development: force light or dark, for checking both without changing the system.
+        switch ProcessInfo.processInfo.environment["YH_APPEARANCE"] {
+        case "dark": NSApp.appearance = NSAppearance(named: .darkAqua)
+        case "light": NSApp.appearance = NSAppearance(named: .aqua)
+        default: break
+        }
         // Needed when running the bare executable (`swift run`) rather than the .app bundle.
         NSApp.setActivationPolicy(.regular)
         NSApp.activate()

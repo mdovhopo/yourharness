@@ -49,7 +49,7 @@ struct QuestionCard: View {
             .controlSize(.large)
         }
         .padding(14)
-        .glassEffect(.regular.tint(.blue.opacity(0.1)), in: .rect(cornerRadius: 18))
+        .glassEffect(.regular.tint(.blue.opacity(0.1)), in: .rect(cornerRadius: Theme.floatingRadius))
     }
 }
 
@@ -64,11 +64,7 @@ private struct QuestionView: View {
                 Image(systemName: "questionmark.bubble")
                     .foregroundStyle(.blue)
                 if let header = question.header, !header.isEmpty {
-                    Text(header)
-                        .font(.caption.weight(.semibold))
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 2)
-                        .background(.blue.opacity(0.14), in: .capsule)
+                    Chip(header, tint: .blue)
                 }
                 Text(question.question)
                     .font(.headline)
@@ -141,7 +137,7 @@ private struct OptionRow: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 6)
             .background(hovering || isSelected ? Color.primary.opacity(isSelected ? 0.07 : 0.04) : .clear,
-                        in: .rect(cornerRadius: 8))
+                        in: .rect(cornerRadius: Theme.innerRadius))
             .contentShape(.rect)
         }
         .buttonStyle(.plain)
@@ -200,7 +196,7 @@ struct PlanCard: View {
             .controlSize(.large)
         }
         .padding(14)
-        .glassEffect(.regular.tint(.green.opacity(0.1)), in: .rect(cornerRadius: 18))
+        .glassEffect(.regular.tint(.green.opacity(0.1)), in: .rect(cornerRadius: Theme.floatingRadius))
     }
 }
 

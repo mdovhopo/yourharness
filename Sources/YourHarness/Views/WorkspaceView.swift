@@ -71,7 +71,7 @@ private struct WorkspaceHeader: View {
                 .font(.system(size: 22, weight: .medium))
                 .foregroundStyle(.secondary)
                 .frame(width: 44, height: 44)
-                .background(.fill.tertiary, in: .rect(cornerRadius: 11, style: .continuous))
+                .card()
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(project.name)
@@ -287,11 +287,7 @@ private struct StackList: View {
                     }
                 }
                 .padding(.vertical, 3)
-                .background(.fill.quinary, in: .rect(cornerRadius: 12, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .strokeBorder(.separator.opacity(0.5))
-                }
+                .card()
                 .padding(.bottom, 8)
         }
     }
@@ -430,12 +426,7 @@ private struct ReviewBadge: View {
         case .none: (nil, .clear)
         }
         if let text {
-            Text(text)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(color)
-                .padding(.horizontal, 7)
-                .padding(.vertical, 2)
-                .background(color.opacity(0.14), in: .capsule)
+            Chip(text, tint: color)
                 .help(review == .changesRequested ? "Changes requested" : review == .required ? "Review required" : "Approved")
         }
     }
@@ -459,7 +450,7 @@ private struct ForgeNotice: View {
             }
         }
         .padding(12)
-        .background(.orange.opacity(0.08), in: .rect(cornerRadius: 10, style: .continuous))
+        .card(tint: .orange)
     }
 }
 
@@ -535,10 +526,10 @@ private struct CardSegment: ViewModifier {
             .overlay(alignment: .bottom) {
                 if !isLast { Divider().padding(.leading, 40) }
             }
-            .background(.fill.quinary, in: shape)
+            .background(.fill.quaternary, in: shape)
             .overlay {
                 // Push the horizontal edges out of view on middle rows, then clip them off.
-                shape.strokeBorder(.separator.opacity(0.5))
+                shape.strokeBorder(.separator.opacity(0.6))
                     .padding(.top, isFirst ? 0 : -2)
                     .padding(.bottom, isLast ? 0 : -2)
             }

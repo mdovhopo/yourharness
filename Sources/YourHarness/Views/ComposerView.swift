@@ -188,12 +188,7 @@ private struct ModelPicker: View {
                     .font(.headline)
                 Spacer()
                 if let plan = app.claudeAccount?.planName {
-                    Text(plan)
-                        .font(.caption.weight(.medium))
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 2)
-                        .background(Color.claude.opacity(0.15), in: .capsule)
-                        .foregroundStyle(Color.claude)
+                    Chip(plan, tint: .claude)
                 }
             }
             .padding(.horizontal, 8)

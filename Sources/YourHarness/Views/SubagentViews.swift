@@ -44,11 +44,7 @@ struct SubagentCallView: View {
                     .padding(12)
             }
         }
-        .background(.quaternary.opacity(0.35), in: .rect(cornerRadius: 12))
-        .overlay {
-            RoundedRectangle(cornerRadius: 12)
-                .strokeBorder(borderStyle, lineWidth: run?.isRunning == true ? 1.5 : 1)
-        }
+        .card(border: borderStyle, lineWidth: run?.isRunning == true ? 1.5 : 1)
         .animation(.snappy, value: run?.isRunning)
     }
 
@@ -70,7 +66,7 @@ struct SubagentCallView: View {
                         .fontWeight(.medium)
                         .lineLimit(1)
                     if let type = run?.agentType {
-                        AgentTypeChip(type: type)
+                        Chip(type)
                     }
                 }
                 if let run {
@@ -156,21 +152,6 @@ struct SubagentStatusIcon: View {
         case .stopped:
             Image(systemName: "stop.circle").foregroundStyle(.secondary)
         }
-    }
-}
-
-private struct AgentTypeChip: View {
-    let type: String
-
-    var body: some View {
-        Text(type)
-            .font(.caption.weight(.medium))
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 1)
-            .background(.quaternary, in: .capsule)
-            .lineLimit(1)
-            .fixedSize()
     }
 }
 
@@ -277,7 +258,7 @@ private struct RunList: View {
                         .padding(.horizontal, 8)
                         .padding(.vertical, 5)
                         .background(run.id == selected ? AnyShapeStyle(.tint.opacity(0.15)) : AnyShapeStyle(.clear),
-                                    in: .rect(cornerRadius: 7))
+                                    in: .rect(cornerRadius: Theme.innerRadius))
                         .contentShape(.rect)
                     }
                     .buttonStyle(.plain)
@@ -330,7 +311,7 @@ private struct SubagentDetail: View {
                     }
                     .padding(12)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(.tint.opacity(0.06), in: .rect(cornerRadius: 12))
+                    .card(tint: .accentColor)
                 }
             }
             .padding(16)
@@ -399,6 +380,7 @@ private struct PromptBox: View {
                 .textSelection(.enabled)
         }
         .padding(10)
-        .background(.quaternary.opacity(0.35), in: .rect(cornerRadius: 10))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .card()
     }
 }

@@ -200,7 +200,7 @@ private struct TableBlock: View {
                 ForEach(0..<table.columnCount, id: \.self) { column in
                     cell(table.header[column], column: column)
                         .font(.system(size: MarkdownMetrics.small, weight: .semibold))
-                        .background(Color.primary.opacity(0.045))
+                        .background(.fill.quaternary)
                         .gridColumnAlignment(alignment(column))
                 }
             }
@@ -214,11 +214,8 @@ private struct TableBlock: View {
                 }
             }
         }
-        .clipShape(.rect(cornerRadius: 10, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(.separator)
-        }
+        .clipShape(.rect(cornerRadius: Theme.cardRadius, style: .continuous))
+        .card()
         .fixedSize(horizontal: false, vertical: true)
     }
 
@@ -355,11 +352,7 @@ struct CodeBlockView: View {
             .padding(.horizontal, 12)
             .padding(.top, 8)
         }
-        .background(Color.primary.opacity(0.04), in: .rect(cornerRadius: 10, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(.separator.opacity(0.6))
-        }
+        .card()
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.12), value: hovering)
     }

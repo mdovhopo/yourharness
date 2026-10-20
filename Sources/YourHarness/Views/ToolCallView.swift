@@ -68,11 +68,7 @@ struct ToolCallView: View {
                     .padding(12)
             }
         }
-        .background(.quaternary.opacity(0.35), in: .rect(cornerRadius: 12))
-        .overlay {
-            RoundedRectangle(cornerRadius: 12)
-                .strokeBorder(entry.toolIsError ? AnyShapeStyle(.red.opacity(0.5)) : AnyShapeStyle(.separator.opacity(0.6)))
-        }
+        .card(border: entry.toolIsError ? AnyShapeStyle(.red.opacity(0.5)) : nil)
     }
 
     private func header(_ presentation: ToolPresentation) -> some View {
@@ -151,7 +147,7 @@ struct CodeBox: View {
         }
         .frame(maxHeight: 320)
         .fixedSize(horizontal: false, vertical: true)
-        .background(.background.opacity(0.6), in: .rect(cornerRadius: 8))
+        .background(.background.opacity(0.6), in: .rect(cornerRadius: Theme.innerRadius))
     }
 }
 
@@ -173,7 +169,7 @@ private struct DiffView: View {
         }
         .font(.system(.callout, design: .monospaced))
         .textSelection(.enabled)
-        .clipShape(.rect(cornerRadius: 8))
+        .clipShape(.rect(cornerRadius: Theme.innerRadius))
     }
 }
 

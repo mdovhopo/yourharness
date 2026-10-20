@@ -23,10 +23,13 @@ struct RootView: View {
                         .transition(.opacity)
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // One surface under every view, so switching crossfades content, not the canvas.
+            .canvasBackground()
             // A quick crossfade when switching threads, not a hard cut.
             .animation(.easeInOut(duration: 0.16), value: app.selectedThreadID)
             .animation(.easeInOut(duration: 0.16), value: app.overviewProjectID)
-            .inspector(isPresented: Bindable(app).showsInspector) {
+            .inspector(isPresented: Binding(get: { app.showsInspector }, set: { app.setShowsInspector($0) })) {
                 Group {
                     if app.overviewProject == nil, let thread = app.selectedThread {
                         SubagentInspector(thread: thread)
@@ -37,7 +40,7 @@ struct RootView: View {
                 }
                 .inspectorColumnWidth(min: 300, ideal: 380, max: 640)
                 .toolbar {
-                    Button("Sub-agents", systemImage: "sidebar.trailing") { app.showsInspector.toggle() }
+                    Button("Sub-agents", systemImage: "sidebar.trailing") { app.setShowsInspector(!app.showsInspector) }
                         .help(app.showsInspector ? "Hide sub-agents (⌥⌘0)" : "Show sub-agents (⌥⌘0)")
                 }
             }

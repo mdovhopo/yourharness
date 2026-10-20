@@ -99,11 +99,7 @@ private struct GitToolRow: View {
                 HStack(spacing: 6) {
                     Text(name)
                     if let account {
-                        Text(account)
-                            .font(.caption.weight(.medium))
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 1)
-                            .background(.tint.opacity(0.15), in: .capsule)
+                        Chip(account, tint: .accentColor)
                             .help("Signed in as \(account)")
                     }
                 }
@@ -302,12 +298,7 @@ private struct OtherAgentRow: View {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
                     Text(cli.name)
-                    Text("Soon")
-                        .font(.caption2.weight(.semibold))
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 1)
-                        .background(.quaternary, in: .capsule)
-                        .foregroundStyle(.secondary)
+                    Chip("Soon")
                 }
                 if let path = status?.path {
                     Text(path.path)

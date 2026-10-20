@@ -118,6 +118,8 @@ struct PersistedState: Codable {
     var autoSettleDays = 3
     /// Who names new threads. Claude Code's Haiku unless changed.
     var titleGeneration = TitleGenerationSettings()
+    /// The right sidebar was open at quit.
+    var showsInspector = false
 
     init() {}
 
@@ -139,6 +141,7 @@ struct PersistedState: Codable {
         diagramInstructions = try container.decodeIfPresent(Bool.self, forKey: .diagramInstructions) ?? true
         autoSettleDays = try container.decodeIfPresent(Int.self, forKey: .autoSettleDays) ?? 3
         titleGeneration = try container.decodeIfPresent(TitleGenerationSettings.self, forKey: .titleGeneration) ?? TitleGenerationSettings()
+        showsInspector = try container.decodeIfPresent(Bool.self, forKey: .showsInspector) ?? false
     }
 }
 

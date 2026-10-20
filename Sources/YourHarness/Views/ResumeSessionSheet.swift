@@ -159,6 +159,6 @@ private struct SessionPreview: View {
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.quaternary.opacity(0.5), in: .rect(cornerRadius: 10))
+        .card()
     }
 }
