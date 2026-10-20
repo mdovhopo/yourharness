@@ -6,7 +6,8 @@ import HarnessCore
 @MainActor @Observable
 final class TranscriptEntry: Identifiable {
     enum Kind: String, Codable {
-        case user, assistant, thinking, tool, notice
+        /// `commandOutput`: what a built-in command printed, e.g. `/context`.
+        case user, assistant, thinking, tool, notice, commandOutput
     }
 
     enum NoticeStyle: String, Codable {

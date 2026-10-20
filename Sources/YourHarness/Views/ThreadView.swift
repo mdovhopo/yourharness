@@ -40,19 +40,19 @@ struct ThreadView: View {
             .frame(minHeight: visibleHeight, alignment: .bottom)
             .overlay(alignment: .bottom) { Color.clear.frame(height: 1).id(Self.bottomID) }
         }
-        // Not for size changes: that anchor pulled you back down whenever any row's height
-        // changed, even while you were reading further up.
         .defaultScrollAnchor(.bottom, for: .initialOffset)
         .defaultScrollAnchor(.bottom, for: .alignment)
-        .onScrollGeometryChange(for: BottomTracking.self) { geometry in
+        // Pinned to the bottom as the transcript grows, but only while following: always on,
+        // it pulled you back down whenever any row's height changed while you read further
+        // up. (Scrolling to the end by hand as rows arrived could instead leave the lazy
+        // stack drawing nothing when a very tall row came in.)
+        .defaultScrollAnchor(followsBottom ? .bottom : nil, for: .sizeChanges)
+        .onScrollGeometryChange(for: Bool.self) { geometry in
             // The reported content height counts the toolbar and composer insets; at the
             // very bottom, offset + container + top inset equals it (measured both ways).
-            let reach = geometry.contentOffset.y + geometry.containerSize.height + geometry.contentInsets.top
-            return BottomTracking(contentHeight: geometry.contentSize.height,
-                                  isAtBottom: reach >= geometry.contentSize.height - 40)
-        } action: { old, new in
-            isAtBottom = new.isAtBottom
-            if followsBottom, new.contentHeight != old.contentHeight { proxy.scrollTo(Self.bottomID, anchor: .bottom) }
+            geometry.contentOffset.y + geometry.containerSize.height + geometry.contentInsets.top >= geometry.contentSize.height - 40
+        } action: { _, atBottom in
+            isAtBottom = atBottom
         }
         // Only scrolling decides, never a size change: while you scroll, nothing pulls you
         // back down; once you stop, the bottom is followed again only if that's where you are.
@@ -120,7 +120,7 @@ struct ThreadView: View {
                 ))
         }
         if showsTypingIndicator {
-            TypingIndicator()
+            TypingIndicator(text: thread.activity ?? "Working…")
                 .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .leading)))
         }
     }
@@ -132,18 +132,14 @@ struct ThreadView: View {
     }
 }
 
-private struct BottomTracking: Equatable {
-    var contentHeight: CGFloat
-    var isAtBottom: Bool
-}
-
-private struct TypingIndicator: View {
+struct TypingIndicator: View {
+    var text = "Working…"
     @State private var dimmed = false
 
     var body: some View {
         HStack(spacing: 8) {
             SpinningClaudeMark(size: 14)
-            Text("Working…")
+            Text(text)
                 .foregroundStyle(.secondary)
                 .opacity(dimmed ? 0.45 : 1)
                 .animation(.easeInOut(duration: 1.1).repeatForever(), value: dimmed)
@@ -154,7 +150,7 @@ private struct TypingIndicator: View {
 }
 
 /// A question, a plan or a plain permission prompt, depending on the tool asking.
-private struct RequestCard: View {
+struct RequestCard: View {
     let request: PermissionRequest
     let thread: ThreadModel
 

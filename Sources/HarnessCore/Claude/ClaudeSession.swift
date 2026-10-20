@@ -13,6 +13,14 @@ public struct ClaudeLaunchOptions: Sendable {
     public var resumeSessionID: String?
     /// Extra instructions after Claude Code's own system prompt, e.g. what this app renders.
     public var appendSystemPrompt: String?
+    /// With `resumeSessionID`: continue in a copy, leaving the original untouched.
+    public var forkSession = false
+    /// Only these built-in tools; nil leaves the CLI's set.
+    public var tools: [String]?
+    /// No MCP servers: `tools` alone doesn't limit theirs.
+    public var withoutMCP = false
+    /// Off: nothing is written to the session history on disk.
+    public var persistsSession = true
 
     public init(
         executable: URL,
@@ -48,7 +56,13 @@ public struct ClaudeLaunchOptions: Sendable {
         if let permissionMode { args += ["--permission-mode", permissionMode] }
         if let appendSystemPrompt { args += ["--append-system-prompt", appendSystemPrompt] }
         if let effort { args += ["--effort", effort] }
-        if let resumeSessionID { args += ["--resume", resumeSessionID] }
+        if let resumeSessionID {
+            args += ["--resume", resumeSessionID]
+            if forkSession { args.append("--fork-session") }
+        }
+        if let tools { args += ["--tools", tools.joined(separator: ",")] }
+        if withoutMCP { args.append("--strict-mcp-config") }
+        if !persistsSession { args.append("--no-session-persistence") }
         return args
     }
 }

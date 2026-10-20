@@ -19,6 +19,14 @@ public enum AgentEvent: Sendable, Equatable {
     case subagentProgress(toolUseID: String, activity: String?, usage: SubagentUsage)
     case subagentFinished(SubagentEnd)
     case permissionRequest(PermissionRequest)
+    /// What a built-in command printed (`/context`, `/usage`, ...): markdown, not a reply.
+    case commandOutput(String)
+    /// The conversation was summarized to free context (`/compact`, or automatically).
+    case compacted(Compaction)
+    /// `/clear`: the CLI starts a new session with empty context.
+    case conversationReset
+    /// `/rename`.
+    case titleChanged(String)
     case rateLimit(RateLimitInfo)
     /// Tokens in the context window after the latest top-level assistant message.
     case contextUsage(tokens: Int)
@@ -101,6 +109,13 @@ public struct SubagentEnd: Sendable, Equatable {
     /// Its final report.
     public var summary: String?
     public var usage: SubagentUsage
+}
+
+public struct Compaction: Sendable, Equatable {
+    /// "manual" or "auto".
+    public var trigger: String
+    public var tokensBefore: Int?
+    public var tokensAfter: Int?
 }
 
 public struct PermissionRequest: Sendable, Equatable, Identifiable {

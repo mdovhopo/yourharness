@@ -7,6 +7,8 @@ import Foundation
 public struct ClaudeStreamParser: Sendable {
     /// Fallback for stream events that arrive without `api_message_id`.
     private var currentMessageID = ""
+    /// While compacting, the CLI replays the messages it kept; they're already shown.
+    private var compacting = false
 
     public init() {}
 
@@ -20,14 +22,19 @@ public struct ClaudeStreamParser: Sendable {
         switch type {
         case "system":
             return parseSystem(object)
+        case "conversation_reset":
+            return [.conversationReset]
         case "stream_event":
             guard let event = object["event"] as? [String: Any] else { return [] }
             return parseStreamEvent(event, messageID: object["api_message_id"] as? String, parent: parent)
         case "assistant":
-            guard let message = object["message"] as? [String: Any],
-                  let id = message["id"] as? String
-            else { return [] }
+            guard !compacting, let message = object["message"] as? [String: Any] else { return [] }
             let blocks = (message["content"] as? [[String: Any]] ?? []).compactMap(Self.contentBlock)
+            if object["local_command_source"] != nil {
+                let text = blocks.compactMap { if case .text(let text) = $0 { text } else { nil } }.joined(separator: "\n")
+                return text.isEmpty ? [] : [.commandOutput(text)]
+            }
+            guard let id = message["id"] as? String else { return [] }
             return [.assistantMessage(messageID: id, blocks: blocks, parentToolUseID: parent)]
         case "user":
             guard let message = object["message"] as? [String: Any],
@@ -43,6 +50,7 @@ public struct ClaudeStreamParser: Sendable {
             guard let info = object["rate_limit_info"] as? [String: Any] else { return [] }
             return [.rateLimit(Self.rateLimit(info))]
         case "result":
+            compacting = false
             let modelUsage = object["modelUsage"] as? [String: [String: Any]] ?? [:]
             return [.turnCompleted(TurnResult(
                 isError: object["is_error"] as? Bool ?? false,
@@ -59,7 +67,7 @@ public struct ClaudeStreamParser: Sendable {
 
     // MARK: - Line types
 
-    private func parseSystem(_ object: [String: Any]) -> [AgentEvent] {
+    private mutating func parseSystem(_ object: [String: Any]) -> [AgentEvent] {
         switch object["subtype"] as? String {
         case "init":
             guard let sessionID = object["session_id"] as? String else { return [] }
@@ -71,7 +79,17 @@ public struct ClaudeStreamParser: Sendable {
                 cliVersion: object["claude_code_version"] as? String
             ))]
         case "status":
-            return (object["status"] as? String).map { [.status($0)] } ?? []
+            guard let status = object["status"] as? String else { return [] }
+            if status == "compacting" { compacting = true }
+            if status == "requesting" { compacting = false }
+            return [.status(status)]
+        case "compact_boundary":
+            let metadata = object["compact_metadata"] as? [String: Any] ?? [:]
+            return [.compacted(Compaction(trigger: metadata["trigger"] as? String ?? "auto",
+                                          tokensBefore: metadata["pre_tokens"] as? Int,
+                                          tokensAfter: metadata["post_tokens"] as? Int))]
+        case "session_title_changed":
+            return (object["title"] as? String).map { [.titleChanged($0)] } ?? []
         case "task_started":
             guard object["task_type"] as? String ?? "local_agent" == "local_agent",
                   let toolUseID = object["tool_use_id"] as? String,
@@ -165,7 +183,8 @@ public struct ClaudeStreamParser: Sendable {
         else { return [] }
         return [.catalog(ClaudeCatalog(
             models: models.compactMap(ClaudeModel.init(json:)),
-            cliVersion: payload["claude_code_version"] as? String
+            cliVersion: payload["claude_code_version"] as? String,
+            commands: (payload["commands"] as? [[String: Any]] ?? []).compactMap(SlashCommand.init(json:))
         ))]
     }
 

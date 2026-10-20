@@ -21,6 +21,7 @@ struct ComposerView: View {
                 .lineLimit(1...12)
                 .focused($focused)
                 .onSubmit(send)
+                .slashCommandMenu(text: $thread.draft, projectID: thread.projectID, run: send)
                 .padding(.horizontal, 4)
 
             HStack(spacing: 4) {

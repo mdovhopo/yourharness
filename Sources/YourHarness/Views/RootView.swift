@@ -33,16 +33,16 @@ struct RootView: View {
             .inspector(isPresented: Binding(get: { app.showsInspector }, set: { app.setShowsInspector($0) })) {
                 Group {
                     if app.overviewProject == nil, let thread = app.selectedThread {
-                        SubagentInspector(thread: thread)
+                        ThreadInspector(thread: thread)
                             .environment(\.issueLinker, app.issueLinker(for: thread))
                     } else {
-                        ContentUnavailableView("No Thread Selected", systemImage: "person.2")
+                        ContentUnavailableView("No Thread Selected", systemImage: "sidebar.trailing")
                     }
                 }
                 .inspectorColumnWidth(min: 300, ideal: 380, max: 640)
                 .toolbar {
-                    Button("Sub-agents", systemImage: "sidebar.trailing") { app.setShowsInspector(!app.showsInspector) }
-                        .help(app.showsInspector ? "Hide sub-agents (⌥⌘0)" : "Show sub-agents (⌥⌘0)")
+                    Button("Sidebar", systemImage: "sidebar.trailing") { app.setShowsInspector(!app.showsInspector) }
+                        .help(app.showsInspector ? "Hide the side chat and sub-agents (⌥⌘0)" : "Show the side chat and sub-agents (⌥⌘0)")
                 }
             }
         }

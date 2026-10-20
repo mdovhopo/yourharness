@@ -15,4 +15,9 @@ enum AgentInstructions {
     To highlight things such as risks or gaps, use a class, e.g. `classDef gap stroke:#e5484d,stroke-dasharray:4` \
     then `class X,Y gap`. Quote labels that contain punctuation, e.g. A["Parse (v2)"].
     """
+
+    /// For a `/btw` side chat, a read-only copy of a thread's conversation.
+    static let sideChat = """
+    This is a side conversation. You are a copy of the conversation above, opened so the user can ask     something on the side without interrupting or adding to the main thread; nothing said here reaches it.     Answer the question directly and briefly. You can read and search files, but not change anything or run     commands; if the answer needs that, say what the main thread should do.
+    """
 }

@@ -19,11 +19,13 @@ struct EntryView: View {
             ToolCallView(entry: entry)
         case .notice:
             NoticeView(text: entry.text, style: entry.noticeStyle)
+        case .commandOutput:
+            CommandOutputView(text: entry.text)
         }
     }
 }
 
-private struct UserMessageView: View {
+struct UserMessageView: View {
     @Environment(AppModel.self) private var app
     let text: String
     let attachments: [String]
@@ -47,7 +49,7 @@ private struct UserMessageView: View {
                     }
                 }
                 if !text.isEmpty {
-                    Text(text)
+                    message
                         .textSelection(.enabled)
                         .padding(.horizontal, 14)
                         .padding(.vertical, 10)
@@ -55,6 +57,33 @@ private struct UserMessageView: View {
                 }
             }
         }
+    }
+}
+
+extension UserMessageView {
+    /// A command reads as one: its name in monospace, then what you passed it.
+    var message: Text {
+        guard let command = SlashCommand.parse(text) else { return Text(text) }
+        let name = Text("/\(command.name)").font(.body.monospaced().weight(.semibold))
+        return command.arguments.isEmpty ? name : Text("\(name) \(command.arguments)")
+    }
+}
+
+/// What a built-in command printed, like `/context`'s usage table.
+private struct CommandOutputView: View {
+    let text: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Command output", systemImage: "terminal")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            MarkdownView(text: text)
+                .textSelection(.enabled)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .card()
     }
 }
 

@@ -120,6 +120,9 @@ struct PersistedState: Codable {
     var titleGeneration = TitleGenerationSettings()
     /// The right sidebar was open at quit.
     var showsInspector = false
+    /// Each project's slash commands and skills as the CLI last listed them, keyed by
+    /// project ID, so the "/" menu fills instantly.
+    var slashCommands: [String: [SlashCommand]] = [:]
     var appearance = Appearance.system
 
     init() {}
@@ -143,6 +146,7 @@ struct PersistedState: Codable {
         autoSettleDays = try container.decodeIfPresent(Int.self, forKey: .autoSettleDays) ?? 3
         titleGeneration = try container.decodeIfPresent(TitleGenerationSettings.self, forKey: .titleGeneration) ?? TitleGenerationSettings()
         showsInspector = try container.decodeIfPresent(Bool.self, forKey: .showsInspector) ?? false
+        slashCommands = try container.decodeIfPresent([String: [SlashCommand]].self, forKey: .slashCommands) ?? [:]
         appearance = try container.decodeIfPresent(Appearance.self, forKey: .appearance) ?? .system
     }
 }

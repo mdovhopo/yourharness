@@ -24,7 +24,7 @@ struct YourHarnessApp: App {
                     .keyboardShortcut("o", modifiers: [.command, .shift])
             }
             CommandGroup(after: .sidebar) {
-                Button(app.showsInspector ? "Hide Sub-agents" : "Show Sub-agents") { app.setShowsInspector(!app.showsInspector) }
+                Button(app.showsInspector ? "Hide Right Sidebar" : "Show Right Sidebar") { app.setShowsInspector(!app.showsInspector) }
                     .keyboardShortcut("0", modifiers: [.command, .option])
             }
             CommandMenu("Thread") {

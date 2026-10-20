@@ -77,6 +77,9 @@ final class AppModel {
         cliPathOverrides = state.cliPathOverrides
         defaults = state.defaults
         claudeModels = state.claudeModels
+        slashCommands = Dictionary(uniqueKeysWithValues: state.slashCommands.compactMap { key, commands in
+            UUID(uuidString: key).map { ($0, commands) }
+        })
         contextWindows = state.contextWindows
         rateLimit = state.rateLimit
         rateLimitUpdatedAt = state.rateLimitUpdatedAt
@@ -137,8 +140,21 @@ final class AppModel {
         NSApp.appearance = (override ?? appearance).nsAppearance
     }
 
-    /// The right sidebar, where you follow a thread's sub-agents. Stays as you left it.
+    /// The right sidebar: a thread's side chat and its sub-agents. Stays as you left it.
     private(set) var showsInspector = false
+
+    enum InspectorPanel: String, CaseIterable, Identifiable {
+        case sideChat, subagents
+        var id: String { rawValue }
+        var label: String { self == .sideChat ? "Side Chat" : "Sub-agents" }
+    }
+
+    var inspectorPanel = InspectorPanel.sideChat
+
+    func showInspector(_ panel: InspectorPanel) {
+        inspectorPanel = panel
+        setShowsInspector(true)
+    }
 
     func setShowsInspector(_ shows: Bool) {
         guard shows != showsInspector else { return }
@@ -149,7 +165,7 @@ final class AppModel {
     /// Opens the right sidebar on one sub-agent of the thread on screen.
     func inspect(_ run: SubagentRun) {
         selectedThread?.inspectedSubagentID = run.id
-        setShowsInspector(true)
+        showInspector(.subagents)
     }
 
     /// The thread on screen right now; nil while a project overview is showing.
@@ -473,7 +489,7 @@ final class AppModel {
         await bootstrap?.value
         guard let executable = claudeExecutable else { throw HarnessError.claudeNotFound }
         guard let project = project(id: thread.projectID) else { throw HarnessError.projectMissing }
-        return ClaudeLaunchOptions(
+        var options = ClaudeLaunchOptions(
             executable: executable,
             workingDirectory: project.url,
             environment: environment,
@@ -483,6 +499,20 @@ final class AppModel {
             resumeSessionID: thread.sessionID,
             appendSystemPrompt: diagramInstructions ? AgentInstructions.diagrams : nil
         )
+        if thread.isSideChat {
+            // A copy of the thread's conversation that can look but not touch, and leaves
+            // nothing behind: read-only tools, no MCP servers, nothing saved.
+            if thread.sessionID == nil, let source = thread.forksSession {
+                options.resumeSessionID = source
+                options.forkSession = true
+            }
+            options.permissionMode = nil
+            options.tools = ["Read", "Glob", "Grep"]
+            options.withoutMCP = true
+            options.persistsSession = false
+            options.appendSystemPrompt = [options.appendSystemPrompt, AgentInstructions.sideChat].compactMap(\.self).joined(separator: "\n\n")
+        }
+        return options
     }
 
     // MARK: - Models & defaults
@@ -512,10 +542,51 @@ final class AppModel {
         return EffortLevel.allCases.filter { supported.contains($0.rawValue) }
     }
 
-    func updateCatalog(_ catalog: ClaudeCatalog) {
-        guard !catalog.models.isEmpty, catalog.models != claudeModels else { return }
-        claudeModels = catalog.models
-        save()
+    func updateCatalog(_ catalog: ClaudeCatalog, projectID: UUID? = nil) {
+        var changed = false
+        if !catalog.models.isEmpty, catalog.models != claudeModels {
+            claudeModels = catalog.models
+            changed = true
+        }
+        if let projectID, !catalog.commands.isEmpty, slashCommands[projectID] != catalog.commands {
+            slashCommands[projectID] = catalog.commands
+            changed = true
+        }
+        if changed { save() }
+    }
+
+    // MARK: - Slash commands
+
+    /// By project: commands and skills depend on the folder (its `.claude/commands`, skills).
+    private(set) var slashCommands: [UUID: [SlashCommand]] = [:]
+    @ObservationIgnored private var commandLoads: Set<UUID> = []
+
+    /// Commands the app handles itself.
+    static let appCommands = [
+        SlashCommand(name: "btw", description: "Ask a side question in the sidebar. Claude sees this thread; nothing is added to it.",
+                     argumentHint: "<question>", isBuiltin: true),
+    ]
+
+    /// What the "/" menu offers in a project: the app's own, then the CLI's.
+    func slashCommands(for projectID: UUID) -> [SlashCommand] {
+        let own = Set(Self.appCommands.map(\.name))
+        return Self.appCommands + (slashCommands[projectID] ?? []).filter {
+            !own.contains($0.name) && !SlashCommand.terminalOnly.contains($0.name)
+        }
+    }
+
+    /// Lists a project's commands with a throwaway CLI process (no request is made), once
+    /// per launch, so the menu is right even before a thread there has started a session.
+    func loadSlashCommands(for projectID: UUID) {
+        guard !commandLoads.contains(projectID), let project = project(id: projectID) else { return }
+        commandLoads.insert(projectID)
+        Task {
+            await bootstrap?.value
+            guard let executable = claudeExecutable,
+                  let catalog = await ClaudeCatalog.load(executable: executable, environment: environment, workingDirectory: project.url)
+            else { return }
+            updateCatalog(catalog, projectID: projectID)
+        }
     }
 
     func updateRateLimit(_ info: RateLimitInfo) {
@@ -820,6 +891,7 @@ final class AppModel {
         state.cliPathOverrides = cliPathOverrides
         state.defaults = defaults
         state.claudeModels = claudeModels
+        state.slashCommands = Dictionary(uniqueKeysWithValues: slashCommands.map { ($0.uuidString, $1) })
         state.contextWindows = contextWindows
         state.rateLimit = rateLimit
         state.rateLimitUpdatedAt = rateLimitUpdatedAt

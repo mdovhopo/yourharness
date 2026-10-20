@@ -52,6 +52,15 @@ final class ThreadModel: Identifiable {
     var draftImages: [ImageAttachment] = []
     /// A generated title is on its way; the current one is a placeholder.
     private(set) var isGeneratingTitle = false
+    /// What the agent is doing when it isn't writing, e.g. compacting the conversation.
+    private(set) var activity: String?
+    /// `/btw`: questions on the side, in a copy of this conversation. Shown in the right
+    /// sidebar; nothing asked there reaches this thread.
+    private(set) var sideChat: ThreadModel?
+    /// A thread's `/btw` side chat: not saved, read-only tools, never reaped.
+    let isSideChat: Bool
+    /// For a side chat: the session it forks from when it starts. Nil starts fresh.
+    let forksSession: String?
 
     @ObservationIgnored private unowned let app: AppModel
     @ObservationIgnored private var sessionStart: Task<ClaudeSession, Error>?
@@ -72,6 +81,8 @@ final class ThreadModel: Identifiable {
     @ObservationIgnored private var titleRequest: UUID?
     /// The first message didn't say what this is about; retitle once a turn has.
     @ObservationIgnored private var titleNeedsRefinement = false
+    /// You sent `/rename`; the CLI's title change that follows is yours to apply.
+    @ObservationIgnored private var renameRequested = false
 
     /// Idle `claude` processes cost hundreds of MB each; drop them and `--resume` later.
     private static let idleTimeout = Duration.seconds(10 * 60)
@@ -81,13 +92,33 @@ final class ThreadModel: Identifiable {
         self.projectID = projectID
         self.app = app
         self.isEphemeral = isEphemeral
+        isSideChat = false
+        forksSession = nil
         title = Self.untitled
         createdAt = .now
         updatedAt = .now
         transcriptLoaded = true
     }
 
+    /// A side chat for `parent`, starting from its conversation as it is now.
+    init(sideChatOf parent: ThreadModel, app: AppModel) {
+        id = UUID()
+        projectID = parent.projectID
+        self.app = app
+        isEphemeral = true
+        isSideChat = true
+        forksSession = parent.sessionID
+        title = "Side Chat"
+        model = parent.model
+        effort = parent.effort
+        createdAt = .now
+        updatedAt = .now
+        transcriptLoaded = true
+    }
+
     init(meta: ThreadMeta, app: AppModel) {
+        isSideChat = false
+        forksSession = nil
         id = meta.id
         projectID = meta.projectID
         self.app = app
@@ -152,8 +183,18 @@ final class ThreadModel: Identifiable {
     // MARK: - Actions
 
     func send(_ text: String, images: [ImageAttachment] = []) {
-        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        var text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !images.isEmpty else { return }
+        if images.isEmpty, let command = SlashCommand.parse(text) {
+            if isSideChat, command.name == "btw" {
+                // Already on the side: the question is all that's left.
+                text = command.arguments
+                guard !text.isEmpty else { return }
+            } else if handleLocally(command) {
+                return
+            }
+            if command.name == "rename" { renameRequested = true }
+        }
         loadTranscriptIfNeeded()
         // Picking a settled thread back up brings it back to the list, and new activity
         // lifts the hold an un-settle puts on automatic settling.
@@ -178,6 +219,50 @@ final class ThreadModel: Identifiable {
                 fail(error.localizedDescription)
             }
         }
+    }
+
+    /// Commands the app does itself, so its own state stays true: `/btw` opens the side
+    /// chat, `/model` and `/effort` go through the same pickers as the composer's chips.
+    private func handleLocally(_ command: (name: String, arguments: String)) -> Bool {
+        switch command.name {
+        case "btw":
+            askAside(command.arguments)
+            return true
+        case "model" where !command.arguments.isEmpty:
+            guard let model = app.claudeModels.first(where: { $0.value.caseInsensitiveCompare(command.arguments) == .orderedSame }) else { return false }
+            setModel(model.value == "default" ? nil : model.value)
+            entries.append(.notice("Model set to \(app.modelDisplayName(for: model.value))"))
+            return true
+        case "effort" where !command.arguments.isEmpty:
+            guard let level = EffortLevel(rawValue: command.arguments.lowercased()) else { return false }
+            setEffort(level.rawValue)
+            entries.append(.notice("Reasoning effort set to \(level.label)"))
+            return true
+        default:
+            return false
+        }
+    }
+
+    // MARK: - Side chat
+
+    /// Opens the side chat in the sidebar and asks it `question`, if there is one. It
+    /// starts from a copy of this conversation as it is now.
+    func askAside(_ question: String) {
+        let chat = sideChat ?? startSideChat()
+        app.showInspector(.sideChat)
+        if !question.isEmpty { chat.send(question) }
+    }
+
+    private func startSideChat() -> ThreadModel {
+        let chat = ThreadModel(sideChatOf: self, app: app)
+        sideChat = chat
+        return chat
+    }
+
+    /// Ends the side chat; the next `/btw` starts a new copy.
+    func closeSideChat() {
+        sideChat?.endSession()
+        sideChat = nil
     }
 
     func stopSubagent(_ run: SubagentRun) {
@@ -328,6 +413,30 @@ final class ThreadModel: Identifiable {
 
         case .status(let status):
             if status == "requesting" { phase = .running }
+            activity = status == "compacting" ? "Compacting the conversation…" : nil
+
+        case .commandOutput(let text):
+            entries.append(TranscriptEntry(kind: .commandOutput, text: text))
+
+        case .compacted(let compaction):
+            activity = nil
+            var notice = compaction.trigger == "manual" ? "Conversation compacted" : "Conversation compacted automatically"
+            if let before = compaction.tokensBefore, let after = compaction.tokensAfter {
+                notice += " · \(Self.tokens(before)) → \(Self.tokens(after)) tokens"
+            }
+            entries.append(.notice(notice))
+            if let after = compaction.tokensAfter { contextTokens = after }
+
+        case .conversationReset:
+            // The CLI moves to a new session; its init event brings the new ID.
+            entries.append(.notice("Context cleared. Claude starts fresh from here."))
+            contextTokens = nil
+
+        case .titleChanged(let newTitle):
+            // Only for your /rename: a title the CLI picks itself doesn't replace ours.
+            guard renameRequested, !isSideChat else { return }
+            renameRequested = false
+            rename(newTitle)
 
         case .blockStarted(let ref, let kind):
             // Subagent internals (non-nil parent) get a nested view later; skip for now.
@@ -429,12 +538,13 @@ final class ThreadModel: Identifiable {
             contextTokens = tokens
 
         case .catalog(let catalog):
-            app.updateCatalog(catalog)
+            app.updateCatalog(catalog, projectID: projectID)
 
         case .controlFailed:
             break
 
         case .turnCompleted(let result):
+            activity = nil
             app.rememberContextWindows(result.contextWindows)
             if let model = activeModelName, let window = result.contextWindows[model] {
                 contextWindow = window
@@ -451,7 +561,7 @@ final class ThreadModel: Identifiable {
             }
             interruptRequested = false
             settle()
-            app.turnFinished(in: projectID)
+            if !isSideChat { app.turnFinished(in: projectID) }
             if titleNeedsRefinement, !result.isError {
                 titleNeedsRefinement = false
                 app.generateTitle(for: self, from: .conversation)
@@ -512,8 +622,14 @@ final class ThreadModel: Identifiable {
         persist()
     }
 
+    static func tokens(_ count: Int) -> String {
+        count < 1000 ? "\(count)" : "\((Double(count) / 1000).formatted(.number.precision(.fractionLength(count < 10_000 ? 1 : 0))))k"
+    }
+
     private func scheduleIdleReap() {
         idleReaper?.cancel()
+        // A side chat can't be resumed: it isn't saved. It lives while it's open.
+        if isSideChat { return }
         idleReaper = Task { [weak self] in
             try? await Task.sleep(for: Self.idleTimeout)
             guard !Task.isCancelled, let self, !self.isWorking else { return }
