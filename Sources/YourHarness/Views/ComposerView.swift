@@ -10,18 +10,31 @@ struct ComposerView: View {
         !thread.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !thread.draftImages.isEmpty
     }
 
+    /// Claude is working: ↩ steers (after its current step), ⌘↩ interrupts and sends.
+    private var isSteering: Bool {
+        thread.phase == .running && thread.hasLiveSession
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
+            if !thread.queuedMessages.isEmpty {
+                QueuedMessages(thread: thread)
+            }
             if !thread.draftImages.isEmpty {
                 DraftAttachments(thread: thread)
             }
-            TextField("Ask Claude…", text: $thread.draft, axis: .vertical)
+            TextField(isSteering ? "Steer Claude… ↩ after its current step, ⌘↩ right now" : "Ask Claude…", text: $thread.draft, axis: .vertical)
                 .textFieldStyle(.plain)
                 .font(.body)
                 .lineLimit(1...12)
                 .focused($focused)
-                .onSubmit(send)
-                .slashCommandMenu(text: $thread.draft, projectID: thread.projectID, run: send)
+                .onSubmit { send() }
+                .onKeyPress(.return, phases: .down) { press in
+                    guard press.modifiers.contains(.command) else { return .ignored }
+                    send(interrupting: true)
+                    return .handled
+                }
+                .slashCommandMenu(text: $thread.draft, projectID: thread.projectID) { send() }
                 .padding(.horizontal, 4)
 
             HStack(spacing: 4) {
@@ -48,14 +61,23 @@ struct ComposerView: View {
                         .buttonBorderShape(.circle)
                         .help("Stop (⌘.)")
                 }
-                Button("Send", systemImage: "arrow.up") { send() }
+                if isSteering, canSend {
+                    Button("Interrupt and Send", systemImage: "bolt.fill") { send(interrupting: true) }
+                        .labelStyle(.iconOnly)
+                        .buttonStyle(.glass)
+                        .buttonBorderShape(.circle)
+                        .help("Interrupt Claude and send this now (⌘↩)")
+                        .transition(.scale.combined(with: .opacity))
+                }
+                Button(isSteering ? "Steer" : "Send", systemImage: isSteering ? "arrow.turn.down.right" : "arrow.up") { send() }
                     .labelStyle(.iconOnly)
                     .fontWeight(.semibold)
                     .buttonStyle(.glassProminent)
                     .buttonBorderShape(.circle)
                     .tint(.claude)
                     .disabled(!canSend)
-                    .help("Send (↩) · New line (⌥↩)")
+                    .contentTransition(.symbolEffect(.replace))
+                    .help(isSteering ? "Steer: Claude reads this after its current step (↩) · New line (⌥↩)" : "Send (↩) · New line (⌥↩)")
             }
             .controlSize(.regular)
         }
@@ -64,6 +86,8 @@ struct ComposerView: View {
         .padding(.bottom, 10)
         .glassEffect(.regular, in: .rect(cornerRadius: 22))
         .animation(.snappy, value: thread.draftImages.isEmpty)
+        .animation(.snappy, value: thread.queuedMessages.map(\.id))
+        .animation(.snappy, value: isSteering && canSend)
         .onAppear {
             focused = true
             pasteMonitor.start { [thread] sources in thread.attach(sources) }
@@ -72,11 +96,64 @@ struct ComposerView: View {
         .onChange(of: focused, initial: true) { _, isFocused in pasteMonitor.isActive = isFocused }
     }
 
-    private func send() {
+    private func send(interrupting: Bool = false) {
         guard canSend else { return }
-        thread.send(thread.draft, images: thread.draftImages)
+        thread.send(thread.draft, images: thread.draftImages, interrupting: interrupting)
         thread.draft = ""
         thread.draftImages = []
+    }
+}
+
+/// Messages sent while Claude works, waiting for its current step. Each can still go now
+/// (Claude is interrupted), come back to the composer, or be dropped.
+private struct QueuedMessages: View {
+    let thread: ThreadModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(thread.queuedMessages) { message in
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Image(systemName: message.pending == .sendingNow ? "bolt.fill" : "clock")
+                        .foregroundStyle(.secondary)
+                        .frame(width: 16)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(message.text.isEmpty ? "Image" : message.text)
+                            .lineLimit(2)
+                        Text(status(message))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 8)
+                    if message.pending == nil {
+                        HStack(spacing: 2) {
+                            Button("Send Now", systemImage: "bolt") { thread.sendNow(message) }
+                                .help("Interrupt Claude and send this now")
+                            Button("Edit", systemImage: "pencil") { thread.withdraw(message, toComposer: true) }
+                                .help("Take it back into the composer")
+                            Button("Remove", systemImage: "xmark") { thread.withdraw(message, toComposer: false) }
+                                .help("Don't send it")
+                        }
+                        .labelStyle(.iconOnly)
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(.secondary)
+                    } else {
+                        ProgressView().controlSize(.small)
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .card(radius: Theme.innerRadius + 4)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+    }
+
+    private func status(_ message: ThreadModel.QueuedMessage) -> String {
+        switch message.pending {
+        case .sendingNow: "Interrupting Claude to send this…"
+        case .withdrawing: "Taking it back…"
+        case nil: "Queued · Claude reads it after its current step"
+        }
     }
 }
 

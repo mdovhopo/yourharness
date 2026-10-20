@@ -6,56 +6,66 @@ struct ThreadView: View {
     let thread: ThreadModel
     @State private var dropTargeted = false
     @State private var visibleHeight: CGFloat = 0
+    /// Shorter than the screen: only then does the transcript get a minimum height.
+    @State private var isShort = true
+    /// Where you are: the row at the bottom edge, not a pixel offset.
+    @State private var position = ScrollPosition(idType: String.self, edge: .bottom)
     /// Keep the newest output in view as the transcript grows: while history loads, while
     /// a reply streams. Your own scrolling turns it off; stopping at the bottom turns it
     /// back on.
     @State private var followsBottom = true
     @State private var isAtBottom = true
-    private static let bottomID = "transcript-bottom"
+    private static let typingID = "typing-indicator"
 
     private var showsTypingIndicator: Bool {
         thread.phase == .running && thread.pendingPermissions.isEmpty && !(thread.entries.last?.isStreaming ?? false)
     }
 
-    var body: some View {
-        ScrollViewReader { proxy in
-            transcript(proxy)
-        }
-        .environment(\.issueLinker, app.issueLinker(for: thread))
-        .navigationTitle(thread.title)
-        .navigationSubtitle(subtitle)
-        .task { thread.loadTranscriptIfNeeded() }
+    /// The row the conversation ends with right now.
+    private var lastRowID: String? {
+        showsTypingIndicator ? Self.typingID : thread.entries.last?.id
     }
 
-    private func transcript(_ proxy: ScrollViewProxy) -> some View {
+    var body: some View {
+        transcript
+            .environment(\.issueLinker, app.issueLinker(for: thread))
+            .navigationTitle(thread.title)
+            .navigationSubtitle(subtitle)
+            .task { thread.loadTranscriptIfNeeded() }
+    }
+
+    private var transcript: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 18) { rows }
-            // Keyed on count, so streaming text doesn't animate, only new rows.
-            .animation(.smooth(duration: 0.32), value: thread.entries.count)
-            .animation(.smooth(duration: 0.25), value: showsTypingIndicator)
-            .frame(maxWidth: 820)
-            .frame(maxWidth: .infinity)
-            .padding(.horizontal, 28)
-            .padding(.vertical, 24)
-            .frame(minHeight: visibleHeight, alignment: .bottom)
-            .overlay(alignment: .bottom) { Color.clear.frame(height: 1).id(Self.bottomID) }
+                .scrollTargetLayout()
+                // Keyed on count, so streaming text doesn't animate, only new rows.
+                .animation(.smooth(duration: 0.32), value: thread.entries.count)
+                .animation(.smooth(duration: 0.25), value: showsTypingIndicator)
+                .frame(maxWidth: 820)
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, 28)
+                .padding(.vertical, 24)
+                .frame(minHeight: isShort ? visibleHeight : nil, alignment: .bottom)
         }
+        // Your place is a row, not an offset. The lazy stack keeps revising its height
+        // estimates for rows off screen; held by offset, the view jumped every time, and
+        // pinning to the bottom pulled you back down. Held by the row at the bottom edge,
+        // that row stays put. Following the conversation is keeping the last row there.
+        .scrollPosition($position, anchor: .bottom)
         .defaultScrollAnchor(.bottom, for: .initialOffset)
-        .defaultScrollAnchor(.bottom, for: .alignment)
-        // Pinned to the bottom as the transcript grows, but only while following: always on,
-        // it pulled you back down whenever any row's height changed while you read further
-        // up. (Scrolling to the end by hand as rows arrived could instead leave the lazy
-        // stack drawing nothing when a very tall row came in.)
-        .defaultScrollAnchor(followsBottom ? .bottom : nil, for: .sizeChanges)
-        .onScrollGeometryChange(for: Bool.self) { geometry in
+        .onScrollGeometryChange(for: ScrollState.self) { geometry in
             // The reported content height counts the toolbar and composer insets; at the
             // very bottom, offset + container + top inset equals it (measured both ways).
-            geometry.contentOffset.y + geometry.containerSize.height + geometry.contentInsets.top >= geometry.contentSize.height - 40
-        } action: { _, atBottom in
-            isAtBottom = atBottom
+            ScrollState(offset: geometry.contentOffset.y, contentHeight: geometry.contentSize.height,
+                        containerHeight: geometry.containerSize.height,
+                        isAtBottom: geometry.contentOffset.y + geometry.containerSize.height + geometry.contentInsets.top >= geometry.contentSize.height - 40)
+        } action: { old, new in
+            isAtBottom = new.isAtBottom
+            isShort = new.contentHeight <= new.containerHeight + 0.5
+            // Moved while the content stayed the same size: that's scrolling, by any means
+            // (a scroll bar drag may report no phase), so follow only if it ended at the bottom.
+            if new.contentHeight == old.contentHeight, new.offset != old.offset { followsBottom = new.isAtBottom }
         }
-        // Only scrolling decides, never a size change: while you scroll, nothing pulls you
-        // back down; once you stop, the bottom is followed again only if that's where you are.
         .onScrollPhaseChange { old, phase in
             if phase != .idle {
                 followsBottom = false
@@ -63,19 +73,17 @@ struct ThreadView: View {
                 followsBottom = isAtBottom
             }
         }
-        // Sending a message takes you to it, wherever you'd scrolled.
-        .onChange(of: thread.entries.last?.id) {
-            guard thread.entries.last?.kind == .user else { return }
-            followsBottom = true
-            proxy.scrollTo(Self.bottomID, anchor: .bottom)
+        // A new row: show it if you're following. Sending a message always takes you to it.
+        .onChange(of: lastRowID) { _, id in
+            guard let id else { return }
+            if thread.entries.last?.id == id, thread.entries.last?.kind == .user { followsBottom = true }
+            if followsBottom { position.scrollTo(id: id, anchor: .bottom) }
         }
-        .modifier(ScrollProbe())
-        // At least as tall as what's visible between the toolbar and the composer, messages
-        // at the bottom: a short thread would otherwise sit on a tall top inset, and the
-        // toolbar's edge effect tints all of it. No taller, or an empty thread would already
-        // count as scrolled away from the bottom when its history loads.
+        .modifier(ScrollProbe(position: $position))
+        // At least as tall as the scroll view, messages at the bottom: a short thread
+        // would otherwise sit on a tall top inset, and the toolbar's edge effect tints all of it.
         .onGeometryChange(for: CGFloat.self) { proxy in
-            proxy.size.height - proxy.safeAreaInsets.top - proxy.safeAreaInsets.bottom
+            proxy.size.height
         } action: { height in
             visibleHeight = height
         }
@@ -121,6 +129,7 @@ struct ThreadView: View {
         }
         if showsTypingIndicator {
             TypingIndicator(text: thread.activity ?? "Working…")
+                .id(Self.typingID)
                 .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .leading)))
         }
     }
@@ -130,6 +139,13 @@ struct ThreadView: View {
         guard let model = thread.activeModelName else { return project }
         return "\(project) · \(model)"
     }
+}
+
+private struct ScrollState: Equatable {
+    var offset: CGFloat
+    var contentHeight: CGFloat
+    var containerHeight: CGFloat
+    var isAtBottom: Bool
 }
 
 struct TypingIndicator: View {

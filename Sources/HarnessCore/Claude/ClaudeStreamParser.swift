@@ -24,6 +24,11 @@ public struct ClaudeStreamParser: Sendable {
             return parseSystem(object)
         case "conversation_reset":
             return [.conversationReset]
+        case "command_lifecycle":
+            guard let id = object["command_uuid"] as? String,
+                  let state = (object["state"] as? String).flatMap(MessageState.init(rawValue:))
+            else { return [] }
+            return [.messageLifecycle(id: id, state: state)]
         case "stream_event":
             guard let event = object["event"] as? [String: Any] else { return [] }
             return parseStreamEvent(event, messageID: object["api_message_id"] as? String, parent: parent)

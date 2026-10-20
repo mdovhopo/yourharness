@@ -31,6 +31,16 @@ final class TranscriptEntry: Identifiable {
     var noticeStyle = NoticeStyle.info
     /// Images sent with a user message: file names in the store's attachments folder.
     var attachments: [String] = []
+    /// How a message you sent while Claude was working got to it.
+    var delivery = Delivery.normal
+
+    enum Delivery: String, Codable {
+        case normal
+        /// Waited for Claude's current step, then joined the turn: steering.
+        case steered
+        /// Claude was stopped so this went in right away.
+        case interrupted
+    }
 
     init(id: String = UUID().uuidString, kind: Kind, text: String = "", isStreaming: Bool = false) {
         self.id = id
@@ -59,6 +69,7 @@ struct EntrySnapshot: Codable, Sendable {
     var noticeStyle: TranscriptEntry.NoticeStyle?
     var attachments: [String]?
     var subagent: SubagentSnapshot?
+    var delivery: TranscriptEntry.Delivery?
 }
 
 extension TranscriptEntry {
@@ -73,7 +84,8 @@ extension TranscriptEntry {
             toolIsError: toolIsError ? true : nil,
             noticeStyle: kind == .notice ? noticeStyle : nil,
             attachments: attachments.isEmpty ? nil : attachments,
-            subagent: subagent?.snapshot
+            subagent: subagent?.snapshot,
+            delivery: delivery == .normal ? nil : delivery
         )
     }
 
@@ -86,6 +98,7 @@ extension TranscriptEntry {
         noticeStyle = snapshot.noticeStyle ?? .info
         attachments = snapshot.attachments ?? []
         subagent = snapshot.subagent.map { SubagentRun(id: snapshot.id, snapshot: $0) }
+        delivery = snapshot.delivery ?? .normal
     }
 }
 

@@ -27,6 +27,8 @@ public enum AgentEvent: Sendable, Equatable {
     case conversationReset
     /// `/rename`.
     case titleChanged(String)
+    /// A message you sent was queued, picked up by Claude, finished, or dropped.
+    case messageLifecycle(id: String, state: MessageState)
     case rateLimit(RateLimitInfo)
     /// Tokens in the context window after the latest top-level assistant message.
     case contextUsage(tokens: Int)
@@ -109,6 +111,20 @@ public struct SubagentEnd: Sendable, Equatable {
     /// Its final report.
     public var summary: String?
     public var usage: SubagentUsage
+}
+
+public enum MessageState: String, Sendable, Equatable {
+    case queued, started, completed, cancelled
+}
+
+/// When a message sent during a turn reaches Claude.
+public enum MessagePriority: String, Sendable {
+    /// Stop the current turn for it.
+    case now
+    /// After the current step: steering. What the CLI does by default.
+    case next
+    /// After the turn ends.
+    case later
 }
 
 public struct Compaction: Sendable, Equatable {

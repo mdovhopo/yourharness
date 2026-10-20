@@ -49,6 +49,9 @@ public struct ClaudeLaunchOptions: Sendable {
             "--output-format", "stream-json",
             "--verbose",
             "--include-partial-messages",
+            // Echo each message back and report when it's queued, picked up, done: that's
+            // how a message sent while Claude works shows where it entered the conversation.
+            "--replay-user-messages",
             // Route permission prompts to us as `control_request`s instead of denying.
             "--permission-prompt-tool", "stdio",
         ]
@@ -120,14 +123,28 @@ public actor ClaudeSession {
         self.events = events
     }
 
-    /// Images go before the text, which is how the model reads them best.
-    public func send(text: String, images: [ImageAttachment] = []) throws {
+    /// Images go before the text, which is how the model reads them best. `id` comes back
+    /// in `messageLifecycle` events. Sent while a turn runs, the CLI holds the message and
+    /// hands it to Claude after the current step (steering); `.now` doesn't wait.
+    public func send(text: String, images: [ImageAttachment] = [], id: String? = nil, priority: MessagePriority? = nil) throws {
+        try write(Self.userMessage(text: text, images: images, id: id, priority: priority))
+    }
+
+    static func userMessage(text: String, images: [ImageAttachment] = [], id: String? = nil, priority: MessagePriority? = nil) -> [String: Any] {
         var content: [[String: Any]] = images.map(\.messageBlock)
         if !text.isEmpty || content.isEmpty { content.append(["type": "text", "text": text]) }
-        try write([
+        var message: [String: Any] = [
             "type": "user",
             "message": ["role": "user", "content": content],
-        ])
+        ]
+        if let id { message["uuid"] = id }
+        if let priority { message["priority"] = priority.rawValue }
+        return message
+    }
+
+    /// Withdraws a message that's still waiting; a no-op once Claude has it.
+    public func cancelQueuedMessage(_ id: String) throws {
+        try control(["subtype": "cancel_async_message", "message_uuid": id])
     }
 
     /// Stops the current turn. The process survives and accepts the next message.

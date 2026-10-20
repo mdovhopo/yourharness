@@ -54,6 +54,20 @@ final class ThreadModel: Identifiable {
     private(set) var isGeneratingTitle = false
     /// What the agent is doing when it isn't writing, e.g. compacting the conversation.
     private(set) var activity: String?
+    /// Sent while Claude works, waiting for its current step to finish. Each joins the
+    /// transcript where Claude picks it up.
+    private(set) var queuedMessages: [QueuedMessage] = []
+
+    struct QueuedMessage: Identifiable {
+        let id: String
+        let text: String
+        let images: [ImageAttachment]
+        let attachments: [String]
+        /// You asked for it to go now (Claude is being stopped), or to take it back.
+        var pending: Pending?
+
+        enum Pending { case sendingNow, withdrawing }
+    }
     /// `/btw`: questions on the side, in a copy of this conversation. Shown in the right
     /// sidebar; nothing asked there reaches this thread.
     private(set) var sideChat: ThreadModel?
@@ -83,6 +97,11 @@ final class ThreadModel: Identifiable {
     @ObservationIgnored private var titleNeedsRefinement = false
     /// You sent `/rename`; the CLI's title change that follows is yours to apply.
     @ObservationIgnored private var renameRequested = false
+    /// The turn is being stopped for a message of yours, which says so itself; the
+    /// stopped turn gets no "Interrupted" notice.
+    @ObservationIgnored private var interruptingForMessage = false
+    /// Messages to restore into the composer once their withdrawal is confirmed.
+    @ObservationIgnored private var restoreOnWithdraw: Set<String> = []
 
     /// Idle `claude` processes cost hundreds of MB each; drop them and `--resume` later.
     private static let idleTimeout = Duration.seconds(10 * 60)
@@ -182,7 +201,9 @@ final class ThreadModel: Identifiable {
 
     // MARK: - Actions
 
-    func send(_ text: String, images: [ImageAttachment] = []) {
+    /// While Claude works, a message steers by default: it waits for the current step and
+    /// joins the turn. `interrupting` stops Claude so it goes in right away.
+    func send(_ text: String, images: [ImageAttachment] = [], interrupting: Bool = false) {
         var text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !images.isEmpty else { return }
         if images.isEmpty, let command = SlashCommand.parse(text) {
@@ -203,22 +224,61 @@ final class ThreadModel: Identifiable {
         let isFirstMessage = title == Self.untitled && !entries.contains { $0.kind == .user }
         let subject = text.isEmpty ? (images.count == 1 ? "Attached image" : "Attached images") : text
         if isFirstMessage { title = ThreadTitlePrompt.seed(from: subject) }
-        let entry = TranscriptEntry(kind: .user, text: text)
-        if !isEphemeral { entry.attachments = images.compactMap { app.store.saveAttachment($0, thread: id) } }
-        entries.append(entry)
+        let messageID = UUID().uuidString.lowercased()
+        let attachments = isEphemeral ? [] : images.compactMap { app.store.saveAttachment($0, thread: id) }
+        let working = phase == .running && sessionStart != nil
+        if working, !interrupting {
+            // Steering: shown above the composer until Claude picks it up.
+            queuedMessages.append(QueuedMessage(id: messageID, text: text, images: images, attachments: attachments))
+        } else {
+            let entry = TranscriptEntry(id: messageID, kind: .user, text: text)
+            entry.attachments = attachments
+            if working { entry.delivery = .interrupted }
+            entries.append(entry)
+        }
         if isFirstMessage { app.generateTitle(for: self, from: .firstMessage(subject)) }
         phase = .running
         idleReaper?.cancel()
         touch()
 
+        let stopFirst = working && interrupting
+        if stopFirst { interruptingForMessage = true }
         Task {
             do {
                 let session = try await ensureSession()
-                try await session.send(text: text, images: images)
+                if stopFirst { try await session.interrupt() }
+                try await session.send(text: text, images: images, id: messageID, priority: stopFirst ? .now : nil)
             } catch {
                 fail(error.localizedDescription)
             }
         }
+    }
+
+    /// A queued message, right away: Claude is stopped, and the CLI hands it the message.
+    func sendNow(_ message: QueuedMessage) {
+        guard let index = queuedMessages.firstIndex(where: { $0.id == message.id }), queuedMessages[index].pending == nil,
+              let start = sessionStart else { return }
+        queuedMessages[index].pending = .sendingNow
+        interruptingForMessage = true
+        Task { try? await start.value.interrupt() }
+    }
+
+    /// Takes a queued message back; with `toComposer`, its text and images return there.
+    func withdraw(_ message: QueuedMessage, toComposer: Bool) {
+        guard let index = queuedMessages.firstIndex(where: { $0.id == message.id }), queuedMessages[index].pending == nil else { return }
+        guard let start = sessionStart else {
+            queuedMessages.remove(at: index)
+            if toComposer { restore(message) }
+            return
+        }
+        queuedMessages[index].pending = .withdrawing
+        if toComposer { restoreOnWithdraw.insert(message.id) }
+        Task { try? await start.value.cancelQueuedMessage(message.id) }
+    }
+
+    private func restore(_ message: QueuedMessage) {
+        draft = draft.isEmpty ? message.text : draft + "\n" + message.text
+        draftImages += message.images
     }
 
     /// Commands the app does itself, so its own state stays true: `/btw` opens the side
@@ -270,8 +330,11 @@ final class ThreadModel: Identifiable {
         Task { try? await start.value.stopTask(taskID) }
     }
 
+    /// Stops Claude. Anything queued is taken back into the composer first, so stopping
+    /// never sends it.
     func stop() {
         guard phase == .running, let start = sessionStart else { return }
+        for message in queuedMessages where message.pending == nil { withdraw(message, toComposer: true) }
         interruptRequested = true
         pendingPermissions.removeAll()
         Task {
@@ -432,6 +495,26 @@ final class ThreadModel: Identifiable {
             entries.append(.notice("Context cleared. Claude starts fresh from here."))
             contextTokens = nil
 
+        case .messageLifecycle(let messageID, let state):
+            guard let index = queuedMessages.firstIndex(where: { $0.id == messageID }) else { return }
+            let message = queuedMessages[index]
+            switch state {
+            case .started, .completed:
+                // Claude has it now: into the transcript, where it entered the conversation.
+                queuedMessages.remove(at: index)
+                let entry = TranscriptEntry(id: message.id, kind: .user, text: message.text)
+                entry.attachments = message.attachments
+                // Picked up after the turn ended, it simply came next: nothing was steered.
+                entry.delivery = message.pending == .sendingNow ? .interrupted : phase == .running ? .steered : .normal
+                entries.append(entry)
+                restoreOnWithdraw.remove(message.id)
+            case .cancelled:
+                queuedMessages.remove(at: index)
+                if restoreOnWithdraw.remove(message.id) != nil { restore(message) }
+            case .queued:
+                break
+            }
+
         case .titleChanged(let newTitle):
             // Only for your /rename: a title the CLI picks itself doesn't replace ours.
             guard renameRequested, !isSideChat else { return }
@@ -551,7 +634,10 @@ final class ThreadModel: Identifiable {
             } else if let window = result.contextWindows.values.max() {
                 contextWindow = window
             }
-            if result.isError {
+            if result.isError, interruptingForMessage {
+                // Stopped for your message, which carries that on itself.
+                interruptingForMessage = false
+            } else if result.isError {
                 if interruptRequested {
                     entries.append(.notice("Interrupted"))
                 } else {
@@ -578,6 +664,11 @@ final class ThreadModel: Identifiable {
             let wasRunning = phase == .running
             for run in liveSubagents { run.abandon() }
             liveSubagents.removeAll()
+            // Whatever was still waiting never reached Claude: back to the composer.
+            for message in queuedMessages { restore(message) }
+            queuedMessages.removeAll()
+            restoreOnWithdraw.removeAll()
+            interruptingForMessage = false
             settle()
             if !receivedInit, sessionID != nil, code != 0 {
                 sessionID = nil

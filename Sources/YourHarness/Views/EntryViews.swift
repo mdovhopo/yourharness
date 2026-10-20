@@ -8,7 +8,7 @@ struct EntryView: View {
     var body: some View {
         switch entry.kind {
         case .user:
-            UserMessageView(text: entry.text, attachments: entry.attachments)
+            UserMessageView(text: entry.text, attachments: entry.attachments, delivery: entry.delivery)
         case .assistant:
             StreamingMarkdown(entry: entry)
         case .thinking:
@@ -29,6 +29,7 @@ struct UserMessageView: View {
     @Environment(AppModel.self) private var app
     let text: String
     let attachments: [String]
+    var delivery = TranscriptEntry.Delivery.normal
 
     var body: some View {
         HStack {
@@ -54,6 +55,18 @@ struct UserMessageView: View {
                         .padding(.horizontal, 14)
                         .padding(.vertical, 10)
                         .background(.tint.opacity(0.14), in: .rect(cornerRadius: 16))
+                }
+                switch delivery {
+                case .steered:
+                    Label("Steered · Claude read this after its step", systemImage: "arrow.turn.down.right")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                case .interrupted:
+                    Label("Interrupted Claude to send this", systemImage: "bolt.fill")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                case .normal:
+                    EmptyView()
                 }
             }
         }

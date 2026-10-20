@@ -9,7 +9,8 @@ import SwiftUI
 struct ScrollProbe: ViewModifier {
     private static let step = ProcessInfo.processInfo.environment["YH_SCROLL_PROBE"].flatMap(Double.init)
 
-    @State private var position = ScrollPosition()
+    /// The transcript's own scroll position, so the probe scrolls it the same way.
+    @Binding var position: ScrollPosition
     @State private var offset: CGFloat = 0
     @State private var viewport: CGFloat = 0
     /// The reported offset counts the toolbar inset; scroll targets don't.
@@ -26,7 +27,6 @@ struct ScrollProbe: ViewModifier {
             }
         } else if let step = Self.step {
             content
-                .scrollPosition($position)
                 .onScrollGeometryChange(for: [CGFloat].self) { [$0.containerSize.height, $0.contentOffset.y, $0.contentInsets.top] } action: { _, geometry in
                     viewport = geometry[0]
                     offset = geometry[1]
