@@ -157,19 +157,30 @@ struct AttachmentThumbnail: View {
         }
     }
 
+    /// Always the full height, before and after the image loads: a row that changes height
+    /// as its thumbnail arrives knocks the transcript's bottom anchoring off, and together
+    /// with the composer shrinking on send it once left the whole transcript blank.
+    /// Only the width follows the image; very wide or tall ones are cropped.
+    private func width(for image: NSImage?) -> CGFloat {
+        let height = maxSize.height
+        guard let size = image?.size, size.width > 0, size.height > 0 else { return min(maxSize.width, height * 4 / 3) }
+        return min(maxSize.width, max(height / 2, height * size.width / size.height))
+    }
+
     var body: some View {
+        let shown = image ?? Thumbnails.cached(key)
         Group {
-            if let image = image ?? Thumbnails.cached(key) {
-                Image(nsImage: image)
+            if let shown {
+                Image(nsImage: shown)
                     .resizable()
-                    .aspectRatio(contentMode: .fit)
+                    .scaledToFill()
             } else {
-                RoundedRectangle(cornerRadius: 8).fill(.quaternary)
-                    .aspectRatio(4 / 3, contentMode: .fit)
+                Rectangle().fill(.quaternary)
             }
         }
-        .frame(maxWidth: maxSize.width, maxHeight: maxSize.height)
+        .frame(width: width(for: shown), height: maxSize.height)
         .clipShape(.rect(cornerRadius: 8))
+        .contentShape(.rect(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.separator))
         .task(id: key) {
             let pixels = Int(max(maxSize.width, maxSize.height) * 2)

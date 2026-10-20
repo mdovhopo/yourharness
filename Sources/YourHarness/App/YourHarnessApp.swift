@@ -75,6 +75,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     .split(separator: ":").compactMap { ImageAttachment.prepare(contentsOf: URL(fileURLWithPath: String($0))) }
                 AppModel.shared.selectedThread?.send(message, images: images)
             }
+        } else if let paths = ProcessInfo.processInfo.environment["YH_SEND_IMAGES"], !paths.isEmpty {
+            // Without a message: attach to the selected thread's composer, as a drop does.
+            MainActor.assumeIsolated {
+                guard let thread = AppModel.shared.selectedThread else { return }
+                thread.loadTranscriptIfNeeded()
+                thread.attach(paths.split(separator: ":").map { .file(URL(fileURLWithPath: String($0))) })
+            }
         }
         if ProcessInfo.processInfo.environment["YH_SIMULATE_STREAMING"] == "1" {
             MainActor.assumeIsolated {
