@@ -1103,72 +1103,142 @@ private struct StateBadge: View {
     }
 }
 
-/// The threads working in a checkout, newest first: click one to open it.
+/// The threads that work in a checkout, as one pill however many there are: their title
+/// when it's a single active one, else how many are active and settled. Settled ones are
+/// done with, so a checkout that only has those reads quiet. Click for the list.
 struct ThreadChips: View {
-    @Environment(AppModel.self) private var app
     let threads: [ThreadModel]
+    @State private var showing = false
+
+    private var active: [ThreadModel] { threads.filter { !$0.isSettled }.sorted { $0.sortDate > $1.sortDate } }
+    private var settled: [ThreadModel] { threads.filter(\.isSettled).sorted { ($0.settledAt ?? .distantPast) > ($1.settledAt ?? .distantPast) } }
 
     var body: some View {
         if !threads.isEmpty {
-            // Two chips, then one, then just a count: rows stay one line however many
-            // threads there are and however narrow the window.
-            ViewThatFits(in: .horizontal) {
-                chips(2)
-                chips(1)
-                compact
-            }
+            Button { showing.toggle() } label: { label }
+                .buttonStyle(.plain)
+                .help(help)
+                .popover(isPresented: $showing, arrowEdge: .bottom) {
+                    ThreadList(active: active, settled: settled) { showing = false }
+                }
         }
     }
 
-    private var compact: some View {
-        Menu {
-            ForEach(threads) { thread in
-                Button(thread.title) { app.selectedThreadID = thread.id }
+    private var label: some View {
+        let onlySettled = active.isEmpty
+        return HStack(spacing: 5) {
+            Image(systemName: onlySettled ? "archivebox" : "bubble.left")
+                .font(.system(size: 10, weight: .semibold))
+            if active.count == 1, settled.isEmpty, let thread = active.first {
+                Text(thread.title)
+                    .lineLimit(1)
+                    .frame(maxWidth: 170, alignment: .leading)
+                    .fixedSize(horizontal: true, vertical: false)
+            } else {
+                if !active.isEmpty { Text("\(active.count) active") }
+                if !active.isEmpty, !settled.isEmpty { Text("·").foregroundStyle(.tertiary) }
+                if !settled.isEmpty { Text("\(settled.count) settled").foregroundStyle(.tertiary) }
             }
-        } label: {
-            Label("\(threads.count)", systemImage: "bubble.left")
-                .labelStyle(CompactLabelStyle())
-                .font(.caption.monospacedDigit())
+            if active.contains(where: \.isWorking) {
+                WorkingDot()
+            }
         }
-        .menuStyle(.button)
-        .buttonStyle(.plain)
-        .menuIndicator(.hidden)
+        .font(.caption.monospacedDigit())
+        .foregroundStyle(onlySettled ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.primary))
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
+        .background {
+            if onlySettled {
+                Capsule().strokeBorder(.quaternary, style: StrokeStyle(lineWidth: 1, dash: [3, 2]))
+            } else {
+                Capsule().fill(.quaternary.opacity(0.7))
+            }
+        }
+        .contentShape(.capsule)
         .fixedSize()
-        .padding(.horizontal, 7)
-        .padding(.vertical, 2)
-        .background(.quaternary.opacity(0.7), in: .capsule)
-        .help(threads.count == 1 ? "1 thread works here" : "\(threads.count) threads work here")
     }
 
-    private func chips(_ shown: Int) -> some View {
-            HStack(spacing: 4) {
-                ForEach(threads.prefix(shown)) { thread in
-                    Button { app.selectedThreadID = thread.id } label: {
-                        Label(thread.title, systemImage: thread.isWorking ? "circle.dotted" : "bubble.left")
-                            .labelStyle(CompactLabelStyle())
-                            .lineLimit(1)
-                            .frame(maxWidth: 150)
-                    }
-                    .buttonStyle(.plain)
-                    .font(.caption)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 2)
-                    .background(.quaternary.opacity(0.7), in: .capsule)
-                    .help("Open “\(thread.title)”")
+    private var help: String {
+        var parts: [String] = []
+        if !active.isEmpty { parts.append(active.count == 1 ? "1 active thread" : "\(active.count) active threads") }
+        if !settled.isEmpty { parts.append(settled.count == 1 ? "1 settled" : "\(settled.count) settled") }
+        return parts.joined(separator: ", ") + " work here. Click to see them."
+    }
+}
+
+/// Pulses while a thread here is working.
+private struct WorkingDot: View {
+    @State private var dim = false
+
+    var body: some View {
+        Circle()
+            .fill(.tint)
+            .frame(width: 6, height: 6)
+            .opacity(dim ? 0.35 : 1)
+            .animation(.easeInOut(duration: 0.8).repeatForever(), value: dim)
+            .onAppear { dim = true }
+            .help("Working now")
+    }
+}
+
+/// The threads of a checkout: active ones first, then settled ones, dimmed.
+private struct ThreadList: View {
+    @Environment(AppModel.self) private var app
+    let active: [ThreadModel]
+    let settled: [ThreadModel]
+    let close: () -> Void
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 2) {
+                if !active.isEmpty {
+                    header("Active")
+                    ForEach(active) { row($0, settled: false) }
                 }
-                if threads.count > shown {
-                    Menu("+\(threads.count - shown)") {
-                        ForEach(threads.dropFirst(shown)) { thread in
-                            Button(thread.title) { app.selectedThreadID = thread.id }
-                        }
-                    }
-                    .menuStyle(.button)
-                    .buttonStyle(.plain)
-                    .menuIndicator(.hidden)
-                    .font(.caption)
-                    .fixedSize()
+                if !settled.isEmpty {
+                    header("Settled")
+                        .padding(.top, active.isEmpty ? 0 : 8)
+                    ForEach(settled) { row($0, settled: true) }
                 }
             }
+            .padding(8)
+        }
+        .frame(width: 320)
+        .frame(maxHeight: 360)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func header(_ title: String) -> some View {
+        Text(title)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 8)
+            .padding(.top, 4)
+    }
+
+    private func row(_ thread: ThreadModel, settled: Bool) -> some View {
+        Button {
+            close()
+            app.selectedThreadID = thread.id
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: settled ? "archivebox" : thread.isWorking ? "circle.dotted" : "bubble.left")
+                    .foregroundStyle(settled ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.secondary))
+                    .frame(width: 16)
+                Text(thread.title)
+                    .lineLimit(1)
+                    .foregroundStyle(settled ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
+                Spacer(minLength: 8)
+                Text((settled ? thread.settledAt : nil) ?? thread.sortDate, format: .relative(presentation: .numeric, unitsStyle: .narrow))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .help(settled ? "Settled: done with. Opening it keeps it on the shelf." : "Open “\(thread.title)”")
     }
 }
 
