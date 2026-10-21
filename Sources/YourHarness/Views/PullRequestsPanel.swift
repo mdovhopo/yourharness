@@ -37,7 +37,7 @@ struct PullRequestsPanel: View {
                                 .padding(.top, open.isEmpty ? 0 : 6)
                             VStack(spacing: 0) {
                                 ForEach(done) { pull in
-                                    PullRequestCardRow(pull: pull, rail: nil)
+                                    PullRequestCardRow(pull: pull, graph: nil)
                                     if pull.id != done.last?.id { Divider().padding(.leading, 34) }
                                 }
                             }
@@ -97,68 +97,25 @@ private struct SyncStatus: View {
     }
 }
 
-/// One stack (or a single PR) in a card, bottom of the stack first. The longest line of
-/// PRs runs straight down one rail however deep it goes; a PR stacked on the same branch
-/// as another (a fork) is shown after it, set in, as branching off its base.
+/// One stack (or a single PR) in a card, drawn as a tree: bottom of the stack first, a line
+/// of PRs in one lane, each fork opening a lane to its right (see `StackGraph`).
 private struct StackCard: View {
     let stack: PullRequestStack
 
-    struct Group: Identifiable {
-        /// "Branches off #72"; nil for the main line.
-        let caption: String?
-        /// Each PR with its layer: 1 is the bottom of the stack.
-        let rows: [(pull: PullRequest, layer: Int)]
-        var id: String { rows.first?.pull.id ?? "" }
-    }
-
-    /// The main line first, then each branch off it, in order up the stack.
-    private var groups: [Group] {
-        var groups: [Group] = []
-        func line(from node: PullRequestStack, layer: Int, caption: String?) {
-            var rows: [(PullRequest, Int)] = [], forks: [(PullRequestStack, Int, PullRequest)] = []
-            var current: PullRequestStack? = node, depth = layer
-            while let step = current {
-                rows.append((step.pullRequest, depth))
-                // The tallest child carries the line on; the others branch off.
-                let children = step.children.sorted { $0.all.count > $1.all.count }
-                forks += children.dropFirst().map { ($0, depth + 1, step.pullRequest) }
-                current = children.first
-                depth += 1
-            }
-            groups.append(Group(caption: caption, rows: rows))
-            for (fork, forkLayer, base) in forks { line(from: fork, layer: forkLayer, caption: "Branches off #\(base.number)") }
-        }
-        line(from: stack, layer: 1, caption: nil)
-        return groups
-    }
-
     var body: some View {
-        let groups = groups
+        let graph = StackGraph.layout(stack)
         VStack(alignment: .leading, spacing: 0) {
             if stack.isStacked {
-                Label("Stack of \(stack.all.count)", systemImage: "square.stack")
+                Label("Stack of \(graph.rows.count)", systemImage: "square.stack")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 12)
                     .padding(.top, 9)
                     .padding(.bottom, 2)
             }
-            ForEach(groups) { group in
-                VStack(alignment: .leading, spacing: 0) {
-                    if let caption = group.caption {
-                        Label(caption, systemImage: "arrow.turn.down.right")
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
-                            .padding(.horizontal, 12)
-                            .padding(.top, 6)
-                    }
-                    ForEach(Array(group.rows.enumerated()), id: \.element.pull.id) { index, row in
-                        PullRequestCardRow(pull: row.pull, rail: stack.isStacked
-                            ? StackRail(position: row.layer, joinedAbove: index > 0, continuesBelow: index < group.rows.count - 1)
-                            : nil)
-                    }
-                }
-                .padding(.leading, group.caption == nil ? 0 : 16)
+            ForEach(graph.rows, id: \.pullRequest.id) { row in
+                PullRequestCardRow(pull: row.pullRequest,
+                                   graph: stack.isStacked ? GraphCell(row: row, laneCount: graph.laneCount) : nil)
             }
         }
         .padding(.bottom, stack.isStacked ? 3 : 0)
@@ -166,35 +123,52 @@ private struct StackCard: View {
     }
 }
 
-/// A PR's place in its stack: its layer in a dot on its title's line, and the rail through it.
-struct StackRail: View {
-    let position: Int
-    let joinedAbove: Bool
-    let continuesBelow: Bool
-    /// Where the dot sits: level with the title's first line.
-    static let dotCenter: CGFloat = 18
+/// A row's slice of the stack's tree: the lines through it, and its PR's dot (with its
+/// layer) in its lane, level with the title. Rows stack up into one unbroken drawing.
+struct GraphCell: View {
+    let row: StackGraph.Row
+    let laneCount: Int
+    static let lane: CGFloat = 18
+    static let dotY: CGFloat = 18
+    static let dot: CGFloat = 16
+
+    static func x(_ lane: Int) -> CGFloat { CGFloat(lane) * Self.lane + Self.dot / 2 }
 
     var body: some View {
-        ZStack(alignment: .top) {
-            VStack(spacing: 0) {
-                Rectangle()
-                    .frame(width: 2, height: Self.dotCenter)
-                    .opacity(joinedAbove ? 1 : 0)
-                Rectangle()
-                    .frame(width: 2)
-                    .frame(maxHeight: .infinity)
-                    .opacity(continuesBelow ? 1 : 0)
+        ZStack(alignment: .topLeading) {
+            Canvas { context, size in
+                var path = Path()
+                for segment in row.segments {
+                    switch segment {
+                    case .through(let lane):
+                        path.move(to: CGPoint(x: Self.x(lane), y: 0))
+                        path.addLine(to: CGPoint(x: Self.x(lane), y: size.height))
+                    case .fromAbove(let lane):
+                        path.move(to: CGPoint(x: Self.x(lane), y: 0))
+                        path.addLine(to: CGPoint(x: Self.x(lane), y: Self.dotY))
+                    case .toBelow(let lane):
+                        path.move(to: CGPoint(x: Self.x(lane), y: Self.dotY))
+                        path.addLine(to: CGPoint(x: Self.x(lane), y: size.height))
+                    case .branch(let from, let to):
+                        // Down the parent's lane, round the corner, across into the dot.
+                        let px = Self.x(from), cx = Self.x(to), radius: CGFloat = 8
+                        path.move(to: CGPoint(x: px, y: 0))
+                        path.addLine(to: CGPoint(x: px, y: Self.dotY - radius))
+                        path.addQuadCurve(to: CGPoint(x: px + radius, y: Self.dotY), control: CGPoint(x: px, y: Self.dotY))
+                        path.addLine(to: CGPoint(x: cx, y: Self.dotY))
+                    }
+                }
+                context.stroke(path, with: .style(.quaternary), style: StrokeStyle(lineWidth: 2, lineCap: .round))
             }
-            .foregroundStyle(.quaternary)
-            Text("\(position)")
+            Text("\(row.layer)")
                 .font(.system(size: 9, weight: .bold).monospacedDigit())
                 .foregroundStyle(.secondary)
-                .frame(width: 16, height: 16)
+                .frame(width: Self.dot, height: Self.dot)
                 .background(Circle().fill(.background))
                 .overlay(Circle().strokeBorder(.tertiary, lineWidth: 1.5))
-                .offset(y: Self.dotCenter - 8)
+                .offset(x: CGFloat(row.lane) * Self.lane, y: Self.dotY - Self.dot / 2)
         }
-        .frame(width: 16)
+        .frame(width: CGFloat(laneCount - 1) * Self.lane + Self.dot)
         .frame(maxHeight: .infinity)
     }
 }
@@ -202,14 +176,14 @@ struct StackRail: View {
 /// A PR in the narrow sidebar: what it is, where it's going, and what stands in its way.
 struct PullRequestCardRow: View {
     let pull: PullRequest
-    let rail: StackRail?
+    let graph: GraphCell?
     @State private var hovering = false
 
     private var finished: Bool { pull.state != .open }
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
-            if let rail { rail }
+            if let graph { graph }
             HStack(alignment: .top, spacing: 10) {
             Image(systemName: symbol)
                 .font(.callout.weight(.medium))
@@ -253,11 +227,11 @@ struct PullRequestCardRow: View {
                 .font(.caption)
             }
             }
-            // In a stack the rail runs the row's whole height, so the text keeps the space.
-            .padding(.vertical, rail == nil ? 0 : 9)
+            // In a stack the tree runs the row's whole height, so the text keeps the space.
+            .padding(.vertical, graph == nil ? 0 : 9)
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, rail == nil ? 9 : 0)
+        .padding(.vertical, graph == nil ? 9 : 0)
         .fixedSize(horizontal: false, vertical: true)
         .background {
             if hovering { Color.primary.opacity(0.04) }
