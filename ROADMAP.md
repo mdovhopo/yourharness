@@ -7,6 +7,9 @@ Where YourHarness is heading, in priority order. Performance, native polish and 
 ### 1. Workspaces out of the box
 Workspace support built in, like T3 Code, where you can follow PRs and related work, but across a whole workspace rather than one repo at a time. Design: [docs/workspaces.md](docs/workspaces.md).
 
+### Browser for agents
+A real browser per thread that the agent drives and you watch and take over: run the app, click through it, read the console and network, screenshot what it found. Native WebKit, tools served in-process over the CLI's control channel. Design: [docs/browser.md](docs/browser.md).
+
 ### 2. Memory
 Memory as a first-class feature: a local store, shared with every agent session, that you can visualize and review automatically.
 
