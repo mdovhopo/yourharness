@@ -17,6 +17,9 @@ struct ComposerView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
+            if thread.isWorking, !thread.plan.items.isEmpty, !thread.plan.isFinished {
+                PlanStrip(plan: thread.plan)
+            }
             if !thread.queuedMessages.isEmpty {
                 QueuedMessages(thread: thread)
             }

@@ -447,6 +447,17 @@ private struct GeneralSettingsView: View {
             TitleGenerationSection()
 
             Section {
+                Toggle(isOn: Binding(get: { app.planChecklist }, set: { app.setPlanChecklist($0) })) {
+                    Label("Let Claude keep a plan checklist", systemImage: "checklist")
+                }
+            } header: {
+                Text("Plans")
+            } footer: {
+                Text("For work with several steps, Claude lists them and ticks them off: the checklist shows in the thread and above the composer while it works. Claude Code leaves these task tools off for current models unless they're turned on here.")
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
                 Toggle(isOn: Binding(get: { app.diagramInstructions }, set: { app.setDiagramInstructions($0) })) {
                     Label("Let agents draw diagrams", systemImage: "point.3.connected.trianglepath.dotted")
                 }

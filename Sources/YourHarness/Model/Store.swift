@@ -131,6 +131,8 @@ struct PersistedState: Codable {
     var appearance = Appearance.system
     /// Tell you when a turn finishes or Claude needs you. On unless turned off.
     var notifications = true
+    /// Give Claude its task tools, so long turns come with a checklist. On unless turned off.
+    var planChecklist = true
 
     init() {}
 
@@ -156,6 +158,7 @@ struct PersistedState: Codable {
         slashCommands = try container.decodeIfPresent([String: [SlashCommand]].self, forKey: .slashCommands) ?? [:]
         appearance = try container.decodeIfPresent(Appearance.self, forKey: .appearance) ?? .system
         notifications = try container.decodeIfPresent(Bool.self, forKey: .notifications) ?? true
+        planChecklist = try container.decodeIfPresent(Bool.self, forKey: .planChecklist) ?? true
     }
 }
 

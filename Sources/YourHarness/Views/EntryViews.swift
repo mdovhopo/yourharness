@@ -4,6 +4,8 @@ import SwiftUI
 
 struct EntryView: View {
     let entry: TranscriptEntry
+    /// For plan rows: the thread they're part of.
+    @Environment(ThreadModel.self) private var thread: ThreadModel?
 
     var body: some View {
         switch entry.kind {
@@ -13,6 +15,8 @@ struct EntryView: View {
             StreamingMarkdown(entry: entry)
         case .thinking:
             ThinkingView(entry: entry)
+        case .tool where thread?.planSteps[entry.id] != nil:
+            PlanStepView(plan: thread?.planSteps[entry.id] ?? TaskPlan(), isLatest: thread?.latestPlanStep == entry.id)
         case .tool where SubagentReport.toolNames.contains(entry.toolName):
             SubagentCallView(entry: entry)
         case .tool:

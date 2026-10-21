@@ -10,6 +10,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 - Turns survive quitting and crashes. Your message is saved the moment you send it, the rest of the turn every couple of seconds, and quitting stops Claude and says so. After a crash, what Claude did meanwhile is recovered from Claude Code's session history.
 - Work done on a thread's session outside YourHarness (`claude --resume` in a terminal) shows up when you open the thread.
 - Unsent drafts are kept across launches.
+- Plan checklist: for work with several steps, Claude lists them and ticks them off. The thread shows the plan where it changes, and a strip above the composer shows the current step while Claude works. You can turn it off in Settings.
 - Notifications: when a turn finishes while YourHarness is in the background, or Claude needs your approval, an answer or a plan review in a thread you aren't looking at. Clicking one opens the thread, and the Dock icon counts threads waiting for you. You can turn them off in Settings.
 
 ### Changed

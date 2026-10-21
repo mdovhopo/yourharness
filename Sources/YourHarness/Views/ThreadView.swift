@@ -29,6 +29,7 @@ struct ThreadView: View {
     var body: some View {
         transcript
             .environment(\.issueLinker, app.issueLinker(for: thread))
+            .environment(thread)
             .navigationTitle(thread.title)
             .navigationSubtitle(subtitle)
             .task { thread.loadTranscriptIfNeeded() }
@@ -119,7 +120,7 @@ struct ThreadView: View {
     }
 
     @ViewBuilder private var rows: some View {
-        ForEach(thread.entries) { entry in
+        ForEach(thread.transcriptRows) { entry in
             EntryView(entry: entry)
                 .modifier(ScrollProbe.Row(id: entry.id))
                 .transition(.asymmetric(

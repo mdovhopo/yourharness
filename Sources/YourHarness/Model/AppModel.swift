@@ -58,6 +58,8 @@ final class AppModel {
 
     /// Whether to notify you when a turn finishes or Claude needs you.
     private(set) var notifications: Bool
+    /// Whether Claude gets its task tools, which the plan checklist shows.
+    private(set) var planChecklist: Bool
     @ObservationIgnored let notifier = Notifier()
 
     @ObservationIgnored let store = Store()
@@ -95,6 +97,7 @@ final class AppModel {
         showsInspector = state.showsInspector
         appearance = state.appearance
         notifications = state.notifications
+        planChecklist = state.planChecklist
 
         threads = state.threads.map { ThreadModel(meta: $0, app: self) }
         selectedThreadID = state.selectedThreadID
@@ -507,6 +510,9 @@ final class AppModel {
             resumeSessionID: thread.sessionID,
             appendSystemPrompt: diagramInstructions ? AgentInstructions.diagrams : nil
         )
+        // Claude Code keeps its task tools from current models unless asked; they're what
+        // the plan checklist shows, and cost nothing until used (they load on demand).
+        if planChecklist, !thread.isSideChat { options.environment["CLAUDE_CODE_ENABLE_TODO_TOOLS"] = "1" }
         if thread.isSideChat {
             // A copy of the thread's conversation that can look but not edit, and leaves
             // nothing behind: no edit tools, no MCP servers, nothing saved. It reads freely;
@@ -650,6 +656,12 @@ final class AppModel {
     }
 
     /// The instruction is part of the launch, so running sessions pick it up on restart.
+    func setPlanChecklist(_ enabled: Bool) {
+        planChecklist = enabled
+        save()
+        for thread in threads { thread.restartSession() }
+    }
+
     func setNotifications(_ enabled: Bool) {
         notifications = enabled
         save()
@@ -967,6 +979,7 @@ final class AppModel {
         state.showsInspector = showsInspector
         state.appearance = appearance
         state.notifications = notifications
+        state.planChecklist = planChecklist
         store.saveState(state)
     }
 

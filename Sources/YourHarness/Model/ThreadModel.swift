@@ -70,6 +70,14 @@ final class ThreadModel: Identifiable {
 
         enum Pending { case sendingNow, withdrawing }
     }
+    /// Claude's checklist from its task tools, as it stands now.
+    private(set) var plan = TaskPlan()
+    /// The plan as of each run of task tool calls, keyed by the run's last call.
+    private(set) var planSteps: [String: TaskPlan] = [:]
+    /// Task tool calls followed by another: their run shows once, at its end.
+    private(set) var foldedPlanCalls: Set<String> = []
+    /// The newest run, shown as the full checklist.
+    private(set) var latestPlanStep: String?
     /// `/btw`: questions on the side, in a copy of this conversation. Shown in the right
     /// sidebar; nothing asked there reaches this thread.
     private(set) var sideChat: ThreadModel?
@@ -205,7 +213,40 @@ final class ThreadModel: Identifiable {
         var transaction = Transaction()
         transaction.disablesAnimations = true
         withTransaction(transaction) { entries = loaded }
+        rebuildPlan()
         recoverFromSessionHistory()
+    }
+
+    /// What the transcript shows: each run of task tool calls as one plan row.
+    var transcriptRows: [TranscriptEntry] {
+        foldedPlanCalls.isEmpty ? entries : entries.filter { !foldedPlanCalls.contains($0.id) }
+    }
+
+    /// Replays the task tool calls. Only when one arrives or gets its result, so a
+    /// streaming reply never pays for it.
+    private func rebuildPlan() {
+        var plan = TaskPlan()
+        var steps: [String: TaskPlan] = [:]
+        var folded: Set<String> = []
+        var previous: String?
+        for entry in entries {
+            guard entry.kind == .tool, TaskPlan.isPlanTool(name: entry.toolName, inputJSON: entry.toolInput) else {
+                previous = nil
+                continue
+            }
+            plan.apply(toolName: entry.toolName, inputJSON: entry.toolInput, result: entry.toolResult, toolUseID: entry.id)
+            if let previous {
+                folded.insert(previous)
+                steps[previous] = nil
+            }
+            steps[entry.id] = plan
+            previous = entry.id
+        }
+        let latest = entries.last { steps[$0.id] != nil }?.id
+        if plan != self.plan { self.plan = plan }
+        if steps != planSteps { planSteps = steps }
+        if folded != foldedPlanCalls { foldedPlanCalls = folded }
+        if latest != latestPlanStep { latestPlanStep = latest }
     }
 
     /// Brings in what the session's own history has and the transcript doesn't: the end
@@ -242,6 +283,7 @@ final class ThreadModel: Identifiable {
                 entries.append(.notice("Continued outside YourHarness"))
             }
             entries.append(contentsOf: backfill.missing.map(TranscriptEntry.init(item:)))
+            rebuildPlan()
             if cutOff {
                 entries.append(.notice(backfill.isEmpty
                     ? "YourHarness closed while Claude was working, so this turn stopped here."
@@ -602,6 +644,8 @@ final class ThreadModel: Identifiable {
             }
             blocks[ref] = entry
             entries.append(entry)
+            // A plan row from its first moment, not a tool row that turns into one.
+            if case .toolUse(_, let name) = kind, TaskPlan.toolNames.contains(name) { rebuildPlan() }
 
         case .textDelta(let ref, let text):
             blocks[ref]?.text += text
@@ -643,18 +687,24 @@ final class ThreadModel: Identifiable {
             for (ref, entry) in blocks where ref.messageID == messageID && entry.kind != .tool {
                 entry.isStreaming = false
             }
+            if content.contains(where: { if case .toolUse(_, let name, let input) = $0 { TaskPlan.isPlanTool(name: name, inputJSON: input) } else { false } }) {
+                rebuildPlan()
+            }
 
         case .toolResults(let results, let parent):
             if let parent {
                 subagent(for: parent)?.apply(results)
                 return
             }
+            var plansChanged = false
             for result in results {
                 guard let entry = tools[result.toolUseID] else { continue }
                 entry.toolResult = result.content
                 entry.toolIsError = result.isError
                 entry.isStreaming = false
+                if TaskPlan.isPlanTool(name: entry.toolName, inputJSON: entry.toolInput) { plansChanged = true }
             }
+            if plansChanged { rebuildPlan() }
 
         case .subagentStarted(let start):
             subagent(for: start.toolUseID)?.start(start)
