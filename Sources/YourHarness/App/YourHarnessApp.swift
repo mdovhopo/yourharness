@@ -23,6 +23,18 @@ struct YourHarnessApp: App {
                 Button("Resume Claude Code Session…") { app.isResumingSession = true }
                     .keyboardShortcut("o", modifiers: [.command, .shift])
             }
+            CommandGroup(after: .textEditing) {
+                Divider()
+                Button("Find in Thread…") { app.selectedThread?.find.open() }
+                    .keyboardShortcut("f")
+                    .disabled(app.visibleThreadID == nil)
+                Button("Find Next") { app.selectedThread?.find.step(1) }
+                    .keyboardShortcut("g")
+                    .disabled(app.selectedThread?.find.matches.isEmpty ?? true)
+                Button("Find Previous") { app.selectedThread?.find.step(-1) }
+                    .keyboardShortcut("g", modifiers: [.command, .shift])
+                    .disabled(app.selectedThread?.find.matches.isEmpty ?? true)
+            }
             CommandGroup(after: .sidebar) {
                 Button(app.showsInspector ? "Hide Right Sidebar" : "Show Right Sidebar") { app.setShowsInspector(!app.showsInspector) }
                     .keyboardShortcut("0", modifiers: [.command, .option])

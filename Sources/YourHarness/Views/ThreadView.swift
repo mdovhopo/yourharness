@@ -81,6 +81,30 @@ struct ThreadView: View {
             if followsBottom { position.scrollTo(id: id, anchor: .bottom) }
         }
         .modifier(ScrollProbe(position: $position))
+        // ⌘F: searched a moment after you stop typing, and again as the thread grows.
+        .task(id: FindKey(query: thread.find.isOpen ? thread.find.query : "", rows: thread.entries.count)) {
+            let query = thread.find.query.trimmingCharacters(in: .whitespaces)
+            guard thread.find.isOpen, !query.isEmpty else { return }
+            try? await Task.sleep(for: .milliseconds(120))
+            guard !Task.isCancelled else { return }
+            let found = await ThreadFind.search(query, in: thread.findableText)
+            guard !Task.isCancelled else { return }
+            thread.find.update(found)
+        }
+        .onChange(of: thread.find.current) { _, id in
+            guard let id else { return }
+            followsBottom = false
+            withAnimation(.smooth(duration: 0.25)) { position.scrollTo(id: id, anchor: .center) }
+        }
+        .overlay(alignment: .top) {
+            if thread.find.isOpen {
+                FindBar(find: thread.find)
+                    .padding(.top, 10)
+                    .padding(.horizontal, 20)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .animation(.snappy(duration: 0.2), value: thread.find.isOpen)
         // At least as tall as the scroll view, messages at the bottom: a short thread
         // would otherwise sit on a tall top inset, and the toolbar's edge effect tints all of it.
         .onGeometryChange(for: CGFloat.self) { proxy in
@@ -122,6 +146,7 @@ struct ThreadView: View {
     @ViewBuilder private var rows: some View {
         ForEach(thread.transcriptRows) { entry in
             EntryView(entry: entry)
+                .environment(\.findHighlight, thread.find.highlight(for: entry.id))
                 .modifier(ScrollProbe.Row(id: entry.id))
                 .transition(.asymmetric(
                     insertion: .opacity.combined(with: .offset(y: 12)),
@@ -140,6 +165,11 @@ struct ThreadView: View {
         guard let model = thread.activeModelName else { return project }
         return "\(project) · \(model)"
     }
+}
+
+private struct FindKey: Equatable {
+    var query: String
+    var rows: Int
 }
 
 private struct ScrollState: Equatable {

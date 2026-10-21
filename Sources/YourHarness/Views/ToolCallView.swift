@@ -51,6 +51,7 @@ struct ToolPresentation {
 struct ToolCallView: View {
     let entry: TranscriptEntry
     @State private var expanded = false
+    @Environment(\.findHighlight) private var findHighlight
 
     var body: some View {
         let presentation = ToolPresentation(name: entry.toolName, inputJSON: entry.toolInput)
@@ -78,7 +79,7 @@ struct ToolCallView: View {
                 .frame(width: 18)
             Text(presentation.verb)
                 .fontWeight(.medium)
-            Text(presentation.detail)
+            Text(AttributedString(presentation.detail).highlighted(findHighlight))
                 .font(.callout.monospaced())
                 .foregroundStyle(.secondary)
                 .lineLimit(1)

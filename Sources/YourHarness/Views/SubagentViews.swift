@@ -5,6 +5,7 @@ import SwiftUI
 /// its report once it's done. The right sidebar follows it step by step.
 struct SubagentCallView: View {
     @Environment(AppModel.self) private var app
+    @Environment(\.findHighlight) private var findHighlight
     let entry: TranscriptEntry
     @State private var expanded = false
 
@@ -62,7 +63,7 @@ struct SubagentCallView: View {
                 .frame(width: 18)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
-                    Text(title)
+                    Text(AttributedString(title).highlighted(findHighlight))
                         .fontWeight(.medium)
                         .lineLimit(1)
                     if let type = run?.agentType {

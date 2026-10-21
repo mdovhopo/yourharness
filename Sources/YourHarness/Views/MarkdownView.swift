@@ -311,6 +311,7 @@ private struct InlineText: View {
     let source: String
     var isTail = false
     @Environment(\.issueLinker) private var linker
+    @Environment(\.findHighlight) private var findHighlight
 
     init(_ source: String, isTail: Bool = false) {
         self.source = source
@@ -319,6 +320,7 @@ private struct InlineText: View {
 
     var body: some View {
         let rendered = Self.render(isTail ? MarkdownInline.closingUnterminated(source) : source, linker: linker)
+            .highlighted(findHighlight)
         if rendered.runs.contains(where: { $0.link != nil }) {
             LinkedText(text: rendered)
         } else {
@@ -379,11 +381,12 @@ struct CodeBlockView: View {
     let code: String
     @State private var copied = false
     @State private var hovering = false
+    @Environment(\.findHighlight) private var findHighlight
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
             ScrollView(.horizontal) {
-                Text(code)
+                Text(AttributedString(code).highlighted(findHighlight))
                     .font(.system(size: MarkdownMetrics.small, design: .monospaced))
                     .lineSpacing(2)
                     .textSelection(.enabled)

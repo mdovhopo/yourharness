@@ -31,6 +31,7 @@ struct EntryView: View {
 
 struct UserMessageView: View {
     @Environment(AppModel.self) private var app
+    @Environment(\.findHighlight) private var findHighlight
     let text: String
     let attachments: [String]
     var delivery = TranscriptEntry.Delivery.normal
@@ -80,7 +81,7 @@ struct UserMessageView: View {
 extension UserMessageView {
     /// A command reads as one: its name in monospace, then what you passed it.
     var message: Text {
-        guard let command = SlashCommand.parse(text) else { return Text(text) }
+        guard let command = SlashCommand.parse(text) else { return Text(AttributedString(text).highlighted(findHighlight)) }
         let name = Text("/\(command.name)").font(.body.monospaced().weight(.semibold))
         return command.arguments.isEmpty ? name : Text("\(name) \(command.arguments)")
     }
@@ -139,11 +140,14 @@ private struct ThinkingView: View {
 private struct NoticeView: View {
     let text: String
     let style: TranscriptEntry.NoticeStyle
+    @Environment(\.findHighlight) private var findHighlight
 
     var body: some View {
         HStack {
             Spacer()
-            Label(text, systemImage: style == .error ? "exclamationmark.triangle.fill" : "info.circle")
+            Label { Text(AttributedString(text).highlighted(findHighlight)) } icon: {
+                Image(systemName: style == .error ? "exclamationmark.triangle.fill" : "info.circle")
+            }
                 .font(.callout)
                 .foregroundStyle(style == .error ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
                 .textSelection(.enabled)

@@ -70,6 +70,8 @@ final class ThreadModel: Identifiable {
 
         enum Pending { case sendingNow, withdrawing }
     }
+    /// ⌘F in this thread.
+    let find = ThreadFind()
     /// Claude's checklist from its task tools, as it stands now.
     private(set) var plan = TaskPlan()
     /// The plan as of each run of task tool calls, keyed by the run's last call.
@@ -215,6 +217,18 @@ final class ThreadModel: Identifiable {
         withTransaction(transaction) { entries = loaded }
         rebuildPlan()
         recoverFromSessionHistory()
+    }
+
+    /// What ⌘F looks through: each row's words, and for a tool call its input (the
+    /// command, the file), which is usually what you're after.
+    var findableText: [(id: String, text: String)] {
+        transcriptRows.compactMap { entry in
+            switch entry.kind {
+            case .user, .assistant, .notice, .commandOutput: (entry.id, entry.text)
+            case .tool: (entry.id, entry.toolName + " " + entry.toolInput)
+            case .thinking: nil
+            }
+        }
     }
 
     /// What the transcript shows: each run of task tool calls as one plan row.
