@@ -933,6 +933,8 @@ private struct WorktreeRow: View {
     let threads: [ThreadModel]
     @State private var confirmingRemoval = false
     @State private var error: String?
+    @State private var hovering = false
+    @State private var removing = false
 
     private var status: RepoStatus? { workspace.worktreeStatuses[worktree.path] }
     private var pullRequest: PullRequest? { workspace.pullRequest(for: worktree, in: repo) }
@@ -993,11 +995,17 @@ private struct WorktreeRow: View {
                     .font(.caption.weight(.medium).monospacedDigit())
                     .help(pullRequest.title)
             }
+            removeButton
         }
         .padding(.leading, 38)
         .padding(.trailing, 12)
         .padding(.vertical, 7)
         .contentShape(.rect)
+        .onHover { hovering = $0 }
+        .opacity(removing ? 0.4 : 1)
+        // The button only shows on hover; VoiceOver gets it as an action on the row.
+        .accessibilityElement(children: .contain)
+        .accessibilityAction(named: "Remove Worktree") { if !worktree.isLocked { requestRemoval() } }
         .contextMenu {
             Button("Show in Finder", systemImage: "folder") { NSWorkspace.shared.activateFileViewerSelecting([worktree.url]) }
                 .disabled(worktree.isMissing)
@@ -1014,14 +1022,14 @@ private struct WorktreeRow: View {
             if let project = app.project(id: workspace.projectID), !worktree.isMissing {
                 Button("New Thread Here", systemImage: "square.and.pencil") { app.newThread(in: project, workingIn: worktree.path) }
             }
-            Button("Remove Worktree…", systemImage: "trash", role: .destructive) { confirmingRemoval = true }
+            Button(risk == .none ? "Remove Worktree" : "Remove Worktree…", systemImage: "trash", role: .destructive, action: requestRemoval)
                 .disabled(worktree.isLocked)
         }
         .confirmationDialog(removalTitle, isPresented: $confirmingRemoval) {
-            if (status?.changedFiles ?? 0) > 0 {
-                Button("Remove and Discard \(status?.changedFiles ?? 0) Changes", role: .destructive) { remove(force: true) }
+            if case .losesWork = risk {
+                Button("Remove and Discard", role: .destructive) { remove() }
             } else {
-                Button("Remove", role: .destructive) { remove(force: false) }
+                Button("Remove", role: .destructive) { remove() }
             }
         } message: {
             Text(removalMessage)
@@ -1047,18 +1055,64 @@ private struct WorktreeRow: View {
         return folder.replacingOccurrences(of: NSHomeDirectory(), with: "~") + "/"
     }
 
-    private var removalTitle: String { "Remove the worktree “\(worktree.url.lastPathComponent)”?" }
+    private var risk: WorkspaceModel.RemovalRisk { workspace.removalRisk(worktree, in: repo) }
+
+    /// One click: always there for a worktree that's safe to remove, on hover otherwise.
+    @ViewBuilder
+    private var removeButton: some View {
+        let safe = risk == .none
+        Button("Remove", systemImage: worktree.isMissing ? "trash.slash" : "trash", action: requestRemoval)
+            .labelStyle(.iconOnly)
+            .buttonStyle(.borderless)
+            .foregroundStyle(safe ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tertiary))
+            .opacity(hovering || safe || removing ? 1 : 0)
+            .disabled(worktree.isLocked || removing)
+            .help(removeHelp)
+    }
+
+    private var removeHelp: String {
+        if worktree.isLocked { return "Locked\(worktree.lockReason.map { ": \($0)" } ?? ""). Unlock it with git worktree unlock to remove it." }
+        if worktree.isMissing { return "Forget this worktree: its folder is already gone" }
+        switch risk {
+        case .none: return "Remove this worktree: nothing in it would be lost"
+        case .keepsWork: return "Remove this worktree (asks first: its branch has work in progress)"
+        case .losesWork: return "Remove this worktree (asks first: something in it would be lost)"
+        }
+    }
+
+    /// Safe: just remove it. Work in it: ask, saying what happens to it.
+    private func requestRemoval() {
+        if risk == .none { remove() } else { confirmingRemoval = true }
+    }
+
+    private var removalTitle: String {
+        if case .losesWork = risk { return "Discard the work in “\(worktree.url.lastPathComponent)”?" }
+        return "Remove the worktree “\(worktree.url.lastPathComponent)”?"
+    }
 
     private var removalMessage: String {
-        var parts = ["Its folder is deleted."]
-        if let branch = worktree.branch { parts.append("The branch \(branch) stays.") }
-        if let changes = status?.changedFiles, changes > 0 { parts.append("It has \(changes) uncommitted change\(changes == 1 ? "" : "s"), which will be lost.") }
-        if !threads.isEmpty { parts.append("\(threads.count == 1 ? "A thread works" : "\(threads.count) threads work") in it; their conversations stay.") }
+        var parts: [String] = []
+        switch risk {
+        case .keepsWork(let why), .losesWork(let why): parts.append(why)
+        case .none: break
+        }
+        parts.append("Its folder is deleted.")
+        if threads.count == 1 { parts.append("The thread that worked in it keeps its conversation.") }
+        if threads.count > 1 { parts.append("The \(threads.count) threads that worked in it keep their conversations.") }
         return parts.joined(separator: " ")
     }
 
-    private func remove(force: Bool) {
-        Task { error = await app.removeWorktree(worktree, of: repo, in: workspace, force: force) }
+    private func remove() {
+        removing = true
+        Task {
+            if worktree.isMissing {
+                await app.pruneWorktrees(of: repo, in: workspace)
+            } else {
+                // Uncommitted changes need --force; git refuses otherwise.
+                error = await app.removeWorktree(worktree, of: repo, in: workspace, force: status?.isDirty ?? false)
+            }
+            removing = false
+        }
     }
 }
 

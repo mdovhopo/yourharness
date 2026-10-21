@@ -38,6 +38,8 @@ final class WorkspaceModel {
     /// Each repo's default branch's own line of commits: a branch pointing at one of them
     /// has no work of its own.
     private(set) var mainLines: [String: Set<String>] = [:]
+    /// Detached worktrees, by path: whether some branch also holds their commit.
+    private(set) var detachedReachable: [String: Bool] = [:]
 
     init(projectID: UUID, root: URL) {
         self.projectID = projectID
@@ -68,6 +70,32 @@ final class WorkspaceModel {
         else { return false }
         if status.upstreamGone { return true }
         return mergedBranches[repo.id]?.contains(branch) == true && !hasNoWork(worktree, in: repo)
+    }
+
+    /// What removing a worktree would cost: nothing (just do it), work that stays on its
+    /// branch (ask), or work that's lost (ask, and say so).
+    enum RemovalRisk: Equatable {
+        case none
+        case keepsWork(String)
+        case losesWork(String)
+    }
+
+    func removalRisk(_ worktree: Worktree, in repo: WorkspaceRepo) -> RemovalRisk {
+        if worktree.isMissing { return .none }
+        guard let status = worktreeStatuses[worktree.path] else { return .keepsWork("Its state hasn't been read yet.") }
+        if status.isDirty {
+            let n = status.changedFiles
+            return .losesWork("It has \(n) uncommitted change\(n == 1 ? "" : "s"), which will be lost.")
+        }
+        if worktree.isDetached {
+            return detachedReachable[worktree.path] == true ? .none
+                : .losesWork("It isn't on a branch, and its commits aren't on any branch either: they'd be lost. Make a branch in it first to keep them.")
+        }
+        if let pr = pullRequest(for: worktree, in: repo) {
+            return .keepsWork("#\(pr.number) is still open. The branch \(worktree.branch ?? "") keeps its commits, so you can check it out again.")
+        }
+        if isFinished(worktree, in: repo) || hasNoWork(worktree, in: repo) { return .none }
+        return .keepsWork("\(worktree.branch ?? "Its branch") has commits that aren't merged yet. The branch keeps them, so you can check it out again.")
     }
 
     /// Its branch points at a commit of the default branch's own: nothing done in it yet.
@@ -215,6 +243,12 @@ final class WorkspaceModel {
         }
         var worktreeStatuses: [String: RepoStatus] = [:]
         for (path, status) in checked { worktreeStatuses[path] = status }
+        let detached = worktrees.flatMap { id, list in list.filter { $0.isDetached && !$0.isMissing }.map { (id, $0) } }
+        let reach = await Self.map(detached) { id, worktree in
+            (worktree.path, await worktree.headOID.asyncMap { await git.isReachable($0, in: cloned.first { $0.id == id }!.url) } ?? false)
+        }
+        let reachable = Dictionary(reach, uniquingKeysWith: { $1 })
+        if reachable != detachedReachable { detachedReachable = reachable }
         if worktrees != self.worktrees { self.worktrees = worktrees }
         if worktreeStatuses != self.worktreeStatuses { self.worktreeStatuses = worktreeStatuses }
         if bases != defaultBranches { defaultBranches = bases }
@@ -295,3 +329,10 @@ protocol ForgeFetching: Sendable {
 
 extension GitHubClient: ForgeFetching {}
 extension GitLabClient: ForgeFetching {}
+
+extension Optional {
+    func asyncMap<T>(_ transform: (Wrapped) async -> T) async -> T? {
+        guard let value = self else { return nil }
+        return await transform(value)
+    }
+}

@@ -100,6 +100,14 @@ extension Git {
         return Set(output.stdout.split(whereSeparator: \.isNewline).map(String.init))
     }
 
+    /// Whether a branch, remote branch or tag holds `oid`: if not, a detached worktree's
+    /// commits are only reachable from its HEAD, and removing it loses them.
+    public func isReachable(_ oid: String, in repo: URL) async -> Bool {
+        let output = await run(["for-each-ref", "--contains", oid, "--count=1", "--format=%(refname)",
+                                "refs/heads", "refs/remotes", "refs/tags"], in: repo)
+        return output.succeeded && !output.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     public func branchExists(_ branch: String, in repo: URL) async -> Bool {
         await run(["rev-parse", "--verify", "--quiet", "refs/heads/\(branch)"], in: repo).succeeded
     }
