@@ -6,6 +6,8 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+## [0.0.1] - 2026-10-21
+
 The first release: a native macOS home for Claude Code that drives the official `claude` CLI you're already logged into. It never touches your credentials.
 
 ### Threads and projects
