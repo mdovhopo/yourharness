@@ -193,9 +193,23 @@ struct PermissionCard: View {
     let request: PermissionRequest
     let decide: (Bool) -> Void
 
+    /// Narrow, as in the side chat: the buttons go under the request instead of beside it.
+    @State private var isNarrow = false
+
     var body: some View {
-        let presentation = ToolPresentation(name: request.toolName, inputJSON: request.inputJSON)
-        HStack(alignment: .top, spacing: 12) {
+        let layout = isNarrow ? AnyLayout(VStackLayout(alignment: .trailing, spacing: 10)) : AnyLayout(HStackLayout(alignment: .top, spacing: 12))
+        layout {
+            summary.frame(maxWidth: .infinity, alignment: .leading)
+            buttons
+        }
+        .padding(14)
+        .onGeometryChange(for: Bool.self) { $0.size.width < 440 } action: { isNarrow = $0 }
+        .glassEffect(.regular.tint(.orange.opacity(0.12)), in: .rect(cornerRadius: Theme.floatingRadius))
+    }
+
+    private var summary: some View {
+        let presentation = ToolPresentation(name: self.request.toolName, inputJSON: self.request.inputJSON)
+        return HStack(alignment: .top, spacing: 12) {
             Image(systemName: presentation.symbol)
                 .font(.title3)
                 .foregroundStyle(.orange)
@@ -209,25 +223,25 @@ struct PermissionCard: View {
                         .lineLimit(4)
                         .textSelection(.enabled)
                 }
-                if let description = request.description, description != presentation.detail {
+                if let description = self.request.description, description != presentation.detail {
                     Text(description)
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
             }
-            Spacer(minLength: 12)
-            HStack(spacing: 8) {
-                Button("Deny") { decide(false) }
-                    .keyboardShortcut(.delete, modifiers: .command)
-                    .help("Deny (⌘⌫)")
-                Button("Allow") { decide(true) }
-                    .keyboardShortcut(.return, modifiers: .command)
-                    .buttonStyle(.glassProminent)
-                    .help("Allow (⌘↩)")
-            }
-            .controlSize(.large)
         }
-        .padding(14)
-        .glassEffect(.regular.tint(.orange.opacity(0.12)), in: .rect(cornerRadius: Theme.floatingRadius))
+    }
+
+    private var buttons: some View {
+        HStack(spacing: 8) {
+            Button("Deny") { decide(false) }
+                .keyboardShortcut(.delete, modifiers: .command)
+                .help("Deny (⌘⌫)")
+            Button("Allow") { decide(true) }
+                .keyboardShortcut(.return, modifiers: .command)
+                .buttonStyle(.glassProminent)
+                .help("Allow (⌘↩)")
+        }
+        .controlSize(.large)
     }
 }

@@ -18,6 +18,11 @@ enum AgentInstructions {
 
     /// For a `/btw` side chat, a read-only copy of a thread's conversation.
     static let sideChat = """
-    This is a side conversation. You are a copy of the conversation above, opened so the user can ask     something on the side without interrupting or adding to the main thread; nothing said here reaches it.     Answer the question directly and briefly. You can read and search files, but not change anything or run     commands; if the answer needs that, say what the main thread should do.
+    This is a side conversation. You are a copy of the conversation above, opened so the user can ask \
+    something on the side without interrupting or adding to the main thread; nothing said here reaches it. \
+    Answer the question directly and briefly. You have Read, Glob, Grep, Bash, WebFetch and WebSearch: use \
+    them when the answer needs a fresh look rather than what the conversation already says. The app asks the \
+    user to approve commands that could change something. You have no tools to edit files: if the answer \
+    needs changes, say what the main thread should do.
     """
 }

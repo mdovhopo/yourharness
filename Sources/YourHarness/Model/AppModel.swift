@@ -147,6 +147,7 @@ final class AppModel {
         case sideChat, subagents
         var id: String { rawValue }
         var label: String { self == .sideChat ? "Side Chat" : "Sub-agents" }
+        var symbol: String { self == .sideChat ? "bubble.left.and.text.bubble.right" : "person.2" }
     }
 
     var inspectorPanel = InspectorPanel.sideChat
@@ -500,14 +501,16 @@ final class AppModel {
             appendSystemPrompt: diagramInstructions ? AgentInstructions.diagrams : nil
         )
         if thread.isSideChat {
-            // A copy of the thread's conversation that can look but not touch, and leaves
-            // nothing behind: read-only tools, no MCP servers, nothing saved.
+            // A copy of the thread's conversation that can look but not edit, and leaves
+            // nothing behind: no edit tools, no MCP servers, nothing saved. It reads freely;
+            // commands and web requests ask you first, whatever the project's mode.
             if thread.sessionID == nil, let source = thread.forksSession {
                 options.resumeSessionID = source
                 options.forkSession = true
             }
-            options.permissionMode = nil
-            options.tools = ["Read", "Glob", "Grep"]
+            // Spelled out: left unset, a defaultMode in your Claude settings would apply.
+            options.permissionMode = "default"
+            options.tools = ["Read", "Glob", "Grep", "Bash", "WebFetch", "WebSearch"]
             options.withoutMCP = true
             options.persistsSession = false
             options.appendSystemPrompt = [options.appendSystemPrompt, AgentInstructions.sideChat].compactMap(\.self).joined(separator: "\n\n")

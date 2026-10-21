@@ -1,47 +1,68 @@
 import HarnessCore
 import SwiftUI
 
-/// The right sidebar for a thread: its side chat and its sub-agents.
+/// The right sidebar for a thread: its side chat and its sub-agents. The tabs sit in the
+/// sidebar's part of the window toolbar, so the panel itself is all content.
 struct ThreadInspector: View {
     @Environment(AppModel.self) private var app
-    let thread: ThreadModel
+    let thread: ThreadModel?
 
     var body: some View {
-        VStack(spacing: 0) {
-            Picker("Panel", selection: Bindable(app).inspectorPanel) {
-                ForEach(AppModel.InspectorPanel.allCases) { panel in
-                    Text(panel.label).tag(panel)
+        Group {
+            if let thread {
+                switch app.inspectorPanel {
+                case .sideChat: SideChatPanel(thread: thread)
+                case .subagents: SubagentInspector(thread: thread)
+                }
+            } else {
+                ContentUnavailableView("No Thread Selected", systemImage: "sidebar.trailing")
+            }
+        }
+        .environment(\.issueLinker, thread.map(app.issueLinker(for:)) ?? IssueLinker(repos: [], openPullRequests: []))
+        .toolbar {
+            if thread != nil {
+                ToolbarItem {
+                    Picker("Panel", selection: Bindable(app).inspectorPanel) {
+                        ForEach(AppModel.InspectorPanel.allCases) { panel in
+                            Text(panel.label).tag(panel)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
                 }
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            Divider()
-            switch app.inspectorPanel {
-            case .sideChat: SideChatPanel(thread: thread)
-            case .subagents: SubagentInspector(thread: thread)
+            ToolbarSpacer(.flexible)
+            if app.inspectorPanel == .sideChat, let thread, thread.sideChat != nil {
+                ToolbarItem {
+                    Button("New Side Chat", systemImage: "square.and.pencil", action: thread.closeSideChat)
+                        .help("End this side chat. The next question starts from a fresh copy of the thread.")
+                }
+            }
+            ToolbarItem {
+                Button("Sidebar", systemImage: "sidebar.trailing") { app.setShowsInspector(!app.showsInspector) }
+                    .help(app.showsInspector ? "Hide the side chat and sub-agents (⌥⌘0)" : "Show the side chat and sub-agents (⌥⌘0)")
             }
         }
     }
 }
 
-/// `/btw`: ask on the side. A copy of the thread's conversation answers; it can read files
-/// but not change them, and nothing said here is added to the thread.
+/// `/btw`: ask on the side. A copy of the thread's conversation answers; it reads files,
+/// asks before running anything, can't edit, and nothing said here is added to the thread.
 private struct SideChatPanel: View {
     let thread: ThreadModel
 
     var body: some View {
         if let chat = thread.sideChat {
-            SideChatConversation(chat: chat, close: thread.closeSideChat)
+            SideChatConversation(chat: chat)
                 .id(chat.id)
         } else {
             VStack(spacing: 0) {
                 ContentUnavailableView {
                     Label("Ask on the Side", systemImage: "bubble.left.and.text.bubble.right")
                 } description: {
-                    Text("A copy of this conversation answers here, so the thread isn't interrupted and nothing is added to it. Type **/btw** and a question in the composer, or ask below.")
+                    Text("A copy of this conversation answers here, so the thread isn't interrupted and nothing is added to it. It can't edit files, and asks before running commands. Type **/btw** and a question in the composer, or ask below.")
                 }
+                .frame(maxHeight: .infinity)
                 SideChatComposer(placeholder: "Ask on the side…", isRunning: false, stop: {}) { question in
                     thread.askAside(question)
                 }
@@ -53,7 +74,6 @@ private struct SideChatPanel: View {
 
 private struct SideChatConversation: View {
     let chat: ThreadModel
-    let close: () -> Void
 
     private var showsTypingIndicator: Bool {
         chat.phase == .running && chat.pendingPermissions.isEmpty && !(chat.entries.last?.isStreaming ?? false)
@@ -61,21 +81,6 @@ private struct SideChatConversation: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                Label("Copy of this conversation · read-only", systemImage: "eye")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                Spacer(minLength: 4)
-                Button("End Side Chat", systemImage: "xmark", action: close)
-                    .labelStyle(.iconOnly)
-                    .buttonStyle(.borderless)
-                    .foregroundStyle(.secondary)
-                    .help("End the side chat. The next /btw starts a fresh copy of the thread.")
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
-
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
                     ForEach(chat.entries) { entry in

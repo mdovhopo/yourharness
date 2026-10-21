@@ -31,19 +31,8 @@ struct RootView: View {
             .animation(.easeInOut(duration: 0.16), value: app.selectedThreadID)
             .animation(.easeInOut(duration: 0.16), value: app.overviewProjectID)
             .inspector(isPresented: Binding(get: { app.showsInspector }, set: { app.setShowsInspector($0) })) {
-                Group {
-                    if app.overviewProject == nil, let thread = app.selectedThread {
-                        ThreadInspector(thread: thread)
-                            .environment(\.issueLinker, app.issueLinker(for: thread))
-                    } else {
-                        ContentUnavailableView("No Thread Selected", systemImage: "sidebar.trailing")
-                    }
-                }
-                .inspectorColumnWidth(min: 300, ideal: 380, max: 640)
-                .toolbar {
-                    Button("Sidebar", systemImage: "sidebar.trailing") { app.setShowsInspector(!app.showsInspector) }
-                        .help(app.showsInspector ? "Hide the side chat and sub-agents (⌥⌘0)" : "Show the side chat and sub-agents (⌥⌘0)")
-                }
+                ThreadInspector(thread: app.overviewProject == nil ? app.selectedThread : nil)
+                    .inspectorColumnWidth(min: 300, ideal: 380, max: 640)
             }
         }
         .sheet(isPresented: Bindable(app).isResumingSession) {

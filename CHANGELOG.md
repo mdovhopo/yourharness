@@ -6,6 +6,11 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+### Changed
+- The right sidebar's tabs and actions moved into the window toolbar, so the panel is all content.
+- The side chat can now run commands and look things up on the web. It asks you first for anything that could change something, and it still can't edit files.
+- Permission cards stack their buttons under the request when space is narrow, as in the side chat.
+
 ## [0.0.1] - 2026-10-21
 
 The first release: a native macOS home for Claude Code that drives the official `claude` CLI you're already logged into. It never touches your credentials.
