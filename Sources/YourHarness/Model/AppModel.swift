@@ -172,10 +172,11 @@ final class AppModel {
     private(set) var showsInspector = false
 
     enum InspectorPanel: String, CaseIterable, Identifiable {
-        case sideChat, subagents, browser
+        case pullRequests, sideChat, subagents, browser
         var id: String { rawValue }
         var label: String {
             switch self {
+            case .pullRequests: "PRs"
             case .sideChat: "Side Chat"
             case .subagents: "Sub-agents"
             case .browser: "Browser"
@@ -183,6 +184,7 @@ final class AppModel {
         }
         var symbol: String {
             switch self {
+            case .pullRequests: "arrow.triangle.pull"
             case .sideChat: "bubble.left.and.text.bubble.right"
             case .subagents: "person.2"
             case .browser: "safari"
@@ -191,6 +193,33 @@ final class AppModel {
     }
 
     var inspectorPanel = InspectorPanel.sideChat
+
+    /// You picked a tab since switching threads: PRs turning up don't take it over.
+    @ObservationIgnored private var panelPicked = false
+
+    /// A thread with PRs opens the sidebar on them; one without leaves the PRs tab.
+    func choosePanel(for thread: ThreadModel?) {
+        panelPicked = false
+        guard let thread else { return }
+        if !pullRequests(for: thread).isEmpty {
+            inspectorPanel = .pullRequests
+        } else if inspectorPanel == .pullRequests {
+            inspectorPanel = .sideChat
+        }
+    }
+
+    /// The thread on screen just got its first PRs (found a moment after it opened, or
+    /// Claude just made one): show them, unless you've picked another tab.
+    func pullRequestsAppeared(for thread: ThreadModel) {
+        guard !panelPicked, !pullRequests(for: thread).isEmpty else { return }
+        inspectorPanel = .pullRequests
+    }
+
+    /// From the tab picker: your choice holds until you switch threads.
+    func pickPanel(_ panel: InspectorPanel) {
+        panelPicked = true
+        inspectorPanel = panel
+    }
 
     func showInspector(_ panel: InspectorPanel) {
         inspectorPanel = panel
@@ -511,53 +540,82 @@ final class AppModel {
         let number: Int
         let repo: String
         let url: URL
-        /// Nil until a linked PR that isn't open has been looked up.
+        /// Nil until a linked PR has been looked up.
         let pull: PullRequest?
         /// The branch that ties it to the thread, when that's how it was found.
         let branch: String?
     }
 
-    /// Linked PRs that aren't open, as their forge last described them.
+    /// The thread's PRs as their forge last described them, any state, by link ID.
     private var linkedPullRequests: [String: PullRequest] = [:]
-    @ObservationIgnored private var lookedUpLinks: Set<String> = []
+    /// When each thread's PRs were last fetched.
+    @ObservationIgnored private var pullsSyncedAt: [UUID: Date] = [:]
+    @ObservationIgnored private var pullsSyncing: Set<UUID> = []
+    private(set) var pullsSyncedAtObserved: [UUID: Date] = [:]
 
-    /// Open PRs from the branches it works on, then the ones linked in it, newest first.
+    /// Open PRs from the branches it works on, and every PR linked in it, whatever their
+    /// state now: one merged since keeps showing, as merged.
     func pullRequests(for thread: ThreadModel) -> [ThreadPullRequest] {
         var result: [ThreadPullRequest] = [], seen = Set<String>()
         let openPulls = workspaceModels.values.flatMap(\.pullRequests)
-        if let project = project(id: thread.projectID), let workspace = workspace(for: project) {
-            for checkout in workspace.checkouts(for: thread) {
-                let branch = checkout.worktree?.branch ?? (checkout.worktree == nil ? workspace.statuses[checkout.repo.id]?.branch : nil)
-                guard let branch, branch != workspace.defaultBranches[checkout.repo.id] else { continue }
-                for pull in workspace.pullRequests(for: checkout.repo) where pull.headBranch == branch && seen.insert(pull.id).inserted {
-                    result.append(ThreadPullRequest(id: pull.id, number: pull.number, repo: pull.remote.name, url: pull.url, pull: pull, branch: branch))
-                }
-            }
+        for pull in branchPullRequests(for: thread) where seen.insert(pull.pull.id).inserted {
+            result.append(ThreadPullRequest(id: pull.pull.id, number: pull.pull.number, repo: pull.pull.remote.name, url: pull.pull.url,
+                                            pull: linkedPullRequests[pull.pull.id] ?? pull.pull, branch: pull.branch))
         }
         for url in thread.pullRequestLinks.reversed() {
             guard let link = PullRequestLink.find(in: url).first, seen.insert(link.id).inserted else { continue }
-            let pull = openPulls.first(where: link.matches) ?? linkedPullRequests[link.id]
+            let pull = linkedPullRequests[link.id] ?? openPulls.first(where: link.matches)
             result.append(ThreadPullRequest(id: link.id, number: link.number, repo: link.remote.name, url: link.url, pull: pull, branch: nil))
         }
         return result
     }
 
-    /// Looks up linked PRs that aren't among the open ones (merged, closed, other repos).
-    func lookUpLinkedPullRequests(for thread: ThreadModel) async {
-        let openPulls = workspaceModels.values.flatMap(\.pullRequests)
-        let missing = thread.pullRequestLinks.compactMap { PullRequestLink.find(in: $0).first }
-            .filter { link in !openPulls.contains(where: link.matches) && !lookedUpLinks.contains(link.id) }
-        guard !missing.isEmpty else { return }
-        lookedUpLinks.formUnion(missing.map(\.id))
+    /// Open PRs whose head branch is one the thread's checkouts are on.
+    private func branchPullRequests(for thread: ThreadModel) -> [(pull: PullRequest, branch: String)] {
+        guard let project = project(id: thread.projectID), let workspace = workspace(for: project) else { return [] }
+        var found: [(PullRequest, String)] = []
+        for checkout in workspace.checkouts(for: thread) {
+            let branch = checkout.worktree?.branch ?? (checkout.worktree == nil ? workspace.statuses[checkout.repo.id]?.branch : nil)
+            guard let branch, branch != workspace.defaultBranches[checkout.repo.id] else { continue }
+            found += workspace.pullRequests(for: checkout.repo).filter { $0.headBranch == branch }.map { ($0, branch) }
+        }
+        return found
+    }
+
+    /// Brings a thread's PRs up to date: PRs found through its branches are saved with it
+    /// (so they stay after merging, when they leave the open list), then all of them are
+    /// fetched, whatever their state. At most every few seconds unless forced.
+    func syncPullRequests(for thread: ThreadModel, force: Bool = false) async {
+        thread.addPullRequestLinks(branchPullRequests(for: thread).map(\.pull.url.absoluteString))
+        let links = thread.pullRequestLinks.compactMap { PullRequestLink.find(in: $0).first }
+        guard !links.isEmpty, !pullsSyncing.contains(thread.id) else { return }
+        if !force, let last = pullsSyncedAt[thread.id], Date.now.timeIntervalSince(last) < 10 { return }
+        pullsSyncing.insert(thread.id)
+        defer { pullsSyncing.remove(thread.id) }
         let found: [PullRequest]
         if let mock = MockPullRequests.all {
-            found = mock.filter { pull in missing.contains { $0.matches(pull) } }
+            found = mock.filter { pull in links.contains { $0.matches(pull) } }
         } else if let github = workspaceTools.github {
-            found = await github.fetch(links: missing)
+            found = await github.fetch(links: links)
         } else {
             found = []
         }
-        for pull in found { linkedPullRequests[pull.id] = pull }
+        for pull in found where linkedPullRequests[pull.id] != pull { linkedPullRequests[pull.id] = pull }
+        pullsSyncedAt[thread.id] = .now
+        pullsSyncedAtObserved[thread.id] = .now
+        // A PR that just changed state changes what the repos view lists too.
+        if found.contains(where: { $0.state != .open }) { refreshWorkspaces(pullsMaxAge: 5) }
+    }
+
+    /// Claude just did something to PRs (`gh pr merge`, a push): look again a moment later,
+    /// and once more after, for checks and merges that take a little while.
+    func pullRequestActivity(in thread: ThreadModel) {
+        Task {
+            for delay in [3.0, 12.0] {
+                try? await Task.sleep(for: .seconds(delay))
+                await syncPullRequests(for: thread, force: true)
+            }
+        }
     }
 
     // MARK: - Worktrees

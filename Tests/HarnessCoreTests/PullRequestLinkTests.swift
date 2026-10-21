@@ -20,10 +20,11 @@ struct PullRequestLinkTests {
     @Test func parsesLinkedPullRequestsWithState() {
         let link = PullRequestLink(remote: GitRemote(host: "github.com", path: "acme/api", forge: .github), number: 42,
                                    url: URL(string: "https://github.com/acme/api/pull/42")!)
-        let json = #"{"data":{"viewer":{"login":"me"},"p0":{"pullRequest":{"number":42,"title":"Return 429","url":"https://github.com/acme/api/pull/42","isDraft":false,"headRefName":"fix/rate-limit","baseRefName":"main","state":"MERGED","reviewDecision":"APPROVED","author":{"login":"me"},"commits":{"nodes":[]}}}}}"#
+        let json = #"{"data":{"viewer":{"login":"me"},"p0":{"pullRequest":{"number":42,"title":"Return 429","url":"https://github.com/acme/api/pull/42","isDraft":false,"headRefName":"fix/rate-limit","baseRefName":"main","state":"MERGED","mergedAt":"2026-10-21T10:00:00Z","mergeStateStatus":"UNKNOWN","isInMergeQueue":false,"autoMergeRequest":{"enabledAt":"2026-10-21T09:00:00Z"},"reviewDecision":"APPROVED","author":{"login":"me"},"commits":{"nodes":[]}}}}}"#
         let pulls = GitHubClient.parse(links: json, [link])
         #expect(pulls.count == 1)
         #expect(pulls[0].state == .merged && pulls[0].isMine && pulls[0].review == .approved)
+        #expect(pulls[0].autoMerge && pulls[0].mergedAt != nil && !pulls[0].inMergeQueue)
         #expect(link.matches(pulls[0]))
         #expect(GitHubClient.query(for: [link]).contains("pullRequest(number: 42)"))
     }

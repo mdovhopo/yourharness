@@ -29,6 +29,13 @@ public struct PullRequest: Sendable, Hashable, Identifiable {
     public var isMine: Bool
     public var reviewRequestedFromMe: Bool
     public var state: State = .open
+    /// What GitHub says stands between it and merging: "CLEAN", "BLOCKED", "BEHIND",
+    /// "DIRTY" (conflicts), "UNSTABLE" (failing checks that aren't required), "DRAFT".
+    public var mergeStatus: String?
+    /// Auto-merge is on: it merges by itself once checks and reviews allow.
+    public var autoMerge = false
+    public var inMergeQueue = false
+    public var mergedAt: Date?
 
     public var id: String { "\(remote.host)/\(remote.path)#\(number)" }
 

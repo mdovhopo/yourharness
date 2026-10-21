@@ -188,14 +188,28 @@ final class WorkspaceModel {
     /// Rescans the folder when asked or on first use, then refreshes status and, when
     /// stale, PRs. Cheap to call often: each part throttles itself.
     func refresh(tools: WorkspaceTools, rescan: Bool = false, pullsMaxAge: TimeInterval = 120) async {
-        if layout == nil || rescan { await scan(tools: tools) }
+        // Also when an early scan ran before git was found: its repos have no remotes yet.
+        if layout == nil || rescan || (!remotesLoaded && tools.git != nil) { await scan(tools: tools) }
         async let status: Void = refreshStatus(tools: tools)
         async let pulls: Void = refreshPulls(tools: tools, maxAge: pullsMaxAge)
         _ = await (status, pulls)
     }
 
+    /// A refresh that finds a scan under way waits for it: going on without it would read
+    /// statuses and PRs for repos (and remotes) that aren't known yet.
     private func scan(tools: WorkspaceTools) async {
-        guard !isScanning else { return }
+        if let scanning { return await scanning.value }
+        let task = Task { await performScan(tools: tools) }
+        scanning = task
+        await task.value
+        scanning = nil
+    }
+
+    @ObservationIgnored private var scanning: Task<Void, Never>?
+    /// The last scan knew where git is, so it read the repos' remotes.
+    @ObservationIgnored private var remotesLoaded = false
+
+    private func performScan(tools: WorkspaceTools) async {
         isScanning = true
         defer { isScanning = false }
         let root = root
@@ -203,6 +217,7 @@ final class WorkspaceModel {
         self.layout = layout
 
         guard let git = tools.git else { return }
+        remotesLoaded = true
         let found = await Self.map(layout.clonedRepos) { repo in
             (repo.id, await git.originURL(of: repo.url).flatMap(GitRemote.init(url:)))
         }
@@ -264,6 +279,8 @@ final class WorkspaceModel {
         if let updated = pullsUpdatedAt, Date.now.timeIntervalSince(updated) < maxAge { return }
         // Development: PRs from a file instead of the forges.
         if let mock = MockPullRequests.all {
+            // As with the forges: nothing to match until the repos' remotes are known.
+            guard !remotes.isEmpty else { return }
             let mine = Set(remotes.values)
             let pulls = mock.filter { $0.state == .open && mine.contains($0.remote) }
             if pulls != pullRequests { pullRequests = pulls }

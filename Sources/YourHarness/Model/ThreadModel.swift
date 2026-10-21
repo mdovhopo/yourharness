@@ -755,7 +755,12 @@ final class ThreadModel: Identifiable {
                 entry.toolIsError = result.isError
                 entry.isStreaming = false
                 if TaskPlan.isPlanTool(name: entry.toolName, inputJSON: entry.toolInput) { plansChanged = true }
-                if entry.toolName == "Bash" { ranCommand = true }
+                if entry.toolName == "Bash" {
+                    ranCommand = true
+                    // Merging, opening or pushing to a PR: its state is about to change.
+                    let command = (try? JSONSerialization.jsonObject(with: Data(entry.toolInput.utf8)) as? [String: Any])?["command"] as? String ?? ""
+                    if ["gh pr", "glab mr", "git push", "gh api"].contains(where: command.contains) { app.pullRequestActivity(in: self) }
+                }
                 noteLinks(in: result.content)
                 if entry.toolName == "EnterWorktree", !result.isError {
                     addFootprint(ThreadFootprint.folders(inResult: result.content))
@@ -798,6 +803,7 @@ final class ThreadModel: Identifiable {
 
         case .turnCompleted(let result):
             activity = nil
+            if !isSideChat { Task { await app.syncPullRequests(for: self, force: true) } }
             app.rememberContextWindows(result.contextWindows)
             if let model = activeModelName, let window = result.contextWindows[model] {
                 contextWindow = window
@@ -1044,6 +1050,14 @@ final class ThreadModel: Identifiable {
         guard !found.isEmpty else { return }
         let merged = Self.mergeLinks(found, into: pullRequestLinks)
         if merged != pullRequestLinks { pullRequestLinks = merged }
+    }
+
+    /// PRs found another way (through a branch it works on): kept with the thread.
+    func addPullRequestLinks(_ urls: [String]) {
+        let merged = Self.mergeLinks(urls, into: pullRequestLinks)
+        guard merged != pullRequestLinks else { return }
+        pullRequestLinks = merged
+        persist()
     }
 
     nonisolated static func mergeLinks(_ new: [String], into existing: [String]) -> [String] {

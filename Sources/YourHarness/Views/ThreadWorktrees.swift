@@ -162,132 +162,28 @@ private struct CheckoutRow: View {
     }
 }
 
-/// The pull requests a thread is linked to, from the toolbar: open ones from the branches
-/// it works on, and any it mentions, whatever their state. Hidden while there are none.
+/// The pull requests a thread is linked to, from the toolbar: opens the right sidebar's PRs
+/// tab, where they're listed in full. Hidden while there are none.
 struct ThreadPullRequestsButton: View {
     @Environment(AppModel.self) private var app
     let thread: ThreadModel
-    @State private var showing = false
 
     var body: some View {
-        let pulls = app.pullRequests(for: thread)
-        if !pulls.isEmpty {
+        let count = app.pullRequests(for: thread).count
+        if count > 0 {
             Button {
-                showing.toggle()
+                if app.showsInspector, app.inspectorPanel == .pullRequests {
+                    app.setShowsInspector(false)
+                } else {
+                    app.showInspector(.pullRequests)
+                }
             } label: {
-                Label("\(pulls.count)", systemImage: "arrow.triangle.pull")
+                Label("\(count)", systemImage: "arrow.triangle.pull")
                     .labelStyle(.titleAndIcon)
                     .monospacedDigit()
             }
-            .help(pulls.count == 1 ? "The pull request this thread is linked to" : "The \(pulls.count) pull requests this thread is linked to")
-            .popover(isPresented: $showing, arrowEdge: .bottom) {
-                ThreadPullRequestsList(pulls: pulls) { showing = false }
-            }
-            .task(id: thread.pullRequestLinks) { await app.lookUpLinkedPullRequests(for: thread) }
-        }
-    }
-}
-
-private struct ThreadPullRequestsList: View {
-    let pulls: [AppModel.ThreadPullRequest]
-    let close: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Text("Pull Requests")
-                .font(.headline)
-                .padding(.horizontal, 14)
-                .padding(.top, 12)
-                .padding(.bottom, 8)
-            ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(pulls) { item in
-                        PullRequestLine(item: item, close: close)
-                        if item.id != pulls.last?.id { Divider().padding(.leading, 40) }
-                    }
-                }
-            }
-            .frame(maxHeight: 420)
-            .fixedSize(horizontal: false, vertical: true)
-        }
-        .padding(.bottom, 6)
-        .frame(width: 420)
-    }
-}
-
-private struct PullRequestLine: View {
-    let item: AppModel.ThreadPullRequest
-    let close: () -> Void
-
-    private var state: PullRequest.State? { item.pull?.state }
-
-    var body: some View {
-        Button {
-            close()
-            NSWorkspace.shared.open(item.url)
-        } label: {
-            HStack(alignment: .top, spacing: 10) {
-                Image(systemName: symbol)
-                    .foregroundStyle(tint)
-                    .frame(width: 16)
-                    .padding(.top, 1)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(item.pull?.title ?? "Pull request #\(item.number)")
-                        .fontWeight(.medium)
-                        .foregroundStyle(state == .open ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
-                        .lineLimit(2)
-                        .multilineTextAlignment(.leading)
-                    Text(detail)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                Spacer(minLength: 6)
-                if let pull = item.pull, pull.state == .open {
-                    HStack(spacing: 6) {
-                        ReviewBadge(review: pull.review)
-                        ChecksBadge(checks: pull.checks)
-                    }
-                    .font(.caption)
-                }
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
-            .contentShape(.rect)
-        }
-        .buttonStyle(.plain)
-        .help(item.url.absoluteString)
-    }
-
-    /// "api #57 · feature/login · Draft", "web #31 · Merged".
-    private var detail: String {
-        var parts = ["\(item.repo) #\(item.number)"]
-        if let branch = item.branch ?? item.pull?.headBranch, !branch.isEmpty { parts.append(branch) }
-        switch state {
-        case .open where item.pull?.isDraft == true: parts.append("Draft")
-        case .merged: parts.append("Merged")
-        case .closed: parts.append("Closed")
-        case .open: break
-        case nil: parts.append("Mentioned in the thread")
-        }
-        return parts.joined(separator: " · ")
-    }
-
-    private var symbol: String {
-        switch state {
-        case .merged: "arrow.triangle.merge"
-        case .closed: "xmark.circle"
-        default: "arrow.triangle.pull"
-        }
-    }
-
-    private var tint: AnyShapeStyle {
-        switch state {
-        case .open where item.pull?.isDraft == true: AnyShapeStyle(.secondary)
-        case .open: AnyShapeStyle(.green)
-        case .merged: AnyShapeStyle(.purple)
-        case .closed: AnyShapeStyle(.red)
-        case nil: AnyShapeStyle(.tertiary)
+            .help(count == 1 ? "The pull request this thread is linked to" : "The \(count) pull requests this thread is linked to")
+            .task(id: thread.pullRequestLinks) { await app.syncPullRequests(for: thread) }
         }
     }
 }

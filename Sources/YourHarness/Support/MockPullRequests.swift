@@ -6,12 +6,24 @@ import HarnessCore
 /// `{"repo": "github.com/acme/api", "number": 57, "title": "…", "head": "feature/login",
 /// "base": "main", "draft": false, "review": "approved", "checks": "passing",
 /// "state": "open", "author": "you", "mine": true}`. Off unless set.
+@MainActor
 enum MockPullRequests {
-    static let all: [PullRequest]? = {
-        guard let path = ProcessInfo.processInfo.environment["YH_MOCK_PULLS"], !path.isEmpty,
-              let data = FileManager.default.contents(atPath: path),
+    /// Read again whenever the file changes, so editing it (a PR merged) shows up live.
+    static var all: [PullRequest]? {
+        guard let path = ProcessInfo.processInfo.environment["YH_MOCK_PULLS"], !path.isEmpty else { return nil }
+        let modified = (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate]) as? Date
+        if let cached, cached.modified == modified { return cached.pulls }
+        let pulls = load(path)
+        cached = (modified, pulls)
+        return pulls
+    }
+
+    private static var cached: (modified: Date?, pulls: [PullRequest])?
+
+    private static func load(_ path: String) -> [PullRequest] {
+        guard let data = FileManager.default.contents(atPath: path),
               let items = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
-        else { return nil }
+        else { return [] }
         return items.compactMap { item in
             guard let repo = item["repo"] as? String, let number = item["number"] as? Int,
                   let slash = repo.firstIndex(of: "/") else { return nil }
@@ -27,6 +39,20 @@ enum MockPullRequests {
                 checks: PullRequest.Checks(rawValue: item["checks"] as? String ?? "none") ?? .none,
                 isMine: item["mine"] as? Bool ?? false, reviewRequestedFromMe: item["reviewRequested"] as? Bool ?? false,
                 state: PullRequest.State(rawValue: item["state"] as? String ?? "open") ?? .open)
+            .with { pull in
+                pull.mergeStatus = item["mergeStatus"] as? String
+                pull.autoMerge = item["autoMerge"] as? Bool ?? false
+                pull.inMergeQueue = item["mergeQueue"] as? Bool ?? false
+                if pull.state == .merged { pull.mergedAt = .now }
+            }
         }
-    }()
+    }
+}
+
+private extension PullRequest {
+    func with(_ change: (inout PullRequest) -> Void) -> PullRequest {
+        var copy = self
+        change(&copy)
+        return copy
+    }
 }

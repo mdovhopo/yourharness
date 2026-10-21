@@ -310,7 +310,7 @@ private struct StackList: View {
 }
 
 /// Where a PR sits in its stack: drawn as a line through dots, bottom of the stack first.
-private struct Rail {
+struct Rail {
     var depth: Int
     var isFirst: Bool
     var isLast: Bool
@@ -394,7 +394,7 @@ private struct PullRequestRow: View {
     }
 }
 
-private struct RailView: View {
+struct RailView: View {
     let rail: Rail
 
     var body: some View {

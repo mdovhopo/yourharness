@@ -1,7 +1,7 @@
 import HarnessCore
 import SwiftUI
 
-/// The right sidebar for a thread: its side chat, its sub-agents and its browser. The tabs sit in the
+/// The right sidebar for a thread: its pull requests, side chat, sub-agents and browser. The tabs sit in the
 /// sidebar's part of the window toolbar, so the panel itself is all content.
 struct ThreadInspector: View {
     @Environment(AppModel.self) private var app
@@ -11,6 +11,7 @@ struct ThreadInspector: View {
         Group {
             if let thread {
                 switch app.inspectorPanel {
+                case .pullRequests: PullRequestsPanel(thread: thread)
                 case .sideChat: SideChatPanel(thread: thread)
                 case .subagents: SubagentInspector(thread: thread)
                 case .browser: BrowserPanel(thread: thread)
@@ -20,11 +21,15 @@ struct ThreadInspector: View {
             }
         }
         .environment(\.issueLinker, thread.map(app.issueLinker(for:)) ?? IssueLinker(repos: [], openPullRequests: []))
+        .onChange(of: thread?.id, initial: true) { app.choosePanel(for: thread) }
+        .onChange(of: thread.map { app.pullRequests(for: $0).isEmpty } ?? true) { _, empty in
+            if !empty, let thread { app.pullRequestsAppeared(for: thread) }
+        }
         .toolbar {
             // Hidden, the sidebar leaves only its toggle in the toolbar.
             if thread != nil, app.showsInspector {
                 ToolbarItem {
-                    Picker("Panel", selection: Bindable(app).inspectorPanel) {
+                    Picker("Panel", selection: Binding(get: { app.inspectorPanel }, set: { app.pickPanel($0) })) {
                         ForEach(AppModel.InspectorPanel.allCases) { panel in
                             Text(panel.label).tag(panel)
                         }

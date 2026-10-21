@@ -107,6 +107,7 @@ public struct GitHubClient: Sendable {
             p\(index): repository(owner: \(quoted(link.remote.owner)), name: \(quoted(link.remote.name))) {
               pullRequest(number: \(link.number)) {
                 number title url isDraft headRefName baseRefName updatedAt reviewDecision state
+                mergedAt mergeStateStatus isInMergeQueue autoMergeRequest { enabledAt }
                 author { login }
                 commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
               }
@@ -126,6 +127,10 @@ public struct GitHubClient: Sendable {
                   var pull = pullRequest(from: node, remote: link.remote, login: login)
             else { return nil }
             pull.state = PullRequest.State(rawValue: (node["state"] as? String ?? "OPEN").lowercased()) ?? .open
+            pull.mergeStatus = node["mergeStateStatus"] as? String
+            pull.autoMerge = node["autoMergeRequest"] is [String: Any]
+            pull.inMergeQueue = node["isInMergeQueue"] as? Bool ?? false
+            pull.mergedAt = ForgeDates.parse(node["mergedAt"])
             return pull
         }
     }
