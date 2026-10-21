@@ -45,8 +45,13 @@ struct WorktreeTests {
         let cwd = "/work/acme"
         #expect(ThreadFootprint.folders(toolName: "Edit", inputJSON: #"{"file_path":"/work/acme-login/src/app.ts"}"#, workingDirectory: cwd) == ["/work/acme-login/src"])
         #expect(ThreadFootprint.folders(toolName: "Grep", inputJSON: #"{"pattern":"x","path":"repos/api"}"#, workingDirectory: cwd) == ["/work/acme/repos/api"])
-        let bash = ThreadFootprint.folders(toolName: "Bash", inputJSON: #"{"command":"cd ../acme-spike && git -C repos/web status; npm --prefix=/opt/x i https://x.dev/a"}"#, workingDirectory: cwd)
-        #expect(bash == ["/work/acme-spike", "/work/acme/repos/web", "/opt/x"])
+        // A relative word counts only if its first part is there: `repos` is, `feature` isn't.
+        let root = FileManager.default.temporaryDirectory.appending(path: "yh-fp-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: root.appending(path: "repos/web"), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let base = ThreadFootprint.resolve(root.path, in: "/")!
+        let bash = ThreadFootprint.folders(toolName: "Bash", inputJSON: #"{"command":"cd ../acme-spike && git -C repos/web status && git worktree add -b feature/login x; npm --prefix=/opt/x i https://x.dev/a"}"#, workingDirectory: base)
+        #expect(bash == [(base as NSString).deletingLastPathComponent + "/acme-spike", base + "/repos/web", "/opt/x"])
         #expect(ThreadFootprint.folders(toolName: "Bash", inputJSON: #"{"command":"ls"}"#, workingDirectory: cwd).isEmpty)
         #expect(ThreadFootprint.folders(inResult: "Created worktree at /work/acme/.claude/worktrees/fix.") == ["/work/acme/.claude/worktrees/fix"])
         #expect(ThreadFootprint.resolve("/tmp/x/", in: "/") == "/private/tmp/x")

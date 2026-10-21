@@ -19,7 +19,7 @@ public enum ThreadFootprint {
         }
         if let path = input["path"] as? String, let absolute = resolve(path, in: workingDirectory) { found.append(absolute) }
         if toolName == "Bash", let command = input["command"] as? String {
-            found += pathWords(in: command).compactMap { resolve($0, in: workingDirectory) }
+            found += pathWords(in: command).filter { isPath($0, in: workingDirectory) }.compactMap { resolve($0, in: workingDirectory) }
         }
         return unique(found)
     }
@@ -59,6 +59,14 @@ public enum ThreadFootprint {
             return word
         }
         .prefix(40).map { $0 }
+    }
+
+    /// In a command, `feature/login` is as likely a branch as a folder. A word counts when it
+    /// is clearly a path (`/…`, `~/…`, `./…`, `../…`) or starts with something that's there.
+    static func isPath(_ word: String, in workingDirectory: String) -> Bool {
+        if ["/", "~", "./", "../"].contains(where: { word.hasPrefix($0) }) { return true }
+        guard let first = word.split(separator: "/").first else { return false }
+        return FileManager.default.fileExists(atPath: (workingDirectory as NSString).appendingPathComponent(String(first)))
     }
 
     /// Absolute and standardized, with `/tmp` and `/var` as their real `/private` paths.
