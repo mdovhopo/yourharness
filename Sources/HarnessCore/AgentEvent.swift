@@ -35,6 +35,9 @@ public enum AgentEvent: Sendable, Equatable {
     /// Reply to `initialize`: models, effort levels, CLI version.
     case catalog(ClaudeCatalog)
     case controlFailed(requestID: String, message: String)
+    /// For a server the app serves (`MCPToolServer`). The session answers these itself;
+    /// they never reach the UI.
+    case mcpMessage(requestID: String, server: String, message: JSONValue)
     case turnCompleted(TurnResult)
     case processExited(code: Int32, stderrTail: String)
 }

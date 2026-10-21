@@ -132,3 +132,41 @@ struct ClaudeSessionIntegrationTests {
         await session.terminate()
     }
 }
+
+/// An in-app tool, called by the real CLI over the control channel.
+@Suite(.enabled(if: ProcessInfo.processInfo.environment["YH_INTEGRATION"] == "1"))
+struct MCPIntegrationTests {
+    private struct Secret: MCPToolServer {
+        let name = "yh"
+        var tools: [MCPTool] { [MCPTool(name: "secret_word", description: "Returns today's secret word.", inputSchema: MCPTool.schema([:]), readOnly: true)] }
+        func call(_ tool: String, arguments: JSONValue, toolUseID: String?) async -> MCPToolResult { .text("pelican") }
+    }
+
+    @Test func claudeCallsAnInAppTool() async throws {
+        var environment = await ShellEnvironment.load()
+        environment.removeValue(forKey: "CLAUDECODE")
+        let executable = try #require(ShellEnvironment.which("claude", in: environment))
+        var options = ClaudeLaunchOptions(executable: executable, workingDirectory: FileManager.default.temporaryDirectory,
+                                          environment: environment, model: "haiku")
+        options.tools = []
+        options.withoutMCP = true
+        options.persistsSession = false
+        options.allowedTools = ["mcp__yh"]
+        let session = try ClaudeSession(options: options, servers: [Secret()])
+        try await session.initialize()
+        try await session.send(text: "Call the secret_word tool, then reply with only the word it returned.")
+        var reply = "", called = false
+        for await event in session.events {
+            switch event {
+            case .assistantMessage(_, let blocks, _):
+                for case .toolUse(_, let name, _) in blocks where name == "mcp__yh__secret_word" { called = true }
+            case .textDelta(_, let text): reply += text
+            case .permissionRequest: Issue.record("Allowed tools shouldn't ask")
+            case .turnCompleted: await session.terminate()
+            default: break
+            }
+        }
+        #expect(called)
+        #expect(reply.lowercased().contains("pelican"))
+    }
+}

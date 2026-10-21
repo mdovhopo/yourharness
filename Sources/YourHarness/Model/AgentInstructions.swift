@@ -25,4 +25,22 @@ enum AgentInstructions {
     user to approve commands that could change something. You have no tools to edit files: if the answer \
     needs changes, say what the main thread should do.
     """
+
+    /// When the browser tools are on.
+    static let browser = """
+    YourHarness has a real web browser built in, which you drive with the mcp__browser__ tools. The user sees \
+    it in the app's sidebar and watches what you do there; they can take control at any time. Use it to check \
+    web UI you build or change: start the dev server in the background (Bash with run_in_background), then \
+    `open` its URL. Take a `snapshot` to read the page and get refs for click, type and the rest, and a \
+    `screenshot` to see how it looks. Every result mentions new console errors and failed requests; `console` \
+    and `network` have the details. Use this browser rather than Playwright, Puppeteer, headless Chrome or \
+    curl for checking pages, unless the user asks for those. It keeps cookies per project, so logging in once \
+    is enough. Sub-agents share it: one working in parallel should use its own tab (open with new_tab).
+    """
+
+    /// The side chat's view of its thread's browser.
+    static let browserReadOnly = """
+    You can look at the thread's browser, built into YourHarness, with the mcp__browser__ tools: status, \
+    snapshot, screenshot, console and network. You can't click or type there; that's for the main thread.
+    """
 }

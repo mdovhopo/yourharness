@@ -87,6 +87,12 @@ final class ThreadModel: Identifiable {
     let isSideChat: Bool
     /// For a side chat: the session it forks from when it starts. Nil starts fresh.
     let forksSession: String?
+    /// For a side chat: the thread it's on the side of. It can look at its browser.
+    @ObservationIgnored private(set) weak var parentThread: ThreadModel?
+    /// The thread's browser, made when it's first used.
+    private(set) var browser: BrowserSession?
+    /// Tabs open at the last quit, until the browser is made.
+    @ObservationIgnored private var savedBrowserTabs: [String] = []
 
     @ObservationIgnored private unowned let app: AppModel
     @ObservationIgnored private var sessionStart: Task<ClaudeSession, Error>?
@@ -145,6 +151,7 @@ final class ThreadModel: Identifiable {
         isEphemeral = true
         isSideChat = true
         forksSession = parent.sessionID
+        parentThread = parent
         title = "Side Chat"
         model = parent.model
         effort = parent.effort
@@ -174,6 +181,7 @@ final class ThreadModel: Identifiable {
         reactivatedAt = meta.reactivatedAt
         wasCutOff = meta.turnInProgress == true
         draft = meta.draft ?? ""
+        savedBrowserTabs = meta.browserTabs ?? []
         transcriptLoaded = false
     }
 
@@ -184,7 +192,12 @@ final class ThreadModel: Identifiable {
                    isPinned: isPinned ? true : nil, settledAt: settledAt,
                    autoSettle: autoSettle ? nil : false, reactivatedAt: reactivatedAt,
                    turnInProgress: phase == .running || wasCutOff ? true : nil,
-                   draft: draft.isEmpty ? nil : draft)
+                   draft: draft.isEmpty ? nil : draft,
+                   browserTabs: Self.nilIfEmpty(browser?.savedURLs ?? savedBrowserTabs))
+    }
+
+    private static func nilIfEmpty(_ urls: [String]) -> [String]? {
+        urls.isEmpty ? nil : urls
     }
 
     var hasLiveSession: Bool { sessionStart != nil }
@@ -553,7 +566,7 @@ final class ThreadModel: Identifiable {
         receivedInit = false
         let generation = sessionGeneration
         let start = Task { () throws -> ClaudeSession in
-            let session = try ClaudeSession(options: try await app.launchOptions(for: self))
+            let session = try ClaudeSession(options: try await app.launchOptions(for: self), servers: app.mcpServers(for: self))
             processID = session.processIdentifier
             listen(to: session, generation: generation)
             // Keeps the model catalog fresh; costs nothing.
@@ -749,7 +762,7 @@ final class ThreadModel: Identifiable {
         case .catalog(let catalog):
             app.updateCatalog(catalog, projectID: projectID)
 
-        case .controlFailed:
+        case .controlFailed, .mcpMessage:
             break
 
         case .turnCompleted(let result):
@@ -917,6 +930,33 @@ final class ThreadModel: Identifiable {
         // with the turn. Asking the session to end needs a moment there isn't.
         if let processID, sessionStart != nil { kill(processID, SIGTERM) }
         sideChat?.prepareForQuit()
+    }
+
+    // MARK: - Browser
+
+    /// The browser, made on first use: by the agent, or by you opening the panel.
+    func ensureBrowser() -> BrowserSession {
+        if let browser { return browser }
+        let browser = BrowserSession(projectID: projectID, restoring: savedBrowserTabs)
+        browser.onChange = { [weak self] in self?.app.save() }
+        browser.onPick = { [weak self] picked in self?.attachPicked(picked) }
+        self.browser = browser
+        return browser
+    }
+
+    func closeBrowser() {
+        if let browser { savedBrowserTabs = browser.savedURLs }
+        browser?.closeAll()
+        browser = nil
+    }
+
+    /// What you picked in the browser goes to the composer: where it is, and a picture.
+    private func attachPicked(_ picked: PickedElement) {
+        let separator = draft.isEmpty || draft.hasSuffix("\n") ? "" : "\n"
+        draft += separator + picked.promptText + "\n"
+        if let image = picked.image.flatMap(ImageAttachment.prepare) {
+            draftImages.append(image)
+        }
     }
 
     // MARK: - Title

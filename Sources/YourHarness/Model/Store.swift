@@ -97,6 +97,8 @@ struct ThreadMeta: Codable {
     var turnInProgress: Bool?
     /// What you'd typed and not sent.
     var draft: String?
+    /// The browser's open tabs, reopened when it's next used.
+    var browserTabs: [String]?
 }
 
 struct PersistedState: Codable {
@@ -133,6 +135,10 @@ struct PersistedState: Codable {
     var notifications = true
     /// Give Claude its task tools, so long turns come with a checklist. On unless turned off.
     var planChecklist = true
+    /// Give Claude the browser built into the app. On unless turned off.
+    var browserTools = true
+    /// Open the sidebar on the browser when Claude opens a page in the thread you're on.
+    var browserAutoShow = true
 
     init() {}
 
@@ -159,6 +165,8 @@ struct PersistedState: Codable {
         appearance = try container.decodeIfPresent(Appearance.self, forKey: .appearance) ?? .system
         notifications = try container.decodeIfPresent(Bool.self, forKey: .notifications) ?? true
         planChecklist = try container.decodeIfPresent(Bool.self, forKey: .planChecklist) ?? true
+        browserTools = try container.decodeIfPresent(Bool.self, forKey: .browserTools) ?? true
+        browserAutoShow = try container.decodeIfPresent(Bool.self, forKey: .browserAutoShow) ?? true
     }
 }
 
@@ -233,13 +241,17 @@ enum EffortLevel: String, CaseIterable, Identifiable {
 /// load lazily when a thread is first opened, so startup cost doesn't grow with history.
 struct Store: Sendable {
     let root: URL
+    /// A development run against `YH_DATA_DIR`: it must never wander into your real folders.
+    let isScratch: Bool
     private let queue = DispatchQueue(label: "yourharness.store", qos: .utility)
 
     init() {
         if let override = ProcessInfo.processInfo.environment["YH_DATA_DIR"], !override.isEmpty {
             // Development: run against a throwaway state instead of your real one.
             root = URL(fileURLWithPath: override, isDirectory: true)
+            isScratch = true
         } else {
+            isScratch = false
             let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             root = base.appending(path: "YourHarness", directoryHint: .isDirectory)
         }
@@ -254,6 +266,17 @@ struct Store: Sendable {
     private var attachmentsDirectory: URL { root.appending(path: "attachments", directoryHint: .isDirectory) }
 
     func attachmentURL(_ name: String) -> URL { attachmentsDirectory.appending(path: name) }
+
+    /// A browser screenshot the agent took, kept for its row in the transcript. Named like
+    /// attachments, so deleting the thread deletes it.
+    func browserScreenshotURL(thread: UUID, toolUseID: String) -> URL {
+        attachmentURL("\(thread.uuidString)-browser-\(toolUseID).jpg")
+    }
+
+    func saveBrowserScreenshot(_ data: Data, thread: UUID, toolUseID: String) {
+        let url = browserScreenshotURL(thread: thread, toolUseID: toolUseID)
+        queue.async { try? data.write(to: url, options: .atomic) }
+    }
 
     /// Written right away: the message showing it is on screen a moment later.
     func saveAttachment(_ image: ImageAttachment, thread: UUID) -> String? {
@@ -278,10 +301,15 @@ struct Store: Sendable {
     }
 
     func loadState() -> PersistedState {
-        guard let data = try? Data(contentsOf: stateURL),
-              let state = try? Self.decoder.decode(PersistedState.self, from: data)
-        else { return PersistedState() }
-        return state
+        guard let data = try? Data(contentsOf: stateURL) else { return PersistedState() }
+        do {
+            return try Self.decoder.decode(PersistedState.self, from: data)
+        } catch {
+            // Said out loud in a development run, where a bad hand-written state would
+            // otherwise start fresh without a word.
+            if isScratch { FileHandle.standardError.write(Data("state.json didn't load: \(error)\n".utf8)) }
+            return PersistedState()
+        }
     }
 
     func saveState(_ state: PersistedState) {

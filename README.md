@@ -24,6 +24,7 @@ An early spike. What works today:
 - Composer with model, reasoning-effort and permission pickers (Auto by default: the CLI's classifier runs what looks safe and asks about the rest), plus a context-window ring. Models and effort levels come live from the CLI's `initialize` catalog. Model and permission changes apply instantly mid-session
 - Find in a thread (⌘F, then ⌘G/⇧⌘G or ↩/⇧↩, Esc to close): a glass find bar over the transcript. It searches messages, notices, command output and tool inputs off the main thread, steps message by message from the newest, and highlights every match (the current message's more strongly)
 - Plan checklist: Claude Code's task tools (`TaskCreate`/`TaskUpdate`, or the older `TodoWrite`) are turned on for current models (`CLAUDE_CODE_ENABLE_TODO_TOOLS`, Settings → General → Plans) and replayed into a checklist. Each run of task calls shows as one plan row (the newest as the full list), and a strip above the composer shows the current step and progress while Claude works
+- A browser for agents ([docs/browser.md](docs/browser.md)): each thread has WebKit tabs in the right sidebar's Browser tab, which Claude drives through `mcp__browser__*` tools (open, navigate, snapshot, screenshot, click, type, press, hover, select, scroll, drag, wait_for, console, network, evaluate, resize, dialog, upload, close). The tools are an MCP server inside the app, reached over the CLI's control channel (no port, nothing else can call them) and pre-approved. Snapshots are an outline with refs, kept under 18 KB; clicks and keys are real `NSEvent`s that never take your keyboard focus; console and network are captured in the page and shown under it. Take Control pauses the agent's actions, the element picker puts what you point at in the composer, and pages keep running off screen while the agent works. Tabs are saved with the thread, cookies per project. Settings → General → Browser
 - Notifications for threads you aren't looking at: a turn finished while the app is in the background, or Claude waiting for your approval, answer or plan review (any time). Clicking one opens its thread; the Dock icon counts threads waiting for you. Permission is asked the first time there's something to say. Settings → General → Notifications
 - A Home project, so you can start a thread without picking a folder
 - Settings (⌘,): appearance (System, Light or Dark; System by default), agent discovery (Claude Code, plus Codex, Cursor, Gemini and OpenCode detection), account and plan from `claude auth status`, custom executable paths, and defaults for new threads
@@ -83,8 +84,10 @@ Sources/
     Forge/                open PRs/MRs via `gh`/`glab` GraphQL, stack detection
     Markdown/             block parser (streaming-aware), PR/issue reference linking
     Diagrams/             Mermaid flowchart + sequence parsers, layered graph layout, sequence layout
+    MCP/                  in-app MCP tool servers (JSON-RPC), served over the CLI's control channel
   YourHarness/            SwiftUI app
     Model/                AppModel, ThreadModel (event reducer), Store (JSON persistence)
+    Browser/              the agent's browser: WebKit tabs, injected scripts, the browser tools
     Views/                sidebar, thread, composer, tool calls, markdown
 ```
 

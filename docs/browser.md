@@ -1,6 +1,6 @@
 # Browser
 
-Status: proposed design. Nothing is implemented yet; the two spikes below are done. Follows T3 Code's collaborative browser, done natively.
+Status: built, apart from what's under Still to build. Follows T3 Code's collaborative browser, done natively.
 
 ## Goal
 
@@ -60,7 +60,7 @@ Clicks and keys are sent to the `WKWebView` as `NSEvent`s at the element's posit
 
 The right sidebar gets a third tab: **Browser**, next to Side Chat and Sub-agents.
 
-- **Toolbar** (in the sidebar's toolbar section, glass):
+- **Address bar** (a glass bar at the top of the panel; the window toolbar holds the sidebar's tabs):
   - back/forward and reload;
   - the URL field;
   - device size;
@@ -167,38 +167,31 @@ What it gives you:
   - take a snapshot before acting;
   - take a screenshot to check how things look.
 
-## Spikes before building
+## What the spikes found
 
-1. Done: in-process MCP over the control channel works with the installed CLI.
-2. Done: image results reach the model.
-3. **Trusted input:** check that `NSEvent` mouse and key events sent to a `WKWebView` in a non-key, background window arrive as trusted events, with focus and hover.
-4. **Hidden rendering:** check that a web view in a hidden sidebar, or a thread you aren't looking at, still lays out, runs timers and screenshots (`takeSnapshot`). If WebKit throttles it, host it in an off-screen window.
-5. **Snapshot quality and size:** run on a few real apps (a form, a dashboard, a long list) and check that it fits under 20 KB with useful refs.
+1. In-process MCP over the control channel works with the installed CLI, with no wait between `initialize` and the first message (integration test `MCPIntegrationTests`), and `--allowedTools mcp__browser` keeps the tools from asking.
+2. Image results reach the model.
+3. **Input.** `NSEvent`s sent straight to the web view arrive as trusted events, in a key window or not, on screen or off. Two catches, both handled:
+   - WebKit makes the web view the window's first responder when it's clicked, which would pull the keyboard out of your composer. `_setShouldSuppressFirstResponderChanges:` stops that for the agent's own events (turned off again after a round trip, so your clicks focus the page as usual).
+   - Without the keyboard focus, key presses still fire `keydown` and their default actions (Backspace, Tab, Enter submitting a form), but typed characters don't insert. `type` inserts text with `insertText:` instead (real `beforeinput`/`input` events). ⌘A/⌘C/⌘X/⌘V are menu commands WebKit runs only for the focused view, so they're done in the page, with a clipboard of the browser's own.
+4. **Hidden rendering.** WebKit treats a page in an occluded or off-screen window as hidden: timers drop to 1 Hz, `requestAnimationFrame` stops, `visibilityState` is `hidden`. With `_setWindowOcclusionDetectionEnabled:` off, a page in any window that's ordered in runs at full speed and screenshots fine; out of a window it's suspended either way. So pages not on screen wait in an off-screen, never-key panel (it doesn't keep the app open), and moving a web view between windows keeps its state. Occlusion detection is off only while the agent is using the browser and for two minutes after. Both switches are private WebKit API, looked up first: without them, pages are throttled and the agent's clicks take focus, but nothing breaks.
+5. **Snapshots.** Measured on real pages: a login form 1 KB, TodoMVC 1 KB, Hacker News' front page 17.5 KB with all 30 stories, a long Wikipedia article and apple.com capped at 18 KB with text and off-screen parts dropped first. Layout tables are flattened, boxes around a single link collapse into it, and punctuation between links is dropped.
 
-## Phases
+## Still to build
 
-1. **Claude drives a browser you watch.**
-   - The control-channel MCP plumbing.
-   - The Browser tab: URL bar, navigation, open in default browser, per-project cookies.
-   - `status`, `open`, `navigate`, `snapshot`, `screenshot`, `click`, `type`, `press`, `scroll`, `wait_for`, `console`, `network`, `evaluate`.
-   - Transcript rows with thumbnails; the agent highlight ring; Take Control.
-   - Auto-show, the setting and the instructions.
-2. **Inspect and point.**
-   - The console and network drawer.
-   - The element picker into the composer.
-   - `resize` with presets and color scheme.
-   - `hover`, `select`, `drag`, `dialog`, `upload`.
-   - Tabs and popups; local server discovery; localhost links opening in the browser.
-3. **Long-running and beyond.**
-   - Off-screen hosting for background threads; idle teardown.
-   - Recordings of a test run.
-   - Annotations.
-   - Read-only browser tools in the side chat.
-   - The same tools for Codex over localhost HTTP.
-   - Optionally, Chrome over CDP as a second engine.
+- Cookie import from Safari and Chrome, into a project's browser.
+- Local servers found from the processes under the thread's `claude` (`lsof`); today they come from what its commands printed.
+- Localhost links in the transcript opening in the thread's browser.
+- Idle teardown of tabs in threads you aren't looking at.
+- A pop-out window for a bigger view, recordings, annotations.
+- The same tools for Codex over localhost HTTP; Chrome over CDP as a second engine.
 
-## Open questions
+## How it's tested
 
-- Should a thread's tabs survive an app restart (reopened at their URLs), or start empty?
-- The side chat: read-only access to the thread's browser (`status`, `snapshot`, `screenshot`, `console`, `network`) seems right. Is that wanted?
-- Cookie import from Safari or Chrome (T3 has it): needed, or is logging in once per project enough?
+`YH_BROWSER_PROBE=<steps.json>` runs tool calls at launch and prints the results (see CLAUDE.md). The MCP plumbing has unit tests and an integration test against the real CLI.
+
+## Decided
+
+- A thread's tabs reopen at their last URLs when its browser is next used; the agent's next `open` takes over a reopened tab.
+- The side chat gets the read-only tools (`status`, `snapshot`, `screenshot`, `wait_for`, `console`, `network`) on the thread's browser.
+- Cookie import from Safari and Chrome is wanted.

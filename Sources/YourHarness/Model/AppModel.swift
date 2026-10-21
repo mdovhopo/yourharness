@@ -60,6 +60,9 @@ final class AppModel {
     private(set) var notifications: Bool
     /// Whether Claude gets its task tools, which the plan checklist shows.
     private(set) var planChecklist: Bool
+    /// Whether Claude gets the browser built into the app.
+    private(set) var browserTools: Bool
+    private(set) var browserAutoShow: Bool
     @ObservationIgnored let notifier = Notifier()
 
     /// Each project's files for `@` mentions, and when they were listed.
@@ -80,7 +83,10 @@ final class AppModel {
         if let id = state.homeProjectID, projects.contains(where: { $0.id == id }) {
             homeProjectID = id
         } else {
-            let home = Project(name: "Home", path: NSHomeDirectory())
+            // A development run gets its own folder as Home: running `claude` in your real
+            // home folder would set off macOS's prompts for Desktop, Documents and the rest.
+            let home = Project(name: "Home", path: store.isScratch ? store.root.appending(path: "home").path : NSHomeDirectory())
+            if store.isScratch { try? FileManager.default.createDirectory(at: store.root.appending(path: "home"), withIntermediateDirectories: true) }
             projects.insert(home, at: 0)
             homeProjectID = home.id
         }
@@ -102,6 +108,8 @@ final class AppModel {
         appearance = state.appearance
         notifications = state.notifications
         planChecklist = state.planChecklist
+        browserTools = state.browserTools
+        browserAutoShow = state.browserAutoShow
 
         threads = state.threads.map { ThreadModel(meta: $0, app: self) }
         selectedThreadID = state.selectedThreadID
@@ -158,10 +166,22 @@ final class AppModel {
     private(set) var showsInspector = false
 
     enum InspectorPanel: String, CaseIterable, Identifiable {
-        case sideChat, subagents
+        case sideChat, subagents, browser
         var id: String { rawValue }
-        var label: String { self == .sideChat ? "Side Chat" : "Sub-agents" }
-        var symbol: String { self == .sideChat ? "bubble.left.and.text.bubble.right" : "person.2" }
+        var label: String {
+            switch self {
+            case .sideChat: "Side Chat"
+            case .subagents: "Sub-agents"
+            case .browser: "Browser"
+            }
+        }
+        var symbol: String {
+            switch self {
+            case .sideChat: "bubble.left.and.text.bubble.right"
+            case .subagents: "person.2"
+            case .browser: "safari"
+            }
+        }
     }
 
     var inspectorPanel = InspectorPanel.sideChat
@@ -248,7 +268,10 @@ final class AppModel {
             }
             thread.settledAt = .now
             thread.isPinned = false
-            if !thread.isWorking { thread.endSession() }
+            if !thread.isWorking {
+                thread.endSession()
+                thread.closeBrowser()
+            }
         } else {
             guard thread.isSettled else { return }
             thread.settledAt = nil
@@ -417,6 +440,7 @@ final class AppModel {
 
     func deleteThread(_ thread: ThreadModel) {
         thread.endSession()
+        thread.closeBrowser()
         threads.removeAll { $0.id == thread.id }
         store.deleteTranscript(thread.id)
         store.deleteAttachments(thread: thread.id)
@@ -517,6 +541,12 @@ final class AppModel {
         // Claude Code keeps its task tools from current models unless asked; they're what
         // the plan checklist shows, and cost nothing until used (they load on demand).
         if planChecklist, !thread.isSideChat { options.environment["CLAUDE_CODE_ENABLE_TODO_TOOLS"] = "1" }
+        if browserTools {
+            // The browser is the app's own and touches none of your files: it doesn't ask.
+            options.allowedTools.append("mcp__browser")
+            let instructions = thread.isSideChat ? AgentInstructions.browserReadOnly : AgentInstructions.browser
+            options.appendSystemPrompt = [options.appendSystemPrompt, instructions].compactMap(\.self).joined(separator: "\n\n")
+        }
         if thread.isSideChat {
             // A copy of the thread's conversation that can look but not edit, and leaves
             // nothing behind: no edit tools, no MCP servers, nothing saved. It reads freely;
@@ -664,6 +694,39 @@ final class AppModel {
         planChecklist = enabled
         save()
         for thread in threads { thread.restartSession() }
+    }
+
+    /// The tools and their instructions are part of the launch: running sessions restart.
+    func setBrowserTools(_ enabled: Bool) {
+        browserTools = enabled
+        save()
+        for thread in threads { thread.restartSession() }
+    }
+
+    func setBrowserAutoShow(_ enabled: Bool) {
+        browserAutoShow = enabled
+        save()
+    }
+
+    /// The agent opened a page: show it, if that's the thread you're looking at.
+    func revealBrowser(for thread: ThreadModel?) {
+        guard browserAutoShow, let thread, !thread.isSideChat, visibleThreadID == thread.id else { return }
+        showInspector(.browser)
+    }
+
+    func saveBrowserScreenshot(_ data: Data, thread: UUID?, toolUseID: String) {
+        guard let thread else { return }
+        store.saveBrowserScreenshot(data, thread: thread, toolUseID: toolUseID)
+    }
+
+    /// The tools a thread's session serves from inside the app.
+    func mcpServers(for thread: ThreadModel) -> [any MCPToolServer] {
+        guard browserTools else { return [] }
+        if thread.isSideChat {
+            guard let parent = thread.parentThread else { return [] }
+            return [BrowserToolServer(browser: BrowserTools(thread: parent, app: self, readOnly: true))]
+        }
+        return [BrowserToolServer(browser: BrowserTools(thread: thread, app: self, readOnly: false))]
     }
 
     func setNotifications(_ enabled: Bool) {
@@ -1010,6 +1073,8 @@ final class AppModel {
         state.appearance = appearance
         state.notifications = notifications
         state.planChecklist = planChecklist
+        state.browserTools = browserTools
+        state.browserAutoShow = browserAutoShow
         store.saveState(state)
     }
 

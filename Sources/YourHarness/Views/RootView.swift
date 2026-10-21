@@ -32,7 +32,7 @@ struct RootView: View {
             .animation(.easeInOut(duration: 0.16), value: app.overviewProjectID)
             .inspector(isPresented: Binding(get: { app.showsInspector }, set: { app.setShowsInspector($0) })) {
                 ThreadInspector(thread: app.overviewProject == nil ? app.selectedThread : nil)
-                    .inspectorColumnWidth(min: 300, ideal: 380, max: 640)
+                    .inspectorColumnWidth(min: 300, ideal: 380, max: 960)
             }
         }
         .sheet(isPresented: Bindable(app).isResumingSession) {

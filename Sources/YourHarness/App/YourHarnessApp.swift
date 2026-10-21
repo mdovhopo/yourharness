@@ -100,6 +100,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 thread.attach(paths.split(separator: ":").map { .file(URL(fileURLWithPath: String($0))) })
             }
         }
+        MainActor.assumeIsolated { BrowserProbe.runIfRequested(app: AppModel.shared) }
         if ProcessInfo.processInfo.environment["YH_SIMULATE_STREAMING"] == "1" {
             MainActor.assumeIsolated {
                 if let thread = AppModel.shared.selectedThread {

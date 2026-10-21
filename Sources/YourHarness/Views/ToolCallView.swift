@@ -7,7 +7,7 @@ struct ToolPresentation {
     let detail: String
     let input: [String: Any]
 
-    init(name: String, inputJSON: String) {
+    init(name: String, inputJSON: String, result: String? = nil) {
         // Partial JSON while streaming won't parse yet; the header just fills in once it does.
         let input = (try? JSONSerialization.jsonObject(with: Data(inputJSON.utf8))) as? [String: Any] ?? [:]
         self.input = input
@@ -36,6 +36,11 @@ struct ToolPresentation {
             (symbol, verb, detail) = ("person.2", "Subagent", string("description"))
         case "TodoWrite":
             (symbol, verb, detail) = ("checklist", "Update plan", "")
+        case "ToolSearch" where string("query").hasPrefix("select:") && string("query").contains(BrowserCall.prefix):
+            // Claude Code loads MCP tools when they're first needed.
+            (symbol, verb, detail) = ("safari", "Load browser tools", "")
+        case let name where name.hasPrefix(BrowserCall.prefix):
+            (symbol, verb, detail) = BrowserCall.presentation(String(name.dropFirst(BrowserCall.prefix.count)), input: input, result: result)
         default:
             let first = input.values.compactMap { $0 as? String }.first ?? ""
             (symbol, verb, detail) = ("wrench.and.screwdriver", name, first)
@@ -54,7 +59,7 @@ struct ToolCallView: View {
     @Environment(\.findHighlight) private var findHighlight
 
     var body: some View {
-        let presentation = ToolPresentation(name: entry.toolName, inputJSON: entry.toolInput)
+        let presentation = ToolPresentation(name: entry.toolName, inputJSON: entry.toolInput, result: entry.isStreaming ? nil : entry.toolResult)
         VStack(alignment: .leading, spacing: 0) {
             Button {
                 withAnimation(.snappy) { expanded.toggle() }
@@ -63,6 +68,10 @@ struct ToolCallView: View {
             }
             .buttonStyle(.plain)
 
+            if entry.toolName == BrowserCall.prefix + "screenshot", !entry.toolIsError, !expanded {
+                BrowserShotThumbnail(toolUseID: entry.id)
+                    .padding([.horizontal, .bottom], 12)
+            }
             if expanded {
                 Divider()
                 details(presentation)
@@ -115,6 +124,12 @@ struct ToolCallView: View {
             }
             if let result = entry.toolResult, !result.isEmpty {
                 CodeBox(text: Self.clipped(result), tint: entry.toolIsError ? .red : nil)
+            }
+            if entry.toolName == BrowserCall.prefix + "screenshot", !entry.toolIsError {
+                BrowserShotThumbnail(toolUseID: entry.id, large: true)
+            }
+            if entry.toolName.hasPrefix(BrowserCall.prefix) {
+                ShowBrowserButton()
             }
         }
     }
@@ -190,5 +205,93 @@ private struct DiffLine: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 1)
         .background(color.opacity(0.1))
+    }
+}
+
+/// Browser tool calls (`mcp__browser__*`), read as steps: "Click button "Sign in"".
+enum BrowserCall {
+    static let prefix = "mcp__browser__"
+
+    static func presentation(_ tool: String, input: [String: Any], result: String?) -> (String, String, String) {
+        let string = { (key: String) in input[key] as? String ?? "" }
+        // The result's first line says what was hit: `Clicked button "Sign in".`
+        let done = result.flatMap { $0.split(separator: "\n").first.map(String.init) }
+        let target = { (verb: String) -> String in
+            if let done, let range = done.range(of: verb + " ") {
+                return String(done[range.upperBound...]).trimmingCharacters(in: CharacterSet(charactersIn: "."))
+            }
+            return [string("label"), string("selector"), string("ref")].first { !$0.isEmpty } ?? ""
+        }
+        switch tool {
+        case "open": return ("safari", "Open", string("url"))
+        case "navigate": return ("arrow.right.circle", string("action").isEmpty ? "Go to" : string("action").capitalized, string("url"))
+        case "snapshot": return ("list.bullet.indent", "Read the page", string("selector"))
+        case "screenshot": return ("camera.viewfinder", "Screenshot", input["full_page"] as? Bool == true ? "full page" : target("of"))
+        case "click": return ("cursorarrow.click", "Click", target("Clicked"))
+        case "hover": return ("cursorarrow", "Hover", target("over"))
+        // A password field says so in the result, which then gives only the length.
+        case "type": return ("keyboard", "Type", done?.contains(" characters into ") == true ? "••••••" : string("text"))
+        case "press": return ("keyboard", "Press", string("key"))
+        case "select": return ("filemenu.and.selection", "Select", (input["values"] as? [String] ?? []).joined(separator: ", "))
+        case "scroll": return ("scroll", "Scroll", string("to").isEmpty ? string("direction") : string("to"))
+        case "drag": return ("hand.draw", "Drag", "")
+        case "wait_for": return ("hourglass", "Wait for", [string("text"), string("selector"), string("url"), string("gone")].first { !$0.isEmpty } ?? "")
+        case "console": return ("terminal", "Read the console", string("level"))
+        case "network": return ("network", "Read network requests", input["failed_only"] as? Bool == true ? "failed" : "")
+        case "evaluate": return ("curlybraces", "Run JavaScript", string("expression"))
+        case "resize": return ("rectangle.expand.diagonal", "Resize", string("preset").isEmpty ? [input["width"], input["height"]].compactMap { ($0 as? NSNumber)?.stringValue }.joined(separator: "×") : string("preset"))
+        case "dialog": return ("questionmark.bubble", input["accept"] as? Bool == false ? "Dismiss dialog" : "Accept dialog", "")
+        case "upload": return ("square.and.arrow.up", "Upload", (input["paths"] as? [String] ?? []).map { ($0 as NSString).lastPathComponent }.joined(separator: ", "))
+        case "close": return ("xmark.square", "Close tab", "")
+        case "status": return ("safari", "Check the browser", "")
+        default: return ("safari", tool, "")
+        }
+    }
+}
+
+/// A screenshot the agent took, from where the app kept it.
+private struct BrowserShotThumbnail: View {
+    @Environment(AppModel.self) private var app
+    @Environment(ThreadModel.self) private var thread: ThreadModel?
+    let toolUseID: String
+    var large = false
+    @State private var image: NSImage?
+
+    var body: some View {
+        // Not an empty Group: with nothing in it, the task below would never start.
+        ZStack {
+            if let image {
+                Image(nsImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(maxWidth: large ? .infinity : 260, maxHeight: large ? 480 : 160, alignment: .leading)
+                    .clipShape(.rect(cornerRadius: Theme.innerRadius))
+                    .overlay(RoundedRectangle(cornerRadius: Theme.innerRadius).stroke(.separator))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .task(id: toolUseID) {
+            guard let thread else { return }
+            let url = app.store.browserScreenshotURL(thread: thread.id, toolUseID: toolUseID)
+            // It's written a moment after the call returns.
+            for _ in 0..<10 {
+                if let loaded = await Task.detached(operation: { NSImage(contentsOf: url) }).value {
+                    image = loaded
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(300))
+            }
+        }
+    }
+}
+
+private struct ShowBrowserButton: View {
+    @Environment(AppModel.self) private var app
+
+    var body: some View {
+        Button("Show Browser", systemImage: "safari") { app.showInspector(.browser) }
+            .buttonStyle(.glass)
+            .controlSize(.small)
     }
 }

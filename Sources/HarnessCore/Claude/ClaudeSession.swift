@@ -21,6 +21,8 @@ public struct ClaudeLaunchOptions: Sendable {
     public var withoutMCP = false
     /// Off: nothing is written to the session history on disk.
     public var persistsSession = true
+    /// Tools that never ask: `mcp__server` covers all of a server's.
+    public var allowedTools: [String] = []
 
     public init(
         executable: URL,
@@ -66,6 +68,7 @@ public struct ClaudeLaunchOptions: Sendable {
         if let tools { args += ["--tools", tools.joined(separator: ",")] }
         if withoutMCP { args.append("--strict-mcp-config") }
         if !persistsSession { args.append("--no-session-persistence") }
+        if !allowedTools.isEmpty { args += ["--allowedTools", allowedTools.joined(separator: ",")] }
         return args
     }
 }
@@ -78,10 +81,12 @@ public actor ClaudeSession {
     public nonisolated let processIdentifier: Int32
 
     private let process: Process
-    private let stdin: FileHandle
+    private let stdin: LineWriter
     private var requestCounter = 0
+    private let servers: [String: MCPServerEndpoint]
 
-    public init(options: ClaudeLaunchOptions) throws {
+    /// `servers` are tools served from inside the app; they're announced in `initialize`.
+    public init(options: ClaudeLaunchOptions, servers: [any MCPToolServer] = []) throws {
         let process = Process()
         process.executableURL = options.executable
         process.arguments = options.arguments
@@ -94,7 +99,22 @@ public actor ClaudeSession {
         process.standardError = stderrPipe
 
         let (events, continuation) = AsyncStream.makeStream(of: AgentEvent.self, bufferingPolicy: .unbounded)
-        let reader = OutputReader(continuation: continuation)
+        let endpoints = Dictionary(servers.map { ($0.name, MCPServerEndpoint($0)) }) { first, _ in first }
+        let writer = LineWriter(stdinPipe.fileHandleForWriting)
+        // Calls run side by side, each answering when it's done: a slow page load shouldn't
+        // hold up a quick status check from a sub-agent.
+        let reader = OutputReader(continuation: continuation) { requestID, server, message in
+            Task {
+                let reply: JSONValue
+                if let endpoint = endpoints[server] {
+                    reply = await endpoint.handle(message) ?? ["jsonrpc": "2.0", "result": [:]]
+                } else {
+                    reply = ["jsonrpc": "2.0", "id": message["id"] ?? nil, "error": ["code": -32601, "message": .string("No server \(server)")]]
+                }
+                try? writer.write(["type": "control_response",
+                                   "response": ["subtype": "success", "request_id": requestID, "response": ["mcp_response": reply.any]]])
+            }
+        }
 
         stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
             let chunk = handle.availableData
@@ -120,7 +140,8 @@ public actor ClaudeSession {
         try process.run()
         self.process = process
         processIdentifier = process.processIdentifier
-        self.stdin = stdinPipe.fileHandleForWriting
+        self.stdin = writer
+        self.servers = endpoints
         // Writing to a process that just died should throw, not kill the app with SIGPIPE.
         _ = fcntl(stdinPipe.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
         self.events = events
@@ -162,7 +183,9 @@ public actor ClaudeSession {
 
     /// Requests the catalog (models, effort levels); answered with a `.catalog` event.
     public func initialize() throws {
-        try control(["subtype": "initialize"])
+        var request: [String: Any] = ["subtype": "initialize"]
+        if !servers.isEmpty { request["sdkMcpServers"] = servers.keys.sorted() }
+        try control(request)
     }
 
     /// Switches model for the following turns, without restarting the process.
@@ -213,16 +236,40 @@ public actor ClaudeSession {
     }
 
     public func terminate() {
-        try? stdin.close()
+        stdin.close()
         if process.isRunning { process.terminate() }
     }
 
     public var isRunning: Bool { process.isRunning }
 
     private func write(_ object: [String: Any]) throws {
+        try stdin.write(object)
+    }
+}
+
+/// stdin, one JSON line at a time. Tool replies are written from their own tasks, and a
+/// screenshot is bigger than a pipe writes in one go, so lines mustn't interleave.
+private final class LineWriter: Sendable {
+    private let handle: Mutex<FileHandle?>
+
+    init(_ handle: FileHandle) {
+        self.handle = Mutex(handle)
+    }
+
+    func write(_ object: [String: Any]) throws {
         var data = try JSONSerialization.data(withJSONObject: object)
         data.append(0x0A)
-        try stdin.write(contentsOf: data)
+        try handle.withLock { handle in
+            guard let handle else { throw CocoaError(.fileWriteNoPermission) }
+            try handle.write(contentsOf: data)
+        }
+    }
+
+    func close() {
+        handle.withLock { handle in
+            try? handle?.close()
+            handle = nil
+        }
     }
 }
 
@@ -239,10 +286,14 @@ private final class OutputReader: Sendable {
 
     private let state = Mutex(State())
     private let continuation: AsyncStream<AgentEvent>.Continuation
+    /// MCP messages for our servers go here, not to the UI.
+    private let mcp: @Sendable (_ requestID: String, _ server: String, _ message: JSONValue) -> Void
     private static let stderrLimit = 8 * 1024
 
-    init(continuation: AsyncStream<AgentEvent>.Continuation) {
+    init(continuation: AsyncStream<AgentEvent>.Continuation,
+         mcp: @escaping @Sendable (_ requestID: String, _ server: String, _ message: JSONValue) -> Void) {
         self.continuation = continuation
+        self.mcp = mcp
     }
 
     func consume(_ chunk: Data) {
@@ -256,7 +307,13 @@ private final class OutputReader: Sendable {
             }
             return events
         }
-        for event in events { continuation.yield(event) }
+        for event in events {
+            if case .mcpMessage(let requestID, let server, let message) = event {
+                mcp(requestID, server, message)
+            } else {
+                continuation.yield(event)
+            }
+        }
     }
 
     func appendStderr(_ chunk: Data) {

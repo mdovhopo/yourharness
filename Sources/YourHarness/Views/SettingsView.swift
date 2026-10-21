@@ -458,6 +458,21 @@ private struct GeneralSettingsView: View {
             }
 
             Section {
+                Toggle(isOn: Binding(get: { app.browserTools }, set: { app.setBrowserTools($0) })) {
+                    Label("Let Claude use the browser", systemImage: "safari")
+                }
+                Toggle(isOn: Binding(get: { app.browserAutoShow }, set: { app.setBrowserAutoShow($0) })) {
+                    Label("Show the browser when Claude opens a page", systemImage: "sidebar.trailing")
+                }
+                .disabled(!app.browserTools)
+            } header: {
+                Text("Browser")
+            } footer: {
+                Text("Claude opens, reads, clicks and types in a browser built into the app, to test what it builds; you watch in the sidebar and can take control. Each project keeps its own cookies. Browser tools don't ask for approval: they only touch the app's own browser.")
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
                 Toggle(isOn: Binding(get: { app.diagramInstructions }, set: { app.setDiagramInstructions($0) })) {
                     Label("Let agents draw diagrams", systemImage: "point.3.connected.trianglepath.dotted")
                 }

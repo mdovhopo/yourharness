@@ -7,6 +7,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 ## [Unreleased]
 
 ### Added
+- A browser built in for Claude. Claude opens the app it's building in a Browser tab in the right sidebar, reads the page, clicks, types, presses keys, scrolls and takes screenshots, and every step shows in the thread. Each result tells it about new console errors and failed requests. You watch it happen, see the console and network under the page, can take control at any time, and can pick an element to put in your message with a picture of it. Tabs reopen where they were after a restart, each project keeps its own cookies, and the side chat can look at the thread's browser. You can turn it off in Settings.
 - Turns survive quitting and crashes. Your message is saved the moment you send it, the rest of the turn every couple of seconds, and quitting stops Claude and says so. After a crash, what Claude did meanwhile is recovered from Claude Code's session history.
 - Work done on a thread's session outside YourHarness (`claude --resume` in a terminal) shows up when you open the thread.
 - Unsent drafts are kept across launches.

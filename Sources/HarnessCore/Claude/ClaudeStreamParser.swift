@@ -195,8 +195,12 @@ public struct ClaudeStreamParser: Sendable {
 
     private func parseControlRequest(_ object: [String: Any]) -> [AgentEvent] {
         guard let requestID = object["request_id"] as? String,
-              let request = object["request"] as? [String: Any],
-              request["subtype"] as? String == "can_use_tool",
+              let request = object["request"] as? [String: Any]
+        else { return [] }
+        if request["subtype"] as? String == "mcp_message", let server = request["server_name"] as? String {
+            return [.mcpMessage(requestID: requestID, server: server, message: JSONValue(request["message"]))]
+        }
+        guard request["subtype"] as? String == "can_use_tool",
               let toolName = request["tool_name"] as? String
         else { return [] }
         return [.permissionRequest(PermissionRequest(

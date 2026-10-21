@@ -1,7 +1,7 @@
 import HarnessCore
 import SwiftUI
 
-/// The right sidebar for a thread: its side chat and its sub-agents. The tabs sit in the
+/// The right sidebar for a thread: its side chat, its sub-agents and its browser. The tabs sit in the
 /// sidebar's part of the window toolbar, so the panel itself is all content.
 struct ThreadInspector: View {
     @Environment(AppModel.self) private var app
@@ -13,6 +13,7 @@ struct ThreadInspector: View {
                 switch app.inspectorPanel {
                 case .sideChat: SideChatPanel(thread: thread)
                 case .subagents: SubagentInspector(thread: thread)
+                case .browser: BrowserPanel(thread: thread)
                 }
             } else {
                 ContentUnavailableView("No Thread Selected", systemImage: "sidebar.trailing")
