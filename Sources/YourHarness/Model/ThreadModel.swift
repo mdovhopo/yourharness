@@ -30,7 +30,9 @@ final class ThreadModel: Identifiable {
     private(set) var contextWindow: Int?
     private(set) var entries: [TranscriptEntry] = []
     private(set) var phase = Phase.idle
-    private(set) var pendingPermissions: [PermissionRequest] = []
+    private(set) var pendingPermissions: [PermissionRequest] = [] {
+        didSet { if pendingPermissions.isEmpty != oldValue.isEmpty { app.waitingChanged() } }
+    }
     /// Sub-agents still at work. Background ones outlive the turn that started them.
     private(set) var liveSubagents: [SubagentRun] = []
     /// The sub-agent the inspector follows; nil follows the latest.
@@ -672,6 +674,7 @@ final class ThreadModel: Identifiable {
 
         case .permissionRequest(let request):
             pendingPermissions.append(request)
+            app.notify(.needsYou, about: self, Self.describe(request))
 
         case .rateLimit(let info):
             app.updateRateLimit(info)
@@ -703,6 +706,10 @@ final class ThreadModel: Identifiable {
                     let message = result.resultText ?? "Claude stopped with an error (\(result.subtype))."
                     entries.append(.notice(message, style: .error))
                 }
+            }
+            // You stopped it yourself: you're there, nothing to tell.
+            if !interruptRequested, !interruptingForMessage {
+                app.notify(.finished, about: self, result.isError ? (result.resultText ?? "Claude stopped with an error.") : lastReply)
             }
             interruptRequested = false
             settle()
@@ -737,6 +744,28 @@ final class ThreadModel: Identifiable {
                 entries.append(.notice("Claude exited (code \(code)). \(detail)", style: .error))
             }
         }
+    }
+
+    /// What Claude is waiting for, in a notification.
+    private static func describe(_ request: PermissionRequest) -> String {
+        if request.toolName == AgentQuestion.toolName {
+            let question = AgentQuestion.parse(inputJSON: request.inputJSON)?.first?.question
+            return question.map { "Claude asks: \($0)" } ?? "Claude has a question for you."
+        }
+        if request.toolName == AgentPlan.toolName { return "Claude has a plan ready for you to review." }
+        let presentation = ToolPresentation(name: request.toolName, inputJSON: request.inputJSON)
+        let detail = presentation.detail.isEmpty ? "" : ": \(presentation.detail)"
+        return "Allow \(presentation.verb.lowercased())\(detail)?"
+    }
+
+    /// The turn's last reply, as a notification's line or two.
+    private var lastReply: String {
+        let turn = entries.reversed().prefix { $0.kind != .user }
+        guard let reply = turn.first(where: { $0.kind == .assistant && !$0.text.isEmpty })?.text else { return "Claude finished." }
+        let plain = reply.replacingOccurrences(of: "[*_`#>]+", with: "", options: .regularExpression)
+            .split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            .joined(separator: " ")
+        return plain.count > 180 ? String(plain.prefix(180)) + "…" : plain
     }
 
     /// Marks the turn finished: nothing is streaming, nothing is awaiting approval.

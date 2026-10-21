@@ -379,6 +379,8 @@ private struct GeneralSettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
+            NotificationsSection()
+
             Section {
                 Picker(selection: defaultModel) {
                     Text("Claude Code Default · \(app.modelDisplayName(for: nil))").tag(String?.none)
@@ -482,6 +484,35 @@ private struct GeneralSettingsView: View {
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+private struct NotificationsSection: View {
+    @Environment(AppModel.self) private var app
+    @State private var isDenied = false
+
+    var body: some View {
+        Section {
+            Toggle(isOn: Binding(get: { app.notifications }, set: { app.setNotifications($0) })) {
+                Label("Notify when Claude finishes or needs you", systemImage: "bell.badge")
+            }
+            if isDenied, app.notifications {
+                LabeledContent {
+                    Button("Open System Settings") {
+                        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension")!)
+                    }
+                } label: {
+                    Label("Notifications are off for YourHarness in System Settings.", systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(.secondary)
+                }
+            }
+        } header: {
+            Text("Notifications")
+        } footer: {
+            Text("Only for threads you aren't looking at: a turn that finishes while YourHarness is in the background, and Claude asking for approval, an answer or a plan review. Click one to open its thread. The Dock icon counts threads waiting for you.")
+                .foregroundStyle(.secondary)
+        }
+        .task { isDenied = await app.notifier.isDenied() }
     }
 }
 

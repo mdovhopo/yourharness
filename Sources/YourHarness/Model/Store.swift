@@ -129,6 +129,8 @@ struct PersistedState: Codable {
     /// project ID, so the "/" menu fills instantly.
     var slashCommands: [String: [SlashCommand]] = [:]
     var appearance = Appearance.system
+    /// Tell you when a turn finishes or Claude needs you. On unless turned off.
+    var notifications = true
 
     init() {}
 
@@ -153,6 +155,7 @@ struct PersistedState: Codable {
         showsInspector = try container.decodeIfPresent(Bool.self, forKey: .showsInspector) ?? false
         slashCommands = try container.decodeIfPresent([String: [SlashCommand]].self, forKey: .slashCommands) ?? [:]
         appearance = try container.decodeIfPresent(Appearance.self, forKey: .appearance) ?? .system
+        notifications = try container.decodeIfPresent(Bool.self, forKey: .notifications) ?? true
     }
 }
 

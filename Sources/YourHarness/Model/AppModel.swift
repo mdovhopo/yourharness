@@ -25,6 +25,7 @@ final class AppModel {
         didSet {
             overviewProjectID = nil
             selectedThread?.markRead()
+            if let selectedThreadID { notifier.clear(thread: selectedThreadID) }
             save()
         }
     }
@@ -54,6 +55,10 @@ final class AppModel {
     /// Why the last generated title didn't arrive, for Settings; cleared by the next success.
     private(set) var titleGenerationError: String?
     @ObservationIgnored private var contextWindows: [String: Int]
+
+    /// Whether to notify you when a turn finishes or Claude needs you.
+    private(set) var notifications: Bool
+    @ObservationIgnored let notifier = Notifier()
 
     @ObservationIgnored let store = Store()
     @ObservationIgnored private var environment: [String: String] = [:]
@@ -89,6 +94,7 @@ final class AppModel {
         titleGeneration = state.titleGeneration
         showsInspector = state.showsInspector
         appearance = state.appearance
+        notifications = state.notifications
 
         threads = state.threads.map { ThreadModel(meta: $0, app: self) }
         selectedThreadID = state.selectedThreadID
@@ -106,6 +112,7 @@ final class AppModel {
             settleIdleThreads()
         }
         startWorkspacePolling()
+        notifier.open = { [weak self] id in self?.openFromNotification(id) }
     }
 
     var homeProject: Project {
@@ -643,6 +650,43 @@ final class AppModel {
     }
 
     /// The instruction is part of the launch, so running sessions pick it up on restart.
+    func setNotifications(_ enabled: Bool) {
+        notifications = enabled
+        save()
+    }
+
+    /// Tells you about a thread you aren't looking at. A finished turn only while the app
+    /// is in the background (the sidebar marks it otherwise); Claude waiting for you,
+    /// whenever it's another thread.
+    func notify(_ kind: Notifier.Kind, about thread: ThreadModel, _ body: String) {
+        guard notifications, !thread.isSideChat else { return }
+        let isLooking = NSApp.isActive && visibleThreadID == thread.id
+        guard !isLooking, kind == .needsYou || !NSApp.isActive else { return }
+        notifier.post(kind, thread: thread.id, title: thread.title, subtitle: project(id: thread.projectID)?.name ?? "",
+                      body: body)
+    }
+
+    private func openFromNotification(_ id: UUID) {
+        guard let thread = threads.first(where: { $0.id == id }) else { return }
+        if thread.isSettled { setSettled(false, thread) }
+        selectedThreadID = id
+        NSApp.activate()
+        let window = NSApp.windows.first { $0.identifier?.rawValue == "main" } ?? NSApp.windows.first { $0.canBecomeMain }
+        if window?.isMiniaturized == true { window?.deminiaturize(nil) }
+        window?.makeKeyAndOrderFront(nil)
+    }
+
+    /// Back in the app: the thread on screen has been seen.
+    func didBecomeActive() {
+        if let visibleThreadID { notifier.clear(thread: visibleThreadID) }
+    }
+
+    /// The Dock icon counts threads waiting for your approval, answer or plan review.
+    func waitingChanged() {
+        let waiting = threads.count { !$0.pendingPermissions.isEmpty || $0.sideChat?.pendingPermissions.isEmpty == false }
+        notifier.setBadge(waiting)
+    }
+
     func setDiagramInstructions(_ enabled: Bool) {
         diagramInstructions = enabled
         save()
@@ -922,6 +966,7 @@ final class AppModel {
         state.titleGeneration = titleGeneration
         state.showsInspector = showsInspector
         state.appearance = appearance
+        state.notifications = notifications
         store.saveState(state)
     }
 
