@@ -127,48 +127,52 @@ private struct StackCard: View {
 /// layer) in its lane, level with the title. Rows stack up into one unbroken drawing.
 struct GraphCell: View {
     let row: StackGraph.Row
+    /// How many lanes wide the cell is: the stack's, or (for a staircase) the row's own.
     let laneCount: Int
-    static let lane: CGFloat = 18
-    static let dotY: CGFloat = 16
+    /// Lane spacing.
+    var step: CGFloat = 18
+    /// Where the dot sits from the top; nil centres it, for one-line rows.
+    var dotY: CGFloat? = 16
     static let dot: CGFloat = 16
 
-    static func x(_ lane: Int) -> CGFloat { CGFloat(lane) * Self.lane + Self.dot / 2 }
+    private func x(_ lane: Int) -> CGFloat { CGFloat(lane) * step + Self.dot / 2 }
 
     var body: some View {
-        ZStack(alignment: .topLeading) {
-            Canvas { context, size in
-                var path = Path()
-                for segment in row.segments {
-                    switch segment {
-                    case .through(let lane):
-                        path.move(to: CGPoint(x: Self.x(lane), y: 0))
-                        path.addLine(to: CGPoint(x: Self.x(lane), y: size.height))
-                    case .fromAbove(let lane):
-                        path.move(to: CGPoint(x: Self.x(lane), y: 0))
-                        path.addLine(to: CGPoint(x: Self.x(lane), y: Self.dotY))
-                    case .toBelow(let lane):
-                        path.move(to: CGPoint(x: Self.x(lane), y: Self.dotY))
-                        path.addLine(to: CGPoint(x: Self.x(lane), y: size.height))
-                    case .branch(let from, let to):
-                        // Down the parent's lane, round the corner, across into the dot.
-                        let px = Self.x(from), cx = Self.x(to), radius: CGFloat = 8
-                        path.move(to: CGPoint(x: px, y: 0))
-                        path.addLine(to: CGPoint(x: px, y: Self.dotY - radius))
-                        path.addQuadCurve(to: CGPoint(x: px + radius, y: Self.dotY), control: CGPoint(x: px, y: Self.dotY))
-                        path.addLine(to: CGPoint(x: cx, y: Self.dotY))
-                    }
+        Canvas { context, size in
+            let y = dotY ?? size.height / 2
+            var path = Path()
+            for segment in row.segments {
+                switch segment {
+                case .through(let lane):
+                    path.move(to: CGPoint(x: x(lane), y: 0))
+                    path.addLine(to: CGPoint(x: x(lane), y: size.height))
+                case .fromAbove(let lane):
+                    path.move(to: CGPoint(x: x(lane), y: 0))
+                    path.addLine(to: CGPoint(x: x(lane), y: y))
+                case .toBelow(let lane):
+                    path.move(to: CGPoint(x: x(lane), y: y))
+                    path.addLine(to: CGPoint(x: x(lane), y: size.height))
+                case .branch(let from, let to):
+                    // Down the parent's lane, round the corner, across into the dot.
+                    let px = x(from), cx = x(to), radius = min(8, (cx - px) / 2)
+                    path.move(to: CGPoint(x: px, y: 0))
+                    path.addLine(to: CGPoint(x: px, y: y - radius))
+                    path.addQuadCurve(to: CGPoint(x: px + radius, y: y), control: CGPoint(x: px, y: y))
+                    path.addLine(to: CGPoint(x: cx, y: y))
                 }
-                context.stroke(path, with: .style(.quaternary), style: StrokeStyle(lineWidth: 2, lineCap: .round))
             }
+            context.stroke(path, with: .style(.quaternary), style: StrokeStyle(lineWidth: 2, lineCap: .round))
+        }
+        .overlay(alignment: dotY == nil ? .leading : .topLeading) {
             Text("\(row.layer)")
                 .font(.system(size: 9, weight: .bold).monospacedDigit())
                 .foregroundStyle(StateChip.color(row.pullRequest))
                 .frame(width: Self.dot, height: Self.dot)
                 .background(Circle().fill(.background))
                 .overlay(Circle().strokeBorder(StateChip.color(row.pullRequest).opacity(0.8), lineWidth: 1.5))
-                .offset(x: CGFloat(row.lane) * Self.lane, y: Self.dotY - Self.dot / 2)
+                .offset(x: CGFloat(row.lane) * step, y: dotY.map { $0 - Self.dot / 2 } ?? 0)
         }
-        .frame(width: CGFloat(laneCount - 1) * Self.lane + Self.dot)
+        .frame(width: CGFloat(laneCount - 1) * step + Self.dot)
         .frame(maxHeight: .infinity)
     }
 }

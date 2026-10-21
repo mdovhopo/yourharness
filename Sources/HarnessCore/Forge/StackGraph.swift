@@ -33,13 +33,27 @@ public struct StackGraph: Sendable, Equatable {
         1 + (node.children.map(height).max() ?? 0)
     }
 
-    public static func layout(_ stack: PullRequestStack) -> StackGraph {
+    public enum Lanes: Sendable {
+        /// A line of PRs shares a lane; only a fork opens one: narrow, for the sidebar.
+        case compact
+        /// Every PR one step in from its base, a staircase, with side branches after
+        /// the main line: for the wide repos view.
+        case depth
+    }
+
+    public static func layout(_ stack: PullRequestStack, lanes: Lanes = .compact) -> StackGraph {
         var placed: [(pull: PullRequest, layer: Int, lane: Int, parent: Int?)] = []
         var busy: Set<Int> = [0]
 
         func visit(_ node: PullRequestStack, lane: Int, layer: Int, parent: Int?) {
             let row = placed.count
             placed.append((node.pullRequest, layer, lane, parent))
+            if lanes == .depth {
+                // The longest line first; each child one step in.
+                let children = node.children.sorted { (height($0), -$0.pullRequest.number) > (height($1), -$1.pullRequest.number) }
+                for child in children { visit(child, lane: layer, layer: layer + 1, parent: row) }
+                return
+            }
             // Side branches first, shortest first; the longest line carries the lane on.
             let children = node.children.sorted { (height($0), -$0.pullRequest.number) < (height($1), -$1.pullRequest.number) }
             for (index, child) in children.enumerated() {

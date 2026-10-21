@@ -61,4 +61,16 @@ struct StackGraphTests {
         // H branches off G into lane 2 while G's own line runs on in lane 1.
         #expect(graph.rows[5].segments == [.branch(from: 1, to: 2), .through(0), .through(1)])
     }
+
+    /// The repos view's staircase: each PR a step in from its base, the main line first,
+    /// and the base's line running past the main line's rows down to a later sibling.
+    @Test func depthLanesMakeAStaircase() {
+        let graph = StackGraph.layout(Self.stack([("A", "main"), ("B", "A"), ("C", "B"), ("D", "C"), ("G", "B")]), lanes: .depth)
+        #expect(Self.picture(graph) == ["A@0", "B@1", "C@2", "D@3", "G@2"])
+        #expect(graph.rows[1].segments == [.branch(from: 0, to: 1), .toBelow(1)])
+        // B's line passes C's subtree on its way to G.
+        #expect(graph.rows[2].segments == [.branch(from: 1, to: 2), .toBelow(2), .through(1)])
+        #expect(graph.rows[3].segments == [.branch(from: 2, to: 3), .through(1)])
+        #expect(graph.rows[4].segments == [.branch(from: 1, to: 2)])
+    }
 }

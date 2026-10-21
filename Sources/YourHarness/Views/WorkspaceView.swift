@@ -281,7 +281,8 @@ private struct StackList: View {
 
     var body: some View {
         ForEach(stacks) { stack in
-                let rows = stack.flattened
+                // A staircase: each PR a step in from its base, the lines joined up.
+                let rows = StackGraph.layout(stack, lanes: .depth).rows
                 VStack(alignment: .leading, spacing: 0) {
                     if stack.isStacked {
                         Label("Stack of \(rows.count)", systemImage: "square.stack")
@@ -295,7 +296,7 @@ private struct StackList: View {
                         PullRequestRow(
                             pullRequest: row.pullRequest,
                             repoName: workspace.repo(for: row.pullRequest)?.name ?? row.pullRequest.remote.name,
-                            rail: stack.isStacked ? Rail(depth: row.depth, isFirst: index == 0, isLast: index == rows.count - 1) : nil
+                            graph: stack.isStacked ? GraphCell(row: row, laneCount: row.lane + 1, step: 22, dotY: nil) : nil
                         )
                         if index < rows.count - 1, !stack.isStacked {
                             Divider().padding(.leading, 40)
@@ -309,23 +310,17 @@ private struct StackList: View {
     }
 }
 
-/// Where a PR sits in its stack: drawn as a line through dots, bottom of the stack first.
-struct Rail {
-    var depth: Int
-    var isFirst: Bool
-    var isLast: Bool
-}
-
 private struct PullRequestRow: View {
     let pullRequest: PullRequest
     let repoName: String
-    let rail: Rail?
+    let graph: GraphCell?
     @State private var hovering = false
 
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
-            if let rail {
-                RailView(rail: rail)
+            if let graph {
+                // Out to the row's edges, so the lines meet the rows above and below.
+                graph.padding(.vertical, -8)
             }
             Image(systemName: pullRequest.isDraft ? "circle.dashed" : "arrow.triangle.pull")
                 .font(.callout.weight(.medium))
@@ -391,27 +386,6 @@ private struct PullRequestRow: View {
             Button("Copy Link", systemImage: "link") { Pasteboard.copy(pullRequest.url.absoluteString) }
             Button("Copy Branch Name", systemImage: "arrow.triangle.branch") { Pasteboard.copy(pullRequest.headBranch) }
         }
-    }
-}
-
-struct RailView: View {
-    let rail: Rail
-
-    var body: some View {
-        ZStack {
-            VStack(spacing: 0) {
-                Rectangle().fill(rail.isFirst ? .clear : Color.secondary.opacity(0.35))
-                Rectangle().fill(rail.isLast ? .clear : Color.secondary.opacity(0.35))
-            }
-            .frame(width: 2)
-            Circle()
-                .fill(.background)
-                .strokeBorder(Color.secondary.opacity(0.6), lineWidth: 2)
-                .frame(width: 9, height: 9)
-        }
-        .frame(width: 12)
-        .padding(.leading, CGFloat(rail.depth) * 14)
-        .padding(.vertical, -8)
     }
 }
 
