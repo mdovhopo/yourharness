@@ -621,7 +621,7 @@ private struct RefreshLimitsButton: View {
     }
 }
 
-/// `5h ━━━━━━──────── 6%`, with reset timing on hover.
+/// `5h ━━━━━━──────── 6%  2h 14m`: used, and how long until it resets.
 private struct LimitMeter: View {
     let name: String
     let window: RateLimitInfo.Window?
@@ -666,7 +666,16 @@ private struct LimitMeter: View {
         guard let window else { return "\(title): no reading yet. Refresh to check." }
         if hasReset { return "\(title): reset since the last reading. Refresh to update." }
         guard let resetsAt = window.resetsAt else { return title }
-        return "\(title): resets \(resetsAt.formatted(.relative(presentation: .named)))"
+        return "\(title): resets \(resetsAt.formatted(.relative(presentation: .named))), \(resetsAt.formatted(date: .abbreviated, time: .shortened))"
+    }
+
+    /// Time left until the reset, short: "42m", "2h 14m", "3d 4h".
+    static func countdown(to date: Date, from now: Date) -> String {
+        let minutes = max(Int(date.timeIntervalSince(now) / 60), 0)
+        let days = minutes / 1440, hours = minutes % 1440 / 60, rest = minutes % 60
+        if days > 0 { return hours > 0 ? "\(days)d \(hours)h" : "\(days)d" }
+        if hours > 0 { return rest > 0 ? "\(hours)h \(rest)m" : "\(hours)h" }
+        return minutes > 0 ? "\(minutes)m" : "now"
     }
 
     var body: some View {
@@ -690,6 +699,13 @@ private struct LimitMeter: View {
                 .font(.caption2.monospacedDigit())
                 .foregroundStyle(.secondary)
                 .frame(width: 30, alignment: .trailing)
+                .contentTransition(.numericText())
+            // A fixed column, so the bars stay the same length whatever the countdown says.
+            Text(window?.resetsAt.flatMap { hasReset ? nil : Self.countdown(to: $0, from: now) } ?? "")
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+                .frame(width: 40, alignment: .trailing)
                 .contentTransition(.numericText())
         }
         .contentShape(.rect)

@@ -18,6 +18,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 - Notifications: when a turn finishes while YourHarness is in the background, or Claude needs your approval, an answer or a plan review in a thread you aren't looking at. Clicking one opens the thread, and the Dock icon counts threads waiting for you. You can turn them off in Settings.
 
 ### Changed
+- The usage limits in the sidebar show how long until each one resets ("2h 14m", "3d 4h"), next to the percentage.
 - The right sidebar's tabs and actions moved into the window toolbar, so the panel is all content.
 - The side chat can now run commands and look things up on the web. It asks you first for anything that could change something, and it still can't edit files.
 - Permission cards stack their buttons under the request when space is narrow, as in the side chat.
