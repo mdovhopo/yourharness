@@ -1,0 +1,59 @@
+# Builds YourHarness.dmg. A pushed v<version> tag (scripts/release.sh) also publishes it as a
+# GitHub release, with that version's CHANGELOG.md notes. Run it by hand to get a DMG of
+# any commit as a workflow artifact.
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  dmg:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # the build number counts commits
+
+      - name: Use the newest Xcode
+        run: |
+          xcode="$(ls -d /Applications/Xcode_*.app | grep -iv beta | sort -V | tail -1)"
+          echo "DEVELOPER_DIR=$xcode/Contents/Developer" >> "$GITHUB_ENV"
+          "$xcode/Contents/Developer/usr/bin/xcodebuild" -version
+
+      - name: Check the tag matches VERSION
+        if: github.ref_type == 'tag'
+        run: test "v$(cat VERSION)" = "$GITHUB_REF_NAME"
+
+      - name: Test
+        run: swift test
+
+      - name: Build the DMG
+        run: |
+          scripts/bundle.sh
+          scripts/dmg.sh
+          version="$(cat VERSION)"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          cd build && shasum -a 256 "YourHarness-$version.dmg" > "YourHarness-$version.dmg.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: YourHarness-${{ env.VERSION }}
+          path: build/YourHarness-${{ env.VERSION }}.dmg*
+
+      - name: Publish the release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            scripts/release-notes.sh "$VERSION"
+            echo
+            cat .github/install-notes.md
+          } > notes.md
+          gh release create "$GITHUB_REF_NAME" build/YourHarness-$VERSION.dmg build/YourHarness-$VERSION.dmg.sha256 \
+            --title "YourHarness $VERSION" --notes-file notes.md --verify-tag

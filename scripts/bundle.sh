@@ -13,6 +13,11 @@ if [[ -z "${DEVELOPER_DIR:-}" && -d /Applications/Xcode.app ]]; then
 fi
 
 cd "$ROOT"
+# The marketing version is VERSION (semver); the build number counts commits, so every
+# build of a later commit sorts after the last.
+VERSION="$(<"$ROOT/VERSION")"
+BUILD="$(git rev-list --count HEAD 2>/dev/null || echo 1)"
+
 swift build -c "$CONFIG" --arch arm64
 BIN="$(swift build -c "$CONFIG" --arch arm64 --show-bin-path)/YourHarness"
 
@@ -20,7 +25,7 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/YourHarness"
 
-cat > "$APP/Contents/Info.plist" <<'PLIST'
+cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -30,8 +35,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleIdentifier</key><string>com.mdovhopo.yourharness</string>
     <key>CFBundleExecutable</key><string>YourHarness</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>0.1.0</string>
-    <key>CFBundleVersion</key><string>1</string>
+    <key>CFBundleShortVersionString</key><string>$VERSION</string>
+    <key>CFBundleVersion</key><string>$BUILD</string>
     <key>LSMinimumSystemVersion</key><string>26.0</string>
     <key>LSArchitecturePriority</key><array><string>arm64</string></array>
     <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
@@ -42,4 +47,4 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 PLIST
 
 codesign --force --sign - "$APP" >/dev/null
-echo "Built $APP"
+echo "Built $APP ($VERSION, build $BUILD)"

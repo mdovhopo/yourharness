@@ -29,6 +29,10 @@ An early spike. What works today:
 - Workspaces: any project that is a git repo, a folder of repos, or a "shell" repo holding gitignored clones gets an overview (click the project name). It shows each repo's branch, ahead/behind and uncommitted changes, repos the workspace references but you haven't cloned (from its compose file), and open pull requests from GitHub (`gh`) and GitLab (`glab`): what needs your review, yours, everyone else's, and stacks. Read-only; see [docs/workspaces.md](docs/workspaces.md)
 - Live app memory readout; Debug menu with a 10,000-entry stress transcript
 
+## Install
+
+Download the latest DMG from [Releases](https://github.com/mdovhopo/yourharness/releases/latest), open it and drag YourHarness to Applications. The app isn't notarized yet, so the first time you open it macOS refuses: go to System Settings → Privacy & Security and click **Open Anyway**, or run `xattr -dr com.apple.quarantine /Applications/YourHarness.app` once. What's in each version: [CHANGELOG.md](CHANGELOG.md).
+
 ## Requirements
 
 - macOS 26+ on Apple Silicon
@@ -44,6 +48,18 @@ open build/YourHarness.app
 swift test                   # parser tests against real captured CLI output
 YH_INTEGRATION=1 swift test --filter Integration   # drives the real claude CLI (Haiku)
 ```
+
+`scripts/install.sh` builds and installs the app in /Applications as your main copy (your threads and settings carry over).
+
+## Releasing
+
+Versions follow [semver](https://semver.org) and live in `VERSION`; the build number counts commits. Add notes under **Unreleased** in CHANGELOG.md as features land, then:
+
+```sh
+scripts/release.sh 0.0.2     # files the notes under 0.0.2, tests, tags v0.0.2, pushes, installs in /Applications
+```
+
+The pushed tag runs `.github/workflows/release.yml`, which tests, builds `YourHarness-<version>.dmg` (`scripts/dmg.sh`) and publishes a GitHub release with that version's notes. Run the workflow by hand for a DMG of any commit.
 
 If `swift build` fails with "Could not initialize build system", `xcode-select` is pointing at the Command Line Tools. Either run `sudo xcode-select -s /Applications/Xcode.app/Contents/Developer` or prefix commands with `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`. `bundle.sh` does the latter automatically.
 
