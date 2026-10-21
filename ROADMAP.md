@@ -8,7 +8,7 @@ Where YourHarness is heading, in priority order. Performance, native polish and 
 Workspace support built in, like T3 Code, where you can follow PRs and related work, but across a whole workspace rather than one repo at a time. Design: [docs/workspaces.md](docs/workspaces.md).
 
 ### Browser for agents
-Built: a real browser per thread that the agent drives and you watch and take over. Still to come: cookie import from Safari and Chrome, recordings, annotations. See [docs/browser.md](docs/browser.md).
+Built: a real browser per thread that the agent drives and you watch and take over. Still to come: recordings, annotations. See [docs/browser.md](docs/browser.md).
 
 ### 2. Memory
 Memory as a first-class feature: a local store, shared with every agent session, that you can visualize and review automatically.

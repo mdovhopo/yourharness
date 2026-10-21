@@ -161,6 +161,7 @@ private struct BrowserMoreMenu: View {
     let browser: BrowserSession
     let popOut: (() -> Void)?
     @State private var confirmingClear = false
+    @State private var importingCookies = false
 
     private var tab: BrowserTab? { browser.selectedTab }
 
@@ -198,6 +199,7 @@ private struct BrowserMoreMenu: View {
                 Button("Show Web Inspector", systemImage: "wrench.and.screwdriver") { WebInspector.show(tab.webView) }
             }
             Divider()
+            Button("Import Cookies…", systemImage: "square.and.arrow.down") { importingCookies = true }
             Button("Clear Browsing Data…", systemImage: "trash") { confirmingClear = true }
         } label: {
             Label("More", systemImage: "ellipsis")
@@ -205,6 +207,7 @@ private struct BrowserMoreMenu: View {
         .menuIndicator(.hidden)
         .fixedSize()
         .help("More")
+        .sheet(isPresented: $importingCookies) { CookieImportSheet(browser: browser) }
         .confirmationDialog("Clear this project's browsing data?", isPresented: $confirmingClear) {
             Button("Clear", role: .destructive) { Task { await browser.clearBrowsingData() } }
         } message: {

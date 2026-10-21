@@ -179,7 +179,6 @@ What it gives you:
 
 ## Still to build
 
-- Cookie import from Safari and Chrome, into a project's browser.
 - Recordings and annotations.
 - Localhost URLs inside code spans aren't links, so they don't open in the browser yet.
 - The same tools for Codex over localhost HTTP; Chrome over CDP as a second engine.
@@ -192,4 +191,4 @@ What it gives you:
 
 - A thread's tabs reopen at their last URLs when its browser is next used; the agent's next `open` takes over a reopened tab.
 - The side chat gets the read-only tools (`status`, `snapshot`, `screenshot`, `wait_for`, `console`, `network`) on the thread's browser.
-- Cookie import from Safari and Chrome is wanted.
+- Cookie import from Safari and Chrome is wanted. Built as Import Cookies… in the More menu: you pick a browser and profile, then the sites; nothing is read until you pick, and nothing is selected by default. Safari's file needs Full Disk Access; Chromium values are decrypted with PBKDF2/AES-128-CBC from the browser's Safe Storage keychain item (macOS asks you), dropping the domain hash newer databases prefix. The readers are tested on synthetic files in `CookieImportTests`.
