@@ -62,6 +62,10 @@ final class AppModel {
     private(set) var planChecklist: Bool
     @ObservationIgnored let notifier = Notifier()
 
+    /// Each project's files for `@` mentions, and when they were listed.
+    @ObservationIgnored private var fileIndexes: [UUID: (index: FileIndex, listedAt: Date)] = [:]
+    @ObservationIgnored private var fileListings: [UUID: Task<FileIndex, Never>] = [:]
+
     @ObservationIgnored let store = Store()
     @ObservationIgnored private var environment: [String: String] = [:]
     @ObservationIgnored private var bootstrap: Task<Void, Never>?
@@ -793,6 +797,32 @@ final class AppModel {
 
     /// Shows the "Resume Claude Code Session" sheet.
     var isResumingSession = false
+
+    /// The project's files for `@` mentions: listed in the background, kept a little while,
+    /// so typing a mention never waits on the disk. In a git repo, what git sees (nothing
+    /// ignored), plus the files of repos cloned inside it; otherwise a walk of the folder.
+    func fileIndex(for projectID: UUID) async -> FileIndex? {
+        if let cached = fileIndexes[projectID], cached.listedAt.timeIntervalSinceNow > -30 { return cached.index }
+        // Your whole home folder isn't a project to pick files from.
+        guard let project = project(id: projectID), project.url.standardizedFileURL.path != NSHomeDirectory() else { return nil }
+        if let listing = fileListings[projectID] { return await listing.value }
+        await bootstrap?.value
+        let git = workspaceTools.git
+        let root = project.url
+        let nested = workspace(for: project)?.repos.filter { !$0.isRoot && $0.isCloned } ?? []
+        let listing = Task.detached(priority: .userInitiated) { () -> FileIndex in
+            guard let git, var files = await git.files(in: root) else { return FileIndex(files: FileIndex.walk(root)) }
+            for repo in nested {
+                files += (await git.files(in: repo.url) ?? []).map { repo.relativePath + "/" + $0 }
+            }
+            return FileIndex(files: files)
+        }
+        fileListings[projectID] = listing
+        let index = await listing.value
+        fileListings[projectID] = nil
+        fileIndexes[projectID] = (index, .now)
+        return index
+    }
 
     /// The thread that already continues this session, if any.
     func thread(forSession sessionID: String) -> ThreadModel? {

@@ -87,12 +87,22 @@ public struct Git: Sendable {
         return url.isEmpty ? nil : url
     }
 
-    private func run(_ arguments: [String], in repo: URL) async -> CommandOutput {
+    /// Tracked and untracked files, minus what's ignored, relative to the repo. Nil if
+    /// it isn't a repo.
+    public func files(in repo: URL) async -> [String]? {
+        // A big monorepo lists megabytes of paths.
+        let output = await run(["ls-files", "-z", "--cached", "--others", "--exclude-standard"], in: repo, outputLimit: 16 * 1024 * 1024)
+        guard output.succeeded else { return nil }
+        return output.stdout.split(separator: "\0").map(String.init)
+    }
+
+    private func run(_ arguments: [String], in repo: URL, outputLimit: Int = 256 * 1024) async -> CommandOutput {
         await CommandRunner.run(
             executable,
             arguments: ["--no-optional-locks", "-C", repo.path] + arguments,
             environment: environment,
-            timeout: 15
+            timeout: 15,
+            outputLimit: outputLimit
         )
     }
 }

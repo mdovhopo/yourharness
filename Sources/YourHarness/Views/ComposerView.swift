@@ -38,6 +38,7 @@ struct ComposerView: View {
                     return .handled
                 }
                 .slashCommandMenu(text: $thread.draft, projectID: thread.projectID) { send() }
+                .fileMentionMenu(text: $thread.draft, projectID: thread.projectID)
                 .padding(.horizontal, 4)
 
             HStack(spacing: 4) {

@@ -11,6 +11,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 - Work done on a thread's session outside YourHarness (`claude --resume` in a terminal) shows up when you open the thread.
 - Unsent drafts are kept across launches.
 - Plan checklist: for work with several steps, Claude lists them and ticks them off. The thread shows the plan where it changes, and a strip above the composer shows the current step while Claude works. You can turn it off in Settings.
+- `@` mentions in the composer: type `@` and part of a name to pick a file or folder from the project, and Claude gets the file with your message.
 - Find in a thread (⌘F): matches are highlighted in messages, code and tool calls, and ⌘G or ⇧⌘G steps between them, starting from the newest.
 - Notifications: when a turn finishes while YourHarness is in the background, or Claude needs your approval, an answer or a plan review in a thread you aren't looking at. Clicking one opens the thread, and the Dock icon counts threads waiting for you. You can turn them off in Settings.
 
