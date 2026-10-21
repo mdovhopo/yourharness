@@ -452,7 +452,8 @@ public enum FlowchartParser {
                     }
                     if body.count >= 2 || end != .none {
                         let label = MermaidText.clean(text)
-                        return label.isEmpty ? nil : (label, (opening + body, end))
+                        guard !label.isEmpty else { return nil }
+                        return (label, (body: opening + body, end: end))
                     }
                     index = saved
                 }
