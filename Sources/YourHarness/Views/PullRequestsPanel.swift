@@ -97,40 +97,120 @@ private struct SyncStatus: View {
     }
 }
 
-/// One stack (or a single PR) in a card, bottom of the stack first, joined by a rail.
+/// One stack (or a single PR) in a card, bottom of the stack first. The longest line of
+/// PRs runs straight down one rail however deep it goes; a PR stacked on the same branch
+/// as another (a fork) is shown after it, set in, as branching off its base.
 private struct StackCard: View {
     let stack: PullRequestStack
 
+    struct Group: Identifiable {
+        /// "Branches off #72"; nil for the main line.
+        let caption: String?
+        /// Each PR with its layer: 1 is the bottom of the stack.
+        let rows: [(pull: PullRequest, layer: Int)]
+        var id: String { rows.first?.pull.id ?? "" }
+    }
+
+    /// The main line first, then each branch off it, in order up the stack.
+    private var groups: [Group] {
+        var groups: [Group] = []
+        func line(from node: PullRequestStack, layer: Int, caption: String?) {
+            var rows: [(PullRequest, Int)] = [], forks: [(PullRequestStack, Int, PullRequest)] = []
+            var current: PullRequestStack? = node, depth = layer
+            while let step = current {
+                rows.append((step.pullRequest, depth))
+                // The tallest child carries the line on; the others branch off.
+                let children = step.children.sorted { $0.all.count > $1.all.count }
+                forks += children.dropFirst().map { ($0, depth + 1, step.pullRequest) }
+                current = children.first
+                depth += 1
+            }
+            groups.append(Group(caption: caption, rows: rows))
+            for (fork, forkLayer, base) in forks { line(from: fork, layer: forkLayer, caption: "Branches off #\(base.number)") }
+        }
+        line(from: stack, layer: 1, caption: nil)
+        return groups
+    }
+
     var body: some View {
-        let rows = stack.flattened
+        let groups = groups
         VStack(alignment: .leading, spacing: 0) {
             if stack.isStacked {
-                Label("Stack of \(rows.count)", systemImage: "square.stack")
+                Label("Stack of \(stack.all.count)", systemImage: "square.stack")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 12)
                     .padding(.top, 9)
+                    .padding(.bottom, 2)
             }
-            ForEach(Array(rows.enumerated()), id: \.element.pullRequest.id) { index, row in
-                PullRequestCardRow(pull: row.pullRequest,
-                                   rail: stack.isStacked ? Rail(depth: row.depth, isFirst: index == 0, isLast: index == rows.count - 1) : nil)
+            ForEach(groups) { group in
+                VStack(alignment: .leading, spacing: 0) {
+                    if let caption = group.caption {
+                        Label(caption, systemImage: "arrow.turn.down.right")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                            .padding(.horizontal, 12)
+                            .padding(.top, 6)
+                    }
+                    ForEach(Array(group.rows.enumerated()), id: \.element.pull.id) { index, row in
+                        PullRequestCardRow(pull: row.pull, rail: stack.isStacked
+                            ? StackRail(position: row.layer, joinedAbove: index > 0, continuesBelow: index < group.rows.count - 1)
+                            : nil)
+                    }
+                }
+                .padding(.leading, group.caption == nil ? 0 : 16)
             }
         }
+        .padding(.bottom, stack.isStacked ? 3 : 0)
         .card()
+    }
+}
+
+/// A PR's place in its stack: its layer in a dot on its title's line, and the rail through it.
+struct StackRail: View {
+    let position: Int
+    let joinedAbove: Bool
+    let continuesBelow: Bool
+    /// Where the dot sits: level with the title's first line.
+    static let dotCenter: CGFloat = 18
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            VStack(spacing: 0) {
+                Rectangle()
+                    .frame(width: 2, height: Self.dotCenter)
+                    .opacity(joinedAbove ? 1 : 0)
+                Rectangle()
+                    .frame(width: 2)
+                    .frame(maxHeight: .infinity)
+                    .opacity(continuesBelow ? 1 : 0)
+            }
+            .foregroundStyle(.quaternary)
+            Text("\(position)")
+                .font(.system(size: 9, weight: .bold).monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(width: 16, height: 16)
+                .background(Circle().fill(.background))
+                .overlay(Circle().strokeBorder(.tertiary, lineWidth: 1.5))
+                .offset(y: Self.dotCenter - 8)
+        }
+        .frame(width: 16)
+        .frame(maxHeight: .infinity)
     }
 }
 
 /// A PR in the narrow sidebar: what it is, where it's going, and what stands in its way.
 struct PullRequestCardRow: View {
     let pull: PullRequest
-    let rail: Rail?
+    let rail: StackRail?
     @State private var hovering = false
 
     private var finished: Bool { pull.state != .open }
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
-            if let rail { RailView(rail: rail) }
+            if let rail { rail }
+            HStack(alignment: .top, spacing: 10) {
             Image(systemName: symbol)
                 .font(.callout.weight(.medium))
                 .foregroundStyle(tint)
@@ -172,9 +252,13 @@ struct PullRequestCardRow: View {
                 }
                 .font(.caption)
             }
+            }
+            // In a stack the rail runs the row's whole height, so the text keeps the space.
+            .padding(.vertical, rail == nil ? 0 : 9)
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 9)
+        .padding(.vertical, rail == nil ? 9 : 0)
+        .fixedSize(horizontal: false, vertical: true)
         .background {
             if hovering { Color.primary.opacity(0.04) }
         }
