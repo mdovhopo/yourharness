@@ -477,12 +477,35 @@ private struct RepositoriesSection: View {
     @Environment(AppModel.self) private var app
     let workspace: WorkspaceModel
     @State private var showUncloned = false
+    @State private var filter = ""
 
     /// A repo's row, then one per worktree, in one card.
     private struct Line: Identifiable {
         let repo: WorkspaceRepo
         let worktree: Worktree?
         var id: String { worktree?.path ?? repo.id }
+    }
+
+    /// Each repo, then its worktrees if it's open. While filtering, repos and worktrees whose
+    /// name, branch or threads match, with matching worktrees shown even in a folded repo.
+    private func lines(_ repos: [WorkspaceRepo], threads: [String: [ThreadModel]]) -> [Line] {
+        let query = filter.trimmingCharacters(in: .whitespaces)
+        func matches(_ texts: [String?]) -> Bool {
+            texts.contains { $0?.localizedCaseInsensitiveContains(query) == true }
+        }
+        return repos.flatMap { repo -> [Line] in
+            let worktrees = workspace.worktrees[repo.id] ?? []
+            guard !query.isEmpty else {
+                return [Line(repo: repo, worktree: nil)] + (app.worktreesExpanded(repo) ? worktrees.map { Line(repo: repo, worktree: $0) } : [])
+            }
+            let repoMatches = matches([repo.name, workspace.statuses[repo.id]?.branch]
+                + (threads[WorkspaceModel.realPath(repo.url.path)] ?? []).map(\.title))
+            let hits = worktrees.filter { worktree in
+                matches([worktree.url.lastPathComponent, worktree.branch] + (threads[worktree.path] ?? []).map(\.title))
+            }
+            guard repoMatches || !hits.isEmpty else { return [] }
+            return [Line(repo: repo, worktree: nil)] + hits.map { Line(repo: repo, worktree: $0) }
+        }
     }
 
     /// Most used first (by how many threads worked in them), then by name. A shell's own
@@ -499,12 +522,36 @@ private struct RepositoriesSection: View {
 
     var body: some View {
         let repos = sortedRepos
-        let lines = repos.flatMap { repo in
-            [Line(repo: repo, worktree: nil)] + (app.worktreesCollapsed(repo) ? [] : (workspace.worktrees[repo.id] ?? []).map { Line(repo: repo, worktree: $0) })
-        }
         let threads = workspace.threadsByCheckout(app.threads)
-        SectionTitle("Repositories", count: repos.count)
-            .padding(.bottom, 12)
+        let lines = lines(repos, threads: threads)
+        let withWorktrees = repos.filter { !(workspace.worktrees[$0.id] ?? []).isEmpty }
+        let anyExpanded = withWorktrees.contains(where: app.worktreesExpanded)
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            SectionTitle("Repositories", count: repos.count)
+            Spacer()
+            // Big workspaces: find a repo, worktree, branch or thread by name.
+            if repos.count > 6 || workspace.allWorktrees.count > 8 {
+                TextField("Filter", text: $filter, prompt: Text("Filter repos, worktrees, threads"))
+                    .textFieldStyle(.roundedBorder)
+                    .controlSize(.small)
+                    .frame(maxWidth: 220)
+            }
+            if !withWorktrees.isEmpty {
+                Button(anyExpanded ? "Collapse All" : "Expand All") {
+                    withAnimation(.snappy(duration: 0.25)) { app.setWorktreesExpanded(!anyExpanded, for: withWorktrees) }
+                }
+                .buttonStyle(.borderless)
+                .font(.callout)
+                .help(anyExpanded ? "Fold every repo's worktrees" : "Show every repo's worktrees")
+            }
+        }
+        .padding(.bottom, 12)
+
+        if lines.isEmpty, !filter.isEmpty {
+            Text("Nothing matches “\(filter)”.")
+                .foregroundStyle(.secondary)
+                .padding(.vertical, 8)
+        }
 
         ForEach(Array(lines.enumerated()), id: \.element.id) { index, line in
             Group {
@@ -597,7 +644,7 @@ private struct RepoRow: View {
     private var pullCount: Int { workspace.pullRequests(for: repo).count }
 
     private var worktrees: [Worktree] { workspace.worktrees[repo.id] ?? [] }
-    private var collapsed: Bool { app.worktreesCollapsed(repo) }
+    private var collapsed: Bool { !app.worktreesExpanded(repo) }
 
     var body: some View {
         HStack(spacing: 10) {
@@ -607,7 +654,7 @@ private struct RepoRow: View {
                     Color.clear
                 } else {
                     Button(collapsed ? "Show Worktrees" : "Hide Worktrees", systemImage: "chevron.right") {
-                        withAnimation(.snappy(duration: 0.25)) { app.setWorktreesCollapsed(!collapsed, for: repo) }
+                        withAnimation(.snappy(duration: 0.25)) { app.setWorktreesExpanded(collapsed, for: [repo]) }
                     }
                     .labelStyle(.iconOnly)
                     .buttonStyle(.borderless)
@@ -636,16 +683,17 @@ private struct RepoRow: View {
                             .foregroundStyle(.tertiary)
                             .help("\(remote?.forge?.displayName ?? "The host") couldn't find this repo with your account")
                     }
-                }
-                HStack(spacing: 6) {
-                    BranchLabel(status: status)
                     if collapsed, !worktrees.isEmpty {
-                        Text(foldedSummary)
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
-                            .lineLimit(1)
+                        Button {
+                            withAnimation(.snappy(duration: 0.25)) { app.setWorktreesExpanded(true, for: [repo]) }
+                        } label: {
+                            WorktreeCountBadge(count: worktrees.count, needsLook: needsLook)
+                        }
+                        .buttonStyle(.plain)
+                        .help(foldedSummary)
                     }
                 }
+                BranchLabel(status: status)
             }
 
             Spacer(minLength: 8)
@@ -702,7 +750,35 @@ private struct RepoRow: View {
     }
 }
 
+/// How many worktrees a folded repo has, with a dot when one of them needs a look.
+private struct WorktreeCountBadge: View {
+    let count: Int
+    let needsLook: Bool
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Image(systemName: WorktreeRow.symbol)
+                .font(.system(size: 9, weight: .semibold))
+            Text("\(count)")
+                .font(.caption.weight(.medium).monospacedDigit())
+            if needsLook {
+                Circle().fill(.orange).frame(width: 5, height: 5)
+            }
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 1)
+        .background(.quaternary.opacity(0.7), in: .capsule)
+        .contentShape(.capsule)
+    }
+}
+
 extension RepoRow {
+    /// Something among its worktrees wants attention: changes, no branch, missing folder.
+    fileprivate var needsLook: Bool {
+        worktrees.contains { $0.isMissing || $0.isDetached || (workspace.worktreeStatuses[$0.path]?.isDirty ?? false) }
+    }
+
     /// Folded: how many worktrees, and what among them needs a look.
     fileprivate var foldedSummary: String {
         var parts = [worktrees.count == 1 ? "1 worktree" : "\(worktrees.count) worktrees"]
@@ -714,7 +790,7 @@ extension RepoRow {
         if detached > 0 { parts.append("\(detached) not on a branch") }
         if finished > 0 { parts.append("\(finished) done with") }
         if missing > 0 { parts.append("\(missing) missing") }
-        return "· " + parts.joined(separator: " · ")
+        return parts.joined(separator: " · ") + ". Click to show them."
     }
 }
 
@@ -848,6 +924,8 @@ enum Pasteboard {
 /// A linked worktree under its repo: where it is, which branch it's on (or that it's on
 /// none), what's in it, its PR, and the threads working in it.
 private struct WorktreeRow: View {
+    /// What stands for a worktree: another checkout beside the repo's own.
+    static let symbol = "rectangle.on.rectangle"
     @Environment(AppModel.self) private var app
     let worktree: Worktree
     let repo: WorkspaceRepo
@@ -862,7 +940,7 @@ private struct WorktreeRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Image(systemName: worktree.isMissing ? "questionmark.folder" : "arrow.turn.down.right")
+            Image(systemName: worktree.isMissing ? "questionmark.folder" : Self.symbol)
                 .foregroundStyle(worktree.isMissing ? AnyShapeStyle(.orange) : AnyShapeStyle(.tertiary))
                 .frame(width: 18)
 
@@ -876,6 +954,7 @@ private struct WorktreeRow: View {
                         .foregroundStyle(.tertiary)
                         .lineLimit(1)
                         .truncationMode(.head)
+                        .layoutPriority(-1)
                     if worktree.isLocked {
                         Image(systemName: "lock.fill")
                             .font(.caption2)
@@ -1031,8 +1110,39 @@ struct ThreadChips: View {
 
     var body: some View {
         if !threads.isEmpty {
+            // Two chips, then one, then just a count: rows stay one line however many
+            // threads there are and however narrow the window.
+            ViewThatFits(in: .horizontal) {
+                chips(2)
+                chips(1)
+                compact
+            }
+        }
+    }
+
+    private var compact: some View {
+        Menu {
+            ForEach(threads) { thread in
+                Button(thread.title) { app.selectedThreadID = thread.id }
+            }
+        } label: {
+            Label("\(threads.count)", systemImage: "bubble.left")
+                .labelStyle(CompactLabelStyle())
+                .font(.caption.monospacedDigit())
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .padding(.horizontal, 7)
+        .padding(.vertical, 2)
+        .background(.quaternary.opacity(0.7), in: .capsule)
+        .help(threads.count == 1 ? "1 thread works here" : "\(threads.count) threads work here")
+    }
+
+    private func chips(_ shown: Int) -> some View {
             HStack(spacing: 4) {
-                ForEach(threads.prefix(2)) { thread in
+                ForEach(threads.prefix(shown)) { thread in
                     Button { app.selectedThreadID = thread.id } label: {
                         Label(thread.title, systemImage: thread.isWorking ? "circle.dotted" : "bubble.left")
                             .labelStyle(CompactLabelStyle())
@@ -1046,9 +1156,9 @@ struct ThreadChips: View {
                     .background(.quaternary.opacity(0.7), in: .capsule)
                     .help("Open “\(thread.title)”")
                 }
-                if threads.count > 2 {
-                    Menu("+\(threads.count - 2)") {
-                        ForEach(threads.dropFirst(2)) { thread in
+                if threads.count > shown {
+                    Menu("+\(threads.count - shown)") {
+                        ForEach(threads.dropFirst(shown)) { thread in
                             Button(thread.title) { app.selectedThreadID = thread.id }
                         }
                     }
@@ -1059,7 +1169,6 @@ struct ThreadChips: View {
                     .fixedSize()
                 }
             }
-        }
     }
 }
 

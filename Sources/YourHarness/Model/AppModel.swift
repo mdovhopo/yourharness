@@ -62,8 +62,8 @@ final class AppModel {
     private(set) var planChecklist: Bool
     /// Per repo path: which threads have worked in it, for sorting repos by use.
     private(set) var repoUsage: [String: RepoUsage]
-    /// Repos whose worktrees are folded in the repos view.
-    private(set) var collapsedWorktrees: Set<String>
+    /// Repos whose worktrees are shown in the repos view; folded is the default.
+    private(set) var expandedWorktrees: Set<String>
     /// Whether Claude gets the browser built into the app.
     private(set) var browserTools: Bool
     private(set) var browserAutoShow: Bool
@@ -114,7 +114,7 @@ final class AppModel {
         planChecklist = state.planChecklist
         browserTools = state.browserTools
         repoUsage = state.repoUsage
-        collapsedWorktrees = state.collapsedWorktrees
+        expandedWorktrees = state.expandedWorktrees
         browserAutoShow = state.browserAutoShow
 
         threads = state.threads.map { ThreadModel(meta: $0, app: self) }
@@ -505,13 +505,15 @@ final class AppModel {
 
     // MARK: - Worktrees
 
-    func worktreesCollapsed(_ repo: WorkspaceRepo) -> Bool {
-        collapsedWorktrees.contains(WorkspaceModel.realPath(repo.url.path))
+    func worktreesExpanded(_ repo: WorkspaceRepo) -> Bool {
+        expandedWorktrees.contains(WorkspaceModel.realPath(repo.url.path))
     }
 
-    func setWorktreesCollapsed(_ collapsed: Bool, for repo: WorkspaceRepo) {
-        let path = WorkspaceModel.realPath(repo.url.path)
-        if collapsed { collapsedWorktrees.insert(path) } else { collapsedWorktrees.remove(path) }
+    func setWorktreesExpanded(_ expanded: Bool, for repos: [WorkspaceRepo]) {
+        for repo in repos {
+            let path = WorkspaceModel.realPath(repo.url.path)
+            if expanded { expandedWorktrees.insert(path) } else { expandedWorktrees.remove(path) }
+        }
         save()
     }
 
@@ -1194,7 +1196,7 @@ final class AppModel {
         state.planChecklist = planChecklist
         state.browserTools = browserTools
         state.repoUsage = repoUsage
-        state.collapsedWorktrees = collapsedWorktrees
+        state.expandedWorktrees = expandedWorktrees
         state.browserAutoShow = browserAutoShow
         store.saveState(state)
     }

@@ -146,8 +146,8 @@ struct PersistedState: Codable {
     var browserAutoShow = true
     /// How much each repo is used, by its path: for sorting repos by use.
     var repoUsage: [String: RepoUsage] = [:]
-    /// Repos whose worktrees are folded in the repos view, by path.
-    var collapsedWorktrees: Set<String> = []
+    /// Repos whose worktrees are shown in the repos view, by path; the rest are folded.
+    var expandedWorktrees: Set<String> = []
 
     init() {}
 
@@ -177,7 +177,7 @@ struct PersistedState: Codable {
         browserTools = try container.decodeIfPresent(Bool.self, forKey: .browserTools) ?? true
         browserAutoShow = try container.decodeIfPresent(Bool.self, forKey: .browserAutoShow) ?? true
         repoUsage = try container.decodeIfPresent([String: RepoUsage].self, forKey: .repoUsage) ?? [:]
-        collapsedWorktrees = try container.decodeIfPresent(Set<String>.self, forKey: .collapsedWorktrees) ?? []
+        expandedWorktrees = try container.decodeIfPresent(Set<String>.self, forKey: .expandedWorktrees) ?? []
     }
 }
 
