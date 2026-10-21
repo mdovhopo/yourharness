@@ -43,6 +43,10 @@ struct RootView: View {
             if ProcessInfo.processInfo.environment["YH_RESUME_SESSION"] != nil { app.isResumingSession = true }
             // Development: open Settings, for checking it without a shortcut.
             if ProcessInfo.processInfo.environment["YH_OPEN_SETTINGS"] != nil { openSettings() }
+            // Development: open the selected thread's browser in its own window.
+            if ProcessInfo.processInfo.environment["YH_OPEN_BROWSER_WINDOW"] != nil, let thread = app.selectedThread {
+                openWindow(id: "browser", value: thread.id)
+            }
             // Development: open a Mermaid file in the diagram window, for checking it without clicking.
             if let path = ProcessInfo.processInfo.environment["YH_OPEN_DIAGRAM"],
                let source = try? String(contentsOfFile: path, encoding: .utf8) {

@@ -25,6 +25,31 @@ final class BrowserSession {
     @ObservationIgnored private var pendingSave: Task<Void, Never>?
 
     static let maxTabs = 8
+    /// Pages nobody has used or looked at for this long are closed; they reopen on next use.
+    static let idleTimeout: TimeInterval = 30 * 60
+
+    /// Panels and windows showing this browser right now.
+    private(set) var viewers = 0
+    /// Shown in its own window: the sidebar points there instead.
+    private(set) var isPoppedOut = false
+    @ObservationIgnored private var lastActive = Date()
+
+    func viewerAppeared(window: Bool = false) {
+        viewers += 1
+        if window { isPoppedOut = true }
+        lastActive = .now
+    }
+
+    func viewerDisappeared(window: Bool = false) {
+        viewers = max(0, viewers - 1)
+        if window { isPoppedOut = false }
+        lastActive = .now
+    }
+
+    /// Nothing's shown it, and neither the agent nor you used it, for a while.
+    var isIdle: Bool {
+        !tabs.isEmpty && viewers == 0 && lastAgentUse == nil && Date().timeIntervalSince(lastActive) > Self.idleTimeout
+    }
 
     init(projectID: UUID, restoring urls: [String]) {
         self.projectID = projectID
@@ -111,6 +136,7 @@ final class BrowserSession {
     /// While the agent is using the browser, its pages run at full speed even where you
     /// can't see them; a couple of minutes after its last call, WebKit may throttle them.
     func agentUsed() {
+        lastActive = .now
         if lastAgentUse == nil {
             for tab in tabs { WebKitSPI.setOcclusionDetection(tab.webView, enabled: false) }
         }
@@ -120,6 +146,7 @@ final class BrowserSession {
             try? await Task.sleep(for: .seconds(120))
             guard !Task.isCancelled, let self else { return }
             self.lastAgentUse = nil
+            self.lastActive = .now
             for tab in self.tabs { WebKitSPI.setOcclusionDetection(tab.webView, enabled: true) }
         }
     }
@@ -131,6 +158,7 @@ final class BrowserSession {
             try? await Task.sleep(for: .seconds(1))
             guard !Task.isCancelled, let self else { return }
             self.pendingSave = nil
+            self.lastActive = .now
             self.onChange?()
         }
     }

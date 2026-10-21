@@ -516,6 +516,7 @@ final class AppModel {
                 try? await Task.sleep(for: .seconds(300))
                 guard let self else { continue }
                 self.settleIdleThreads()
+                self.closeIdleBrowsers()
                 guard NSApp.isActive else { continue }
                 self.refreshWorkspaces(pullsMaxAge: 240)
             }
@@ -706,6 +707,14 @@ final class AppModel {
     func setBrowserAutoShow(_ enabled: Bool) {
         browserAutoShow = enabled
         save()
+    }
+
+    /// Each idle page is a web content process: tens of MB for nothing. Closed, its tabs'
+    /// addresses wait to reopen when the browser is next used.
+    func closeIdleBrowsers() {
+        for thread in threads where thread.browser?.isIdle == true && !thread.isWorking && visibleThreadID != thread.id {
+            thread.closeBrowser()
+        }
     }
 
     /// The agent opened a page: show it, if that's the thread you're looking at.

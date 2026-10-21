@@ -180,10 +180,8 @@ What it gives you:
 ## Still to build
 
 - Cookie import from Safari and Chrome, into a project's browser.
-- Local servers found from the processes under the thread's `claude` (`lsof`); today they come from what its commands printed.
-- Localhost links in the transcript opening in the thread's browser.
-- Idle teardown of tabs in threads you aren't looking at.
-- A pop-out window for a bigger view, recordings, annotations.
+- Recordings and annotations.
+- Localhost URLs inside code spans aren't links, so they don't open in the browser yet.
 - The same tools for Codex over localhost HTTP; Chrome over CDP as a second engine.
 
 ## How it's tested

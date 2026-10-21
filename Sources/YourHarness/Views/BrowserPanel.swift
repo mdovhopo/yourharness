@@ -5,7 +5,11 @@ import WebKit
 /// watch, with the console and network under them.
 struct BrowserPanel: View {
     @Environment(AppModel.self) private var app
+    @Environment(\.openWindow) private var openWindow
+    @Environment(\.dismissWindow) private var dismissWindow
     let thread: ThreadModel
+    /// In its own window rather than the sidebar.
+    var inWindow = false
 
     var body: some View {
         if let browser = thread.browser {
@@ -17,7 +21,7 @@ struct BrowserPanel: View {
 
     private func content(_ browser: BrowserSession) -> some View {
         VStack(spacing: 0) {
-            BrowserAddressBar(browser: browser)
+            BrowserAddressBar(browser: browser, popOut: inWindow ? nil : { openWindow(id: "browser", value: thread.id) })
                 .padding(.horizontal, 10)
                 .padding(.top, 8)
                 .padding(.bottom, 6)
@@ -31,14 +35,30 @@ struct BrowserPanel: View {
                     .padding(.horizontal, 10)
                     .padding(.bottom, 6)
             }
-            if let tab = browser.selectedTab {
+            if browser.isPoppedOut, !inWindow {
+                ContentUnavailableView {
+                    Label("In Its Own Window", systemImage: "macwindow")
+                } description: {
+                    Text("This thread's browser is open in a separate window. Claude keeps using it there.")
+                } actions: {
+                    Button("Show Window") { openWindow(id: "browser", value: thread.id) }
+                        .buttonStyle(.glass)
+                    Button("Bring It Back") { dismissWindow(id: "browser", value: thread.id) }
+                        .buttonStyle(.glass)
+                }
+                .frame(maxHeight: .infinity)
+            } else if let tab = browser.selectedTab {
                 BrowserPageArea(tab: tab)
                     .id(tab.id)
             } else {
                 BrowserEmptyState(thread: thread, browser: browser)
             }
         }
-        .onAppear { browser.restoreIfNeeded() }
+        .onAppear {
+            browser.restoreIfNeeded()
+            browser.viewerAppeared(window: inWindow)
+        }
+        .onDisappear { browser.viewerDisappeared(window: inWindow) }
     }
 }
 
@@ -47,6 +67,8 @@ struct BrowserPanel: View {
 private struct BrowserAddressBar: View {
     @Environment(AppModel.self) private var app
     let browser: BrowserSession
+    /// Opens the browser in its own window; nil when it's already in one.
+    let popOut: (() -> Void)?
     @State private var address = ""
     @FocusState private var editing: Bool
 
@@ -75,7 +97,7 @@ private struct BrowserAddressBar: View {
             }
             .foregroundStyle(browser.userHasControl ? AnyShapeStyle(.orange) : AnyShapeStyle(.primary))
             .help(browser.userHasControl ? "Let Claude act in the browser again" : "Stop Claude from acting in the browser while you use it. It can still look.")
-            BrowserMoreMenu(browser: browser)
+            BrowserMoreMenu(browser: browser, popOut: popOut)
         }
         .labelStyle(.iconOnly)
         .buttonStyle(.borderless)
@@ -137,12 +159,17 @@ private struct BrowserAddressBar: View {
 
 private struct BrowserMoreMenu: View {
     let browser: BrowserSession
+    let popOut: (() -> Void)?
     @State private var confirmingClear = false
 
     private var tab: BrowserTab? { browser.selectedTab }
 
     var body: some View {
         Menu {
+            if let popOut {
+                Button("Open in Window", systemImage: "macwindow.badge.plus", action: popOut)
+                Divider()
+            }
             Button("New Tab", systemImage: "plus") { browser.newTab(byAgent: false) }
                 .disabled(browser.tabs.count >= BrowserSession.maxTabs)
             if let tab {
@@ -690,27 +717,23 @@ private struct BrowserEmptyState: View {
         }
         .padding()
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .task { thread.refreshLocalServers() }
     }
 }
 
-/// Local servers this thread started, from what its commands printed.
-@MainActor
-enum LocalServers {
-    private static let pattern = /https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]):\d{2,5}[^\s'"`)\]>,]*/
+/// A thread's browser in its own window, for a bigger look than the sidebar gives.
+struct BrowserWindow: View {
+    @Environment(AppModel.self) private var app
+    let threadID: UUID
 
-    static func found(in thread: ThreadModel) -> [String] {
-        var seen = Set<String>(), found: [String] = []
-        for entry in thread.entries.reversed() where entry.kind == .tool && ["Bash", "BashOutput", "TaskOutput"].contains(entry.toolName) {
-            guard let output = entry.toolResult else { continue }
-            for match in output.matches(of: pattern) {
-                var url = String(match.output).replacingOccurrences(of: "0.0.0.0", with: "localhost")
-                while url.hasSuffix(".") { url.removeLast() }
-                guard let parsed = URL(string: url), let port = parsed.port else { continue }
-                let key = "\(parsed.host() ?? "")\(port)"
-                if seen.insert(key).inserted { found.append(url) }
-            }
-            if found.count >= 5 { break }
+    var body: some View {
+        if let thread = app.threads.first(where: { $0.id == threadID }) {
+            BrowserPanel(thread: thread, inWindow: true)
+                .canvasBackground()
+                .navigationTitle(thread.browser?.selectedTab?.displayTitle ?? "Browser")
+                .navigationSubtitle(thread.title)
+        } else {
+            ContentUnavailableView("Thread Closed", systemImage: "safari")
         }
-        return found
     }
 }

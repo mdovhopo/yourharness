@@ -91,6 +91,9 @@ final class ThreadModel: Identifiable {
     @ObservationIgnored private(set) weak var parentThread: ThreadModel?
     /// The thread's browser, made when it's first used.
     private(set) var browser: BrowserSession?
+    /// Ports that processes this thread started are listening on: its dev servers.
+    private(set) var listeningPorts: [Int] = []
+    @ObservationIgnored private var serverScan: Task<Void, Never>?
     /// Tabs open at the last quit, until the browser is made.
     @ObservationIgnored private var savedBrowserTabs: [String] = []
 
@@ -723,15 +726,17 @@ final class ThreadModel: Identifiable {
                 subagent(for: parent)?.apply(results)
                 return
             }
-            var plansChanged = false
+            var plansChanged = false, ranCommand = false
             for result in results {
                 guard let entry = tools[result.toolUseID] else { continue }
                 entry.toolResult = result.content
                 entry.toolIsError = result.isError
                 entry.isStreaming = false
                 if TaskPlan.isPlanTool(name: entry.toolName, inputJSON: entry.toolInput) { plansChanged = true }
+                if entry.toolName == "Bash" { ranCommand = true }
             }
             if plansChanged { rebuildPlan() }
+            if ranCommand { refreshLocalServers() }
 
         case .subagentStarted(let start):
             subagent(for: start.toolUseID)?.start(start)
@@ -942,6 +947,36 @@ final class ThreadModel: Identifiable {
         browser.onPick = { [weak self] picked in self?.attachPicked(picked) }
         self.browser = browser
         return browser
+    }
+
+    /// Looks for servers under this thread's `claude` after a command: one started in the
+    /// background takes a moment to listen, so it looks again a little later.
+    func refreshLocalServers() {
+        guard let processID, sessionStart != nil else { return }
+        serverScan?.cancel()
+        serverScan = Task { [weak self] in
+            for delay in [1.5, 5.0] {
+                try? await Task.sleep(for: .seconds(delay))
+                guard !Task.isCancelled else { return }
+                let ports = await LocalServers.listeningPorts(under: processID)
+                guard !Task.isCancelled, let self else { return }
+                if ports != self.listeningPorts { self.listeningPorts = ports }
+            }
+        }
+    }
+
+    /// A link to this Mac, clicked in the thread: it opens in the thread's browser, in the
+    /// tab already on that server if there is one.
+    func openInBrowser(_ url: URL) {
+        let browser = ensureBrowser()
+        browser.restoreIfNeeded()
+        if let tab = browser.tabs.first(where: { $0.url?.host() == url.host() && $0.url?.port == url.port }) {
+            browser.selectedTabID = tab.id
+            tab.load(url.absoluteString)
+        } else {
+            browser.newTab(url: url.absoluteString, byAgent: false)
+        }
+        app.showInspector(.browser)
     }
 
     func closeBrowser() {

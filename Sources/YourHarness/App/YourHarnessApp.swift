@@ -62,6 +62,15 @@ struct YourHarnessApp: App {
             }
         }
 
+        WindowGroup("Browser", id: "browser", for: UUID.self) { $threadID in
+            if let threadID {
+                BrowserWindow(threadID: threadID)
+                    .environment(app)
+            }
+        }
+        .defaultSize(width: 1320, height: 960)
+        .restorationBehavior(.disabled)
+
         WindowGroup("Diagram", id: "diagram", for: String.self) { $source in
             if let source {
                 DiagramWindow(source: source)

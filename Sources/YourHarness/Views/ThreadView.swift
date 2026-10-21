@@ -30,6 +30,13 @@ struct ThreadView: View {
         transcript
             .environment(\.issueLinker, app.issueLinker(for: thread))
             .environment(thread)
+            // Links to this Mac (the app being built) open in the thread's browser; ⌘-click
+            // for your default browser.
+            .environment(\.openURL, OpenURLAction { url in
+                guard app.browserTools, LocalServers.isLocal(url), !NSEvent.modifierFlags.contains(.command) else { return .systemAction }
+                thread.openInBrowser(url)
+                return .handled
+            })
             .navigationTitle(thread.title)
             .navigationSubtitle(subtitle)
             .task { thread.loadTranscriptIfNeeded() }
