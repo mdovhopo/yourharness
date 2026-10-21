@@ -35,6 +35,8 @@ struct WorkspaceView: View {
             .frame(maxWidth: .infinity)
         }
         .scrollIndicators(.automatic)
+        .onAppear { app.computeFootprints() }
+        .animation(.smooth(duration: 0.3), value: workspace.worktrees)
         .animation(.smooth(duration: 0.3), value: workspace.pullRequests)
         .animation(.smooth(duration: 0.3), value: workspace.statuses)
         .animation(.smooth(duration: 0.3), value: workspace.layout)
@@ -50,19 +52,33 @@ private struct WorkspaceHeader: View {
 
     private var subtitle: String {
         guard let layout = workspace.layout else { return "Looking for repositories…" }
-        let cloned = layout.clonedRepos.count
-        let uncloned = layout.repos.count - cloned
+        let cloned = workspace.clonedRepos.count
+        let uncloned = workspace.unclonedRepos.count
         switch layout.kind {
         case .plain:
             return "Folder"
         case .repo:
             let branch = workspace.statuses[""]?.branch.map { " · \($0)" } ?? ""
-            return "Git repository\(branch)"
+            return (["Git repository\(branch)"] + worktreeSummary).joined(separator: " · ")
         case .folder, .shell:
             var parts = ["Workspace", cloned == 1 ? "1 repo" : "\(cloned) repos"]
             if uncloned > 0 { parts.append("\(uncloned) not cloned") }
-            return parts.joined(separator: " · ")
+            return (parts + worktreeSummary).joined(separator: " · ")
         }
+    }
+
+    /// "3 worktrees", and what needs a look: not on a branch, done with, missing.
+    private var worktreeSummary: [String] {
+        let all = workspace.clonedRepos.flatMap { repo in (workspace.worktrees[repo.id] ?? []).map { (repo, $0) } }
+        guard !all.isEmpty else { return [] }
+        var parts = [all.count == 1 ? "1 worktree" : "\(all.count) worktrees"]
+        let detached = all.count { $0.1.isDetached && !$0.1.isMissing }
+        let finished = all.count { workspace.isFinished($0.1, in: $0.0) }
+        let missing = all.count { $0.1.isMissing }
+        if detached > 0 { parts.append("\(detached) not on a branch") }
+        if finished > 0 { parts.append("\(finished) done with") }
+        if missing > 0 { parts.append("\(missing) missing") }
+        return parts
     }
 
     var body: some View {
@@ -458,17 +474,33 @@ private struct ForgeNotice: View {
 // MARK: - Repositories
 
 private struct RepositoriesSection: View {
+    @Environment(AppModel.self) private var app
     let workspace: WorkspaceModel
     @State private var showUncloned = false
 
+    /// A repo's row, then one per worktree, in one card.
+    private struct Line: Identifiable {
+        let repo: WorkspaceRepo
+        let worktree: Worktree?
+        var id: String { worktree?.path ?? repo.id }
+    }
+
     var body: some View {
         let repos = workspace.clonedRepos
+        let lines = repos.flatMap { repo in [Line(repo: repo, worktree: nil)] + (workspace.worktrees[repo.id] ?? []).map { Line(repo: repo, worktree: $0) } }
+        let threads = workspace.threadsByCheckout(app.threads)
         SectionTitle("Repositories", count: repos.count)
             .padding(.bottom, 12)
 
-        ForEach(Array(repos.enumerated()), id: \.element.id) { index, repo in
-            RepoRow(repo: repo, workspace: workspace)
-                .modifier(CardSegment(isFirst: index == 0, isLast: index == repos.count - 1))
+        ForEach(Array(lines.enumerated()), id: \.element.id) { index, line in
+            Group {
+                if let worktree = line.worktree {
+                    WorktreeRow(worktree: worktree, repo: line.repo, workspace: workspace, threads: threads[worktree.path] ?? [])
+                } else {
+                    RepoRow(repo: line.repo, workspace: workspace, threads: threads[WorkspaceModel.realPath(line.repo.url.path)] ?? [])
+                }
+            }
+            .modifier(CardSegment(isFirst: index == 0, isLast: index == lines.count - 1))
         }
 
         let uncloned = workspace.unclonedRepos
@@ -539,9 +571,12 @@ private struct CardSegment: ViewModifier {
 }
 
 private struct RepoRow: View {
+    @Environment(AppModel.self) private var app
     let repo: WorkspaceRepo
     let workspace: WorkspaceModel
+    let threads: [ThreadModel]
     @State private var hovering = false
+    @State private var addingWorktree = false
 
     private var status: RepoStatus? { workspace.statuses[repo.id] }
     private var remote: GitRemote? { workspace.remotes[repo.id] }
@@ -572,6 +607,7 @@ private struct RepoRow: View {
 
             Spacer(minLength: 8)
 
+            ThreadChips(threads: threads)
             if let status {
                 SyncLabel(status: status)
                 ChangesLabel(status: status)
@@ -605,11 +641,21 @@ private struct RepoRow: View {
             if let web = remote?.webURL {
                 Button("Open on \(remote?.forge?.displayName ?? remote?.host ?? "Web")", systemImage: "safari") { NSWorkspace.shared.open(web) }
             }
+            Button("Open in Terminal", systemImage: "terminal") { app.openInTerminal(repo.url) }
             Button("Copy Path", systemImage: "doc.on.doc") { Pasteboard.copy(repo.url.path) }
             if let branch = status?.branch {
                 Button("Copy Branch Name", systemImage: "arrow.triangle.branch") { Pasteboard.copy(branch) }
             }
+            Divider()
+            Button("New Worktree…", systemImage: "plus.square.on.square") { addingWorktree = true }
+            if let project = app.project(id: workspace.projectID) {
+                Button("New Thread Here", systemImage: "square.and.pencil") { app.newThread(in: project, workingIn: repo.url.path) }
+            }
+            if workspace.worktrees[repo.id]?.contains(where: \.isMissing) == true {
+                Button("Forget Missing Worktrees", systemImage: "trash.slash") { Task { await app.pruneWorktrees(of: repo, in: workspace) } }
+            }
         }
+        .sheet(isPresented: $addingWorktree) { NewWorktreeSheet(repo: repo, workspace: workspace) }
     }
 }
 
@@ -735,5 +781,311 @@ enum Pasteboard {
     static func copy(_ text: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
+    }
+}
+
+// MARK: - Worktrees
+
+/// A linked worktree under its repo: where it is, which branch it's on (or that it's on
+/// none), what's in it, its PR, and the threads working in it.
+private struct WorktreeRow: View {
+    @Environment(AppModel.self) private var app
+    let worktree: Worktree
+    let repo: WorkspaceRepo
+    let workspace: WorkspaceModel
+    let threads: [ThreadModel]
+    @State private var confirmingRemoval = false
+    @State private var error: String?
+
+    private var status: RepoStatus? { workspace.worktreeStatuses[worktree.path] }
+    private var pullRequest: PullRequest? { workspace.pullRequest(for: worktree, in: repo) }
+    private var isFinished: Bool { workspace.isFinished(worktree, in: repo) }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: worktree.isMissing ? "questionmark.folder" : "arrow.turn.down.right")
+                .foregroundStyle(worktree.isMissing ? AnyShapeStyle(.orange) : AnyShapeStyle(.tertiary))
+                .frame(width: 18)
+
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(worktree.url.lastPathComponent)
+                        .fontWeight(.medium)
+                        .lineLimit(1)
+                    Text(location)
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.head)
+                    if worktree.isLocked {
+                        Image(systemName: "lock.fill")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                            .help(worktree.lockReason.map { "Locked: \($0)" } ?? "Locked: git won't remove or prune it")
+                    }
+                }
+                WorktreeBranchLabel(worktree: worktree)
+            }
+
+            Spacer(minLength: 8)
+
+            ThreadChips(threads: threads)
+            if worktree.isMissing {
+                StateBadge(text: "Folder missing", color: .orange)
+                    .help("Its folder was moved or deleted. Forget Missing Worktrees (on the repo) cleans it up.")
+            } else if let status {
+                if isFinished {
+                    StateBadge(text: status.upstreamGone ? "Remote branch deleted" : "Merged into \(defaultBranch)", color: .green)
+                        .help("Its work has landed. If nothing in it is still needed, it can be removed.")
+                } else if workspace.hasNoWork(worktree, in: repo), !status.isDirty {
+                    Text("No commits yet")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.tertiary)
+                        .help("Its branch points at a commit of \(defaultBranch): nothing has been committed on it")
+                } else {
+                    SyncLabel(status: status)
+                }
+                ChangesLabel(status: status)
+            } else if workspace.isRefreshingStatus {
+                ProgressView().controlSize(.mini)
+            }
+            if let pullRequest {
+                Button("#\(pullRequest.number)") { NSWorkspace.shared.open(pullRequest.url) }
+                    .buttonStyle(.borderless)
+                    .font(.caption.weight(.medium).monospacedDigit())
+                    .help(pullRequest.title)
+            }
+        }
+        .padding(.leading, 30)
+        .padding(.trailing, 12)
+        .padding(.vertical, 7)
+        .contentShape(.rect)
+        .contextMenu {
+            Button("Show in Finder", systemImage: "folder") { NSWorkspace.shared.activateFileViewerSelecting([worktree.url]) }
+                .disabled(worktree.isMissing)
+            Button("Open in Terminal", systemImage: "terminal") { app.openInTerminal(worktree.url) }
+                .disabled(worktree.isMissing)
+            Button("Copy Path", systemImage: "doc.on.doc") { Pasteboard.copy(worktree.path) }
+            if let branch = worktree.branch {
+                Button("Copy Branch Name", systemImage: "arrow.triangle.branch") { Pasteboard.copy(branch) }
+            }
+            if let pullRequest {
+                Button("Open #\(pullRequest.number)", systemImage: "arrow.triangle.pull") { NSWorkspace.shared.open(pullRequest.url) }
+            }
+            Divider()
+            if let project = app.project(id: workspace.projectID), !worktree.isMissing {
+                Button("New Thread Here", systemImage: "square.and.pencil") { app.newThread(in: project, workingIn: worktree.path) }
+            }
+            Button("Remove Worktree…", systemImage: "trash", role: .destructive) { confirmingRemoval = true }
+                .disabled(worktree.isLocked)
+        }
+        .confirmationDialog(removalTitle, isPresented: $confirmingRemoval) {
+            if (status?.changedFiles ?? 0) > 0 {
+                Button("Remove and Discard \(status?.changedFiles ?? 0) Changes", role: .destructive) { remove(force: true) }
+            } else {
+                Button("Remove", role: .destructive) { remove(force: false) }
+            }
+        } message: {
+            Text(removalMessage)
+        }
+        .alert("Couldn't remove the worktree", isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) {
+            Button("OK") { error = nil }
+        } message: {
+            Text(error ?? "")
+        }
+    }
+
+    private var defaultBranch: String {
+        let base = workspace.defaultBranches[repo.id] ?? "main"
+        return base.hasPrefix("origin/") ? String(base.dropFirst("origin/".count)) : base
+    }
+
+    /// Inside the project: relative; elsewhere: with ~ for your home folder.
+    private var location: String {
+        let folder = (worktree.path as NSString).deletingLastPathComponent
+        let root = WorkspaceModel.realPath(workspace.root.path)
+        if folder == root { return "" }
+        if folder.hasPrefix(root + "/") { return String(folder.dropFirst(root.count + 1)) + "/" }
+        return folder.replacingOccurrences(of: NSHomeDirectory(), with: "~") + "/"
+    }
+
+    private var removalTitle: String { "Remove the worktree “\(worktree.url.lastPathComponent)”?" }
+
+    private var removalMessage: String {
+        var parts = ["Its folder is deleted."]
+        if let branch = worktree.branch { parts.append("The branch \(branch) stays.") }
+        if let changes = status?.changedFiles, changes > 0 { parts.append("It has \(changes) uncommitted change\(changes == 1 ? "" : "s"), which will be lost.") }
+        if !threads.isEmpty { parts.append("\(threads.count == 1 ? "A thread works" : "\(threads.count) threads work") in it; their conversations stay.") }
+        return parts.joined(separator: " ")
+    }
+
+    private func remove(force: Bool) {
+        Task { error = await app.removeWorktree(worktree, of: repo, in: workspace, force: force) }
+    }
+}
+
+/// The branch, or that HEAD isn't on one: commits made there belong to no branch.
+private struct WorktreeBranchLabel: View {
+    let worktree: Worktree
+
+    var body: some View {
+        HStack(spacing: 4) {
+            if let branch = worktree.branch {
+                Image(systemName: "arrow.triangle.branch")
+                    .font(.system(size: 9, weight: .semibold))
+                Text(branch)
+                    .foregroundStyle(.secondary)
+            } else {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.orange)
+                Text("Not on a branch\(worktree.headOID.map { " · \($0.prefix(7))" } ?? "")")
+                    .foregroundStyle(.orange)
+                    .help("HEAD is detached: new commits here aren't on any branch, and are easy to lose. Check out or create a branch in it.")
+            }
+        }
+        .font(.caption.monospaced())
+        .foregroundStyle(.secondary)
+        .lineLimit(1)
+        .truncationMode(.middle)
+    }
+}
+
+private struct StateBadge: View {
+    let text: String
+    let color: Color
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Circle().fill(color).frame(width: 6, height: 6)
+            Text(text)
+        }
+        .font(.caption.weight(.medium))
+        .foregroundStyle(.secondary)
+    }
+}
+
+/// The threads working in a checkout, newest first: click one to open it.
+struct ThreadChips: View {
+    @Environment(AppModel.self) private var app
+    let threads: [ThreadModel]
+
+    var body: some View {
+        if !threads.isEmpty {
+            HStack(spacing: 4) {
+                ForEach(threads.prefix(2)) { thread in
+                    Button { app.selectedThreadID = thread.id } label: {
+                        Label(thread.title, systemImage: thread.isWorking ? "circle.dotted" : "bubble.left")
+                            .labelStyle(CompactLabelStyle())
+                            .lineLimit(1)
+                            .frame(maxWidth: 150)
+                    }
+                    .buttonStyle(.plain)
+                    .font(.caption)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2)
+                    .background(.quaternary.opacity(0.7), in: .capsule)
+                    .help("Open “\(thread.title)”")
+                }
+                if threads.count > 2 {
+                    Menu("+\(threads.count - 2)") {
+                        ForEach(threads.dropFirst(2)) { thread in
+                            Button(thread.title) { app.selectedThreadID = thread.id }
+                        }
+                    }
+                    .menuStyle(.button)
+                    .buttonStyle(.plain)
+                    .menuIndicator(.hidden)
+                    .font(.caption)
+                    .fixedSize()
+                }
+            }
+        }
+    }
+}
+
+/// New Worktree…: a branch (new, or one that exists) checked out in its own folder.
+struct NewWorktreeSheet: View {
+    @Environment(AppModel.self) private var app
+    @Environment(\.dismiss) private var dismiss
+    let repo: WorkspaceRepo
+    let workspace: WorkspaceModel
+    @State private var branch = ""
+    @State private var base = ""
+    @State private var location: URL?
+    @State private var working = false
+    @State private var error: String?
+    @State private var startThread = true
+
+    private var trimmed: String { branch.trimmingCharacters(in: .whitespaces) }
+    private var target: URL { location ?? app.defaultWorktreeLocation(repo: repo, branch: trimmed.isEmpty ? "branch" : trimmed) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("New Worktree of \(repo.name)")
+                .font(.title2.weight(.semibold))
+            Text("Another checkout of the repo, on its own branch, so work there doesn't touch this one. A thread can work in as many as it needs.")
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Form {
+                TextField("Branch", text: $branch, prompt: Text("feature/login"))
+                TextField("Starting from", text: $base, prompt: Text(workspace.defaultBranches[repo.id] ?? "HEAD"))
+                    .help("Used for a new branch. An existing branch is checked out as it is.")
+                LabeledContent("Folder") {
+                    HStack {
+                        Text(target.path.replacingOccurrences(of: NSHomeDirectory(), with: "~"))
+                            .font(.callout.monospaced())
+                            .lineLimit(1)
+                            .truncationMode(.head)
+                        Button("Change…", action: chooseFolder)
+                    }
+                }
+                Toggle("Start a thread in it", isOn: $startThread)
+            }
+            .formStyle(.grouped)
+            if let error {
+                Label(error, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button("Create") { Task { await create() } }
+                    .buttonStyle(.glassProminent)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(trimmed.isEmpty || working)
+            }
+        }
+        .padding(20)
+        .frame(width: 520)
+    }
+
+    private func chooseFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.prompt = "Put It Here"
+        panel.message = "Choose the folder to create the worktree in."
+        if panel.runModal() == .OK, let url = panel.url {
+            location = url.appending(path: trimmed.isEmpty ? "worktree" : trimmed.replacingOccurrences(of: "/", with: "-"))
+        }
+    }
+
+    private func create() async {
+        working = true
+        defer { working = false }
+        let start = base.trimmingCharacters(in: .whitespaces)
+        let folder = target
+        if let failure = await app.addWorktree(to: repo, in: workspace, branch: trimmed, from: start.isEmpty ? workspace.defaultBranches[repo.id] : start, at: folder) {
+            error = failure
+            return
+        }
+        if startThread, let project = app.project(id: workspace.projectID) {
+            app.newThread(in: project, workingIn: folder.path)
+        }
+        dismiss()
     }
 }

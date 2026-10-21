@@ -28,6 +28,16 @@ final class WorkspaceModel {
     private(set) var isRefreshingPulls = false
     private(set) var statusUpdatedAt: Date?
     private(set) var pullsUpdatedAt: Date?
+    /// Each repo's linked worktrees (not its main checkout), keyed by `WorkspaceRepo.id`.
+    private(set) var worktrees: [String: [Worktree]] = [:]
+    /// Keyed by worktree path.
+    private(set) var worktreeStatuses: [String: RepoStatus] = [:]
+    /// Per repo: its default branch (`origin/main`), and the local branches already in it.
+    private(set) var defaultBranches: [String: String] = [:]
+    private(set) var mergedBranches: [String: Set<String>] = [:]
+    /// Each repo's default branch's own line of commits: a branch pointing at one of them
+    /// has no work of its own.
+    private(set) var mainLines: [String: Set<String>] = [:]
 
     init(projectID: UUID, root: URL) {
         self.projectID = projectID
@@ -36,7 +46,74 @@ final class WorkspaceModel {
 
     var isRefreshing: Bool { isScanning || isRefreshingStatus || isRefreshingPulls }
     var repos: [WorkspaceRepo] { layout?.repos ?? [] }
-    var clonedRepos: [WorkspaceRepo] { repos.filter(\.isCloned) }
+    /// Linked worktrees inside the project are listed under their repo, not as repos.
+    var clonedRepos: [WorkspaceRepo] {
+        let linked = Set(worktrees.values.joined().map(\.path))
+        return repos.filter { $0.isCloned && !linked.contains(Self.realPath($0.url.path)) }
+    }
+    var allWorktrees: [Worktree] { clonedRepos.flatMap { worktrees[$0.id] ?? [] } }
+
+    /// The open PR from a worktree's branch.
+    func pullRequest(for worktree: Worktree, in repo: WorkspaceRepo) -> PullRequest? {
+        guard let branch = worktree.branch else { return nil }
+        return pullRequests(for: repo).first { $0.headBranch == branch }
+    }
+
+    /// Done with: nothing uncommitted, no open PR, and its work has landed: its remote
+    /// branch was deleted (what a merged PR usually does), or its own commits are in the
+    /// default branch. A branch still where it started has no work yet, so it isn't done.
+    func isFinished(_ worktree: Worktree, in repo: WorkspaceRepo) -> Bool {
+        guard let branch = worktree.branch, !worktree.isMissing, pullRequest(for: worktree, in: repo) == nil,
+              let status = worktreeStatuses[worktree.path], !status.isDirty
+        else { return false }
+        if status.upstreamGone { return true }
+        return mergedBranches[repo.id]?.contains(branch) == true && !hasNoWork(worktree, in: repo)
+    }
+
+    /// Its branch points at a commit of the default branch's own: nothing done in it yet.
+    func hasNoWork(_ worktree: Worktree, in repo: WorkspaceRepo) -> Bool {
+        guard worktree.branch != nil, let head = worktree.headOID else { return false }
+        return mainLines[repo.id]?.contains(head) == true
+    }
+
+    /// Which threads work in which checkout, by path: every folder a thread touched counts
+    /// for the innermost checkout holding it, so a worktree nested in its repo's folder
+    /// doesn't also count for the repo.
+    func threadsByCheckout(_ threads: [ThreadModel]) -> [String: [ThreadModel]] {
+        let roots = (clonedRepos.map { Self.realPath($0.url.path) } + allWorktrees.map(\.path)).sorted { $0.count > $1.count }
+        var result: [String: [ThreadModel]] = [:]
+        for thread in threads where !thread.isSideChat {
+            var hit = Set<String>()
+            for folder in thread.footprint + [thread.workingDirectory].compactMap({ $0.map(Self.realPath) }) {
+                if let root = roots.first(where: { ThreadFootprint.touches([folder], root: $0) }) { hit.insert(root) }
+            }
+            for root in hit { result[root, default: []].append(thread) }
+        }
+        for key in result.keys { result[key]?.sort { $0.sortDate > $1.sortDate } }
+        return result
+    }
+
+    /// A checkout a thread works in: a repo's main one (worktree nil) or a linked worktree.
+    struct Checkout: Identifiable {
+        let repo: WorkspaceRepo
+        let worktree: Worktree?
+        var id: String { worktree?.path ?? repo.id }
+        var path: String { worktree?.path ?? WorkspaceModel.realPath(repo.url.path) }
+    }
+
+    /// The checkouts one thread works in, the one it runs in first.
+    func checkouts(for thread: ThreadModel) -> [Checkout] {
+        let all = clonedRepos.flatMap { repo in [Checkout(repo: repo, worktree: nil)] + (worktrees[repo.id] ?? []).map { Checkout(repo: repo, worktree: $0) } }
+        let used = threadsByCheckout([thread])
+        let running = thread.workingDirectory.map(Self.realPath)
+        return all.filter { used[$0.path] != nil || $0.path == running }
+            .sorted { ($0.path == running ? 0 : 1, $0.path) < ($1.path == running ? 0 : 1, $1.path) }
+    }
+
+    /// git reports real paths: `/tmp` is `/private/tmp`.
+    nonisolated static func realPath(_ path: String) -> String {
+        ThreadFootprint.resolve(path, in: "/") ?? path
+    }
     var unclonedRepos: [WorkspaceRepo] { repos.filter { !$0.isCloned } }
     var hasForgeRemotes: Bool { remotes.values.contains { $0.forge != nil } }
 
@@ -96,10 +173,42 @@ final class WorkspaceModel {
         if let updated = statusUpdatedAt, Date.now.timeIntervalSince(updated) < minInterval { return }
         isRefreshingStatus = true
         defer { isRefreshingStatus = false }
-        let results = await Self.map(clonedRepos) { repo in (repo.id, await git.status(of: repo.url)) }
+        let cloned = repos.filter(\.isCloned)
+        let results = await Self.map(cloned) { repo in (repo.id, await git.status(of: repo.url)) }
         var statuses: [String: RepoStatus] = [:]
         for (id, status) in results { statuses[id] = status }
         if statuses != self.statuses { self.statuses = statuses }
+
+        // Worktrees: each repo's list, the status of each one, and which branches are merged.
+        let lists = await Self.map(cloned) { repo -> (String, [Worktree], String?) in
+            let all = await git.worktrees(of: repo.url) ?? []
+            return (repo.id, all.filter { !$0.isMain && !$0.isBare }, await git.defaultBranch(of: repo.url))
+        }
+        var worktrees: [String: [Worktree]] = [:], bases: [String: String] = [:]
+        // A repo listed as a linked worktree of another (it's nested in the project) is
+        // that one's worktree: only its main repo lists it.
+        let mains = Set(lists.flatMap { _, linked, _ in linked.map(\.path) })
+        for (id, linked, base) in lists {
+            guard let repo = cloned.first(where: { $0.id == id }), !mains.contains(Self.realPath(repo.url.path)) else { continue }
+            if !linked.isEmpty { worktrees[id] = linked.sorted { $0.path < $1.path } }
+            if let base { bases[id] = base }
+        }
+        let merged = await Self.map(Array(bases)) { id, base in
+            let url = cloned.first { $0.id == id }!.url
+            return (id, await git.branchesMerged(into: base, in: url), await git.mainLine(base, in: url))
+        }
+        let checked = await Self.map(worktrees.values.joined().filter { !$0.isMissing }) { worktree in
+            (worktree.path, await git.status(of: worktree.url))
+        }
+        var worktreeStatuses: [String: RepoStatus] = [:]
+        for (path, status) in checked { worktreeStatuses[path] = status }
+        if worktrees != self.worktrees { self.worktrees = worktrees }
+        if worktreeStatuses != self.worktreeStatuses { self.worktreeStatuses = worktreeStatuses }
+        if bases != defaultBranches { defaultBranches = bases }
+        let mergedMap = Dictionary(merged.map { ($0.0, $0.1) }, uniquingKeysWith: { $1 })
+        if mergedMap != mergedBranches { mergedBranches = mergedMap }
+        let lines = Dictionary(merged.map { ($0.0, $0.2) }, uniquingKeysWith: { $1 })
+        if lines != mainLines { mainLines = lines }
         statusUpdatedAt = .now
     }
 

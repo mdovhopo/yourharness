@@ -13,6 +13,8 @@ public struct RepoStatus: Sendable, Equatable {
     public var untracked = 0
     public var conflicted = 0
     public var stashes = 0
+    /// It tracks a remote branch that's been deleted: usually its PR was merged.
+    public var upstreamGone = false
 
     public init() {}
 
@@ -21,6 +23,7 @@ public struct RepoStatus: Sendable, Equatable {
 
     public static func parse(porcelainV2 output: String) -> RepoStatus {
         var status = RepoStatus()
+        var sawAheadBehind = false
         for line in output.split(separator: "\n", omittingEmptySubsequences: true) {
             if line.hasPrefix("# ") {
                 let parts = line.dropFirst(2).split(separator: " ", maxSplits: 1).map(String.init)
@@ -33,6 +36,7 @@ public struct RepoStatus: Sendable, Equatable {
                 case "branch.upstream":
                     status.upstream = parts[1]
                 case "branch.ab":
+                    sawAheadBehind = true
                     for value in parts[1].split(separator: " ") {
                         if value.hasPrefix("+") { status.ahead = Int(value.dropFirst()) ?? 0 }
                         if value.hasPrefix("-") { status.behind = Int(value.dropFirst()) ?? 0 }
@@ -59,6 +63,8 @@ public struct RepoStatus: Sendable, Equatable {
                 break
             }
         }
+        // Tracking something, with nothing to compare against: the remote branch is gone.
+        status.upstreamGone = status.upstream != nil && !sawAheadBehind
         return status
     }
 }
@@ -96,10 +102,11 @@ public struct Git: Sendable {
         return output.stdout.split(separator: "\0").map(String.init)
     }
 
-    private func run(_ arguments: [String], in repo: URL, outputLimit: Int = 256 * 1024) async -> CommandOutput {
+    /// `writes`: a command that changes the repo (worktree add/remove) takes git's locks as usual.
+    func run(_ arguments: [String], in repo: URL, outputLimit: Int = 256 * 1024, writes: Bool = false) async -> CommandOutput {
         await CommandRunner.run(
             executable,
-            arguments: ["--no-optional-locks", "-C", repo.path] + arguments,
+            arguments: (writes ? [] : ["--no-optional-locks"]) + ["-C", repo.path] + arguments,
             environment: environment,
             timeout: 15,
             outputLimit: outputLimit

@@ -99,6 +99,11 @@ struct ThreadMeta: Codable {
     var draft: String?
     /// The browser's open tabs, reopened when it's next used.
     var browserTabs: [String]?
+    /// Folders the thread's tool calls touched, newest last: which repos and worktrees it
+    /// works in. Nil until worked out (threads from before this was kept).
+    var footprint: [String]?
+    /// Runs here instead of the project folder: a worktree, say.
+    var workingDirectory: String?
 }
 
 struct PersistedState: Codable {

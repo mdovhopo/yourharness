@@ -103,6 +103,18 @@ For now a ticket is just an issue key the user mentioned in the thread, shown as
 
 ## Worktrees
 
+### Tracking (built)
+
+A thread isn't given a worktree. It works in whatever repos and worktrees it needs, several at once, and the harness keeps track:
+- **Discovery:** each cloned repo's `git worktree list`, so linked worktrees show wherever they live. One nested in the project folder is listed under its repo, not as a repo of its own.
+- **State per worktree:** branch, or "Not on a branch" (detached HEAD: new commits there belong to no branch); changes, ahead/behind, local only; its open PR; locked; folder missing (prunable).
+- **Done with:** nothing uncommitted, no open PR, and the work has landed: the remote branch was deleted (what merging a PR usually does), or the branch is merged into the default branch with commits of its own. A branch still pointing at a commit on the default branch's first-parent line has no work yet ("No commits yet"), however far the default branch has moved since. A squash merge shows through the deleted remote branch.
+- **Threads ↔ checkouts:** each thread keeps a footprint, the folders its tool calls touched (file and search paths, path-like words in commands resolved against where it runs, `EnterWorktree` results), newest last, capped at 300 and saved with the thread. Threads from before are worked out once from their saved history. Each folder counts for the innermost checkout holding it, so a worktree nested in its repo doesn't also count for the repo.
+- **Where you see it:** worktree rows under each repo, with their threads as chips; counts in the header (worktrees, not on a branch, done with, missing); and a toolbar button on each thread listing the checkouts it works in.
+- **Actions:** New Worktree… (new or existing branch, from the default branch, into the app's storage unless you pick a folder, optionally starting a thread there), New Thread Here, Run This Thread Here (a thread can run in a worktree; the next message starts a new Claude session there, since sessions are stored per folder), Remove Worktree (warns about uncommitted changes, keeps the branch), Forget Missing Worktrees (`git worktree prune`), Show in Finder, Open in Terminal, copy path and branch.
+
+### Composite worktrees (planned)
+
 A worktree of the shell has no sub-repos, since they're gitignored, so worktrees are **composite**:
 
 ```

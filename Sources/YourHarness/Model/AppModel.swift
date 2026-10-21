@@ -495,6 +495,57 @@ final class AppModel {
     }
 
     /// An agent may have edited files, committed, or opened a PR.
+    // MARK: - Worktrees
+
+    /// A thread that runs in `folder` (a worktree) rather than the project folder.
+    func newThread(in project: Project, workingIn folder: String) {
+        let thread = newThread(in: project)
+        thread.setWorkingDirectory(folder == project.path ? nil : folder)
+    }
+
+    /// Where New Worktree puts a checkout unless told otherwise: the app's own storage,
+    /// outside the project, so its agents don't find every file twice.
+    func defaultWorktreeLocation(repo: WorkspaceRepo, branch: String) -> URL {
+        let slug = branch.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: " ", with: "-")
+        return store.root.appending(path: "worktrees").appending(path: repo.url.lastPathComponent).appending(path: slug)
+    }
+
+    /// `git worktree add`; nil on success, else git's complaint.
+    func addWorktree(to repo: WorkspaceRepo, in workspace: WorkspaceModel, branch: String, from base: String?, at location: URL) async -> String? {
+        guard let git = workspaceTools.git else { return "Git isn't available." }
+        try? FileManager.default.createDirectory(at: location.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let exists = await git.branchExists(branch, in: repo.url)
+        let error = await git.addWorktree(of: repo.url, at: location, newBranch: exists ? nil : branch,
+                                          from: exists ? nil : base, existingBranch: exists ? branch : nil)
+        await workspace.refreshStatus(tools: workspaceTools, minInterval: 0)
+        return error
+    }
+
+    func removeWorktree(_ worktree: Worktree, of repo: WorkspaceRepo, in workspace: WorkspaceModel, force: Bool) async -> String? {
+        guard let git = workspaceTools.git else { return "Git isn't available." }
+        let error = await git.removeWorktree(worktree, of: repo.url, force: force)
+        await workspace.refresh(tools: workspaceTools, rescan: true)
+        return error
+    }
+
+    func pruneWorktrees(of repo: WorkspaceRepo, in workspace: WorkspaceModel) async {
+        guard let git = workspaceTools.git else { return }
+        _ = await git.pruneWorktrees(of: repo.url)
+        await workspace.refreshStatus(tools: workspaceTools, minInterval: 0)
+    }
+
+    /// Threads saved before footprints were kept work theirs out, so the repos view knows
+    /// which worktrees they're in.
+    func computeFootprints() {
+        for thread in threads { thread.computeFootprintIfNeeded() }
+    }
+
+    func openInTerminal(_ folder: URL) {
+        let terminal = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Terminal")
+            ?? URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")
+        NSWorkspace.shared.open([folder], withApplicationAt: terminal, configuration: NSWorkspace.OpenConfiguration())
+    }
+
     func turnFinished(in projectID: UUID) {
         guard let project = project(id: projectID), let workspace = workspace(for: project) else { return }
         let tools = workspaceTools
@@ -531,7 +582,8 @@ final class AppModel {
         guard let project = project(id: thread.projectID) else { throw HarnessError.projectMissing }
         var options = ClaudeLaunchOptions(
             executable: executable,
-            workingDirectory: project.url,
+            // A worktree that's since been removed falls back to the project.
+            workingDirectory: thread.workingDirectory.flatMap { FileManager.default.fileExists(atPath: $0) ? URL(fileURLWithPath: $0, isDirectory: true) : nil } ?? project.url,
             environment: environment,
             model: thread.effectiveModel,
             permissionMode: project.permissionMode.cliValue,

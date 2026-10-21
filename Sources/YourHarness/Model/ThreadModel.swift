@@ -91,6 +91,12 @@ final class ThreadModel: Identifiable {
     @ObservationIgnored private(set) weak var parentThread: ThreadModel?
     /// The thread's browser, made when it's first used.
     private(set) var browser: BrowserSession?
+    /// Folders its tool calls touched, newest last: the repos and worktrees it works in.
+    private(set) var footprint: [String] = []
+    /// False for a thread saved before footprints were kept, until it's worked out.
+    @ObservationIgnored private var footprintKnown = true
+    /// Where `claude` runs, when it isn't the project folder: a worktree, say.
+    private(set) var workingDirectory: String?
     /// Ports that processes this thread started are listening on: its dev servers.
     private(set) var listeningPorts: [Int] = []
     @ObservationIgnored private var serverScan: Task<Void, Never>?
@@ -155,6 +161,8 @@ final class ThreadModel: Identifiable {
         isSideChat = true
         forksSession = parent.sessionID
         parentThread = parent
+        // Its session lives with the folder the thread's runs in.
+        workingDirectory = parent.workingDirectory
         title = "Side Chat"
         model = parent.model
         effort = parent.effort
@@ -185,6 +193,9 @@ final class ThreadModel: Identifiable {
         wasCutOff = meta.turnInProgress == true
         draft = meta.draft ?? ""
         savedBrowserTabs = meta.browserTabs ?? []
+        footprint = meta.footprint ?? []
+        footprintKnown = meta.footprint != nil
+        workingDirectory = meta.workingDirectory
         transcriptLoaded = false
     }
 
@@ -196,7 +207,9 @@ final class ThreadModel: Identifiable {
                    autoSettle: autoSettle ? nil : false, reactivatedAt: reactivatedAt,
                    turnInProgress: phase == .running || wasCutOff ? true : nil,
                    draft: draft.isEmpty ? nil : draft,
-                   browserTabs: Self.nilIfEmpty(browser?.savedURLs ?? savedBrowserTabs))
+                   browserTabs: Self.nilIfEmpty(browser?.savedURLs ?? savedBrowserTabs),
+                   footprint: footprintKnown ? footprint : nil,
+                   workingDirectory: workingDirectory)
     }
 
     private static func nilIfEmpty(_ urls: [String]) -> [String]? {
@@ -689,6 +702,7 @@ final class ThreadModel: Identifiable {
             blocks[ref]?.toolInput += json
 
         case .assistantMessage(let messageID, let content, let parent):
+            noteFootprint(content)
             if let parent {
                 subagent(for: parent)?.append(content)
                 return
@@ -734,6 +748,9 @@ final class ThreadModel: Identifiable {
                 entry.isStreaming = false
                 if TaskPlan.isPlanTool(name: entry.toolName, inputJSON: entry.toolInput) { plansChanged = true }
                 if entry.toolName == "Bash" { ranCommand = true }
+                if entry.toolName == "EnterWorktree", !result.isError {
+                    addFootprint(ThreadFootprint.folders(inResult: result.content))
+                }
             }
             if plansChanged { rebuildPlan() }
             if ranCommand { refreshLocalServers() }
@@ -935,6 +952,66 @@ final class ThreadModel: Identifiable {
         // with the turn. Asking the session to end needs a moment there isn't.
         if let processID, sessionStart != nil { kill(processID, SIGTERM) }
         sideChat?.prepareForQuit()
+    }
+
+    // MARK: - Footprint
+
+    /// The folder `claude` runs in.
+    var effectiveDirectory: String {
+        workingDirectory ?? app.project(id: projectID)?.path ?? NSHomeDirectory()
+    }
+
+    /// Runs in `path` from the next session on (a worktree, say); nil goes back to the project.
+    func setWorkingDirectory(_ path: String?) {
+        guard path != workingDirectory else { return }
+        workingDirectory = path
+        // Claude keeps sessions per folder: one from elsewhere can't be resumed here.
+        if sessionID != nil { entries.append(.notice("Now working in \((path ?? app.project(id: projectID)?.path ?? "").replacingOccurrences(of: NSHomeDirectory(), with: "~")). The next message starts a new Claude session there.")) }
+        sessionID = nil
+        endSession()
+        if let path { addFootprint([path]) }
+        persist()
+    }
+
+    private func noteFootprint(_ content: [ContentBlock]) {
+        let cwd = effectiveDirectory
+        var found: [String] = []
+        for case .toolUse(_, let name, let input) in content {
+            found += ThreadFootprint.folders(toolName: name, inputJSON: input, workingDirectory: cwd)
+        }
+        addFootprint(found)
+    }
+
+    private func addFootprint(_ folders: [String]) {
+        let merged = ThreadFootprint.merge(folders, into: footprint)
+        if merged != footprint { footprint = merged }
+    }
+
+    /// For a thread saved before footprints were kept: read once from its saved history,
+    /// off the main thread.
+    func computeFootprintIfNeeded() {
+        guard !footprintKnown, !isEphemeral else { return }
+        footprintKnown = true
+        let store = app.store, id = id, cwd = effectiveDirectory
+        Task { [weak self] in
+            let folders = await Task.detached(priority: .utility) {
+                var found: [String] = []
+                func walk(_ entries: [EntrySnapshot]) {
+                    for entry in entries where entry.kind == .tool {
+                        found = ThreadFootprint.merge(ThreadFootprint.folders(toolName: entry.toolName ?? "", inputJSON: entry.toolInput ?? "", workingDirectory: cwd), into: found)
+                        if entry.toolName == "EnterWorktree", let result = entry.toolResult {
+                            found = ThreadFootprint.merge(ThreadFootprint.folders(inResult: result), into: found)
+                        }
+                        if let subagent = entry.subagent { walk(subagent.entries) }
+                    }
+                }
+                walk(store.loadTranscript(id))
+                return found
+            }.value
+            guard let self else { return }
+            self.footprint = ThreadFootprint.merge(self.footprint, into: folders)
+            self.app.save()
+        }
     }
 
     // MARK: - Browser

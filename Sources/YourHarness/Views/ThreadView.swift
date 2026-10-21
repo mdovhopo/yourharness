@@ -39,7 +39,17 @@ struct ThreadView: View {
             })
             .navigationTitle(thread.title)
             .navigationSubtitle(subtitle)
-            .task { thread.loadTranscriptIfNeeded() }
+            .toolbar {
+                if let project = app.project(id: thread.projectID), let workspace = app.workspace(for: project) {
+                    ToolbarItem {
+                        ThreadWorktreesButton(thread: thread, project: project, workspace: workspace)
+                    }
+                }
+            }
+            .task {
+                thread.loadTranscriptIfNeeded()
+                thread.computeFootprintIfNeeded()
+            }
     }
 
     private var transcript: some View {
@@ -168,9 +178,11 @@ struct ThreadView: View {
     }
 
     private var subtitle: String {
-        let project = app.project(id: thread.projectID)?.name ?? ""
-        guard let model = thread.activeModelName else { return project }
-        return "\(project) · \(model)"
+        var parts = [app.project(id: thread.projectID)?.name ?? ""]
+        // Running in a worktree: which one.
+        if let folder = thread.workingDirectory { parts.append((folder as NSString).lastPathComponent) }
+        if let model = thread.activeModelName { parts.append(model) }
+        return parts.joined(separator: " · ")
     }
 }
 
