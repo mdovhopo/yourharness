@@ -129,7 +129,7 @@ struct GraphCell: View {
     let row: StackGraph.Row
     let laneCount: Int
     static let lane: CGFloat = 18
-    static let dotY: CGFloat = 18
+    static let dotY: CGFloat = 16
     static let dot: CGFloat = 16
 
     static func x(_ lane: Int) -> CGFloat { CGFloat(lane) * Self.lane + Self.dot / 2 }
@@ -162,10 +162,10 @@ struct GraphCell: View {
             }
             Text("\(row.layer)")
                 .font(.system(size: 9, weight: .bold).monospacedDigit())
-                .foregroundStyle(.secondary)
+                .foregroundStyle(StateChip.color(row.pullRequest))
                 .frame(width: Self.dot, height: Self.dot)
                 .background(Circle().fill(.background))
-                .overlay(Circle().strokeBorder(.tertiary, lineWidth: 1.5))
+                .overlay(Circle().strokeBorder(StateChip.color(row.pullRequest).opacity(0.8), lineWidth: 1.5))
                 .offset(x: CGFloat(row.lane) * Self.lane, y: Self.dotY - Self.dot / 2)
         }
         .frame(width: CGFloat(laneCount - 1) * Self.lane + Self.dot)
@@ -182,56 +182,46 @@ struct PullRequestCardRow: View {
     private var finished: Bool { pull.state != .open }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            if let graph { graph }
-            HStack(alignment: .top, spacing: 10) {
-            Image(systemName: symbol)
-                .font(.callout.weight(.medium))
-                .foregroundStyle(tint)
-                .frame(width: 16)
-                .padding(.top, 1)
-                .contentTransition(.symbolEffect(.replace))
-            VStack(alignment: .leading, spacing: 4) {
-                Text(pull.title)
-                    .fontWeight(.medium)
-                    .foregroundStyle(finished ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
-                    .lineLimit(2)
+        HStack(alignment: .top, spacing: 8) {
+            // In a stack the dot carries the state; on its own, a small icon does.
+            if let graph {
+                graph
+            } else {
+                Image(systemName: symbol)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(tint)
+                    .frame(width: 16, height: 18)
+                    .contentTransition(.symbolEffect(.replace))
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                // The title, with what to know about it on the same line.
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(pull.title)
+                        .fontWeight(.medium)
+                        .foregroundStyle(finished ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
+                        .lineLimit(2)
+                    Spacer(minLength: 4)
+                    status
+                }
                 HStack(spacing: 4) {
                     Text("\(pull.remote.name) #\(pull.number)").monospacedDigit()
                     Text("·")
                     Text(pull.headBranch).font(.caption.monospaced()).lineLimit(1).truncationMode(.middle)
                     Image(systemName: "arrow.right").font(.system(size: 7, weight: .bold))
                     Text(pull.baseBranch).font(.caption.monospaced()).lineLimit(1)
+                    if !pull.isMine, let author = pull.author {
+                        Text("·")
+                        Text(author).lineLimit(1)
+                    }
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
-                HStack(spacing: 6) {
-                    StateChip(pull: pull)
-                    if pull.state == .open {
-                        if let hint = mergeHint { Chip(hint.text, tint: hint.color) }
-                        ReviewBadge(review: pull.review)
-                        ChecksBadge(checks: pull.checks)
-                    }
-                    Spacer(minLength: 0)
-                    if !pull.isMine, let author = pull.author {
-                        Text(author).font(.caption).foregroundStyle(.tertiary).lineLimit(1)
-                    }
-                    if let date = pull.mergedAt ?? pull.updatedAt {
-                        TimelineView(.everyMinute) { context in
-                            Text(ShortAge.string(from: date, to: context.date))
-                                .font(.caption.monospacedDigit())
-                                .foregroundStyle(.tertiary)
-                        }
-                    }
-                }
-                .font(.caption)
-            }
             }
             // In a stack the tree runs the row's whole height, so the text keeps the space.
-            .padding(.vertical, graph == nil ? 0 : 9)
+            .padding(.vertical, graph == nil ? 0 : 7)
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, graph == nil ? 9 : 0)
+        .padding(.vertical, graph == nil ? 7 : 0)
         .fixedSize(horizontal: false, vertical: true)
         .background {
             if hovering { Color.primary.opacity(0.04) }
@@ -240,12 +230,39 @@ struct PullRequestCardRow: View {
         .onHover { hovering = $0 }
         .onTapGesture { NSWorkspace.shared.open(pull.url) }
         .pointerStyle(.link)
-        .help("Open \(pull.remote.forge?.requestNoun ?? "pull request") #\(pull.number) in your browser")
+        .help("\(stateName). Open \(pull.remote.forge?.requestNoun ?? "pull request") #\(pull.number) in your browser")
         .contextMenu {
             Button("Open in Browser", systemImage: "safari") { NSWorkspace.shared.open(pull.url) }
             Button("Copy Link", systemImage: "link") { Pasteboard.copy(pull.url.absoluteString) }
             Button("Copy Branch Name", systemImage: "arrow.triangle.branch") { Pasteboard.copy(pull.headBranch) }
         }
+    }
+
+    /// Right of the title: a chip only when the state is worth saying (plain "Open" isn't),
+    /// what blocks merging, review, checks, and age.
+    @ViewBuilder
+    private var status: some View {
+        HStack(spacing: 5) {
+            if let chip = StateChip.notable(pull) { Chip(chip.text, tint: chip.color) }
+            if pull.state == .open {
+                if let hint = mergeHint { Chip(hint.text, tint: hint.color) }
+                ReviewBadge(review: pull.review)
+                ChecksBadge(checks: pull.checks)
+            }
+            if let date = pull.mergedAt ?? pull.updatedAt {
+                TimelineView(.everyMinute) { context in
+                    Text(ShortAge.string(from: date, to: context.date))
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.tertiary)
+                }
+            }
+        }
+        .font(.caption)
+        .fixedSize()
+    }
+
+    private var stateName: String {
+        StateChip.notable(pull)?.text ?? (pull.state == .open ? "Open" : pull.state.rawValue.capitalized)
     }
 
     private var symbol: String {
@@ -275,20 +292,29 @@ struct PullRequestCardRow: View {
     }
 }
 
-/// Open, Draft, Auto-merge, In merge queue, Merged, Closed.
-private struct StateChip: View {
-    let pull: PullRequest
-
-    var body: some View {
-        let (text, color): (String, Color) = switch pull.state {
+/// Draft, Auto-merge, In merge queue, Merged, Closed: the states worth a chip. A plain open
+/// PR needs none (the dot says it).
+enum StateChip {
+    static func notable(_ pull: PullRequest) -> (text: String, color: Color)? {
+        switch pull.state {
         case .merged: ("Merged", .purple)
         case .closed: ("Closed", .red)
         case .open where pull.inMergeQueue: ("In merge queue", .purple)
         case .open where pull.autoMerge: ("Auto-merge", .purple)
         case .open where pull.isDraft: ("Draft", .gray)
-        case .open: ("Open", .green)
+        case .open: nil
         }
-        Chip(text, tint: color)
+    }
+
+    /// The colour the stack's dot takes: green open, grey draft, purple merging or merged.
+    static func color(_ pull: PullRequest) -> Color {
+        switch pull.state {
+        case .merged: .purple
+        case .closed: .red
+        case .open where pull.inMergeQueue || pull.autoMerge: .purple
+        case .open where pull.isDraft: .gray
+        case .open: .green
+        }
     }
 }
 
