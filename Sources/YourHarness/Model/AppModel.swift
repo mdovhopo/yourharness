@@ -60,6 +60,10 @@ final class AppModel {
     private(set) var notifications: Bool
     /// Whether Claude gets its task tools, which the plan checklist shows.
     private(set) var planChecklist: Bool
+    /// Per repo path: which threads have worked in it, for sorting repos by use.
+    private(set) var repoUsage: [String: RepoUsage]
+    /// Repos whose worktrees are folded in the repos view.
+    private(set) var collapsedWorktrees: Set<String>
     /// Whether Claude gets the browser built into the app.
     private(set) var browserTools: Bool
     private(set) var browserAutoShow: Bool
@@ -109,6 +113,8 @@ final class AppModel {
         notifications = state.notifications
         planChecklist = state.planChecklist
         browserTools = state.browserTools
+        repoUsage = state.repoUsage
+        collapsedWorktrees = state.collapsedWorktrees
         browserAutoShow = state.browserAutoShow
 
         threads = state.threads.map { ThreadModel(meta: $0, app: self) }
@@ -490,12 +496,62 @@ final class AppModel {
         let tools = workspaceTools
         for project in projects {
             guard let workspace = workspace(for: project) else { continue }
-            Task { await workspace.refresh(tools: tools, rescan: rescan, pullsMaxAge: pullsMaxAge) }
+            Task {
+                await workspace.refresh(tools: tools, rescan: rescan, pullsMaxAge: pullsMaxAge)
+                noteRepoUsage(in: workspace)
+            }
         }
     }
 
-    /// An agent may have edited files, committed, or opened a PR.
     // MARK: - Worktrees
+
+    func worktreesCollapsed(_ repo: WorkspaceRepo) -> Bool {
+        collapsedWorktrees.contains(WorkspaceModel.realPath(repo.url.path))
+    }
+
+    func setWorktreesCollapsed(_ collapsed: Bool, for repo: WorkspaceRepo) {
+        let path = WorkspaceModel.realPath(repo.url.path)
+        if collapsed { collapsedWorktrees.insert(path) } else { collapsedWorktrees.remove(path) }
+        save()
+    }
+
+    /// How many threads have worked in a repo, its worktrees included.
+    func usage(of repo: WorkspaceRepo) -> Int {
+        repoUsage[WorkspaceModel.realPath(repo.url.path)]?.count ?? 0
+    }
+
+    /// Records which threads work in which repos of `workspace`: every thread, wherever it
+    /// lives, since a Home thread can work in a project's repo too.
+    func noteRepoUsage(in workspace: WorkspaceModel) {
+        guard workspace.statusUpdatedAt != nil else { return }
+        record(workspace.checkoutsByThread(threads))
+    }
+
+    /// A thread touched new folders: credit the repos they're in.
+    func footprintChanged(_ thread: ThreadModel) {
+        guard !thread.isSideChat else { return }
+        // Only once a workspace knows its worktrees: until then a worktree nested in the
+        // project looks like a repo of its own, and would be counted as one.
+        for workspace in workspaceModels.values where workspace.statusUpdatedAt != nil {
+            record([thread.id: workspace.checkouts(for: thread).map { WorkspaceModel.realPath($0.repo.url.path) }], dates: [thread.id: thread.updatedAt])
+        }
+    }
+
+    private func record(_ reposByThread: [UUID: [String]], dates: [UUID: Date]? = nil) {
+        var usage = repoUsage
+        for (thread, repos) in reposByThread {
+            let date = dates?[thread] ?? threads.first { $0.id == thread }?.updatedAt
+            for repo in Set(repos) {
+                var entry = usage[repo] ?? RepoUsage()
+                entry.threads.insert(thread)
+                if let date, date > (entry.lastUsed ?? .distantPast) { entry.lastUsed = date }
+                usage[repo] = entry
+            }
+        }
+        guard usage != repoUsage else { return }
+        repoUsage = usage
+        save()
+    }
 
     /// A thread that runs in `folder` (a worktree) rather than the project folder.
     func newThread(in project: Project, workingIn folder: String) {
@@ -546,11 +602,13 @@ final class AppModel {
         NSWorkspace.shared.open([folder], withApplicationAt: terminal, configuration: NSWorkspace.OpenConfiguration())
     }
 
+    /// An agent may have edited files, committed, or opened a PR.
     func turnFinished(in projectID: UUID) {
         guard let project = project(id: projectID), let workspace = workspace(for: project) else { return }
         let tools = workspaceTools
         Task {
             await workspace.refreshStatus(tools: tools, minInterval: 0)
+            noteRepoUsage(in: workspace)
             await workspace.refreshPulls(tools: tools, maxAge: 15)
         }
     }
@@ -1135,6 +1193,8 @@ final class AppModel {
         state.notifications = notifications
         state.planChecklist = planChecklist
         state.browserTools = browserTools
+        state.repoUsage = repoUsage
+        state.collapsedWorktrees = collapsedWorktrees
         state.browserAutoShow = browserAutoShow
         store.saveState(state)
     }

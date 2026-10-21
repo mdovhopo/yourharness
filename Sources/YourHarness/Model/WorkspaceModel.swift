@@ -101,6 +101,19 @@ final class WorkspaceModel {
         var path: String { worktree?.path ?? WorkspaceModel.realPath(repo.url.path) }
     }
 
+    /// For each thread that works here, the repos (main checkout paths) it works in.
+    func checkoutsByThread(_ threads: [ThreadModel]) -> [UUID: [String]] {
+        var result: [UUID: [String]] = [:]
+        let repoOf = Dictionary(clonedRepos.flatMap { repo in
+            [(Self.realPath(repo.url.path), repo)] + (worktrees[repo.id] ?? []).map { ($0.path, repo) }
+        }, uniquingKeysWith: { first, _ in first })
+        for (checkout, users) in threadsByCheckout(threads) {
+            guard let repo = repoOf[checkout] else { continue }
+            for thread in users { result[thread.id, default: []].append(Self.realPath(repo.url.path)) }
+        }
+        return result
+    }
+
     /// The checkouts one thread works in, the one it runs in first.
     func checkouts(for thread: ThreadModel) -> [Checkout] {
         let all = clonedRepos.flatMap { repo in [Checkout(repo: repo, worktree: nil)] + (worktrees[repo.id] ?? []).map { Checkout(repo: repo, worktree: $0) } }

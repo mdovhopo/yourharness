@@ -485,9 +485,23 @@ private struct RepositoriesSection: View {
         var id: String { worktree?.path ?? repo.id }
     }
 
+    /// Most used first (by how many threads worked in them), then by name. A shell's own
+    /// repo stays on top: it's the frame the others sit in.
+    private var sortedRepos: [WorkspaceRepo] {
+        workspace.clonedRepos.sorted { a, b in
+            let shellA = a.isRoot && workspace.layout?.kind == .shell, shellB = b.isRoot && workspace.layout?.kind == .shell
+            if shellA != shellB { return shellA }
+            let useA = app.usage(of: a), useB = app.usage(of: b)
+            if useA != useB { return useA > useB }
+            return a.name.localizedStandardCompare(b.name) == .orderedAscending
+        }
+    }
+
     var body: some View {
-        let repos = workspace.clonedRepos
-        let lines = repos.flatMap { repo in [Line(repo: repo, worktree: nil)] + (workspace.worktrees[repo.id] ?? []).map { Line(repo: repo, worktree: $0) } }
+        let repos = sortedRepos
+        let lines = repos.flatMap { repo in
+            [Line(repo: repo, worktree: nil)] + (app.worktreesCollapsed(repo) ? [] : (workspace.worktrees[repo.id] ?? []).map { Line(repo: repo, worktree: $0) })
+        }
         let threads = workspace.threadsByCheckout(app.threads)
         SectionTitle("Repositories", count: repos.count)
             .padding(.bottom, 12)
@@ -557,7 +571,7 @@ private struct CardSegment: ViewModifier {
             .padding(.top, isFirst ? 3 : 0)
             .padding(.bottom, isLast ? 3 : 0)
             .overlay(alignment: .bottom) {
-                if !isLast { Divider().padding(.leading, 40) }
+                if !isLast { Divider().padding(.leading, 48) }
             }
             .background(.fill.quaternary, in: shape)
             .overlay {
@@ -582,8 +596,29 @@ private struct RepoRow: View {
     private var remote: GitRemote? { workspace.remotes[repo.id] }
     private var pullCount: Int { workspace.pullRequests(for: repo).count }
 
+    private var worktrees: [Worktree] { workspace.worktrees[repo.id] ?? [] }
+    private var collapsed: Bool { app.worktreesCollapsed(repo) }
+
     var body: some View {
         HStack(spacing: 10) {
+            // Folds this repo's worktrees; remembered.
+            Group {
+                if worktrees.isEmpty {
+                    Color.clear
+                } else {
+                    Button(collapsed ? "Show Worktrees" : "Hide Worktrees", systemImage: "chevron.right") {
+                        withAnimation(.snappy(duration: 0.25)) { app.setWorktreesCollapsed(!collapsed, for: repo) }
+                    }
+                    .labelStyle(.iconOnly)
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.secondary)
+                    .rotationEffect(.degrees(collapsed ? 0 : 90))
+                    .help(collapsed ? "Show its \(worktrees.count) worktree\(worktrees.count == 1 ? "" : "s")" : "Hide its worktrees")
+                }
+            }
+            .frame(width: 12)
+            .padding(.trailing, -4)
             Image(systemName: repo.isRoot && workspace.layout?.kind == .shell ? "square.stack.3d.up" : "shippingbox")
                 .foregroundStyle(.secondary)
                 .frame(width: 18)
@@ -602,7 +637,15 @@ private struct RepoRow: View {
                             .help("\(remote?.forge?.displayName ?? "The host") couldn't find this repo with your account")
                     }
                 }
-                BranchLabel(status: status)
+                HStack(spacing: 6) {
+                    BranchLabel(status: status)
+                    if collapsed, !worktrees.isEmpty {
+                        Text(foldedSummary)
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                    }
+                }
             }
 
             Spacer(minLength: 8)
@@ -656,6 +699,22 @@ private struct RepoRow: View {
             }
         }
         .sheet(isPresented: $addingWorktree) { NewWorktreeSheet(repo: repo, workspace: workspace) }
+    }
+}
+
+extension RepoRow {
+    /// Folded: how many worktrees, and what among them needs a look.
+    fileprivate var foldedSummary: String {
+        var parts = [worktrees.count == 1 ? "1 worktree" : "\(worktrees.count) worktrees"]
+        let changed = worktrees.count { (workspace.worktreeStatuses[$0.path]?.isDirty ?? false) && !$0.isMissing }
+        let detached = worktrees.count { $0.isDetached && !$0.isMissing }
+        let finished = worktrees.count { workspace.isFinished($0, in: repo) }
+        let missing = worktrees.count(where: \.isMissing)
+        if changed > 0 { parts.append("\(changed) with changes") }
+        if detached > 0 { parts.append("\(detached) not on a branch") }
+        if finished > 0 { parts.append("\(finished) done with") }
+        if missing > 0 { parts.append("\(missing) missing") }
+        return "· " + parts.joined(separator: " · ")
     }
 }
 
@@ -856,7 +915,7 @@ private struct WorktreeRow: View {
                     .help(pullRequest.title)
             }
         }
-        .padding(.leading, 30)
+        .padding(.leading, 38)
         .padding(.trailing, 12)
         .padding(.vertical, 7)
         .contentShape(.rect)

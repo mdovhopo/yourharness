@@ -144,6 +144,10 @@ struct PersistedState: Codable {
     var browserTools = true
     /// Open the sidebar on the browser when Claude opens a page in the thread you're on.
     var browserAutoShow = true
+    /// How much each repo is used, by its path: for sorting repos by use.
+    var repoUsage: [String: RepoUsage] = [:]
+    /// Repos whose worktrees are folded in the repos view, by path.
+    var collapsedWorktrees: Set<String> = []
 
     init() {}
 
@@ -172,7 +176,18 @@ struct PersistedState: Codable {
         planChecklist = try container.decodeIfPresent(Bool.self, forKey: .planChecklist) ?? true
         browserTools = try container.decodeIfPresent(Bool.self, forKey: .browserTools) ?? true
         browserAutoShow = try container.decodeIfPresent(Bool.self, forKey: .browserAutoShow) ?? true
+        repoUsage = try container.decodeIfPresent([String: RepoUsage].self, forKey: .repoUsage) ?? [:]
+        collapsedWorktrees = try container.decodeIfPresent(Set<String>.self, forKey: .collapsedWorktrees) ?? []
     }
+}
+
+/// The threads that have worked in a repo, in its main checkout or any of its worktrees.
+/// Kept when a thread is deleted: it's a record of use, not a list of what's there.
+struct RepoUsage: Codable, Equatable {
+    var threads: Set<UUID> = []
+    var lastUsed: Date?
+
+    var count: Int { threads.count }
 }
 
 /// What new threads and projects start with. Nil means "let the CLI decide".

@@ -984,7 +984,11 @@ final class ThreadModel: Identifiable {
 
     private func addFootprint(_ folders: [String]) {
         let merged = ThreadFootprint.merge(folders, into: footprint)
-        if merged != footprint { footprint = merged }
+        guard merged != footprint else { return }
+        let new = Set(merged).subtracting(footprint)
+        footprint = merged
+        // Only when it reached somewhere new: the same folders again change nothing.
+        if !new.isEmpty { app.footprintChanged(self) }
     }
 
     /// For a thread saved before footprints were kept: read once from its saved history,
@@ -1010,6 +1014,7 @@ final class ThreadModel: Identifiable {
             }.value
             guard let self else { return }
             self.footprint = ThreadFootprint.merge(self.footprint, into: folders)
+            self.app.footprintChanged(self)
             self.app.save()
         }
     }
