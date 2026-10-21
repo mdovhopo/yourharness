@@ -6,6 +6,8 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+## [0.0.2] - 2026-10-22
+
 ### Highlights
 YourHarness now keeps track of the work around a conversation, not just the conversation: the pull requests a thread is linked to, live in a new PRs tab; the repos and worktrees it works in; and a real browser Claude drives to test what it builds. Turns also survive quitting and crashes.
 
