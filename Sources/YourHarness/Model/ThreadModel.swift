@@ -102,6 +102,12 @@ final class ThreadModel: Identifiable {
     @ObservationIgnored private var interruptingForMessage = false
     /// Messages to restore into the composer once their withdrawal is confirmed.
     @ObservationIgnored private var restoreOnWithdraw: Set<String> = []
+    /// The app closed while Claude was working on this, without saving that it stopped.
+    @ObservationIgnored private var wasCutOff = false
+    /// The running `claude` process, so quitting can stop it on the spot.
+    @ObservationIgnored private var processID: Int32?
+    /// A save during a turn, a moment after the latest change.
+    @ObservationIgnored private var pendingSave: Task<Void, Never>?
 
     /// Idle `claude` processes cost hundreds of MB each; drop them and `--resume` later.
     private static let idleTimeout = Duration.seconds(10 * 60)
@@ -154,6 +160,8 @@ final class ThreadModel: Identifiable {
         settledAt = meta.settledAt
         autoSettle = meta.autoSettle ?? true
         reactivatedAt = meta.reactivatedAt
+        wasCutOff = meta.turnInProgress == true
+        draft = meta.draft ?? ""
         transcriptLoaded = false
     }
 
@@ -162,7 +170,9 @@ final class ThreadModel: Identifiable {
                    updatedAt: updatedAt, sessionID: sessionID, model: model, effort: effort,
                    contextTokens: contextTokens, contextWindow: contextWindow,
                    isPinned: isPinned ? true : nil, settledAt: settledAt,
-                   autoSettle: autoSettle ? nil : false, reactivatedAt: reactivatedAt)
+                   autoSettle: autoSettle ? nil : false, reactivatedAt: reactivatedAt,
+                   turnInProgress: phase == .running || wasCutOff ? true : nil,
+                   draft: draft.isEmpty ? nil : draft)
     }
 
     var hasLiveSession: Bool { sessionStart != nil }
@@ -193,6 +203,50 @@ final class ThreadModel: Identifiable {
         var transaction = Transaction()
         transaction.disablesAnimations = true
         withTransaction(transaction) { entries = loaded }
+        recoverFromSessionHistory()
+    }
+
+    /// Brings in what the session's own history has and the transcript doesn't: the end
+    /// of a turn the app closed during, or what was said in `claude --resume` elsewhere.
+    /// After a crash it always looks; otherwise only if the session file changed since.
+    private func recoverFromSessionHistory() {
+        guard !isEphemeral else { return }
+        let cutOff = wasCutOff
+        guard let sessionID else {
+            if cutOff { finishRecovery(SessionBackfill(), cutOff: true) }
+            return
+        }
+        let known = entries.map(\.archiveItem)
+        let count = entries.count
+        let savedAt = cutOff ? nil : app.store.transcriptModified(id)
+        Task {
+            let backfill = await app.sessionBackfill(sessionID: sessionID, known: known, changedSince: savedAt)
+            // You've carried on meanwhile: what's on screen is what counts.
+            guard entries.count == count, phase == .idle, sessionStart == nil else { return }
+            if backfill != nil || cutOff { finishRecovery(backfill ?? SessionBackfill(), cutOff: cutOff) }
+        }
+    }
+
+    private func finishRecovery(_ backfill: SessionBackfill, cutOff: Bool) {
+        wasCutOff = false
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            for (index, item) in backfill.completed where entries.indices.contains(index) {
+                entries[index].complete(with: item)
+            }
+            // Messages sent elsewhere; a tool result written as the app quit needs no word.
+            if !cutOff, backfill.missing.contains(where: { if case .user = $0 { true } else { false } }) {
+                entries.append(.notice("Continued outside YourHarness"))
+            }
+            entries.append(contentsOf: backfill.missing.map(TranscriptEntry.init(item:)))
+            if cutOff {
+                entries.append(.notice(backfill.isEmpty
+                    ? "YourHarness closed while Claude was working, so this turn stopped here."
+                    : "YourHarness closed while Claude was working. What Claude did until then was recovered from its session history."))
+            }
+        }
+        if cutOff || !backfill.isEmpty { persist() }
     }
 
     func markRead() {
@@ -240,6 +294,8 @@ final class ThreadModel: Identifiable {
         phase = .running
         idleReaper?.cancel()
         touch()
+        // Saved before Claude sees it: your message survives whatever happens next.
+        persist()
 
         let stopFirst = working && interrupting
         if stopFirst { interruptingForMessage = true }
@@ -440,6 +496,7 @@ final class ThreadModel: Identifiable {
         let generation = sessionGeneration
         let start = Task { () throws -> ClaudeSession in
             let session = try ClaudeSession(options: try await app.launchOptions(for: self))
+            processID = session.processIdentifier
             listen(to: session, generation: generation)
             // Keeps the model catalog fresh; costs nothing.
             try? await session.initialize()
@@ -466,6 +523,8 @@ final class ThreadModel: Identifiable {
     // MARK: - Reducer
 
     private func apply(_ event: AgentEvent, generation: Int) {
+        // Saved as it goes, so quitting or a crash loses a moment, not the turn.
+        defer { if phase == .running { persistSoon() } }
         // Everything but the exit event is harmless from a superseded session.
         switch event {
         case .sessionStarted(let info):
@@ -733,9 +792,38 @@ final class ThreadModel: Identifiable {
     }
 
     private func persist() {
+        pendingSave?.cancel()
+        pendingSave = nil
         guard !isEphemeral else { return }
         app.store.saveTranscript(id, entries: entries.map(\.snapshot))
         app.save()
+    }
+
+    /// At most one save every couple of seconds while Claude streams.
+    private func persistSoon() {
+        guard !isEphemeral, pendingSave == nil else { return }
+        pendingSave = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled, let self else { return }
+            self.persist()
+        }
+    }
+
+    /// Quitting: a running turn is stopped and says so, what was queued goes back to the
+    /// composer, and anything unsaved is saved.
+    func prepareForQuit() {
+        if phase == .running {
+            for message in queuedMessages { restore(message) }
+            queuedMessages.removeAll()
+            entries.append(.notice("Stopped when YourHarness quit"))
+            settle()
+        } else if pendingSave != nil {
+            persist()
+        }
+        // Stopped now: the app is about to exit, and an orphaned `claude` would carry on
+        // with the turn. Asking the session to end needs a moment there isn't.
+        if let processID, sessionStart != nil { kill(processID, SIGTERM) }
+        sideChat?.prepareForQuit()
     }
 
     // MARK: - Title

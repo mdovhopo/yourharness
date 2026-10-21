@@ -92,6 +92,11 @@ struct ThreadMeta: Codable {
     /// Set by un-settling: the thread sorts as fresh, and isn't auto-settled again until
     /// you send something new.
     var reactivatedAt: Date?
+    /// Claude was working when this was saved. Still set at launch, the app closed
+    /// mid-turn without saying so (a crash), and the turn is marked as cut off.
+    var turnInProgress: Bool?
+    /// What you'd typed and not sent.
+    var draft: String?
 }
 
 struct PersistedState: Codable {
@@ -290,15 +295,28 @@ struct Store: Sendable {
         write(entries, to: transcriptURL(id))
     }
 
+    /// When the transcript was last written, to tell whether the session went on without it.
+    func transcriptModified(_ id: UUID) -> Date? {
+        try? FileManager.default.attributesOfItem(atPath: transcriptURL(id).path)[.modificationDate] as? Date
+    }
+
+    /// Waits for every write so far; at quit, so none is cut off.
+    func flush() {
+        queue.sync {}
+    }
+
     func deleteTranscript(_ id: UUID) {
         let url = transcriptURL(id)
         queue.async { try? FileManager.default.removeItem(at: url) }
     }
 
-    /// Encodes on the caller, writes on a serial background queue so writes stay ordered.
-    private func write(_ value: some Encodable, to url: URL) {
-        guard let data = try? Self.encoder.encode(value) else { return }
-        queue.async { try? data.write(to: url, options: .atomic) }
+    /// Encodes and writes on a serial background queue, so writes stay ordered and a long
+    /// transcript saved mid-turn costs the main thread nothing.
+    private func write(_ value: some Encodable & Sendable, to url: URL) {
+        queue.async {
+            guard let data = try? Self.encoder.encode(value) else { return }
+            try? data.write(to: url, options: .atomic)
+        }
     }
 
     private static let encoder: JSONEncoder = {

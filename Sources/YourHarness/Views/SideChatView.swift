@@ -20,7 +20,8 @@ struct ThreadInspector: View {
         }
         .environment(\.issueLinker, thread.map(app.issueLinker(for:)) ?? IssueLinker(repos: [], openPullRequests: []))
         .toolbar {
-            if thread != nil {
+            // Hidden, the sidebar leaves only its toggle in the toolbar.
+            if thread != nil, app.showsInspector {
                 ToolbarItem {
                     Picker("Panel", selection: Bindable(app).inspectorPanel) {
                         ForEach(AppModel.InspectorPanel.allCases) { panel in
@@ -32,7 +33,7 @@ struct ThreadInspector: View {
                 }
             }
             ToolbarSpacer(.flexible)
-            if app.inspectorPanel == .sideChat, let thread, thread.sideChat != nil {
+            if app.showsInspector, app.inspectorPanel == .sideChat, let thread, thread.sideChat != nil {
                 ToolbarItem {
                     Button("New Side Chat", systemImage: "square.and.pencil", action: thread.closeSideChat)
                         .help("End this side chat. The next question starts from a fresh copy of the thread.")

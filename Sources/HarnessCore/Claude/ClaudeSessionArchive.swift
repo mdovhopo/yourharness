@@ -153,11 +153,14 @@ public struct ClaudeSessionArchive: Sendable, Equatable {
                   let message = object["message"] as? [String: Any] else { continue }
 
             if record.type == "assistant" {
-                if let model = message["model"] as? String, model != "<synthetic>" { archive.model = model }
+                let isSynthetic = message["model"] as? String == "<synthetic>"
+                if let model = message["model"] as? String, !isSynthetic { archive.model = model }
                 for block in message["content"] as? [[String: Any]] ?? [] {
                     switch ClaudeStreamParser.contentBlock(block) {
                     case .text(let text)?:
                         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                        // The CLI's stand-in reply for a turn that was stopped, not Claude's.
+                        if isSynthetic, text == "No response requested." { continue }
                         if !text.isEmpty { archive.items.append(.assistant(text)) }
                     case .thinking(let text)?:
                         // Usually redacted to a signature; only real text is worth showing.

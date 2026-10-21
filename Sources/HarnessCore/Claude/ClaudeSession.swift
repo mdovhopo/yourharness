@@ -74,6 +74,8 @@ public struct ClaudeLaunchOptions: Sendable {
 /// The process stays alive between turns, so follow-up messages skip CLI startup.
 public actor ClaudeSession {
     public nonisolated let events: AsyncStream<AgentEvent>
+    /// The `claude` process, for stopping it when there's no time to await the actor (quitting).
+    public nonisolated let processIdentifier: Int32
 
     private let process: Process
     private let stdin: FileHandle
@@ -117,6 +119,7 @@ public actor ClaudeSession {
 
         try process.run()
         self.process = process
+        processIdentifier = process.processIdentifier
         self.stdin = stdinPipe.fileHandleForWriting
         // Writing to a process that just died should throw, not kill the app with SIGPIPE.
         _ = fcntl(stdinPipe.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)

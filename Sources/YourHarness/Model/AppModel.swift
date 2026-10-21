@@ -759,6 +759,24 @@ final class AppModel {
         }.value
     }
 
+    /// What the session's history has beyond `known`, read off the main thread. With
+    /// `changedSince`, nil unless the file changed after that.
+    func sessionBackfill(sessionID: String, known: [ClaudeSessionArchive.Item], changedSince: Date?) async -> SessionBackfill? {
+        await bootstrap?.value
+        let config = ClaudeSessionArchive.configDirectory(environment: environment)
+        return await Task.detached(priority: .utility) {
+            guard let url = ClaudeSessionArchive.locate(sessionID: sessionID, configDirectory: config) else { return nil }
+            if let changedSince {
+                // A second's grace: the file's last line can land just after our save.
+                let modified = (try? FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate] as? Date) ?? .distantPast
+                guard modified > changedSince.addingTimeInterval(1) else { return nil }
+            }
+            guard let archive = try? ClaudeSessionArchive.load(from: url, sessionID: sessionID) else { return nil }
+            let backfill = SessionBackfill(known: known, archive: archive)
+            return backfill.isEmpty ? nil : backfill
+        }.value
+    }
+
     /// Opens a thread that shows the session's history and continues it with `--resume`,
     /// in the project for the folder it ran in (added if you don't have one yet).
     @discardableResult
@@ -908,8 +926,10 @@ final class AppModel {
     }
 
     func shutdown() {
+        for thread in threads { thread.prepareForQuit() }
         save()
         for thread in threads { thread.endSession() }
+        store.flush()
     }
 
     // MARK: - Debug

@@ -6,6 +6,11 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+### Added
+- Turns survive quitting and crashes. Your message is saved the moment you send it, the rest of the turn every couple of seconds, and quitting stops Claude and says so. After a crash, what Claude did meanwhile is recovered from Claude Code's session history.
+- Work done on a thread's session outside YourHarness (`claude --resume` in a terminal) shows up when you open the thread.
+- Unsent drafts are kept across launches.
+
 ### Changed
 - The right sidebar's tabs and actions moved into the window toolbar, so the panel is all content.
 - The side chat can now run commands and look things up on the web. It asks you first for anything that could change something, and it still can't edit files.

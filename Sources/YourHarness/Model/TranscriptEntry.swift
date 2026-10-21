@@ -103,6 +103,28 @@ extension TranscriptEntry {
 }
 
 extension TranscriptEntry {
+    /// As the session's own history records it, to line the two up.
+    var archiveItem: ClaudeSessionArchive.Item {
+        switch kind {
+        case .user: .user(text.isEmpty ? "[Image]" : text)
+        case .assistant: .assistant(text)
+        case .thinking: .thinking(text)
+        case .tool: .tool(id: id, name: toolName, inputJSON: toolInput, result: toolResult, isError: toolIsError)
+        case .notice, .commandOutput: .notice(text)
+        }
+    }
+
+    /// Fills in what was cut off: the rest of a reply, a tool call's result.
+    func complete(with item: ClaudeSessionArchive.Item) {
+        switch item {
+        case .assistant(let text), .thinking(let text): self.text = text
+        case .tool(_, _, _, let result, let isError):
+            toolResult = result
+            toolIsError = isError
+        case .user, .notice: break
+        }
+    }
+
     /// A message from a resumed Claude Code session.
     convenience init(item: ClaudeSessionArchive.Item) {
         switch item {

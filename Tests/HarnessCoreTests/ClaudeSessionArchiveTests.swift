@@ -6,7 +6,8 @@ struct ClaudeSessionArchiveTests {
     private static let id = "0f3c5a1e-7b2d-4c9e-8a61-2d4e6f8a0b1c"
 
     /// The shape of a real session file, sanitized: a rewound branch, parallel tool calls
-    /// with sibling results, a compaction, a slash command, an interrupt and CLI noise.
+    /// with sibling results, a compaction, a slash command, an interrupt (and the CLI's stand-in
+    /// reply after it) and CLI noise.
     private static let fixture = """
     {"type":"permission-mode","permissionMode":"default","sessionId":"s"}
     {"parentUuid":null,"isSidechain":false,"type":"user","message":{"role":"user","content":"Why is the export slow?"},"uuid":"u1","timestamp":"2026-10-01T10:00:00.000Z","cwd":"/tmp/project","sessionId":"s"}
@@ -28,6 +29,7 @@ struct ClaudeSessionArchiveTests {
     {"parentUuid":"s1","isSidechain":false,"type":"user","isMeta":true,"message":{"role":"user","content":"[Image: source: /tmp/x.png]"},"uuid":"meta1","timestamp":"2026-10-01T10:03:00.000Z","cwd":"/tmp/project","sessionId":"s"}
     {"parentUuid":"meta1","isSidechain":false,"type":"user","message":{"role":"user","content":[{"type":"text","text":"Make it read once<system-reminder>internal</system-reminder>"},{"type":"image","source":{}}]},"uuid":"u2","timestamp":"2026-10-01T10:03:01.000Z","cwd":"/tmp/project","sessionId":"s"}
     {"parentUuid":"u2","isSidechain":false,"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]},"uuid":"i1","timestamp":"2026-10-01T10:03:02.000Z","cwd":"/tmp/project","sessionId":"s"}
+    {"parentUuid":"i1","isSidechain":false,"type":"assistant","message":{"id":"m4","model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"No response requested."}]},"uuid":"syn1","timestamp":"2026-10-01T10:03:02.000Z","cwd":"/tmp/project","sessionId":"s"}
     {"type":"ai-title","aiTitle":"Export performance","sessionId":"s"}
     {"type":"api-request-blob","hash":"h","message":{"content":"ignored"},"sessionId":"s"}
     {"type":"ai-title","aiTitle":"Speed up CSV export","sessionId":"s"}
