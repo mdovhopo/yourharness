@@ -262,6 +262,14 @@ final class WorkspaceModel {
     func refreshPulls(tools: WorkspaceTools, maxAge: TimeInterval) async {
         guard !isRefreshingPulls else { return }
         if let updated = pullsUpdatedAt, Date.now.timeIntervalSince(updated) < maxAge { return }
+        // Development: PRs from a file instead of the forges.
+        if let mock = MockPullRequests.all {
+            let mine = Set(remotes.values)
+            let pulls = mock.filter { $0.state == .open && mine.contains($0.remote) }
+            if pulls != pullRequests { pullRequests = pulls }
+            pullsUpdatedAt = .now
+            return
+        }
         let byForge = Dictionary(grouping: Set(remotes.values), by: \.forge)
         guard byForge.keys.contains(where: { $0 != nil }) else { return }
         isRefreshingPulls = true

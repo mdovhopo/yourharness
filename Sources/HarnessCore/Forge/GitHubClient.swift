@@ -88,6 +88,48 @@ public struct GitHubClient: Sendable {
         )
     }
 
+    /// Specific PRs a thread links to, whatever their state: one query per host.
+    public func fetch(links: [PullRequestLink]) async -> [PullRequest] {
+        var found: [PullRequest] = []
+        for (host, group) in Dictionary(grouping: links.filter { $0.remote.forge == .github }, by: \.remote.host) {
+            var arguments = ["api", "graphql", "-f", "query=\(Self.query(for: group))"]
+            if host != "github.com" { arguments += ["--hostname", host] }
+            let output = await CommandRunner.run(executable, arguments: arguments, environment: environment, timeout: 20)
+            guard output.succeeded else { continue }
+            found += Self.parse(links: output.stdout, group)
+        }
+        return found
+    }
+
+    static func query(for links: [PullRequestLink]) -> String {
+        let parts = links.enumerated().map { index, link in
+            """
+            p\(index): repository(owner: \(quoted(link.remote.owner)), name: \(quoted(link.remote.name))) {
+              pullRequest(number: \(link.number)) {
+                number title url isDraft headRefName baseRefName updatedAt reviewDecision state
+                author { login }
+                commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+              }
+            }
+            """
+        }
+        return "query {\n  viewer { login }\n" + parts.joined(separator: "\n") + "\n}"
+    }
+
+    static func parse(links json: String, _ links: [PullRequestLink]) -> [PullRequest] {
+        guard let object = try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any],
+              let data = object["data"] as? [String: Any]
+        else { return [] }
+        let login = (data["viewer"] as? [String: Any])?["login"] as? String
+        return links.enumerated().compactMap { index, link in
+            guard let node = (data["p\(index)"] as? [String: Any])?["pullRequest"] as? [String: Any],
+                  var pull = pullRequest(from: node, remote: link.remote, login: login)
+            else { return nil }
+            pull.state = PullRequest.State(rawValue: (node["state"] as? String ?? "OPEN").lowercased()) ?? .open
+            return pull
+        }
+    }
+
     static func review(_ decision: String?) -> PullRequest.Review {
         switch decision {
         case "APPROVED": .approved

@@ -104,6 +104,8 @@ struct ThreadMeta: Codable {
     var footprint: [String]?
     /// Runs here instead of the project folder: a worktree, say.
     var workingDirectory: String?
+    /// PR and MR links that came up in the thread. Nil until worked out.
+    var pullRequests: [String]?
 }
 
 struct PersistedState: Codable {

@@ -95,6 +95,9 @@ final class ThreadModel: Identifiable {
     private(set) var footprint: [String] = []
     /// False for a thread saved before footprints were kept, until it's worked out.
     @ObservationIgnored private var footprintKnown = true
+    /// PR and MR links that came up in the thread, oldest first.
+    private(set) var pullRequestLinks: [String] = []
+    @ObservationIgnored private var linksKnown = true
     /// Where `claude` runs, when it isn't the project folder: a worktree, say.
     private(set) var workingDirectory: String?
     /// Ports that processes this thread started are listening on: its dev servers.
@@ -195,6 +198,8 @@ final class ThreadModel: Identifiable {
         savedBrowserTabs = meta.browserTabs ?? []
         footprint = meta.footprint ?? []
         footprintKnown = meta.footprint != nil
+        pullRequestLinks = meta.pullRequests ?? []
+        linksKnown = meta.pullRequests != nil
         workingDirectory = meta.workingDirectory
         transcriptLoaded = false
     }
@@ -209,7 +214,8 @@ final class ThreadModel: Identifiable {
                    draft: draft.isEmpty ? nil : draft,
                    browserTabs: Self.nilIfEmpty(browser?.savedURLs ?? savedBrowserTabs),
                    footprint: footprintKnown ? footprint : nil,
-                   workingDirectory: workingDirectory)
+                   workingDirectory: workingDirectory,
+                   pullRequests: linksKnown ? pullRequestLinks : nil)
     }
 
     private static func nilIfEmpty(_ urls: [String]) -> [String]? {
@@ -347,6 +353,7 @@ final class ThreadModel: Identifiable {
     func send(_ text: String, images: [ImageAttachment] = [], interrupting: Bool = false) {
         var text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !images.isEmpty else { return }
+        noteLinks(in: text)
         if images.isEmpty, let command = SlashCommand.parse(text) {
             if isSideChat, command.name == "btw" {
                 // Already on the side: the question is all that's left.
@@ -703,6 +710,7 @@ final class ThreadModel: Identifiable {
 
         case .assistantMessage(let messageID, let content, let parent):
             noteFootprint(content)
+            for case .text(let text) in content { noteLinks(in: text) }
             if let parent {
                 subagent(for: parent)?.append(content)
                 return
@@ -748,6 +756,7 @@ final class ThreadModel: Identifiable {
                 entry.isStreaming = false
                 if TaskPlan.isPlanTool(name: entry.toolName, inputJSON: entry.toolInput) { plansChanged = true }
                 if entry.toolName == "Bash" { ranCommand = true }
+                noteLinks(in: result.content)
                 if entry.toolName == "EnterWorktree", !result.isError {
                     addFootprint(ThreadFootprint.folders(inResult: result.content))
                 }
@@ -994,14 +1003,21 @@ final class ThreadModel: Identifiable {
     /// For a thread saved before footprints were kept: read once from its saved history,
     /// off the main thread.
     func computeFootprintIfNeeded() {
-        guard !footprintKnown, !isEphemeral else { return }
+        guard !footprintKnown || !linksKnown, !isEphemeral else { return }
+        let needsFootprint = !footprintKnown, needsLinks = !linksKnown
         footprintKnown = true
+        linksKnown = true
         let store = app.store, id = id, cwd = effectiveDirectory
         Task { [weak self] in
-            let folders = await Task.detached(priority: .utility) {
-                var found: [String] = []
+            let (folders, links) = await Task.detached(priority: .utility) { () -> ([String], [String]) in
+                var found: [String] = [], links: [String] = []
                 func walk(_ entries: [EntrySnapshot]) {
-                    for entry in entries where entry.kind == .tool {
+                    for entry in entries {
+                        // PR links can be anywhere: your messages, replies, tool output.
+                        for text in [entry.text, entry.toolResult ?? ""] where !text.isEmpty {
+                            links = Self.mergeLinks(PullRequestLink.find(in: text).map(\.url.absoluteString), into: links)
+                        }
+                        guard entry.kind == .tool else { continue }
                         found = ThreadFootprint.merge(ThreadFootprint.folders(toolName: entry.toolName ?? "", inputJSON: entry.toolInput ?? "", workingDirectory: cwd), into: found)
                         if entry.toolName == "EnterWorktree", let result = entry.toolResult {
                             found = ThreadFootprint.merge(ThreadFootprint.folders(inResult: result), into: found)
@@ -1010,13 +1026,28 @@ final class ThreadModel: Identifiable {
                     }
                 }
                 walk(store.loadTranscript(id))
-                return found
+                return (found, links)
             }.value
             guard let self else { return }
-            self.footprint = ThreadFootprint.merge(self.footprint, into: folders)
-            self.app.footprintChanged(self)
+            if needsFootprint {
+                self.footprint = ThreadFootprint.merge(self.footprint, into: folders)
+                self.app.footprintChanged(self)
+            }
+            if needsLinks { self.pullRequestLinks = Self.mergeLinks(self.pullRequestLinks, into: links) }
             self.app.save()
         }
+    }
+
+    /// Notes PR and MR links in some text from the thread.
+    private func noteLinks(in text: String) {
+        let found = PullRequestLink.find(in: text).map(\.url.absoluteString)
+        guard !found.isEmpty else { return }
+        let merged = Self.mergeLinks(found, into: pullRequestLinks)
+        if merged != pullRequestLinks { pullRequestLinks = merged }
+    }
+
+    nonisolated static func mergeLinks(_ new: [String], into existing: [String]) -> [String] {
+        Array((existing + new.filter { !existing.contains($0) }).suffix(100))
     }
 
     // MARK: - Browser

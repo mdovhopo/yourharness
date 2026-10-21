@@ -503,6 +503,63 @@ final class AppModel {
         }
     }
 
+    // MARK: - A thread's pull requests
+
+    /// A PR a thread is linked to: from a branch it works on, or a link that came up in it.
+    struct ThreadPullRequest: Identifiable {
+        let id: String
+        let number: Int
+        let repo: String
+        let url: URL
+        /// Nil until a linked PR that isn't open has been looked up.
+        let pull: PullRequest?
+        /// The branch that ties it to the thread, when that's how it was found.
+        let branch: String?
+    }
+
+    /// Linked PRs that aren't open, as their forge last described them.
+    private var linkedPullRequests: [String: PullRequest] = [:]
+    @ObservationIgnored private var lookedUpLinks: Set<String> = []
+
+    /// Open PRs from the branches it works on, then the ones linked in it, newest first.
+    func pullRequests(for thread: ThreadModel) -> [ThreadPullRequest] {
+        var result: [ThreadPullRequest] = [], seen = Set<String>()
+        let openPulls = workspaceModels.values.flatMap(\.pullRequests)
+        if let project = project(id: thread.projectID), let workspace = workspace(for: project) {
+            for checkout in workspace.checkouts(for: thread) {
+                let branch = checkout.worktree?.branch ?? (checkout.worktree == nil ? workspace.statuses[checkout.repo.id]?.branch : nil)
+                guard let branch, branch != workspace.defaultBranches[checkout.repo.id] else { continue }
+                for pull in workspace.pullRequests(for: checkout.repo) where pull.headBranch == branch && seen.insert(pull.id).inserted {
+                    result.append(ThreadPullRequest(id: pull.id, number: pull.number, repo: pull.remote.name, url: pull.url, pull: pull, branch: branch))
+                }
+            }
+        }
+        for url in thread.pullRequestLinks.reversed() {
+            guard let link = PullRequestLink.find(in: url).first, seen.insert(link.id).inserted else { continue }
+            let pull = openPulls.first(where: link.matches) ?? linkedPullRequests[link.id]
+            result.append(ThreadPullRequest(id: link.id, number: link.number, repo: link.remote.name, url: link.url, pull: pull, branch: nil))
+        }
+        return result
+    }
+
+    /// Looks up linked PRs that aren't among the open ones (merged, closed, other repos).
+    func lookUpLinkedPullRequests(for thread: ThreadModel) async {
+        let openPulls = workspaceModels.values.flatMap(\.pullRequests)
+        let missing = thread.pullRequestLinks.compactMap { PullRequestLink.find(in: $0).first }
+            .filter { link in !openPulls.contains(where: link.matches) && !lookedUpLinks.contains(link.id) }
+        guard !missing.isEmpty else { return }
+        lookedUpLinks.formUnion(missing.map(\.id))
+        let found: [PullRequest]
+        if let mock = MockPullRequests.all {
+            found = mock.filter { pull in missing.contains { $0.matches(pull) } }
+        } else if let github = workspaceTools.github {
+            found = await github.fetch(links: missing)
+        } else {
+            found = []
+        }
+        for pull in found { linkedPullRequests[pull.id] = pull }
+    }
+
     // MARK: - Worktrees
 
     func worktreesExpanded(_ repo: WorkspaceRepo) -> Bool {

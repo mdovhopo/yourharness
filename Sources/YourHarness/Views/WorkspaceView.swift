@@ -415,7 +415,7 @@ private struct RailView: View {
     }
 }
 
-private struct ChecksBadge: View {
+struct ChecksBadge: View {
     let checks: PullRequest.Checks
 
     var body: some View {
@@ -432,7 +432,7 @@ private struct ChecksBadge: View {
     }
 }
 
-private struct ReviewBadge: View {
+struct ReviewBadge: View {
     let review: PullRequest.Review
 
     var body: some View {

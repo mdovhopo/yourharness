@@ -1,7 +1,12 @@
 import Foundation
 
-/// An open pull request (GitHub) or merge request (GitLab), normalized.
+/// A pull request (GitHub) or merge request (GitLab), normalized. The repos view lists open
+/// ones; a thread can link to merged or closed ones too.
 public struct PullRequest: Sendable, Hashable, Identifiable {
+    public enum State: String, Sendable, Hashable, Codable {
+        case open, merged, closed
+    }
+
     public enum Review: String, Sendable, Hashable {
         case approved, changesRequested, required, none
     }
@@ -23,14 +28,16 @@ public struct PullRequest: Sendable, Hashable, Identifiable {
     public var checks: Checks
     public var isMine: Bool
     public var reviewRequestedFromMe: Bool
+    public var state: State = .open
 
     public var id: String { "\(remote.host)/\(remote.path)#\(number)" }
 
     public init(
         remote: GitRemote, number: Int, title: String, url: URL, author: String?, isDraft: Bool,
         headBranch: String, baseBranch: String, updatedAt: Date?, review: Review, checks: Checks,
-        isMine: Bool, reviewRequestedFromMe: Bool
+        isMine: Bool, reviewRequestedFromMe: Bool, state: State = .open
     ) {
+        self.state = state
         self.remote = remote
         self.number = number
         self.title = title

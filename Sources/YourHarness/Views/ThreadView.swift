@@ -45,6 +45,9 @@ struct ThreadView: View {
                         ThreadWorktreesButton(thread: thread, project: project, workspace: workspace)
                     }
                 }
+                ToolbarItem {
+                    ThreadPullRequestsButton(thread: thread)
+                }
             }
             .task {
                 thread.loadTranscriptIfNeeded()
