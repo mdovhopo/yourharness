@@ -30,6 +30,14 @@ public enum ShellEnvironment {
         var base = inherited.filter { baseVariables.contains($0.key) || $0.key.hasPrefix("LC_") }
         base["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
 
+        // Development: a test run gets PATH from whoever launched it and doesn't start your
+        // login shell, whose rc files can reach into Downloads or Documents: macOS would
+        // ask you for access on behalf of every fresh test build.
+        if let path = inherited["YH_PATH"], !path.isEmpty {
+            base["PATH"] = path
+            return base
+        }
+
         // Interactive first (PATH is often set in .zshrc), then login-only if the rc files
         // hang or fail. CommandRunner SIGKILLs on timeout: interactive shells ignore SIGTERM.
         for (flags, timeout) in [("-ilc", 4.0), ("-lc", 3.0)] {
