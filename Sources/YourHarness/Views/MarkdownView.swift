@@ -75,15 +75,84 @@ struct MarkdownView: View {
 
     var body: some View {
         let blocks = MarkdownParser.parse(text, streaming: streaming)
+        let groups = MarkdownGroup.make(blocks)
         VStack(alignment: .leading, spacing: 12) {
-            ForEach(Array(blocks.enumerated()), id: \.offset) { index, block in
-                BlockView(block: block, isTail: streaming && index == blocks.count - 1)
-                    .equatable()
+            ForEach(groups) { group in
+                // Prose runs are one piece of text, so selection runs across their paragraphs.
+                let isTail = streaming && group.id == groups.last?.id
+                if let prose = group.prose {
+                    ProseView(blocks: prose, source: text, index: group.id, isTail: isTail)
+                } else if let block = group.block {
+                    BlockView(block: block, isTail: isTail)
+                        .equatable()
+                }
             }
         }
         // A touch larger than the 13pt system body: this is the text you read all day.
         .font(.system(size: MarkdownMetrics.body))
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// A message's blocks, with the prose next to each other gathered into one run.
+struct MarkdownGroup: Identifiable {
+    let id: Int
+    var prose: [MarkdownBlock]?
+    var block: MarkdownBlock?
+
+    static func make(_ blocks: [MarkdownBlock]) -> [MarkdownGroup] {
+        var groups: [MarkdownGroup] = []
+        for block in blocks {
+            switch block {
+            case .heading, .paragraph, .list, .quote:
+                if groups.last?.prose != nil { groups[groups.count - 1].prose?.append(block) }
+                else { groups.append(MarkdownGroup(id: groups.count, prose: [block])) }
+            case .code, .table, .rule:
+                groups.append(MarkdownGroup(id: groups.count, block: block))
+            }
+        }
+        return groups
+    }
+}
+
+/// A run of prose in AppKit text: selectable across its paragraphs, and measured once.
+private struct ProseView: View {
+    let blocks: [MarkdownBlock]
+    let source: String
+    let index: Int
+    let isTail: Bool
+    @Environment(\.issueLinker) private var linker
+    @Environment(\.findHighlight) private var findHighlight
+
+    var body: some View {
+        let key = NativeTextKey(source: source, style: "prose\(index)\(isTail ? "~" : "")|\(linker.repos.count)|\(linker.openPullRequests.count)",
+                                find: findHighlight.map { "\($0.query)|\($0.isCurrent)" } ?? "")
+        NativeText(text: ProseCache.text(for: key, cached: !isTail) {
+            ProseText.build(blocks, tail: isTail, linker: linker, find: findHighlight)
+        }, key: key)
+    }
+}
+
+/// Built prose, kept so scrolling back to a message doesn't build its text again.
+@MainActor
+enum ProseCache {
+    private static var texts: [NativeTextKey: NSAttributedString] = [:]
+
+    static func text(for key: NativeTextKey, cached: Bool, build: () -> NSAttributedString) -> NSAttributedString {
+        if let known = texts[key] { return known }
+        let text = build()
+        guard cached else { return text }
+        if texts.count > 1_500 { texts.removeAll(keepingCapacity: true) }
+        texts[key] = text
+        return text
+    }
+}
+
+/// Inline markdown with links and `#12` references, for the AppKit text too.
+@MainActor
+enum InlineMarkdown {
+    static func render(_ source: String, linker: IssueLinker) -> AttributedString {
+        InlineText.render(source, linker: linker)
     }
 }
 
@@ -449,10 +518,9 @@ struct CodeBlockView: View {
     var body: some View {
         ZStack(alignment: .topTrailing) {
             ScrollView(.horizontal) {
-                Text(CodeHighlighting.text(code, language: language, streaming: streaming).highlighted(findHighlight))
-                    .font(.system(size: MarkdownMetrics.small, design: .monospaced))
-                    .lineSpacing(2)
-                    .textSelection(.enabled)
+                // AppKit text, its size from its lines: measuring a long block costs nothing.
+                let built = CodeText.build(code, language: language, streaming: streaming, find: findHighlight)
+                NativeText(text: built.text, key: built.key, wraps: false, size: built.size)
                     .padding(.horizontal, 14)
                     .padding(.top, language.isEmpty ? 12 : 28)
                     .padding(.bottom, 12)

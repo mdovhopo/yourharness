@@ -41,6 +41,13 @@ final class ThreadModel: Identifiable {
     private(set) var hasUnread = false
     /// Finished turns you've opened to see Claude's work, by their first message's ID.
     var expandedTurns: Set<String> = []
+    /// How many of the latest turns the transcript shows; scrolling to the top adds more.
+    var shownTurns = ThreadModel.turnsPerPage
+    static let turnsPerPage = ProcessInfo.processInfo.environment["YH_TURNS_PER_PAGE"].flatMap(Int.init) ?? 40
+
+    func showEarlierTurns() {
+        shownTurns += Self.turnsPerPage
+    }
     /// Where you were when you last left the thread: the row at the bottom of the screen;
     /// nil when you were at the end, which is where it opens then.
     var scrollAnchor: String?
@@ -963,6 +970,7 @@ final class ThreadModel: Identifiable {
 
     /// Opens the turn that holds `entryID`, if it's folded away.
     func reveal(_ entryID: String) {
+        showTurns(including: entryID)
         for case .work(let work) in transcriptDisplayRows where !work.isExpanded && work.entries.contains(where: { $0.id == entryID }) {
             expandedTurns.insert(work.turnID)
         }
@@ -1011,6 +1019,19 @@ final class ThreadModel: Identifiable {
         guard !isEphemeral else { return }
         app.store.saveTranscript(id, entries: entries.map(\.snapshot))
         app.save()
+    }
+
+    /// Lets go of the transcript to save memory; opening the thread reads it back. Only a
+    /// thread that's idle, with nothing waiting to be saved or sent.
+    func unloadTranscript() {
+        guard transcriptLoaded, !isEphemeral, !isSideChat, !isWorking, pendingSave == nil,
+              pendingPermissions.isEmpty, queuedMessages.isEmpty, sideChat == nil else { return }
+        transcriptLoad?.cancel()
+        transcriptLoad = nil
+        transcriptLoaded = false
+        entries.removeAll()
+        expandedTurns.removeAll()
+        rebuildPlan()
     }
 
     /// At most one save every couple of seconds while Claude streams.

@@ -7,7 +7,11 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 ## [Unreleased]
 
 ### Changed
-- **Switching threads is instant.** No crossfade or sliding selection to wait through; a big thread's history loads off the main thread, so the click answers at once; the thread opens where you left it without a jump; and the toolbar's worktree and PR buttons no longer redo their work on every redraw. On a thread of 2,000 entries a switch takes about 65 ms, down from about 90 plus the animations.
+- **Switching threads is instant.** Going back to one of the last few threads you were in takes a few tens of milliseconds and keeps your exact place: their transcripts stay made. Everything else got lighter too: no crossfade or sliding selection to wait through, a long thread's history loads off the main thread and only its latest 40 turns are laid out (scroll to the top for more), the composer and toolbar stay put instead of being rebuilt, and transcripts you haven't looked at in a while are let go to save memory.
+- **Text in the transcript selects like Mac text.** Claude's replies are AppKit text: drag across paragraphs, lists and headings, double-click a word, ⌘C, Look Up; links show the pointing hand. Code blocks too, and they no longer slow down a long thread.
+
+### Fixed
+- A transcript with one entry the app couldn't read showed as empty; now only that entry is skipped.
 
 ## [0.0.4] - 2026-10-23
 

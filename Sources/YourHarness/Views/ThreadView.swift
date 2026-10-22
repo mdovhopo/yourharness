@@ -1,30 +1,17 @@
 import HarnessCore
 import SwiftUI
 
+/// A thread: its transcript, and around it what stays from thread to thread (the composer,
+/// the toolbar, the title). Only the transcript is made anew when you switch, so switching
+/// swaps rows rather than rebuilding the window's content, as Mail does.
 struct ThreadView: View {
     @Environment(AppModel.self) private var app
     let thread: ThreadModel
-
-    init(thread: ThreadModel) {
-        self.thread = thread
-        // Where you were, from the first frame: no landing at the end and jumping back.
-        _position = State(initialValue: thread.scrollAnchor.map { ScrollPosition(id: $0, anchor: .bottom) }
-            ?? ScrollPosition(idType: String.self, edge: .bottom))
-        _followsBottom = State(initialValue: thread.scrollAnchor == nil)
-    }
     @State private var dropTargeted = false
-    @State private var visibleHeight: CGFloat = 0
-    /// Shorter than the screen: only then does the transcript get a minimum height.
-    @State private var isShort = true
-    /// Where you are: the row at the bottom edge, not a pixel offset.
-    @State private var position: ScrollPosition
-    /// Keep the newest output in view as the transcript grows: while history loads, while
-    /// a reply streams. Your own scrolling turns it off; stopping at the bottom turns it
-    /// back on.
-    @State private var followsBottom = true
-    @State private var isAtBottom = true
-    /// Rows on screen now, for jumping between your messages from where you are.
-    @State private var visibleRowIDs: [String] = []
+    /// The threads you were in last, newest first: their transcripts stay made (hidden), so
+    /// going back to one shows it at once, where you were.
+    @State private var recent: [UUID] = []
+    private static let keptTranscripts = 4
     /// The thread's whole height, and the composer's with what sits on it: a new thread's
     /// composer waits in the middle.
     @State private var areaHeight: CGFloat = 0
@@ -35,21 +22,68 @@ struct ThreadView: View {
     private var isFresh: Bool {
         thread.sessionID == nil && thread.entries.isEmpty && thread.queuedMessages.isEmpty && thread.phase != .running
     }
-    private static let typingID = "typing-indicator"
 
-    private var showsTypingIndicator: Bool {
-        thread.phase == .running && thread.pendingPermissions.isEmpty && !(thread.entries.last?.isStreaming ?? false)
-    }
-
-    /// The row the conversation ends with right now, as shown: a finished turn's last
-    /// entry may be folded away.
-    private var lastRowID: String? {
-        showsTypingIndicator ? Self.typingID : thread.transcriptDisplayRows.last?.id
+    private var keptThreads: [ThreadModel] {
+        let ids = recent.contains(thread.id) ? recent : [thread.id] + recent
+        return ids.compactMap { id in id == thread.id ? thread : app.threads.first { $0.id == id } }
     }
 
     var body: some View {
-        transcript
-            .environment(\.issueLinker, app.issueLinker(for: thread))
+        ZStack {
+            ForEach(keptThreads) { kept in
+                let shown = kept.id == thread.id
+                TranscriptView(thread: kept)
+                    .environment(\.issueLinker, app.issueLinker(for: kept))
+                    .environment(kept)
+                    .opacity(shown ? 1 : 0)
+                    .allowsHitTesting(shown)
+                    .accessibilityHidden(!shown)
+                    .zIndex(shown ? 1 : 0)
+            }
+        }
+            .onChange(of: thread.id, initial: true) {
+                recent = Array(([thread.id] + recent.filter { $0 != thread.id }).prefix(Self.keptTranscripts))
+                let id = thread.id
+                DispatchQueue.main.async { SwitchProbe.threadAppeared(id) }
+            }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                VStack(spacing: 10) {
+                    if isFresh {
+                        StartPrompt(thread: thread)
+                            .transition(.opacity.combined(with: .scale(scale: 0.97, anchor: .bottom)))
+                    }
+                    ForEach(thread.pendingPermissions) { request in
+                        RequestCard(request: request, thread: thread)
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                    }
+                    ComposerView(thread: thread)
+                }
+                .frame(maxWidth: 820)
+                .padding(.horizontal, 20)
+                .padding(.bottom, 16)
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { composerHeight = $0 }
+                // The same composer, lifted to the middle: it keeps its focus and draft on the way down.
+                .offset(y: isFresh ? -max((areaHeight - composerHeight) / 2, 0) : 0)
+                .animation(.snappy, value: thread.pendingPermissions)
+                .animation(.spring(response: 0.55, dampingFraction: 0.86), value: isFresh)
+            }
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { areaHeight = $0 }
+            .onDrop(of: [.fileURL, .image], isTargeted: $dropTargeted) { providers in
+                Task { thread.attach(await ImageIntake.sources(from: providers)) }
+                return true
+            }
+            .overlay {
+                if dropTargeted {
+                    RoundedRectangle(cornerRadius: 16)
+                        .strokeBorder(.tint, style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
+                        .background(.tint.opacity(0.05), in: .rect(cornerRadius: 16))
+                        .overlay { Label("Drop images to attach", systemImage: "photo.badge.plus").font(.title3) }
+                        .padding(8)
+                        .allowsHitTesting(false)
+                        .transition(.opacity)
+                }
+            }
+            .animation(.easeOut(duration: 0.15), value: dropTargeted)
             .environment(thread)
             // Links to this Mac (the app being built) open in the thread's browser; ⌘-click
             // for your default browser.
@@ -70,13 +104,61 @@ struct ThreadView: View {
                     ThreadPullRequestsButton(thread: thread)
                 }
             }
+    }
+
+    private var subtitle: String {
+        var parts = [app.project(id: thread.projectID)?.name ?? ""]
+        // Running in a worktree: which one.
+        if let folder = thread.workingDirectory { parts.append((folder as NSString).lastPathComponent) }
+        if let model = thread.activeModelName { parts.append(model) }
+        return parts.joined(separator: " · ")
+    }
+}
+
+/// The scrolling transcript of one thread, with where you are in it.
+private struct TranscriptView: View {
+    @Environment(AppModel.self) private var app
+    let thread: ThreadModel
+
+    init(thread: ThreadModel) {
+        self.thread = thread
+        // Where you were, from the first frame: no landing at the end and jumping back.
+        _position = State(initialValue: thread.scrollAnchor.map { ScrollPosition(id: $0, anchor: .bottom) }
+            ?? ScrollPosition(idType: String.self, edge: .bottom))
+        _followsBottom = State(initialValue: thread.scrollAnchor == nil)
+    }
+    @State private var visibleHeight: CGFloat = 0
+    /// Shorter than the screen: only then does the transcript get a minimum height.
+    @State private var isShort = true
+    /// Where you are: the row at the bottom edge, not a pixel offset.
+    @State private var position: ScrollPosition
+    /// Keep the newest output in view as the transcript grows: while history loads, while
+    /// a reply streams. Your own scrolling turns it off; stopping at the bottom turns it
+    /// back on.
+    @State private var followsBottom = true
+    @State private var isAtBottom = true
+    /// Rows on screen now, for jumping between your messages from where you are.
+    @State private var visibleRowIDs: [String] = []
+    private static let typingID = "typing-indicator"
+
+    private var showsTypingIndicator: Bool {
+        thread.phase == .running && thread.pendingPermissions.isEmpty && !(thread.entries.last?.isStreaming ?? false)
+    }
+
+    /// The row the conversation ends with right now, as shown: a finished turn's last
+    /// entry may be folded away.
+    private var lastRowID: String? {
+        showsTypingIndicator ? Self.typingID : thread.transcriptDisplayRows.last?.id
+    }
+
+    var body: some View {
+        transcript
             .task {
                 await thread.loadTranscriptSoon()
                 thread.computeFootprintIfNeeded()
                 await restorePlace()
             }
             .onDisappear { rememberPlace() }
-            .onAppear { SwitchProbe.threadAppeared(thread.id) }
     }
 
     private var transcript: some View {
@@ -172,44 +254,6 @@ struct ThreadView: View {
         } action: { height in
             visibleHeight = height
         }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            VStack(spacing: 10) {
-                if isFresh {
-                    StartPrompt(thread: thread)
-                        .transition(.opacity.combined(with: .scale(scale: 0.97, anchor: .bottom)))
-                }
-                ForEach(thread.pendingPermissions) { request in
-                    RequestCard(request: request, thread: thread)
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
-                }
-                ComposerView(thread: thread)
-            }
-            .frame(maxWidth: 820)
-            .padding(.horizontal, 20)
-            .padding(.bottom, 16)
-            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { composerHeight = $0 }
-            // The same composer, lifted to the middle: it keeps its focus and draft on the way down.
-            .offset(y: isFresh ? -max((areaHeight - composerHeight) / 2, 0) : 0)
-            .animation(.snappy, value: thread.pendingPermissions)
-            .animation(.spring(response: 0.55, dampingFraction: 0.86), value: isFresh)
-        }
-        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { areaHeight = $0 }
-        .onDrop(of: [.fileURL, .image], isTargeted: $dropTargeted) { providers in
-            Task { thread.attach(await ImageIntake.sources(from: providers)) }
-            return true
-        }
-        .overlay {
-            if dropTargeted {
-                RoundedRectangle(cornerRadius: 16)
-                    .strokeBorder(.tint, style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
-                    .background(.tint.opacity(0.05), in: .rect(cornerRadius: 16))
-                    .overlay { Label("Drop images to attach", systemImage: "photo.badge.plus").font(.title3) }
-                    .padding(8)
-                    .allowsHitTesting(false)
-                    .transition(.opacity)
-            }
-        }
-        .animation(.easeOut(duration: 0.15), value: dropTargeted)
     }
 
     @ViewBuilder private var rows: some View {
@@ -233,6 +277,7 @@ struct ThreadView: View {
     /// position starts there; this only settles it once a transcript that loaded after the
     /// first frame is in.
     private func restorePlace() async {
+        if let anchor = thread.scrollAnchor { thread.showTurns(including: anchor) }
         if let anchor = thread.scrollAnchor, thread.transcriptDisplayRows.contains(where: { $0.id == anchor }) {
             followsBottom = false
             position.scrollTo(id: anchor, anchor: .bottom)
@@ -245,6 +290,8 @@ struct ThreadView: View {
     private func rememberPlace() {
         guard !isAtBottom, !followsBottom else {
             thread.scrollAnchor = nil
+            // Left at the end: next time it opens with just the latest turns again.
+            thread.shownTurns = ThreadModel.turnsPerPage
             return
         }
         let order = Dictionary(thread.transcriptDisplayRows.enumerated().map { ($1.id, $0) }, uniquingKeysWith: { first, _ in first })
@@ -262,6 +309,12 @@ struct ThreadView: View {
         switch direction {
         case .previous:
             followsBottom = false
+            // Past the turns shown: show more, then go on from there.
+            if !rows[..<top].contains(where: isMessage), case .earlier = rows.first {
+                thread.showEarlierTurns()
+                Task { @MainActor in jump(.previous) }
+                return
+            }
             let target = rows[..<top].last(where: isMessage) ?? rows[0]
             withAnimation(.smooth(duration: 0.3)) { position.scrollTo(id: target.id, anchor: .top) }
         case .next:
@@ -275,13 +328,6 @@ struct ThreadView: View {
         }
     }
 
-    private var subtitle: String {
-        var parts = [app.project(id: thread.projectID)?.name ?? ""]
-        // Running in a worktree: which one.
-        if let folder = thread.workingDirectory { parts.append((folder as NSString).lastPathComponent) }
-        if let model = thread.activeModelName { parts.append(model) }
-        return parts.joined(separator: " · ")
-    }
 }
 
 /// Over a new thread's composer: where the work happens.
@@ -306,6 +352,25 @@ private struct StartPrompt: View {
     }
 }
 
+/// At the top of a long thread: earlier turns come in as you scroll up to it.
+private struct EarlierTurnsRow: View {
+    let count: Int
+    let load: () -> Void
+
+    var body: some View {
+        Button(action: load) {
+            Label(count == 1 ? "1 earlier turn" : "\(count) earlier turns", systemImage: "arrow.up")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 6)
+        }
+        .buttonStyle(.borderless)
+        // Reaching it is asking for more; what's on screen stays put as they're added above.
+        .onAppear { load() }
+    }
+}
+
 private struct TranscriptRowView: View {
     let row: TranscriptRow
     let thread: ThreadModel
@@ -327,6 +392,8 @@ private struct TranscriptRowView: View {
                         if work.isExpanded { thread.expandedTurns.remove(work.turnID) } else { thread.expandedTurns.insert(work.turnID) }
                     }
                 }
+            case .earlier(let count):
+                EarlierTurnsRow(count: count) { thread.showEarlierTurns() }
             }
         }
     }

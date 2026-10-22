@@ -4,11 +4,14 @@ import Foundation
 enum TranscriptRow: Identifiable, Equatable {
     case entry(TranscriptEntry)
     case work(TurnWork)
+    /// Above the turns shown: how many earlier ones there are.
+    case earlier(Int)
 
     var id: String {
         switch self {
         case .entry(let entry): entry.id
         case .work(let work): work.id
+        case .earlier: "earlier-turns"
         }
     }
 
@@ -20,6 +23,7 @@ enum TranscriptRow: Identifiable, Equatable {
         switch (a, b) {
         case let (.entry(x), .entry(y)): x === y
         case let (.work(x), .work(y)): x == y
+        case let (.earlier(x), .earlier(y)): x == y
         default: false
         }
     }
@@ -59,15 +63,25 @@ extension ThreadModel {
     /// The transcript with each finished turn's work folded between your message and
     /// Claude's answer. The turn in progress shows everything, so you can follow along;
     /// messages you sent during a turn, and notices, always show.
+    ///
+    /// Only the last `shownTurns` turns: a long thread opens as fast as a short one, and
+    /// scrolling to the top shows more.
     var transcriptDisplayRows: [TranscriptRow] {
         let rows = transcriptRows
+        let turns = Self.turnStarts(in: rows)
+        let hidden = max(turns.count - shownTurns, 0)
         var result: [TranscriptRow] = []
-        result.reserveCapacity(rows.count)
-        var index = 0
-        // Anything before the first message you sent (a resumed session's notice) shows as is.
-        while index < rows.count, !rows[index].startsTurn {
-            result.append(.entry(rows[index]))
-            index += 1
+        var index: Int
+        if hidden > 0 {
+            result.append(.earlier(hidden))
+            index = turns[hidden]
+        } else {
+            // Anything before the first message you sent (a resumed session's notice) shows as is.
+            index = 0
+            while index < rows.count, !rows[index].startsTurn {
+                result.append(.entry(rows[index]))
+                index += 1
+            }
         }
         while index < rows.count {
             let start = index
@@ -78,6 +92,21 @@ extension ThreadModel {
             result.append(contentsOf: Self.fold(turn, isCurrent: isCurrent, expanded: expandedTurns))
         }
         return result
+    }
+
+    /// Where each turn starts in `rows`.
+    static func turnStarts(in rows: [TranscriptEntry]) -> [Int] {
+        rows.indices.filter { rows[$0].startsTurn }
+    }
+
+    /// Shows enough earlier turns that `entryID` is among them.
+    func showTurns(including entryID: String) {
+        let rows = transcriptRows
+        guard let position = rows.firstIndex(where: { $0.id == entryID }) else { return }
+        let turns = Self.turnStarts(in: rows)
+        let turn = turns.lastIndex(where: { $0 <= position }) ?? 0
+        let needed = turns.count - turn
+        if needed > shownTurns { shownTurns = needed }
     }
 
     private static func fold(_ turn: ArraySlice<TranscriptEntry>, isCurrent: Bool, expanded: Set<String>) -> [TranscriptRow] {

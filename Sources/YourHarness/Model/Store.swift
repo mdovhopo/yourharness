@@ -353,7 +353,13 @@ struct Store: Sendable {
 
     func loadTranscript(_ id: UUID) -> [EntrySnapshot] {
         guard let data = try? Data(contentsOf: transcriptURL(id)) else { return [] }
-        return (try? Self.decoder.decode([EntrySnapshot].self, from: data)) ?? []
+        if let entries = try? Self.decoder.decode([EntrySnapshot].self, from: data) { return entries }
+        // One entry it can't read (a newer app's, a damaged one) costs that entry, not the thread.
+        let entries = (try? Self.decoder.decode([Lossy<EntrySnapshot>].self, from: data))?.compactMap(\.value) ?? []
+        if !entries.isEmpty {
+            FileHandle.standardError.write(Data("Transcript \(id): skipped entries it couldn't read\n".utf8))
+        }
+        return entries
     }
 
     func saveTranscript(_ id: UUID, entries: [EntrySnapshot]) {
@@ -395,4 +401,13 @@ struct Store: Sendable {
         decoder.dateDecodingStrategy = .iso8601
         return decoder
     }()
+}
+
+/// An element that may not decode: nil instead of failing the whole array.
+struct Lossy<Value: Decodable>: Decodable {
+    let value: Value?
+
+    init(from decoder: Decoder) throws {
+        value = try? Value(from: decoder)
+    }
 }

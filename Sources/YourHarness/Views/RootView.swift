@@ -22,8 +22,9 @@ struct RootView: View {
                     WorkspaceView(project: project, workspace: workspace)
                         .id(project.id)
                 } else if let thread = app.selectedThread {
+                    // Not keyed on the thread: it keeps its composer and toolbar, and only its
+                    // transcript is made anew.
                     ThreadView(thread: thread)
-                        .id(thread.id)
                 } else {
                     EmptyDetailView()
                 }

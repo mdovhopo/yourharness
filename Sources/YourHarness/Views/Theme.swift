@@ -72,8 +72,17 @@ enum SyntaxPalette {
         containers[kind] ?? AttributeContainer()
     }
 
-    private static let colors: [SyntaxToken.Kind: Color] = Dictionary(uniqueKeysWithValues: SyntaxToken.Kind.allCases.map { kind in
-        let (light, dark): (UInt32, UInt32) = switch kind {
+    /// The same colors for AppKit text; nil for plain.
+    static func nsColor(_ kind: SyntaxToken.Kind) -> NSColor? {
+        nsColors[kind]
+    }
+
+    private static let nsColors: [SyntaxToken.Kind: NSColor] = Dictionary(uniqueKeysWithValues: SyntaxToken.Kind.allCases.compactMap { kind in
+        hex(kind).map { (kind, NSColor.syntax(light: $0.light, dark: $0.dark)) }
+    })
+
+    private static func hex(_ kind: SyntaxToken.Kind) -> (light: UInt32, dark: UInt32)? {
+        switch kind {
         case .keyword: (0x9B2393, 0xFC5FA3)
         case .type: (0x0B6E78, 0x5DD8D0)
         case .string: (0xC41A16, 0xFC6A5D)
@@ -87,8 +96,9 @@ enum SyntaxPalette {
         case .deleted: (0xB42318, 0xFF7B72)
         case .meta: (0x4B6CB7, 0x8FB0F0)
         }
-        return (kind, Color(nsColor: .syntax(light: light, dark: dark)))
-    })
+    }
+
+    private static let colors: [SyntaxToken.Kind: Color] = nsColors.mapValues { Color(nsColor: $0) }
 
     private static let containers: [SyntaxToken.Kind: AttributeContainer] = colors.mapValues { color in
         var container = AttributeContainer()

@@ -18,14 +18,18 @@ final class TranscriptEntry: Identifiable {
     let kind: Kind
     var text: String
     var isStreaming: Bool
+    // Set before the entry joins a transcript and never after, so not observed: the
+    // transcript reads them for every entry each time it lays out its rows, and observing
+    // 2,000 entries' worth of reads cost a switch to a long thread about 200 ms.
+
     /// When it happened; nil for rows saved before times were kept, or taken from a
     /// session's history.
-    var date: Date?
+    @ObservationIgnored var date: Date?
     /// On the message that starts a turn: when Claude finished it.
     var turnEndedAt: Date?
 
     // Tool calls
-    var toolName = ""
+    @ObservationIgnored var toolName = ""
     /// JSON; partial while the model is still streaming the input.
     var toolInput = ""
     var toolResult: String?
@@ -37,7 +41,7 @@ final class TranscriptEntry: Identifiable {
     /// Images sent with a user message: file names in the store's attachments folder.
     var attachments: [String] = []
     /// How a message you sent while Claude was working got to it.
-    var delivery = Delivery.normal
+    @ObservationIgnored var delivery = Delivery.normal
 
     enum Delivery: String, Codable {
         case normal

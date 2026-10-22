@@ -27,8 +27,23 @@ final class AppModel {
             overviewProjectID = nil
             selectedThread?.markRead()
             if let selectedThreadID { notifier.clear(thread: selectedThreadID) }
+            noteViewed()
             save()
         }
+    }
+
+    /// Threads you looked at, newest first. Beyond the last few, an idle thread's transcript
+    /// is let go: a long one is tens of megabytes in memory, and reading it back is quick.
+    @ObservationIgnored private var viewed: [UUID] = []
+    private static let loadedTranscripts = 6
+
+    private func noteViewed() {
+        guard let selectedThreadID else { return }
+        viewed = [selectedThreadID] + viewed.filter { $0 != selectedThreadID }
+        guard viewed.count > Self.loadedTranscripts else { return }
+        let stale = Set(viewed.dropFirst(Self.loadedTranscripts))
+        for thread in threads where stale.contains(thread.id) { thread.unloadTranscript() }
+        viewed = Array(viewed.prefix(Self.loadedTranscripts))
     }
     /// When set, the detail pane shows this project's repos and PRs instead of a thread.
     private(set) var overviewProjectID: UUID?
