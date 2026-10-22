@@ -6,6 +6,8 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+## [0.0.4] - 2026-10-23
+
 ### Highlights
 A calmer transcript: once a turn ends, Claude's work folds into one line ("Worked for 2m 14s · 9 tool calls"), so your messages and its answers are what you read, with times, turn lengths and ⌘[ / ⌘] to jump between your messages. A thread's PRs are now the ones it worked on, and threads settle by themselves when all of them merge. Also new: chaining skills anywhere in a message, Claude showing you images and videos, syntax highlighting, Undo, and a stable signing identity, so macOS stops asking for permissions again after each update.
 
