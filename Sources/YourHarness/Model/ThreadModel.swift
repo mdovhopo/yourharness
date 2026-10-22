@@ -39,6 +39,10 @@ final class ThreadModel: Identifiable {
     var inspectedSubagentID: String?
     /// A reply finished while you were looking at another thread.
     private(set) var hasUnread = false
+    /// Finished turns you've opened to see Claude's work, by their first message's ID.
+    var expandedTurns: Set<String> = []
+    /// Asked for from the menu or the transcript's buttons; the transcript scrolls.
+    private(set) var messageJump: MessageJump?
     /// Pinned threads sit at the top of their project.
     var isPinned = false
     /// Settled threads move to their project's Settled shelf; history stays.
@@ -885,6 +889,7 @@ final class ThreadModel: Identifiable {
     /// Marks the turn finished: nothing is streaming, nothing is awaiting approval.
     private func settle() {
         if phase == .running, app.visibleThreadID != id { hasUnread = true }
+        if phase == .running { noteTurnEnded() }
         phase = .idle
         pendingPermissions.removeAll()
         for entry in blocks.values where entry.isStreaming { entry.isStreaming = false }
@@ -896,6 +901,23 @@ final class ThreadModel: Identifiable {
         liveSubagents.removeAll { !$0.isRunning }
         touch()
         persist()
+    }
+
+    /// How long the turn took goes on the message that started it.
+    private func noteTurnEnded() {
+        guard let start = entries.last(where: \.startsTurn), start.turnEndedAt == nil else { return }
+        start.turnEndedAt = .now
+    }
+
+    func jumpToMessage(_ direction: MessageJump.Direction) {
+        messageJump = MessageJump(direction: direction)
+    }
+
+    /// Opens the turn that holds `entryID`, if it's folded away.
+    func reveal(_ entryID: String) {
+        for case .work(let work) in transcriptDisplayRows where !work.isExpanded && work.entries.contains(where: { $0.id == entryID }) {
+            expandedTurns.insert(work.turnID)
+        }
     }
 
     /// The run for an Agent tool call, made on first sight of its tool call.
@@ -910,6 +932,7 @@ final class ThreadModel: Identifiable {
     }
 
     private func fail(_ message: String) {
+        if phase == .running { noteTurnEnded() }
         phase = .idle
         entries.append(.notice(message, style: .error))
         persist()

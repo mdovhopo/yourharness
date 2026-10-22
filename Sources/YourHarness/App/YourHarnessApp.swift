@@ -53,6 +53,13 @@ struct YourHarnessApp: App {
                 }
                 .keyboardShortcut(.downArrow, modifiers: [.command, .option])
                 Divider()
+                Button("Previous Message") { app.selectedThread?.jumpToMessage(.previous) }
+                    .keyboardShortcut("[")
+                    .disabled(app.visibleThreadID == nil)
+                Button("Next Message") { app.selectedThread?.jumpToMessage(.next) }
+                    .keyboardShortcut("]")
+                    .disabled(app.visibleThreadID == nil)
+                Divider()
                 Button("Stop") { app.selectedThread?.stop() }
                     .keyboardShortcut(".")
                     .disabled(app.selectedThread?.phase != .running)

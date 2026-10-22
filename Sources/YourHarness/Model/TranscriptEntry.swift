@@ -18,6 +18,11 @@ final class TranscriptEntry: Identifiable {
     let kind: Kind
     var text: String
     var isStreaming: Bool
+    /// When it happened; nil for rows saved before times were kept, or taken from a
+    /// session's history.
+    var date: Date?
+    /// On the message that starts a turn: when Claude finished it.
+    var turnEndedAt: Date?
 
     // Tool calls
     var toolName = ""
@@ -42,12 +47,17 @@ final class TranscriptEntry: Identifiable {
         case interrupted
     }
 
-    init(id: String = UUID().uuidString, kind: Kind, text: String = "", isStreaming: Bool = false) {
+    init(id: String = UUID().uuidString, kind: Kind, text: String = "", isStreaming: Bool = false, date: Date? = .now) {
         self.id = id
         self.kind = kind
         self.text = text
         self.isStreaming = isStreaming
+        self.date = date
     }
+
+    /// A message you sent that starts a turn, rather than one that joined Claude's work
+    /// (an interruption stops the turn, so it starts the next).
+    var startsTurn: Bool { kind == .user && delivery != .steered }
 
     static func notice(_ text: String, style: NoticeStyle = .info) -> TranscriptEntry {
         let entry = TranscriptEntry(kind: .notice, text: text)
@@ -70,6 +80,8 @@ struct EntrySnapshot: Codable, Sendable {
     var attachments: [String]?
     var subagent: SubagentSnapshot?
     var delivery: TranscriptEntry.Delivery?
+    var date: Date?
+    var turnEndedAt: Date?
 }
 
 extension TranscriptEntry {
@@ -85,12 +97,15 @@ extension TranscriptEntry {
             noticeStyle: kind == .notice ? noticeStyle : nil,
             attachments: attachments.isEmpty ? nil : attachments,
             subagent: subagent?.snapshot,
-            delivery: delivery == .normal ? nil : delivery
+            delivery: delivery == .normal ? nil : delivery,
+            date: date,
+            turnEndedAt: turnEndedAt
         )
     }
 
     convenience init(snapshot: EntrySnapshot) {
-        self.init(id: snapshot.id, kind: snapshot.kind, text: snapshot.text)
+        self.init(id: snapshot.id, kind: snapshot.kind, text: snapshot.text, date: snapshot.date)
+        turnEndedAt = snapshot.turnEndedAt
         toolName = snapshot.toolName ?? ""
         toolInput = snapshot.toolInput ?? ""
         toolResult = snapshot.toolResult
@@ -129,19 +144,19 @@ extension TranscriptEntry {
     convenience init(item: ClaudeSessionArchive.Item) {
         switch item {
         case .user(let text):
-            self.init(kind: .user, text: text)
+            self.init(kind: .user, text: text, date: nil)
         case .assistant(let text):
-            self.init(kind: .assistant, text: text)
+            self.init(kind: .assistant, text: text, date: nil)
         case .thinking(let text):
-            self.init(kind: .thinking, text: text)
+            self.init(kind: .thinking, text: text, date: nil)
         case .tool(let id, let name, let input, let result, let isError):
-            self.init(id: id, kind: .tool)
+            self.init(id: id, kind: .tool, date: nil)
             toolName = name
             toolInput = input
             toolResult = result
             toolIsError = isError
         case .notice(let text):
-            self.init(kind: .notice, text: text)
+            self.init(kind: .notice, text: text, date: nil)
         }
     }
 }

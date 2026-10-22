@@ -27,7 +27,5 @@ A single chat that can reach across all projects and threads, instead of startin
 
 ## Later
 
-### Small follow-ups
-
 ### Start agents from mobile
 Kick off or check on agents from a phone. Deprioritized for now.

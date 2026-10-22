@@ -9,6 +9,10 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 ### Added
 - **Threads settle when their work lands.** Once every PR a thread is linked to has merged, and nothing new has happened in it since, it moves to the Settled shelf, the way idle threads do. One PR still open, or closed without merging, keeps it where it is. PRs are looked up in the background, so this happens for threads you aren't looking at too.
 - **Undo for thread actions.** Settling, unpinning or deleting a thread shows Undo for a few seconds above the limits box, and ⌘Z (Edit → Undo) takes it back too. Deleting no longer asks first: the thread's files are only removed when YourHarness quits.
+- **Claude's work folds away when a turn ends.** While Claude works you see every step; once it's done, the thinking, tool calls, sub-agents and what it said along the way fold into one line between your message and its answer: "Worked for 2m 14s · 9 tool calls · edited 3 files". Click it to see everything. Notices and messages you sent mid-turn stay in view.
+- **How long a turn takes.** The working indicator counts up while Claude works, and each finished turn says how long it took.
+- **Times on your messages,** and your messages stand out more: tinted and outlined, with a little more room above each turn.
+- **Jump between your messages.** ⌘[ and ⌘] (Thread menu) or the small arrows at the bottom right of the transcript go to your previous and next message; past the last, to the end.
 
 ## [0.0.3] - 2026-10-22
 

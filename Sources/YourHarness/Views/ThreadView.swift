@@ -15,6 +15,8 @@ struct ThreadView: View {
     /// back on.
     @State private var followsBottom = true
     @State private var isAtBottom = true
+    /// Rows on screen now, for jumping between your messages from where you are.
+    @State private var visibleRowIDs: [String] = []
     private static let typingID = "typing-indicator"
 
     private var showsTypingIndicator: Bool {
@@ -114,7 +116,23 @@ struct ThreadView: View {
         .onChange(of: thread.find.current) { _, id in
             guard let id else { return }
             followsBottom = false
-            withAnimation(.smooth(duration: 0.25)) { position.scrollTo(id: id, anchor: .center) }
+            // A match inside a folded turn: open it first, then go there.
+            thread.reveal(id)
+            Task { @MainActor in
+                withAnimation(.smooth(duration: 0.25)) { position.scrollTo(id: id, anchor: .center) }
+            }
+        }
+        .onScrollTargetVisibilityChange(idType: String.self, threshold: 0.3) { visibleRowIDs = $0 }
+        .onChange(of: thread.messageJump) { _, jump in
+            if let jump { self.jump(jump.direction) }
+        }
+        .overlay(alignment: .bottomTrailing) {
+            if !isShort, thread.entries.contains(where: { $0.kind == .user }) {
+                MessageJumpControls(thread: thread)
+                    .padding(.trailing, 14)
+                    .padding(.bottom, 10)
+                    .transition(.opacity)
+            }
         }
         .overlay(alignment: .top) {
             if thread.find.isOpen {
@@ -164,19 +182,56 @@ struct ThreadView: View {
     }
 
     @ViewBuilder private var rows: some View {
-        ForEach(thread.transcriptRows) { entry in
-            EntryView(entry: entry)
-                .environment(\.findHighlight, thread.find.highlight(for: entry.id))
-                .modifier(ScrollProbe.Row(id: entry.id))
-                .transition(.asymmetric(
-                    insertion: .opacity.combined(with: .offset(y: 12)),
-                    removal: .opacity
-                ))
+        ForEach(thread.transcriptDisplayRows) { row in
+            Group {
+                switch row {
+                case .entry(let entry):
+                    EntryView(entry: entry)
+                        .environment(\.findHighlight, thread.find.highlight(for: entry.id))
+                        // A little more room above each turn, so they read as separate.
+                        .padding(.top, entry.startsTurn && entry.id != thread.entries.first?.id ? 12 : 0)
+                case .work(let work):
+                    WorkSummaryRow(work: work) {
+                        withAnimation(.smooth(duration: 0.3)) {
+                            if work.isExpanded { thread.expandedTurns.remove(work.turnID) } else { thread.expandedTurns.insert(work.turnID) }
+                        }
+                    }
+                }
+            }
+            .modifier(ScrollProbe.Row(id: row.id))
+            .transition(.asymmetric(
+                insertion: .opacity.combined(with: .offset(y: 12)),
+                removal: .opacity
+            ))
         }
         if showsTypingIndicator {
-            TypingIndicator(text: thread.activity ?? "Working…")
+            TypingIndicator(text: thread.activity ?? "Working…", since: thread.entries.last(where: \.startsTurn)?.date)
                 .id(Self.typingID)
                 .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .leading)))
+        }
+    }
+
+    /// To your previous message above the top of the screen, or your next one below it
+    /// (past the last, to the end).
+    private func jump(_ direction: MessageJump.Direction) {
+        let rows = thread.transcriptDisplayRows
+        guard !rows.isEmpty else { return }
+        let index = Dictionary(rows.enumerated().map { ($1.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let top = visibleRowIDs.compactMap { index[$0] }.min() ?? rows.count - 1
+        let isMessage: (TranscriptRow) -> Bool = { $0.entry?.kind == .user }
+        switch direction {
+        case .previous:
+            followsBottom = false
+            let target = rows[..<top].last(where: isMessage) ?? rows[0]
+            withAnimation(.smooth(duration: 0.3)) { position.scrollTo(id: target.id, anchor: .top) }
+        case .next:
+            if top + 1 < rows.count, let target = rows[(top + 1)...].first(where: isMessage) {
+                followsBottom = false
+                withAnimation(.smooth(duration: 0.3)) { position.scrollTo(id: target.id, anchor: .top) }
+            } else if let last = lastRowID {
+                followsBottom = true
+                withAnimation(.smooth(duration: 0.3)) { position.scrollTo(id: last, anchor: .bottom) }
+            }
         }
     }
 
@@ -203,6 +258,8 @@ private struct ScrollState: Equatable {
 
 struct TypingIndicator: View {
     var text = "Working…"
+    /// When the turn started: shows how long it's been going.
+    var since: Date?
     @State private var dimmed = false
 
     var body: some View {
@@ -212,6 +269,14 @@ struct TypingIndicator: View {
                 .foregroundStyle(.secondary)
                 .opacity(dimmed ? 0.45 : 1)
                 .animation(.easeInOut(duration: 1.1).repeatForever(), value: dimmed)
+            if let since {
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    Text(TurnDuration.format(context.date.timeIntervalSince(since)))
+                        .monospacedDigit()
+                        .foregroundStyle(.tertiary)
+                        .contentTransition(.numericText())
+                }
+            }
         }
         .font(.callout)
         .onAppear { dimmed = true }

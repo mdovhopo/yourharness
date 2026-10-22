@@ -10,7 +10,7 @@ struct EntryView: View {
     var body: some View {
         switch entry.kind {
         case .user:
-            UserMessageView(text: entry.text, attachments: entry.attachments, delivery: entry.delivery)
+            UserMessageView(text: entry.text, attachments: entry.attachments, delivery: entry.delivery, date: entry.date)
         case .assistant:
             StreamingMarkdown(entry: entry)
         case .thinking:
@@ -35,6 +35,7 @@ struct UserMessageView: View {
     let text: String
     let attachments: [String]
     var delivery = TranscriptEntry.Delivery.normal
+    var date: Date?
 
     var body: some View {
         HStack {
@@ -55,11 +56,13 @@ struct UserMessageView: View {
                     }
                 }
                 if !text.isEmpty {
+                    // Tinted and outlined, so your messages stand out when scrolling back.
                     message
                         .textSelection(.enabled)
                         .padding(.horizontal, 14)
                         .padding(.vertical, 10)
-                        .background(.tint.opacity(0.14), in: .rect(cornerRadius: 16))
+                        .background(.tint.opacity(0.17), in: .rect(cornerRadius: 16))
+                        .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(.tint.opacity(0.35), lineWidth: 1))
                 }
                 switch delivery {
                 case .steered:
@@ -72,6 +75,9 @@ struct UserMessageView: View {
                         .foregroundStyle(.secondary)
                 case .normal:
                     EmptyView()
+                }
+                if let date {
+                    MessageTime(date: date)
                 }
             }
         }
