@@ -402,9 +402,12 @@ struct ReleaseNotesView: View {
     }
 }
 
-private struct ReleaseNotesSection: View {
+struct ReleaseNotesSection: View {
     let notes: ReleaseNotes
     let showsVersion: Bool
+    var tag: (text: String, tint: Color)?
+    /// A rule below, between releases in one list; cards don't need it.
+    var separated = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -412,6 +415,9 @@ private struct ReleaseNotesSection: View {
                 if showsVersion {
                     Text(notes.version.description)
                         .font(.headline)
+                }
+                if let tag {
+                    Chip(tag.text, tint: tag.tint)
                 }
                 if let date = notes.publishedAt {
                     Text(date.formatted(date: .abbreviated, time: .omitted))
@@ -429,7 +435,89 @@ private struct ReleaseNotesSection: View {
             }
             MarkdownView(text: notes.text.isEmpty ? "No notes for this release." : notes.text)
                 .textSelection(.enabled)
-            if showsVersion { Divider().padding(.top, 4) }
+            if showsVersion, separated { Divider().padding(.top, 4) }
         }
+    }
+}
+
+/// Settings → Releases: this version, its updates, and every release's notes.
+struct ReleasesSettingsView: View {
+    @Environment(AppModel.self) private var app
+    @State private var notes: [ReleaseNotes] = []
+    @State private var loading = true
+    @State private var error: String?
+
+    private var updater: Updater { app.updater }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 12) {
+                        Image(nsImage: NSApp.applicationIconImage)
+                            .resizable()
+                            .frame(width: 48, height: 48)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("YourHarness \(updater.versionLabel)")
+                                .font(.title3.weight(.semibold))
+                                .textSelection(.enabled)
+                            if let build = updater.build {
+                                Text("Build \(build)")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    Divider()
+                    UpdateStatus()
+                    Text("Looks for a new release on GitHub at launch and every few hours. Updates download only when you ask, and apply when you restart.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(14)
+                .card()
+
+                HStack(alignment: .firstTextBaseline) {
+                    Text("Release Notes")
+                        .font(.headline)
+                    Spacer()
+                    Link("All Releases on GitHub", destination: Updater.releasesPage)
+                        .font(.callout)
+                }
+                .padding(.top, 4)
+
+                if notes.isEmpty {
+                    if loading {
+                        ProgressView("Loading the notes from GitHub…")
+                            .frame(maxWidth: .infinity, minHeight: 120)
+                    } else {
+                        Text(error.map { "Couldn't load the notes: \($0)" } ?? "No releases yet.")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                ForEach(notes) { release in
+                    ReleaseNotesSection(notes: release, showsVersion: true, tag: tag(for: release), separated: false)
+                        .padding(14)
+                        .card()
+                }
+            }
+            .padding(20)
+        }
+        .task {
+            do {
+                notes = try await updater.allReleaseNotes()
+            } catch {
+                self.error = Updater.describe(error)
+            }
+            loading = false
+        }
+    }
+
+    private func tag(for release: ReleaseNotes) -> (text: String, tint: Color)? {
+        guard let current = updater.current else { return nil }
+        if release.version == current { return ("Installed", .green) }
+        if release.version > current { return ("New", .accentColor) }
+        return nil
     }
 }

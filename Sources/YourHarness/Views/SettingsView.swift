@@ -11,6 +11,9 @@ struct SettingsView: View {
             Tab("General", systemImage: "gearshape") {
                 GeneralSettingsView()
             }
+            Tab("Releases", systemImage: "shippingbox") {
+                ReleasesSettingsView()
+            }
         }
         .frame(width: 640, height: 560)
     }
@@ -36,21 +39,25 @@ private struct AgentsSettingsView: View {
                 Text("Support for these is coming. YourHarness detects them now, so they're ready when it lands.")
                     .foregroundStyle(.secondary)
             }
-        }
-        .formStyle(.grouped)
-        .toolbar {
-            Button {
-                Task { await app.refreshAgents() }
-            } label: {
-                if app.isRefreshingAgents {
-                    ProgressView().controlSize(.small)
-                } else {
-                    Label("Refresh", systemImage: "arrow.clockwise")
+
+            // Not in the toolbar: in Settings that's the tab bar, where it showed up as a tab.
+            Section {
+                LabeledContent("Installed or signed in just now?") {
+                    Button {
+                        Task { await app.refreshAgents() }
+                    } label: {
+                        if app.isRefreshingAgents {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Text("Detect Again")
+                        }
+                    }
+                    .disabled(app.isRefreshingAgents)
+                    .help("Look for agents and tools again")
                 }
             }
-            .disabled(app.isRefreshingAgents)
-            .help("Detect agents again")
         }
+        .formStyle(.grouped)
         .task { await app.refreshAgents() }
     }
 }
@@ -365,25 +372,6 @@ private struct GeneralSettingsView: View {
 
     var body: some View {
         Form {
-            Section {
-                LabeledContent("Version") {
-                    HStack(spacing: 10) {
-                        Text(app.updater.build.map { "\(app.updater.versionLabel) (build \($0))" } ?? app.updater.versionLabel)
-                            .monospacedDigit()
-                            .textSelection(.enabled)
-                        CurrentReleaseNotesButton()
-                    }
-                }
-                LabeledContent("Updates") {
-                    UpdateStatus()
-                }
-            } header: {
-                Text("YourHarness")
-            } footer: {
-                Text("Looks for a new release on GitHub at launch and every few hours. Updates download only when you ask, and apply when you restart.")
-                    .foregroundStyle(.secondary)
-            }
-
             Section {
                 Picker(selection: Binding(get: { app.appearance }, set: { app.setAppearance($0) })) {
                     ForEach(Appearance.allCases) { appearance in

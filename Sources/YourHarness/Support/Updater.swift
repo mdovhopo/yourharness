@@ -8,7 +8,8 @@ import HarnessCore
 /// this one. Restart quits, swaps the two, and opens the new one.
 ///
 /// Development: `YH_UPDATE_FEED=<release.json>` reads the latest release from a file shaped
-/// like GitHub's `releases/latest` (its disk image can be a `file://` URL), for testing the
+/// like GitHub's `releases/latest`, or a list like `releases` for several releases' notes (a
+/// disk image can be a `file://` or local URL), for testing the
 /// whole flow on a Dev copy. Dev copies don't look on GitHub without it: a release would
 /// replace them with the main app.
 @Observable @MainActor
@@ -105,6 +106,11 @@ final class Updater {
         updatedFrom = nil
     }
 
+    /// Every release's notes, newest first.
+    func allReleaseNotes() async throws -> [ReleaseNotes] {
+        try await releaseNotes(after: SemanticVersion("0")!, through: SemanticVersion("\(Int.max)")!)
+    }
+
     /// The notes of the releases after `after` up to and including `through`, newest first;
     /// without `after`, just `through`'s.
     func releaseNotes(after: SemanticVersion?, through: SemanticVersion) async throws -> [ReleaseNotes] {
@@ -178,7 +184,16 @@ final class Updater {
     private func fetchLatest() async throws -> AppRelease {
         if let feed {
             let url = feed.contains("://") ? URL(string: feed)! : URL(fileURLWithPath: feed)
-            return try AppRelease.parse(gitHubLatest: try Data(contentsOf: url))
+            let data = try Data(contentsOf: url)
+            // A list of releases (GitHub's `releases`) offers its newest installable one.
+            if let list = try? JSONSerialization.jsonObject(with: data) as? [Any] {
+                let releases = list.compactMap { item in
+                    (try? JSONSerialization.data(withJSONObject: item)).flatMap { try? AppRelease.parse(gitHubLatest: $0) }
+                }
+                guard let newest = releases.max(by: { $0.version < $1.version }) else { throw AppRelease.ParseError.notARelease }
+                return newest
+            }
+            return try AppRelease.parse(gitHubLatest: data)
         }
         var request = URLRequest(url: Self.gitHubLatest, timeoutInterval: 20)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
