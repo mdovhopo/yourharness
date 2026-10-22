@@ -182,23 +182,10 @@ struct ThreadView: View {
     }
 
     @ViewBuilder private var rows: some View {
+        let firstID = thread.entries.first?.id
         ForEach(thread.transcriptDisplayRows) { row in
-            Group {
-                switch row {
-                case .entry(let entry):
-                    EntryView(entry: entry)
-                        .environment(\.findHighlight, thread.find.highlight(for: entry.id))
-                        // A little more room above each turn, so they read as separate.
-                        .padding(.top, entry.startsTurn && entry.id != thread.entries.first?.id ? 12 : 0)
-                case .work(let work):
-                    WorkSummaryRow(work: work) {
-                        withAnimation(.smooth(duration: 0.3)) {
-                            if work.isExpanded { thread.expandedTurns.remove(work.turnID) } else { thread.expandedTurns.insert(work.turnID) }
-                        }
-                    }
-                }
-            }
-            .modifier(ScrollProbe.Row(id: row.id))
+            TranscriptRowView(row: row, thread: thread, isFirst: row.id == firstID)
+                .modifier(ScrollProbe.Row(id: row.id))
             .transition(.asymmetric(
                 insertion: .opacity.combined(with: .offset(y: 12)),
                 removal: .opacity
@@ -241,6 +228,32 @@ struct ThreadView: View {
         if let folder = thread.workingDirectory { parts.append((folder as NSString).lastPathComponent) }
         if let model = thread.activeModelName { parts.append(model) }
         return parts.joined(separator: " · ")
+    }
+}
+
+private struct TranscriptRowView: View {
+    let row: TranscriptRow
+    let thread: ThreadModel
+    let isFirst: Bool
+
+    var body: some View {
+        // In a stack, so the row is one view whichever case it is: the lazy stack can't
+        // tell that about a bare switch, and builds every row to find out (10,000 rows: 130 MB more).
+        VStack(alignment: .leading, spacing: 0) {
+            switch row {
+            case .entry(let entry):
+                EntryView(entry: entry)
+                    .environment(\.findHighlight, thread.find.highlight(for: entry.id))
+                    // A little more room above each turn, so they read as separate.
+                    .padding(.top, entry.startsTurn && !isFirst ? 12 : 0)
+            case .work(let work):
+                WorkSummaryRow(work: work) {
+                    withAnimation(.smooth(duration: 0.3)) {
+                        if work.isExpanded { thread.expandedTurns.remove(work.turnID) } else { thread.expandedTurns.insert(work.turnID) }
+                    }
+                }
+            }
+        }
     }
 }
 

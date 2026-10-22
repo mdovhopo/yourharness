@@ -1,7 +1,7 @@
 import Foundation
 
 /// A row of the transcript as shown: an entry, or a finished turn's work folded into one line.
-enum TranscriptRow: Identifiable {
+enum TranscriptRow: Identifiable, Equatable {
     case entry(TranscriptEntry)
     case work(TurnWork)
 
@@ -15,11 +15,19 @@ enum TranscriptRow: Identifiable {
     var entry: TranscriptEntry? {
         if case .entry(let entry) = self { entry } else { nil }
     }
+
+    static func == (a: Self, b: Self) -> Bool {
+        switch (a, b) {
+        case let (.entry(x), .entry(y)): x === y
+        case let (.work(x), .work(y)): x == y
+        default: false
+        }
+    }
 }
 
 /// What Claude did on the way to its answer in one finished turn: thinking, tool calls,
 /// sub-agents, and what it said in between.
-struct TurnWork {
+struct TurnWork: Equatable {
     /// The ID of the message that started the turn.
     let turnID: String
     let entries: [TranscriptEntry]
@@ -28,6 +36,11 @@ struct TurnWork {
     let isExpanded: Bool
 
     var id: String { "work-" + turnID }
+
+    static func == (a: Self, b: Self) -> Bool {
+        a.turnID == b.turnID && a.isExpanded == b.isExpanded && a.endedAt == b.endedAt
+            && a.entries.count == b.entries.count && a.entries.last === b.entries.last
+    }
 
     var duration: TimeInterval? {
         guard let startedAt, let endedAt else { return nil }
