@@ -38,17 +38,19 @@ public enum SyntaxHighlighter {
     /// The text's tokens, in order and not overlapping. None for a language it doesn't know.
     public static func tokens(in text: String, language: String) -> [SyntaxToken] {
         guard let syntax = Syntax(language: language), !text.isEmpty else { return [] }
-        let spans = text.utf8.withContiguousStorageIfAvailable { spans(in: $0, syntax) }
-            ?? ContiguousArray(text.utf8).withUnsafeBufferPointer { spans(in: $0, syntax) }
+        // Typed out, and not named like the function: Xcode 26.6 (what CI builds with)
+        // couldn't tell them apart.
+        let found: [Span] = text.utf8.withContiguousStorageIfAvailable { (bytes: UnsafeBufferPointer<UInt8>) -> [Span] in Self.spans(in: bytes, syntax) }
+            ?? ContiguousArray(text.utf8).withUnsafeBufferPointer { (bytes: UnsafeBufferPointer<UInt8>) -> [Span] in Self.spans(in: bytes, syntax) }
 
         // Spans start and end on ASCII bytes, so these are scalar boundaries. Walking the
         // offsets in order keeps this linear for bridged strings too.
         var tokens: [SyntaxToken] = []
-        tokens.reserveCapacity(spans.count)
+        tokens.reserveCapacity(found.count)
         let utf8 = text.utf8
         var index = utf8.startIndex
         var offset = 0
-        for span in spans {
+        for span in found {
             let start = utf8.index(index, offsetBy: span.start - offset)
             let end = utf8.index(start, offsetBy: span.end - span.start)
             tokens.append(SyntaxToken(kind: span.kind, range: start..<end))
