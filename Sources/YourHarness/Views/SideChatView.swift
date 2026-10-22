@@ -130,6 +130,7 @@ private struct SideChatComposer: View {
                 .textFieldStyle(.plain)
                 .lineLimit(1...6)
                 .onSubmit(submit)
+                .newLineOnShiftReturn()
                 .padding(.vertical, 4)
             if isRunning {
                 Button("Stop", systemImage: "stop.fill", action: stop)

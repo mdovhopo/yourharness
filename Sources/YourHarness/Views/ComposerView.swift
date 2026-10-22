@@ -37,6 +37,7 @@ struct ComposerView: View {
                     send(interrupting: true)
                     return .handled
                 }
+                .newLineOnShiftReturn()
                 .slashCommandMenu(text: $thread.draft, projectID: thread.projectID) { send() }
                 .fileMentionMenu(text: $thread.draft, projectID: thread.projectID)
                 .padding(.horizontal, 4)
@@ -507,5 +508,23 @@ struct PickerRow: View {
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
+    }
+}
+
+extension View {
+    /// ⇧↩ (and ⌥↩) start a new line where the cursor is, as in any text area; ↩ alone
+    /// still sends.
+    func newLineOnShiftReturn() -> some View {
+        onKeyPress(.return, phases: .down) { press in
+            guard press.modifiers.contains(.shift) || press.modifiers.contains(.option),
+                  !press.modifiers.contains(.command) else { return .ignored }
+            // The text view with the cursor: the key window's, or a visible window's while
+            // the app isn't frontmost.
+            let editor = (NSApp.keyWindow?.firstResponder as? NSTextView)
+                ?? NSApp.windows.lazy.filter(\.isVisible).compactMap { $0.firstResponder as? NSTextView }.first
+            guard let editor else { return .ignored }
+            editor.insertNewlineIgnoringFieldEditor(nil)
+            return .handled
+        }
     }
 }

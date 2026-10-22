@@ -47,7 +47,7 @@ private struct FileMentionMenu: ViewModifier {
                 return .handled
             }
             .onKeyPress(.return) {
-                guard isOpen, !NSEvent.modifierFlags.contains(.option) else { return .ignored }
+                guard isOpen, NSEvent.modifierFlags.isDisjoint(with: [.option, .shift]) else { return .ignored }
                 insert(matches[clamped])
                 return .handled
             }

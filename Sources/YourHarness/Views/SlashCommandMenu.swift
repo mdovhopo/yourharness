@@ -72,8 +72,8 @@ private struct SlashCommandMenu: ViewModifier {
                 return .handled
             }
             .onKeyPress(.return) {
-                // ⌥↩ is a new line, never a pick.
-                guard isOpen, !NSEvent.modifierFlags.contains(.option) else { return .ignored }
+                // ⌥↩ and ⇧↩ are a new line, never a pick.
+                guard isOpen, NSEvent.modifierFlags.isDisjoint(with: [.option, .shift]) else { return .ignored }
                 accept(matches[clamped(matches)])
                 return .handled
             }
