@@ -41,6 +41,9 @@ final class ThreadModel: Identifiable {
     private(set) var hasUnread = false
     /// Finished turns you've opened to see Claude's work, by their first message's ID.
     var expandedTurns: Set<String> = []
+    /// Where you were when you last left the thread: the row at the bottom of the screen;
+    /// nil when you were at the end, which is where it opens then.
+    var scrollAnchor: String?
     /// Asked for from the menu or the transcript's buttons; the transcript scrolls.
     private(set) var messageJump: MessageJump?
     /// Pinned threads sit at the top of their project.

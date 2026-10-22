@@ -23,9 +23,10 @@ struct ThreadView: View {
         thread.phase == .running && thread.pendingPermissions.isEmpty && !(thread.entries.last?.isStreaming ?? false)
     }
 
-    /// The row the conversation ends with right now.
+    /// The row the conversation ends with right now, as shown: a finished turn's last
+    /// entry may be folded away.
     private var lastRowID: String? {
-        showsTypingIndicator ? Self.typingID : thread.entries.last?.id
+        showsTypingIndicator ? Self.typingID : thread.transcriptDisplayRows.last?.id
     }
 
     var body: some View {
@@ -54,7 +55,9 @@ struct ThreadView: View {
             .task {
                 thread.loadTranscriptIfNeeded()
                 thread.computeFootprintIfNeeded()
+                await restorePlace()
             }
+            .onDisappear { rememberPlace() }
     }
 
     private var transcript: some View {
@@ -196,6 +199,28 @@ struct ThreadView: View {
                 .id(Self.typingID)
                 .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .leading)))
         }
+    }
+
+    /// Back where you were in this thread, or at the end if that's where you were.
+    private func restorePlace() async {
+        // The rows exist once this view has been laid out with them.
+        await Task.yield()
+        if let anchor = thread.scrollAnchor, thread.transcriptDisplayRows.contains(where: { $0.id == anchor }) {
+            followsBottom = false
+            position.scrollTo(id: anchor, anchor: .bottom)
+        } else {
+            followsBottom = true
+            if let last = lastRowID { position.scrollTo(id: last, anchor: .bottom) }
+        }
+    }
+
+    private func rememberPlace() {
+        guard !isAtBottom, !followsBottom else {
+            thread.scrollAnchor = nil
+            return
+        }
+        let order = Dictionary(thread.transcriptDisplayRows.enumerated().map { ($1.id, $0) }, uniquingKeysWith: { first, _ in first })
+        thread.scrollAnchor = visibleRowIDs.max { (order[$0] ?? -1) < (order[$1] ?? -1) }
     }
 
     /// To your previous message above the top of the screen, or your next one below it
