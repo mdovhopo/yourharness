@@ -48,6 +48,10 @@ jobs:
           keychain="$RUNNER_TEMP/signing.keychain-db"
           identity="$(scripts/signing-keychain.sh "$RUNNER_TEMP/signing.p12" "$SIGNING_P12_PASSWORD" "$keychain" "$(openssl rand -hex 24)")"
           rm "$RUNNER_TEMP/signing.p12"
+          # On the runner (thrown away after), codesign only finds the identity's private key
+          # in a keychain on the search list.
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          security find-identity -p codesigning "$keychain"
           echo "YH_SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
           echo "YH_SIGN_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
 
