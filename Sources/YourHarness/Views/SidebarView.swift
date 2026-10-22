@@ -71,7 +71,7 @@ struct SidebarView: View {
     }
 
     private func move(_ offset: Int) -> KeyPress.Result {
-        withAnimation(SidebarMetrics.selectionSpring) { app.selectAdjacentThread(offset) }
+        app.selectAdjacentThread(offset)
         return .handled
     }
 }
@@ -226,7 +226,7 @@ private struct ProjectHeader: View {
                 if app.isHome(project) {
                     withAnimation(.snappy(duration: 0.25)) { app.setCollapsed(!collapsed, for: project) }
                 } else {
-                    withAnimation(SidebarMetrics.selectionSpring) { app.showOverview(of: project) }
+                    app.showOverview(of: project)
                 }
             }
 
@@ -336,7 +336,8 @@ private struct ThreadRow: View {
         }
         .contentShape(.rect)
         .onTapGesture {
-            withAnimation(SidebarMetrics.selectionSpring) { app.selectedThreadID = thread.id }
+            // Instant, as a native sidebar's selection is.
+            app.selectedThreadID = thread.id
         }
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.12), value: hovering)

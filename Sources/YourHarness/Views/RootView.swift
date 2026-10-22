@@ -17,25 +17,22 @@ struct RootView: View {
                 .navigationSplitViewColumnWidth(min: 220, ideal: 270, max: 380)
         } detail: {
             ZStack {
+                // Switching is instant, as in Mail or Messages: no crossfade to wait through.
                 if let project = app.overviewProject, let workspace = app.workspace(for: project) {
                     WorkspaceView(project: project, workspace: workspace)
                         .id(project.id)
-                        .transition(.opacity)
                 } else if let thread = app.selectedThread {
                     ThreadView(thread: thread)
                         .id(thread.id)
-                        .transition(.opacity)
                 } else {
                     EmptyDetailView()
-                        .transition(.opacity)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            // One surface under every view, so switching crossfades content, not the canvas.
+            // One surface under every view, so switching swaps content, not the canvas.
             .canvasBackground()
-            // A quick crossfade when switching threads, not a hard cut.
-            .animation(.easeInOut(duration: 0.16), value: app.selectedThreadID)
-            .animation(.easeInOut(duration: 0.16), value: app.overviewProjectID)
+            .transaction(value: app.selectedThreadID) { $0.animation = nil }
+            .transaction(value: app.overviewProjectID) { $0.animation = nil }
             .inspector(isPresented: Binding(get: { isOnScreen && app.showsInspector }, set: { app.setShowsInspector($0) })) {
                 ThreadInspector(thread: app.overviewProject == nil ? app.selectedThread : nil)
                     .inspectorColumnWidth(min: 300, ideal: 380, max: 960)

@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 import HarnessCore
 
 /// The CLIs a workspace refresh drives, resolved once discovery finishes.
@@ -14,7 +15,9 @@ struct WorkspaceTools: Sendable {
 final class WorkspaceModel {
     let projectID: UUID
     let root: URL
-    private(set) var layout: WorkspaceLayout?
+    private(set) var layout: WorkspaceLayout? {
+        didSet { forgetDerived() }
+    }
     /// Keyed by `WorkspaceRepo.id`.
     private(set) var statuses: [String: RepoStatus] = [:]
     private(set) var remotes: [String: GitRemote] = [:]
@@ -29,7 +32,9 @@ final class WorkspaceModel {
     private(set) var statusUpdatedAt: Date?
     private(set) var pullsUpdatedAt: Date?
     /// Each repo's linked worktrees (not its main checkout), keyed by `WorkspaceRepo.id`.
-    private(set) var worktrees: [String: [Worktree]] = [:]
+    private(set) var worktrees: [String: [Worktree]] = [:] {
+        didSet { forgetDerived() }
+    }
     /// Keyed by worktree path.
     private(set) var worktreeStatuses: [String: RepoStatus] = [:]
     /// Per repo: its default branch (`origin/main`), and the local branches already in it.
@@ -47,6 +52,43 @@ final class WorkspaceModel {
     }
 
     var isRefreshing: Bool { isScanning || isRefreshingStatus || isRefreshingPulls }
+
+    // Worked out from the repos and worktrees, which rarely change, but asked for on every
+    // render of the toolbar and the PRs tab: kept until they change.
+    @ObservationIgnored private var derivedCloned: [WorkspaceRepo]?
+    @ObservationIgnored private var derivedRoots: [String]?
+    @ObservationIgnored private var derivedCheckouts: [UUID: (key: CheckoutKey, all: [Checkout], written: [Checkout])] = [:]
+
+    private struct CheckoutKey: Equatable {
+        var footprint: Int, lastFolder: String?, written: Int, lastWritten: String?, workingDirectory: String?
+
+        @MainActor init(_ thread: ThreadModel) {
+            footprint = thread.footprint.count
+            lastFolder = thread.footprint.last
+            written = thread.writtenFootprint.count
+            lastWritten = thread.writtenFootprint.last
+            workingDirectory = thread.workingDirectory
+        }
+    }
+
+    private func forgetDerived() {
+        derivedCloned = nil
+        derivedRoots = nil
+        derivedCheckouts.removeAll()
+    }
+
+    /// A thread's checkouts, all and written in, worked out once per change to either side.
+    private func derived(for thread: ThreadModel) -> (all: [Checkout], written: [Checkout]) {
+        let key = CheckoutKey(thread)
+        if let cached = derivedCheckouts[thread.id], cached.key == key { return (cached.all, cached.written) }
+        let used = threadsByCheckout([thread]), wrote = threadsByCheckout([thread], written: true)
+        let running = thread.workingDirectory.map(Self.realPath)
+        let all = allCheckouts.filter { used[$0.path] != nil || $0.path == running }
+            .sorted { ($0.path == running ? 0 : 1, $0.path) < ($1.path == running ? 0 : 1, $1.path) }
+        let written = allCheckouts.filter { wrote[$0.path] != nil }
+        derivedCheckouts[thread.id] = (key, all, written)
+        return (all, written)
+    }
 
     /// A worktree git just removed, dropped from what's shown at once: nothing is scanned or
     /// fetched, since branches, merges and PRs don't change with it. Polling catches the rest.
@@ -75,8 +117,11 @@ final class WorkspaceModel {
     var repos: [WorkspaceRepo] { layout?.repos ?? [] }
     /// Linked worktrees inside the project are listed under their repo, not as repos.
     var clonedRepos: [WorkspaceRepo] {
+        if let derivedCloned { return derivedCloned }
         let linked = Set(worktrees.values.joined().map(\.path))
-        return repos.filter { $0.isCloned && !linked.contains(Self.realPath($0.url.path)) }
+        let cloned = repos.filter { $0.isCloned && !linked.contains(Self.realPath($0.url.path)) }
+        derivedCloned = cloned
+        return cloned
     }
     var allWorktrees: [Worktree] { clonedRepos.flatMap { worktrees[$0.id] ?? [] } }
 
@@ -133,7 +178,8 @@ final class WorkspaceModel {
     /// for the innermost checkout holding it, so a worktree nested in its repo's folder
     /// doesn't also count for the repo.
     func threadsByCheckout(_ threads: [ThreadModel], written: Bool = false) -> [String: [ThreadModel]] {
-        let roots = (clonedRepos.map { Self.realPath($0.url.path) } + allWorktrees.map(\.path)).sorted { $0.count > $1.count }
+        let roots = derivedRoots ?? (clonedRepos.map { Self.realPath($0.url.path) } + allWorktrees.map(\.path)).sorted { $0.count > $1.count }
+        derivedRoots = roots
         var result: [String: [ThreadModel]] = [:]
         for thread in threads where !thread.isSideChat {
             var hit = Set<String>()
@@ -170,8 +216,7 @@ final class WorkspaceModel {
 
     /// The checkouts a thread changed something in: edited files, made commits, pushed.
     func writtenCheckouts(for thread: ThreadModel) -> [Checkout] {
-        let used = threadsByCheckout([thread], written: true)
-        return allCheckouts.filter { used[$0.path] != nil }
+        derived(for: thread).written
     }
 
     /// The checkout a folder is in: the innermost repo or worktree holding it.
@@ -191,17 +236,19 @@ final class WorkspaceModel {
 
     /// The checkouts one thread works in, the one it runs in first.
     func checkouts(for thread: ThreadModel) -> [Checkout] {
-        let all = clonedRepos.flatMap { repo in [Checkout(repo: repo, worktree: nil)] + (worktrees[repo.id] ?? []).map { Checkout(repo: repo, worktree: $0) } }
-        let used = threadsByCheckout([thread])
-        let running = thread.workingDirectory.map(Self.realPath)
-        return all.filter { used[$0.path] != nil || $0.path == running }
-            .sorted { ($0.path == running ? 0 : 1, $0.path) < ($1.path == running ? 0 : 1, $1.path) }
+        derived(for: thread).all
     }
 
     /// git reports real paths: `/tmp` is `/private/tmp`.
     nonisolated static func realPath(_ path: String) -> String {
-        ThreadFootprint.resolve(path, in: "/") ?? path
+        if let known = realPaths.withLock({ $0[path] }) { return known }
+        let real = ThreadFootprint.resolve(path, in: "/") ?? path
+        realPaths.withLock { $0[path] = real }
+        return real
     }
+
+    /// Resolving a path asks the file system; the answer for a folder doesn't change.
+    private nonisolated static let realPaths = Mutex<[String: String]>([:])
     var unclonedRepos: [WorkspaceRepo] { repos.filter { !$0.isCloned } }
     var hasForgeRemotes: Bool { remotes.values.contains { $0.forge != nil } }
 

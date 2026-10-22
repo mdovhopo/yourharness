@@ -6,6 +6,9 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+### Changed
+- **Switching threads is instant.** No crossfade or sliding selection to wait through; a big thread's history loads off the main thread, so the click answers at once; the thread opens where you left it without a jump; and the toolbar's worktree and PR buttons no longer redo their work on every redraw. On a thread of 2,000 entries a switch takes about 65 ms, down from about 90 plus the animations.
+
 ## [0.0.4] - 2026-10-23
 
 ### Highlights

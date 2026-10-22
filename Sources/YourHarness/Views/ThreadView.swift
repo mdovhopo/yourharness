@@ -4,12 +4,20 @@ import SwiftUI
 struct ThreadView: View {
     @Environment(AppModel.self) private var app
     let thread: ThreadModel
+
+    init(thread: ThreadModel) {
+        self.thread = thread
+        // Where you were, from the first frame: no landing at the end and jumping back.
+        _position = State(initialValue: thread.scrollAnchor.map { ScrollPosition(id: $0, anchor: .bottom) }
+            ?? ScrollPosition(idType: String.self, edge: .bottom))
+        _followsBottom = State(initialValue: thread.scrollAnchor == nil)
+    }
     @State private var dropTargeted = false
     @State private var visibleHeight: CGFloat = 0
     /// Shorter than the screen: only then does the transcript get a minimum height.
     @State private var isShort = true
     /// Where you are: the row at the bottom edge, not a pixel offset.
-    @State private var position = ScrollPosition(idType: String.self, edge: .bottom)
+    @State private var position: ScrollPosition
     /// Keep the newest output in view as the transcript grows: while history loads, while
     /// a reply streams. Your own scrolling turns it off; stopping at the bottom turns it
     /// back on.
@@ -63,11 +71,12 @@ struct ThreadView: View {
                 }
             }
             .task {
-                thread.loadTranscriptIfNeeded()
+                await thread.loadTranscriptSoon()
                 thread.computeFootprintIfNeeded()
                 await restorePlace()
             }
             .onDisappear { rememberPlace() }
+            .onAppear { SwitchProbe.threadAppeared(thread.id) }
     }
 
     private var transcript: some View {
@@ -220,10 +229,10 @@ struct ThreadView: View {
         }
     }
 
-    /// Back where you were in this thread, or at the end if that's where you were.
+    /// Back where you were in this thread, or at the end if that's where you were. The
+    /// position starts there; this only settles it once a transcript that loaded after the
+    /// first frame is in.
     private func restorePlace() async {
-        // The rows exist once this view has been laid out with them.
-        await Task.yield()
         if let anchor = thread.scrollAnchor, thread.transcriptDisplayRows.contains(where: { $0.id == anchor }) {
             followsBottom = false
             position.scrollTo(id: anchor, anchor: .bottom)

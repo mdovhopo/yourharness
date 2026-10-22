@@ -45,11 +45,11 @@ struct YourHarnessApp: App {
             }
             CommandMenu("Thread") {
                 Button("Previous Thread") {
-                    withAnimation(SidebarMetrics.selectionSpring) { app.selectAdjacentThread(-1) }
+                    app.selectAdjacentThread(-1)
                 }
                 .keyboardShortcut(.upArrow, modifiers: [.command, .option])
                 Button("Next Thread") {
-                    withAnimation(SidebarMetrics.selectionSpring) { app.selectAdjacentThread(1) }
+                    app.selectAdjacentThread(1)
                 }
                 .keyboardShortcut(.downArrow, modifiers: [.command, .option])
                 Divider()
@@ -124,6 +124,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             AppModel.shared.updater.start()
             CookieImport.importIfRequested(app: AppModel.shared)
             BrowserProbe.runIfRequested(app: AppModel.shared)
+            SwitchProbe.runIfRequested(app: AppModel.shared)
         }
         if ProcessInfo.processInfo.environment["YH_SIMULATE_STREAMING"] == "1" {
             MainActor.assumeIsolated {

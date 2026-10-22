@@ -258,10 +258,34 @@ final class ThreadModel: Identifiable {
             ?? app.contextWindow(forModel: app.claudeModel(for: effectiveModel)?.resolvedModel)
     }
 
+    /// Right now, on this thread: for sending, steering and the like, which need it.
     func loadTranscriptIfNeeded() {
         guard !transcriptLoaded else { return }
+        transcriptLoad?.cancel()
+        transcriptLoad = nil
+        apply(app.store.loadTranscript(id))
+    }
+
+    /// Read and decoded off the main thread, for showing the thread: a big transcript is
+    /// megabytes of JSON, and switching to it shouldn't wait for that.
+    func loadTranscriptSoon() async {
+        guard !transcriptLoaded else { return }
+        if transcriptLoad == nil {
+            let store = app.store, id = id
+            transcriptLoad = Task { [weak self] in
+                let loaded = await Task.detached(priority: .userInitiated) { store.loadTranscript(id) }.value
+                guard let self, !Task.isCancelled, !self.transcriptLoaded else { return }
+                self.apply(loaded)
+            }
+        }
+        await transcriptLoad?.value
+    }
+
+    @ObservationIgnored private var transcriptLoad: Task<Void, Never>?
+
+    private func apply(_ snapshots: [EntrySnapshot]) {
         transcriptLoaded = true
-        let loaded = app.store.loadTranscript(id)
+        let loaded = snapshots
             .filter { !($0.kind == .thinking && $0.text.isEmpty) }
             .map(TranscriptEntry.init(snapshot:))
         // History should just be there; only new messages animate in.
