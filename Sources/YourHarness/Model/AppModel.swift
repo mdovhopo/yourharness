@@ -831,17 +831,21 @@ final class AppModel {
         return error
     }
 
+    /// `git worktree remove`, and nothing else: local, quick even offline. Nil on success,
+    /// else git's complaint.
     func removeWorktree(_ worktree: Worktree, of repo: WorkspaceRepo, in workspace: WorkspaceModel, force: Bool) async -> String? {
         guard let git = workspaceTools.git else { return "Git isn't available." }
-        let error = await git.removeWorktree(worktree, of: repo.url, force: force)
-        await workspace.refresh(tools: workspaceTools, rescan: true)
-        return error
+        if let error = await git.removeWorktree(worktree, of: repo.url, force: force) { return error }
+        workspace.forgetWorktree(worktree, in: repo)
+        return nil
     }
 
-    func pruneWorktrees(of repo: WorkspaceRepo, in workspace: WorkspaceModel) async {
-        guard let git = workspaceTools.git else { return }
-        _ = await git.pruneWorktrees(of: repo.url)
-        await workspace.refreshStatus(tools: workspaceTools, minInterval: 0)
+    /// `git worktree prune`: forgets worktrees whose folders are gone. Nil on success.
+    func pruneWorktrees(of repo: WorkspaceRepo, in workspace: WorkspaceModel) async -> String? {
+        guard let git = workspaceTools.git else { return "Git isn't available." }
+        if let error = await git.pruneWorktrees(of: repo.url) { return error }
+        workspace.forgetMissingWorktrees(in: repo)
+        return nil
     }
 
     /// Threads saved before footprints were kept work theirs out, so the repos view knows

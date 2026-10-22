@@ -18,6 +18,9 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 ### Changed
 - **YourHarness is signed with its own certificate** instead of ad hoc. macOS will ask once more for the folders and keychain items it used (it's a new identity), and from then on remembers your answers across updates. Updates are only installed when they're signed the same way.
 
+### Fixed
+- Removing a worktree is instant, even offline: it no longer rescans the project and asks GitHub for PRs before it's done.
+
 ## [0.0.3] - 2026-10-22
 
 ### Highlights

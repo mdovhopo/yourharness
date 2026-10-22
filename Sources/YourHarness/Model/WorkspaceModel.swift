@@ -47,6 +47,31 @@ final class WorkspaceModel {
     }
 
     var isRefreshing: Bool { isScanning || isRefreshingStatus || isRefreshingPulls }
+
+    /// A worktree git just removed, dropped from what's shown at once: nothing is scanned or
+    /// fetched, since branches, merges and PRs don't change with it. Polling catches the rest.
+    func forgetWorktree(_ worktree: Worktree, in repo: WorkspaceRepo) {
+        worktrees[repo.id]?.removeAll { $0.path == worktree.path }
+        worktreeStatuses[worktree.path] = nil
+        detachedReachable[worktree.path] = nil
+        // One inside the project was also found by the scan, as a repo of its own.
+        guard var layout else { return }
+        let scanned = layout.repos.filter { Self.realPath($0.url.path) == worktree.path }
+        guard !scanned.isEmpty else { return }
+        layout.repos.removeAll { Self.realPath($0.url.path) == worktree.path }
+        for entry in scanned {
+            statuses[entry.id] = nil
+            remotes[entry.id] = nil
+        }
+        self.layout = layout
+    }
+
+    /// `git worktree prune` dropped the repo's worktrees whose folders are gone.
+    func forgetMissingWorktrees(in repo: WorkspaceRepo) {
+        for worktree in worktrees[repo.id] ?? [] where worktree.isMissing {
+            forgetWorktree(worktree, in: repo)
+        }
+    }
     var repos: [WorkspaceRepo] { layout?.repos ?? [] }
     /// Linked worktrees inside the project are listed under their repo, not as repos.
     var clonedRepos: [WorkspaceRepo] {

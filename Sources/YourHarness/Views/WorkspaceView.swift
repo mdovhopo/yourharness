@@ -717,7 +717,7 @@ private struct RepoRow: View {
                 Button("New Thread Here", systemImage: "square.and.pencil") { app.newThread(in: project, workingIn: repo.url.path) }
             }
             if workspace.worktrees[repo.id]?.contains(where: \.isMissing) == true {
-                Button("Forget Missing Worktrees", systemImage: "trash.slash") { Task { await app.pruneWorktrees(of: repo, in: workspace) } }
+                Button("Forget Missing Worktrees", systemImage: "trash.slash") { Task { _ = await app.pruneWorktrees(of: repo, in: workspace) } }
             }
         }
         .sheet(isPresented: $addingWorktree) { NewWorktreeSheet(repo: repo, workspace: workspace) }
@@ -1080,7 +1080,7 @@ private struct WorktreeRow: View {
         removing = true
         Task {
             if worktree.isMissing {
-                await app.pruneWorktrees(of: repo, in: workspace)
+                error = await app.pruneWorktrees(of: repo, in: workspace)
             } else {
                 // Uncommitted changes need --force; git refuses otherwise.
                 error = await app.removeWorktree(worktree, of: repo, in: workspace, force: status?.isDirty ?? false)
