@@ -47,6 +47,7 @@ struct RootView: View {
         .onChange(of: undoManager, initial: true) { app.undoManager = undoManager }
         .onAppear {
             isOnScreen = true
+            fitOnScreen()
             // Development: open the resume sheet filled in, for checking it without clicking.
             if ProcessInfo.processInfo.environment["YH_RESUME_SESSION"] != nil { app.isResumingSession = true }
             // Development: open Settings, for checking it without a shortcut.
@@ -60,6 +61,23 @@ struct RootView: View {
                let source = try? String(contentsOfFile: path, encoding: .utf8) {
                 openWindow(id: "diagram", value: source)
             }
+        }
+    }
+}
+
+/// A window saved taller or wider than its screen (0.0.2 and 0.0.3 could grow one past the
+/// bottom, from the Browser tab) comes back fitted to it.
+@MainActor
+private func fitOnScreen() {
+    DispatchQueue.main.async {
+        for window in NSApp.windows where window.isVisible && !window.styleMask.contains(.fullScreen) {
+            guard let visible = (window.screen ?? NSScreen.main)?.visibleFrame else { continue }
+            let frame = window.frame
+            guard frame.height > visible.height + 1 || frame.width > visible.width + 1 else { continue }
+            let size = NSSize(width: min(frame.width, visible.width), height: min(frame.height, visible.height))
+            let origin = NSPoint(x: min(max(frame.minX, visible.minX), visible.maxX - size.width),
+                                 y: min(max(frame.minY, visible.minY), visible.maxY - size.height))
+            window.setFrame(NSRect(origin: origin, size: size), display: true)
         }
     }
 }

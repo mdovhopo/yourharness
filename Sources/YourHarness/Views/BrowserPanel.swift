@@ -699,7 +699,8 @@ private struct BrowserEmptyState: View {
             } description: {
                 Text("Claude opens pages here to test what it builds, and you watch each step. You can type an address above too.")
             }
-            .fixedSize(horizontal: false, vertical: true)
+            // Not fixedSize: measured at the window's narrowest, the text wraps a word a line, and
+            // its height (2,000 pt and more) became the window's minimum, pushing it off screen.
             if !servers.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Started in this thread")

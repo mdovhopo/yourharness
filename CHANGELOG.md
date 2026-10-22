@@ -19,6 +19,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 - **YourHarness is signed with its own certificate** instead of ad hoc. macOS will ask once more for the folders and keychain items it used (it's a new identity), and from then on remembers your answers across updates. Updates are only installed when they're signed the same way.
 
 ### Fixed
+- Opening the Browser tab on a Mac where it had never been used made the window grow past the bottom of the screen, pushing the sidebars down; the window stayed that tall afterwards. It no longer grows, and a window saved too tall fits the screen again.
 - Removing a worktree is instant, even offline: it no longer rescans the project and asks GitHub for PRs before it's done.
 
 ## [0.0.3] - 2026-10-22
