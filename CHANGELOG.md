@@ -6,6 +6,9 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+### Added
+- **Threads settle when their work lands.** Once every PR a thread is linked to has merged, and nothing new has happened in it since, it moves to the Settled shelf, the way idle threads do. One PR still open, or closed without merging, keeps it where it is. PRs are looked up in the background, so this happens for threads you aren't looking at too.
+
 ## [0.0.3] - 2026-10-22
 
 ### Highlights

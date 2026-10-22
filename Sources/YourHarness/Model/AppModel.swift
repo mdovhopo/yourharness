@@ -132,6 +132,9 @@ final class AppModel {
             await bootstrap?.value
             refreshWorkspaces()
             settleIdleThreads()
+            // Give the workspaces a moment to list branch PRs, then look for merged work.
+            try? await Task.sleep(for: .seconds(20))
+            await syncPullRequestsForSettling()
         }
         startWorkspacePolling()
         notifier.open = { [weak self] id in self?.openFromNotification(id) }
@@ -349,6 +352,41 @@ final class AppModel {
             changed = true
         }
         if changed { save() }
+    }
+
+    /// Settles a thread once every PR it's linked to has merged and it's had nothing new
+    /// since: the work landed. Same exceptions as idle settling; one closed without merging,
+    /// or still open, keeps it.
+    func settleMergedThreads(now: Date = .now) {
+        var changed = false
+        for thread in threads {
+            guard !thread.isSettled, !thread.isEphemeral, !thread.isSideChat, thread.autoSettle, thread.reactivatedAt == nil,
+                  !thread.isWorking, thread.pendingPermissions.isEmpty, visibleThreadID != thread.id
+            else { continue }
+            let pulls = pullRequests(for: thread)
+            guard !pulls.isEmpty else { continue }
+            let merges = pulls.compactMap { $0.pull?.state == .merged ? ($0.pull?.mergedAt ?? now) : nil }
+            // Work after the last merge (beyond the turn that merged it) is new work.
+            guard merges.count == pulls.count, let last = merges.max(), thread.updatedAt <= last.addingTimeInterval(15 * 60) else { continue }
+            thread.settledAt = now
+            thread.isPinned = false
+            thread.endSession()
+            thread.closeBrowser()
+            changed = true
+        }
+        if changed { save() }
+    }
+
+    /// Looks up the PRs of threads that might settle when they merge, including ones you
+    /// aren't looking at.
+    func syncPullRequestsForSettling() async {
+        for thread in threads where !thread.isSettled && !thread.isEphemeral && !thread.isSideChat && thread.autoSettle
+            && !thread.pullRequestLinks.isEmpty {
+            let pulls = pullRequests(for: thread)
+            guard pulls.contains(where: { $0.pull?.state != .merged }) else { continue }
+            await syncPullRequests(for: thread)
+        }
+        settleMergedThreads()
     }
 
     /// Everything the sidebar shows, in order. Lets the list animate inserts and reorders.
@@ -606,6 +644,7 @@ final class AppModel {
         pullsSyncedAtObserved[thread.id] = .now
         // A PR that just changed state changes what the repos view lists too.
         if found.contains(where: { $0.state != .open }) { refreshWorkspaces(pullsMaxAge: 5) }
+        settleMergedThreads()
     }
 
     /// Claude just did something to PRs (`gh pr merge`, a push): look again a moment later,
@@ -743,6 +782,7 @@ final class AppModel {
                 try? await Task.sleep(for: .seconds(300))
                 guard let self else { continue }
                 self.settleIdleThreads()
+                await self.syncPullRequestsForSettling()
                 self.closeIdleBrowsers()
                 guard NSApp.isActive else { continue }
                 self.refreshWorkspaces(pullsMaxAge: 240)
