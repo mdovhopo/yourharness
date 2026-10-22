@@ -1,4 +1,5 @@
 import AppKit
+import struct HarnessCore.SyntaxToken
 import SwiftUI
 
 /// One small set of surfaces, so the thread, the overview and the side panels read as one
@@ -60,5 +61,52 @@ struct Chip: View {
             .background(tint.map { AnyShapeStyle($0.opacity(0.14)) } ?? AnyShapeStyle(.fill.tertiary), in: .capsule)
             .lineLimit(1)
             .fixedSize()
+    }
+}
+
+/// Code colors, after Xcode's default themes: pink keywords, red strings, grey comments,
+/// blue numbers, teal types. Each has a light and a dark variant.
+enum SyntaxPalette {
+    /// One container per kind, so building a block's text doesn't make one per token.
+    static func attributes(_ kind: SyntaxToken.Kind) -> AttributeContainer {
+        containers[kind] ?? AttributeContainer()
+    }
+
+    private static let colors: [SyntaxToken.Kind: Color] = Dictionary(uniqueKeysWithValues: SyntaxToken.Kind.allCases.map { kind in
+        let (light, dark): (UInt32, UInt32) = switch kind {
+        case .keyword: (0x9B2393, 0xFC5FA3)
+        case .type: (0x0B6E78, 0x5DD8D0)
+        case .string: (0xC41A16, 0xFC6A5D)
+        case .comment: (0x5D6C79, 0x7F8C98)
+        case .number: (0x1C00CF, 0xA59BFF)
+        case .function: (0x6C36A9, 0xB281EB)
+        case .attribute: (0x815F03, 0xD9A05B)
+        case .property: (0x255E9E, 0x7CB1E8)
+        case .variable: (0x3900A0, 0xD0A8FF)
+        case .inserted: (0x1E7B34, 0x5DD27A)
+        case .deleted: (0xB42318, 0xFF7B72)
+        case .meta: (0x4B6CB7, 0x8FB0F0)
+        }
+        return (kind, Color(nsColor: .syntax(light: light, dark: dark)))
+    })
+
+    private static let containers: [SyntaxToken.Kind: AttributeContainer] = colors.mapValues { color in
+        var container = AttributeContainer()
+        container.foregroundColor = color
+        return container
+    }
+}
+
+private extension NSColor {
+    static func syntax(light: UInt32, dark: UInt32) -> NSColor {
+        NSColor(name: nil) { appearance in
+            let hex = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? dark : light
+            return NSColor(
+                srgbRed: CGFloat((hex >> 16) & 0xFF) / 255,
+                green: CGFloat((hex >> 8) & 0xFF) / 255,
+                blue: CGFloat(hex & 0xFF) / 255,
+                alpha: 1
+            )
+        }
     }
 }

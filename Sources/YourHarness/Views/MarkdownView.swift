@@ -117,7 +117,7 @@ private struct BlockView: View, Equatable {
                     MermaidBlockView(source: text)
                 }
             } else {
-                CodeBlockView(language: language, code: text)
+                CodeBlockView(language: language, code: text, streaming: isTail)
             }
         case .quote(let text):
             HStack(alignment: .top, spacing: 12) {
@@ -376,9 +376,72 @@ private struct InlineText: View {
     }
 }
 
+/// Highlighted code, kept so finished blocks aren't tokenized again each time the transcript
+/// re-renders. A streaming block changes on every frame, so it gets one slot of its own.
+@MainActor
+enum CodeHighlighting {
+    /// Past these, a block stays plain.
+    static let maxBytes = 200_000
+    static let maxLines = 2_000
+    /// While it streams, a block is tokenized again on every frame: a long one waits until it's done.
+    static let maxStreamingLines = 400
+
+    private struct Key: Hashable {
+        let language: String
+        let code: String
+    }
+
+    private static var entries: [Key: AttributedString] = [:]
+    private static var order: [Key] = []
+    private static var cachedBytes = 0
+    private static var tail: (key: Key, text: AttributedString)?
+
+    static func text(_ code: String, language: String, streaming: Bool) -> AttributedString {
+        guard SyntaxHighlighter.highlights(language), code.utf8.count <= maxBytes else { return AttributedString(code) }
+        let key = Key(language: language, code: code)
+        if let cached = entries[key] { return cached }
+        if let tail, tail.key == key { return tail.text }
+
+        if streaming, code.utf8.count(where: { $0 == UInt8(ascii: "\n") }) > maxStreamingLines { return AttributedString(code) }
+        let text = highlight(code, language: language)
+        if streaming {
+            tail = (key, text)
+        } else {
+            entries[key] = text
+            order.append(key)
+            cachedBytes += code.utf8.count
+            while order.count > 128 || cachedBytes > 2_000_000 {
+                let evicted = order.removeFirst()
+                entries[evicted] = nil
+                cachedBytes -= evicted.code.utf8.count
+            }
+        }
+        return text
+    }
+
+    private static func highlight(_ code: String, language: String) -> AttributedString {
+        guard code.utf8.count(where: { $0 == UInt8(ascii: "\n") }) < maxLines else { return AttributedString(code) }
+        var text = AttributedString()
+        var cursor = code.startIndex
+        for token in SyntaxHighlighter.tokens(in: code, language: language) {
+            if cursor < token.range.lowerBound {
+                text.append(AttributedString(code[cursor..<token.range.lowerBound]))
+            }
+            text.append(AttributedString(code[token.range], attributes: SyntaxPalette.attributes(token.kind)))
+            cursor = token.range.upperBound
+        }
+        if cursor < code.endIndex {
+            text.append(AttributedString(code[cursor...]))
+        }
+        return text
+    }
+}
+
 struct CodeBlockView: View {
     let language: String
     let code: String
+    /// The reply is still streaming this block in.
+    var streaming = false
     @State private var copied = false
     @State private var hovering = false
     @Environment(\.findHighlight) private var findHighlight
@@ -386,7 +449,7 @@ struct CodeBlockView: View {
     var body: some View {
         ZStack(alignment: .topTrailing) {
             ScrollView(.horizontal) {
-                Text(AttributedString(code).highlighted(findHighlight))
+                Text(CodeHighlighting.text(code, language: language, streaming: streaming).highlighted(findHighlight))
                     .font(.system(size: MarkdownMetrics.small, design: .monospaced))
                     .lineSpacing(2)
                     .textSelection(.enabled)

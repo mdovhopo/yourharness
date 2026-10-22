@@ -99,7 +99,6 @@ The Claude adapter runs `claude -p --input-format stream-json --output-format st
 See [ROADMAP.md](ROADMAP.md) for the bigger picture. Smaller gaps in what exists today:
 
 - Text selection across transcript blocks (SwiftUI limitation; an AppKit/TextKit 2 transcript would fix it if the stress test shows we need it anyway)
-- Syntax highlighting in code blocks
 - Sub-agents in resumed Claude Code sessions show their report but not their steps (those live in separate session files)
 - Git worktree per thread
 - More adapters (Codex app-server, ACP)
