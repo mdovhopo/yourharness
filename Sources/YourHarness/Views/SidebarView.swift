@@ -593,6 +593,7 @@ private struct UsageFooter: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .animation(.smooth(duration: 0.35), value: app.updater.phase.bannerKind)
         .animation(.smooth(duration: 0.35), value: app.updater.announcesUpToDate)
+        .animation(.smooth(duration: 0.35), value: app.updater.updatedFrom)
         .glassEffect(.regular, in: .rect(cornerRadius: 14))
         .padding(10)
     }

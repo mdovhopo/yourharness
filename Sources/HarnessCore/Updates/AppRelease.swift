@@ -43,6 +43,71 @@ public struct SemanticVersion: Sendable, Hashable, Comparable, CustomStringConve
     }
 }
 
+/// What a release says about itself, for reading in the app.
+public struct ReleaseNotes: Sendable, Equatable, Identifiable {
+    public var version: SemanticVersion
+    public var title: String
+    /// Markdown, without the install instructions the release page adds.
+    public var text: String
+    public var page: URL?
+    public var publishedAt: Date?
+
+    public var id: String { version.description }
+
+    public init(version: SemanticVersion, title: String, text: String, page: URL?, publishedAt: Date?) {
+        self.version = version
+        self.title = title
+        self.text = text
+        self.page = page
+        self.publishedAt = publishedAt
+    }
+
+    /// GitHub's `GET /repos/{owner}/{repo}/releases`: published releases, newest first. Drafts,
+    /// pre-releases and tags that aren't versions are left out.
+    public static func parse(gitHubList data: Data) throws -> [ReleaseNotes] {
+        guard let releases = try? JSONDecoder().decode([GitHubRelease].self, from: data) else { throw AppRelease.ParseError.notARelease }
+        return releases
+            .filter { $0.draft != true && $0.prerelease != true }
+            .compactMap { $0.notes }
+            .sorted { $0.version > $1.version }
+    }
+
+    /// The install instructions start at an `Install` heading.
+    static func trimmed(_ body: String) -> String {
+        guard let range = body.range(of: #"(^|\n)#{2,3} Install"#, options: [.regularExpression, .caseInsensitive]) else {
+            return body.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return String(body[..<range.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+struct GitHubRelease: Decodable {
+    struct Asset: Decodable {
+        var name: String
+        var browser_download_url: URL
+        var size: Int?
+    }
+    var tag_name: String
+    var name: String?
+    var body: String?
+    var html_url: URL?
+    var published_at: String?
+    var prerelease: Bool?
+    var draft: Bool?
+    var assets: [Asset]?
+
+    var notes: ReleaseNotes? {
+        guard let version = SemanticVersion(tag_name) else { return nil }
+        return ReleaseNotes(
+            version: version,
+            title: name?.isEmpty == false ? name! : "YourHarness \(version)",
+            text: ReleaseNotes.trimmed(body ?? ""),
+            page: html_url,
+            publishedAt: published_at.flatMap { try? Date($0, strategy: .iso8601) }
+        )
+    }
+}
+
 /// A published release of the app: its disk image, the image's checksum, and its notes.
 public struct AppRelease: Sendable, Equatable {
     public var version: SemanticVersion
@@ -85,26 +150,12 @@ public struct AppRelease: Sendable, Equatable {
     /// GitHub's `GET /repos/{owner}/{repo}/releases/latest`. Drafts never show up there,
     /// and pre-releases are skipped.
     public static func parse(gitHubLatest data: Data) throws -> AppRelease {
-        struct Asset: Decodable {
-            var name: String
-            var browser_download_url: URL
-            var size: Int?
-        }
-        struct Release: Decodable {
-            var tag_name: String
-            var name: String?
-            var body: String?
-            var html_url: URL?
-            var published_at: String?
-            var prerelease: Bool?
-            var assets: [Asset]
-        }
-        guard let release = try? JSONDecoder().decode(Release.self, from: data) else { throw ParseError.notARelease }
+        guard let release = try? JSONDecoder().decode(GitHubRelease.self, from: data) else { throw ParseError.notARelease }
         guard let version = SemanticVersion(release.tag_name) else { throw ParseError.badVersion(release.tag_name) }
-        guard let image = release.assets.first(where: { $0.name.lowercased().hasSuffix(".dmg") }) else {
+        guard let image = release.assets?.first(where: { $0.name.lowercased().hasSuffix(".dmg") }) else {
             throw ParseError.noDiskImage(release.tag_name)
         }
-        let checksum = release.assets.first { $0.name == image.name + ".sha256" }
+        let checksum = release.assets?.first { $0.name == image.name + ".sha256" }
         return AppRelease(
             version: version,
             title: release.name?.isEmpty == false ? release.name! : "YourHarness \(version)",
@@ -125,8 +176,9 @@ public struct AppRelease: Sendable, Equatable {
     }
 
     /// The release notes without the install instructions the release page adds below them.
-    public var whatsNew: String {
-        guard let range = notes.range(of: #"\n#{2,3} Install"#, options: [.regularExpression, .caseInsensitive]) else { return notes }
-        return String(notes[..<range.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+    public var whatsNew: String { ReleaseNotes.trimmed(notes) }
+
+    public var releaseNotes: ReleaseNotes {
+        ReleaseNotes(version: version, title: title, text: whatsNew, page: page, publishedAt: publishedAt)
     }
 }

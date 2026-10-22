@@ -54,3 +54,32 @@ struct AppReleaseTests {
         #expect(AppRelease.digest(inChecksumFile: "") == nil)
     }
 }
+
+struct ReleaseNotesTests {
+    @Test func parsesGitHubReleaseList() throws {
+        let json = """
+        [{"tag_name":"v0.0.3","name":"YourHarness 0.0.3","body":"### Fixed\\n- A thing.\\n\\n### Install\\n1. Download.","html_url":"https://example.com/v0.0.3","published_at":"2026-10-23T08:00:00Z","assets":[]},
+         {"tag_name":"v0.0.4-beta.1","prerelease":true,"body":"beta","assets":[]},
+         {"tag_name":"v0.0.5","draft":true,"body":"draft"},
+         {"tag_name":"nightly","body":"not a version"},
+         {"tag_name":"v0.0.1","name":"","body":"First.","assets":[]},
+         {"tag_name":"v0.0.2","name":"YourHarness 0.0.2","body":"## Install\\nOnly install notes.","assets":[]}]
+        """
+        let notes = try ReleaseNotes.parse(gitHubList: Data(json.utf8))
+        #expect(notes.map(\.id) == ["0.0.3", "0.0.2", "0.0.1"])
+        #expect(notes[0].text == "### Fixed\n- A thing.")
+        #expect(notes[0].page?.absoluteString == "https://example.com/v0.0.3")
+        #expect(notes[0].publishedAt != nil)
+        #expect(notes[1].text == "")
+        #expect(notes[2].title == "YourHarness 0.0.1")
+        #expect(throws: AppRelease.ParseError.notARelease) { try ReleaseNotes.parse(gitHubList: Data(#"{"message":"Not Found"}"#.utf8)) }
+    }
+
+    @Test func anUpdatesNotesComeFromItsRelease() throws {
+        let json = #"{"tag_name":"v0.0.3","body":"Notes.\n\n### Install\nSteps.","html_url":"https://example.com/r","assets":[{"name":"YourHarness-0.0.3.dmg","browser_download_url":"https://example.com/a.dmg"}]}"#
+        let notes = try AppRelease.parse(gitHubLatest: Data(json.utf8)).releaseNotes
+        #expect(notes.version == SemanticVersion("0.0.3"))
+        #expect(notes.text == "Notes.")
+        #expect(notes.page?.absoluteString == "https://example.com/r")
+    }
+}

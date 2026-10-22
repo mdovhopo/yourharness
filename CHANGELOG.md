@@ -8,6 +8,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ### Added
 - **Updates in the app.** The version shows at the bottom of the limits box and in Settings. When a new release is out, the box offers it with its notes (What's New), downloads it when you click Update, checks it against the release's checksum, then Restart (after a confirmation that says which threads it would stop) quits and opens the new version. YourHarness looks at launch and every six hours, and **Check for Updates…** is in the app menu.
+- **Release notes in the app.** What's New renders the notes from GitHub for every release since yours, each with a link to its page; after an update, the limits box says what you updated to and shows what's new. The notes of the version you're running are a click away from the version number and Settings.
 
 ### Fixed
 - The left sidebar no longer goes missing at launch when the right sidebar was left open. Its button also said it was showing, so the first click did nothing.

@@ -31,12 +31,18 @@ final class Updater {
     private(set) var latest: AppRelease?
     /// Set by a check you asked for, so "up to date" is said once and then goes away.
     private(set) var announcesUpToDate = false
+    /// The version this copy ran as before it was updated, until you've seen what's new.
+    private(set) var updatedFrom: SemanticVersion?
 
     /// This copy's version; nil for a bare executable (`swift run`).
     let current: SemanticVersion? = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String).flatMap(SemanticVersion.init)
     let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String
 
     private static let gitHubLatest = URL(string: "https://api.github.com/repos/mdovhopo/yourharness/releases/latest")!
+    private static let gitHubList = URL(string: "https://api.github.com/repos/mdovhopo/yourharness/releases?per_page=30")!
+    static let releasesPage = URL(string: "https://github.com/mdovhopo/yourharness/releases")!
+    private static let lastRunVersionKey = "lastRunVersion"
+    private var notesCache: (notes: [ReleaseNotes], fetched: Date)?
     private static let checkInterval: Duration = .seconds(6 * 60 * 60)
     private let feed = ProcessInfo.processInfo.environment["YH_UPDATE_FEED"].flatMap { $0.isEmpty ? nil : $0 }
     private let bundleURL = Bundle.main.bundleURL
@@ -66,6 +72,7 @@ final class Updater {
     }
 
     func start() {
+        noteVersionChange()
         guard isEnabled, schedule == nil else { return }
         restoreStaged()
         schedule = Task { [weak self] in
@@ -82,6 +89,53 @@ final class Updater {
         guard isEnabled else { return }
         announcesUpToDate = true
         Task { await check() }
+    }
+
+    /// Remembers the version this copy runs as, and whether it just changed up.
+    private func noteVersionChange() {
+        guard let current else { return }
+        let defaults = UserDefaults.standard
+        if let last = defaults.string(forKey: Self.lastRunVersionKey).flatMap(SemanticVersion.init), last < current {
+            updatedFrom = last
+        }
+        defaults.set(current.description, forKey: Self.lastRunVersionKey)
+    }
+
+    func dismissUpdated() {
+        updatedFrom = nil
+    }
+
+    /// The notes of the releases after `after` up to and including `through`, newest first;
+    /// without `after`, just `through`'s.
+    func releaseNotes(after: SemanticVersion?, through: SemanticVersion) async throws -> [ReleaseNotes] {
+        let all: [ReleaseNotes]
+        if let notesCache, notesCache.fetched.timeIntervalSinceNow > -600 {
+            all = notesCache.notes
+        } else {
+            all = try await fetchNotes()
+            notesCache = (all, .now)
+        }
+        return all.filter { notes in notes.version <= through && (after.map { notes.version > $0 } ?? (notes.version == through)) }
+    }
+
+    private func fetchNotes() async throws -> [ReleaseNotes] {
+        if let feed {
+            let url = feed.contains("://") ? URL(string: feed)! : URL(fileURLWithPath: feed)
+            let data = try Data(contentsOf: url)
+            // A feed is one release, or a list of them.
+            if let list = try? ReleaseNotes.parse(gitHubList: data) { return list }
+            return [try AppRelease.parse(gitHubLatest: data).releaseNotes]
+        }
+        var request = URLRequest(url: Self.gitHubList, timeoutInterval: 20)
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.setValue("YourHarness/\(current?.description ?? "dev")", forHTTPHeaderField: "User-Agent")
+        let (data, response) = try await URLSession.shared.data(for: request)
+        if let http = response as? HTTPURLResponse, http.statusCode != 200 {
+            throw UpdateError(http.statusCode == 403 || http.statusCode == 429
+                ? "GitHub is limiting requests right now. Try again in a while."
+                : "GitHub answered \(http.statusCode).")
+        }
+        return try ReleaseNotes.parse(gitHubList: data)
     }
 
     /// Clears a failed check you asked for.
@@ -319,7 +373,7 @@ final class Updater {
         NSApp.terminate(nil)
     }
 
-    private static func describe(_ error: Error) -> String {
+    static func describe(_ error: Error) -> String {
         if let error = error as? UpdateError { return error.message }
         if let error = error as? AppRelease.ParseError { return error.description }
         if let error = error as? URLError {

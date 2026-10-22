@@ -21,7 +21,9 @@ struct UpdateBanner: View {
                         Button("What's New") { showsNotes = true }
                             .buttonStyle(.link)
                             .font(.caption)
-                            .popover(isPresented: $showsNotes, arrowEdge: .trailing) { WhatsNewView(release: release) }
+                            .popover(isPresented: $showsNotes, arrowEdge: .trailing) {
+                                ReleaseNotesView(after: updater.current, through: release.version, known: release.releaseNotes)
+                            }
                     }
                     Spacer(minLength: 4)
                     Button("Update") { updater.downloadUpdate() }
@@ -110,10 +112,33 @@ struct UpdateBanner: View {
                     Spacer(minLength: 0)
                 }
             default:
-                EmptyView()
+                if let from = updater.updatedFrom, let current = updater.current {
+                    HStack(spacing: 8) {
+                        icon("sparkles", .accentColor)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("Updated to \(current.description)")
+                                .font(.callout.weight(.semibold))
+                            Button("What's New") { showsNotes = true }
+                                .buttonStyle(.link)
+                                .font(.caption)
+                                .popover(isPresented: $showsNotes, arrowEdge: .trailing) {
+                                    ReleaseNotesView(after: from, through: current)
+                                }
+                        }
+                        Spacer(minLength: 4)
+                        Button("Dismiss", systemImage: "xmark.circle.fill") { updater.dismissUpdated() }
+                            .labelStyle(.iconOnly)
+                            .buttonStyle(.borderless)
+                            .foregroundStyle(.secondary)
+                            .help("Hide this")
+                    }
+                }
             }
         }
         .transition(.asymmetric(insertion: .push(from: .bottom), removal: .opacity).combined(with: .opacity))
+        .onChange(of: showsNotes) { _, open in
+            if !open { updater.dismissUpdated() }
+        }
     }
 
     private func icon(_ name: String, _ color: Color) -> some View {
@@ -171,12 +196,30 @@ struct VersionButton: View {
                                 .foregroundStyle(.secondary)
                         }
                     }
+                    Spacer(minLength: 0)
+                    CurrentReleaseNotesButton()
                 }
                 UpdateStatus()
                     .font(.callout)
             }
             .padding(14)
             .frame(width: 300, alignment: .leading)
+        }
+    }
+}
+
+/// The notes of the version you're running.
+struct CurrentReleaseNotesButton: View {
+    @Environment(AppModel.self) private var app
+    @State private var showing = false
+
+    var body: some View {
+        if let current = app.updater.current {
+            Button("Release Notes") { showing = true }
+                .help("What changed in \(current.description)")
+                .popover(isPresented: $showing, arrowEdge: .bottom) {
+                    ReleaseNotesView(after: nil, through: current)
+                }
         }
     }
 }
@@ -216,7 +259,9 @@ struct UpdateStatus: View {
                     Text("\(release.version.description) is available")
                     Spacer(minLength: 8)
                     Button("What's New") { showsNotes = true }
-                        .popover(isPresented: $showsNotes, arrowEdge: .bottom) { WhatsNewView(release: release) }
+                        .popover(isPresented: $showsNotes, arrowEdge: .bottom) {
+                            ReleaseNotesView(after: updater.current, through: release.version, known: release.releaseNotes)
+                        }
                     Button("Update") { updater.downloadUpdate() }
                         .buttonStyle(.glassProminent)
                 case .downloading(let release, let progress):
@@ -279,44 +324,112 @@ struct RestartToUpdateButton: View {
     }
 }
 
-/// A release's notes, from GitHub: what changed, with links to the commits.
-struct WhatsNewView: View {
+/// Release notes from GitHub, rendered here: every release after `after` up to `through`, newest
+/// first, each with a link to its page. Without `after`, just `through`.
+struct ReleaseNotesView: View {
     @Environment(AppModel.self) private var app
-    let release: AppRelease
+    let after: SemanticVersion?
+    let through: SemanticVersion
+    /// Shown at once while the rest load (the release an update offers is already known).
+    var known: ReleaseNotes?
+    @State private var notes: [ReleaseNotes] = []
+    @State private var loading = true
+    @State private var error: String?
+
+    private var title: String {
+        if let after, after < through, notes.count > 1 { return "What's New Since \(after.description)" }
+        return "What's New in \(through.description)"
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(release.title)
+            HStack(alignment: .firstTextBaseline) {
+                Text(title)
                     .font(.title3.weight(.semibold))
-                if let date = release.publishedAt {
-                    Text("Released \(date.formatted(date: .abbreviated, time: .omitted))")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                Spacer()
+                if loading, !notes.isEmpty {
+                    ProgressView().controlSize(.mini)
                 }
             }
             .padding([.horizontal, .top], 16)
             .padding(.bottom, 10)
             Divider()
             ScrollView {
-                MarkdownView(text: release.whatsNew.isEmpty ? "No notes for this release." : release.whatsNew)
-                    .textSelection(.enabled)
-                    .padding(16)
+                VStack(alignment: .leading, spacing: 22) {
+                    if notes.isEmpty {
+                        if loading {
+                            ProgressView("Loading the notes from GitHub…")
+                                .frame(maxWidth: .infinity, minHeight: 120)
+                        } else {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text(error.map { "Couldn't load the notes: \($0)" } ?? "There are no notes for \(through.description).")
+                                    .foregroundStyle(.secondary)
+                                Link("Read them on GitHub", destination: Updater.releasesPage)
+                            }
+                        }
+                    }
+                    ForEach(notes) { release in
+                        ReleaseNotesSection(notes: release, showsVersion: notes.count > 1)
+                    }
+                }
+                .padding(16)
             }
-            .frame(maxHeight: 420)
+            // Sized up front: a popover doesn't grow when the notes arrive after it opens.
+            .frame(minHeight: 380, maxHeight: 460)
+            .animation(.smooth(duration: 0.3), value: notes.map(\.id))
             Divider()
             HStack {
-                if let page = release.page {
-                    Link("View on GitHub", destination: page)
-                }
+                Link("All Releases on GitHub", destination: Updater.releasesPage)
                 Spacer()
-                if case .available = app.updater.phase {
+                if case .available(let release) = app.updater.phase, release.version == through {
                     Button("Update") { app.updater.downloadUpdate() }
                         .buttonStyle(.glassProminent)
                 }
             }
             .padding(12)
         }
-        .frame(width: 440)
+        .frame(width: 460)
+        .task {
+            if let known, notes.isEmpty { notes = [known] }
+            do {
+                let loaded = try await app.updater.releaseNotes(after: after, through: through)
+                if !loaded.isEmpty { notes = loaded }
+            } catch {
+                self.error = Updater.describe(error)
+            }
+            loading = false
+        }
+    }
+}
+
+private struct ReleaseNotesSection: View {
+    let notes: ReleaseNotes
+    let showsVersion: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                if showsVersion {
+                    Text(notes.version.description)
+                        .font(.headline)
+                }
+                if let date = notes.publishedAt {
+                    Text(date.formatted(date: .abbreviated, time: .omitted))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if let page = notes.page {
+                    Link(destination: page) {
+                        Label("View on GitHub", systemImage: "arrow.up.forward.square")
+                    }
+                    .font(.caption)
+                    .help(page.absoluteString)
+                }
+            }
+            MarkdownView(text: notes.text.isEmpty ? "No notes for this release." : notes.text)
+                .textSelection(.enabled)
+            if showsVersion { Divider().padding(.top, 4) }
+        }
     }
 }

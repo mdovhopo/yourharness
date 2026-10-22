@@ -367,9 +367,12 @@ private struct GeneralSettingsView: View {
         Form {
             Section {
                 LabeledContent("Version") {
-                    Text(app.updater.build.map { "\(app.updater.versionLabel) (build \($0))" } ?? app.updater.versionLabel)
-                        .monospacedDigit()
-                        .textSelection(.enabled)
+                    HStack(spacing: 10) {
+                        Text(app.updater.build.map { "\(app.updater.versionLabel) (build \($0))" } ?? app.updater.versionLabel)
+                            .monospacedDigit()
+                            .textSelection(.enabled)
+                        CurrentReleaseNotesButton()
+                    }
                 }
                 LabeledContent("Updates") {
                     UpdateStatus()
