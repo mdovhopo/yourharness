@@ -73,6 +73,9 @@ public struct SessionInfo: Sendable, Equatable {
     public var cwd: String?
     public var permissionMode: String?
     public var cliVersion: String?
+    /// What the agent can run itself with its Skill tool: skills, bundled ones included,
+    /// as opposed to commands only the CLI runs (`/compact`).
+    public var skills: [String]? = nil
 }
 
 public struct ToolResult: Sendable, Equatable {

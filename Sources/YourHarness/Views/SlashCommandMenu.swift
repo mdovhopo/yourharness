@@ -2,8 +2,8 @@ import HarnessCore
 import SwiftUI
 
 extension View {
-    /// The "/" menu for a composer's text field: while the text is a command name being
-    /// typed, it lists matching commands and skills above the field. ↑↓ pick, Tab
+    /// The "/" menu for a composer's text field: while a command name is being typed, at
+    /// the start or as a word later on (skills to chain), it lists matches above the field. ↑↓ pick, Tab
     /// completes, Return runs one that takes no arguments (or completes one that does),
     /// Esc closes.
     func slashCommandMenu(text: Binding<String>, projectID: UUID, run: @escaping () -> Void) -> some View {
@@ -22,15 +22,21 @@ private struct SlashCommandMenu: ViewModifier {
     @State private var dismissedAt: String?
     @State private var listHeight: CGFloat = 0
 
-    /// The command name being typed, without the slash; nil once there's a space.
+    /// The command name being typed, without the slash: at the start, or as a word later on;
+    /// nil once there's a space after it.
     private var query: String? {
-        guard text.hasPrefix("/"), !text.contains(where: \.isWhitespace) else { return nil }
-        return String(text.dropFirst())
+        SlashCommand.trailingCommand(in: text)?.query
+    }
+
+    /// Typed after the start of the message: a skill to chain, not a command to run now.
+    private var isChained: Bool {
+        SlashCommand.trailingCommand(in: text).map { $0.start > text.startIndex } ?? false
     }
 
     private var matches: [SlashCommand] {
         guard let query, dismissedAt != text else { return [] }
-        let commands = app.slashCommands(for: projectID)
+        // Partway through a message, only what the agent can run itself.
+        let commands = isChained ? app.chainableCommands(for: projectID) : app.slashCommands(for: projectID)
         guard !query.isEmpty else { return commands }
         let q = query.lowercased()
         func rank(_ command: SlashCommand) -> Int? {
@@ -97,12 +103,15 @@ private struct SlashCommandMenu: ViewModifier {
     }
 
     private func complete(_ command: SlashCommand) {
-        text = "/\(command.name) "
+        let start = SlashCommand.trailingCommand(in: text)?.start ?? text.startIndex
+        text = String(text[..<start]) + "/\(command.name) "
     }
 
     /// Runs it right away unless it needs something more: `/compact` (optional
-    /// instructions) runs, `/hello <name>` waits for the name.
+    /// instructions) runs, `/hello <name>` waits for the name. Later in a message, it's
+    /// only put in.
     private func accept(_ command: SlashCommand) {
+        guard !isChained else { return complete(command) }
         let hint = command.argumentHint
         if hint.isEmpty || hint.hasPrefix("[") || hint.localizedCaseInsensitiveContains("optional") {
             text = "/\(command.name)"

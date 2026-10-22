@@ -103,6 +103,9 @@ final class AppModel {
         slashCommands = Dictionary(uniqueKeysWithValues: state.slashCommands.compactMap { key, commands in
             UUID(uuidString: key).map { ($0, commands) }
         })
+        skillNames = Dictionary(uniqueKeysWithValues: state.skills.compactMap { key, skills in
+            UUID(uuidString: key).map { ($0, skills) }
+        })
         contextWindows = state.contextWindows
         rateLimit = state.rateLimit
         rateLimitUpdatedAt = state.rateLimitUpdatedAt
@@ -992,6 +995,31 @@ final class AppModel {
                      argumentHint: "<question>", isBuiltin: true),
     ]
 
+    /// By project: the skills a session there reported, which the agent can run itself.
+    private(set) var skillNames: [UUID: [String]] = [:]
+
+    func noteSkills(_ skills: [String], projectID: UUID) {
+        guard skillNames[projectID] != skills else { return }
+        skillNames[projectID] = skills
+        save()
+    }
+
+    /// Commands the agent can run itself partway through a message: skills, by what a
+    /// session reported; until one has, your own commands and skills.
+    func chainableCommands(for projectID: UUID) -> [SlashCommand] {
+        let commands = slashCommands(for: projectID)
+        guard let skills = skillNames[projectID].map(Set.init) else { return commands.filter { !$0.isBuiltin } }
+        return commands.filter { command in skills.contains(command.name) || command.aliases.contains(where: skills.contains) }
+    }
+
+    /// Your message as the agent gets it: with skills named later in it (`then /review`),
+    /// a note to run them as they come up. Claude Code only runs the one a message starts with.
+    func messageForAgent(_ text: String, projectID: UUID) -> String {
+        let known = Set(chainableCommands(for: projectID).flatMap { [$0.name] + $0.aliases })
+        guard let note = SlashCommand.chainNote(for: SlashCommand.chainedCommands(in: text, known: known)) else { return text }
+        return text + "\n\n" + note
+    }
+
     /// What the "/" menu offers in a project: the app's own, then the CLI's.
     func slashCommands(for projectID: UUID) -> [SlashCommand] {
         let own = Set(Self.appCommands.map(\.name))
@@ -1446,6 +1474,7 @@ final class AppModel {
         state.defaults = defaults
         state.claudeModels = claudeModels
         state.slashCommands = Dictionary(uniqueKeysWithValues: slashCommands.map { ($0.uuidString, $1) })
+        state.skills = Dictionary(uniqueKeysWithValues: skillNames.map { ($0.uuidString, $1) })
         state.contextWindows = contextWindows
         state.rateLimit = rateLimit
         state.rateLimitUpdatedAt = rateLimitUpdatedAt

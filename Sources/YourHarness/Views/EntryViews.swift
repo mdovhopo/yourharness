@@ -33,6 +33,7 @@ struct EntryView: View {
 
 struct UserMessageView: View {
     @Environment(AppModel.self) private var app
+    @Environment(ThreadModel.self) private var thread: ThreadModel?
     @Environment(\.findHighlight) private var findHighlight
     let text: String
     let attachments: [String]
@@ -89,9 +90,28 @@ struct UserMessageView: View {
 extension UserMessageView {
     /// A command reads as one: its name in monospace, then what you passed it.
     var message: Text {
-        guard let command = SlashCommand.parse(text) else { return Text(AttributedString(text).highlighted(findHighlight)) }
+        guard let command = SlashCommand.parse(text) else { return Text(chained(AttributedString(text).highlighted(findHighlight), in: text)) }
         let name = Text("/\(command.name)").font(.body.monospaced().weight(.semibold))
-        return command.arguments.isEmpty ? name : Text("\(name) \(command.arguments)")
+        return command.arguments.isEmpty ? name : Text("\(name) \(chained(AttributedString(command.arguments), in: command.arguments))")
+    }
+
+    /// Skills chained later in the message (`then /review`) read as commands too.
+    private func chained(_ attributed: AttributedString, in text: String) -> AttributedString {
+        guard let thread, text.contains("/") else { return attributed }
+        let known = Set(app.chainableCommands(for: thread.projectID).flatMap { [$0.name] + $0.aliases })
+        var result = attributed
+        for name in SlashCommand.chainedCommands(in: " " + text, known: known) {
+            var search = result.startIndex
+            while let range = result[search...].range(of: "/" + name) {
+                let before = range.lowerBound == result.startIndex ? " " : result.characters[result.characters.index(before: range.lowerBound)]
+                let after = range.upperBound == result.endIndex ? " " : result.characters[range.upperBound]
+                if before.isWhitespace, !(after.isLetter || after.isNumber || after == "-" || after == ":" || after == "/") {
+                    result[range].font = .body.monospaced().weight(.semibold)
+                }
+                search = range.upperBound
+            }
+        }
+        return result
     }
 }
 

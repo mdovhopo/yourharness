@@ -93,6 +93,19 @@ struct ClaudeStreamParserTests {
         #expect(input["command"] as? String == "touch probe_file.txt")
     }
 
+    @Test func initListsTheSkillsTheAgentCanRun() {
+        var parser = ClaudeStreamParser()
+        let line = #"{"type":"system","subtype":"init","session_id":"s1","skills":["graphify","code-review","anthropic-skills:pdf"],"slash_commands":["compact","code-review"]}"#
+        guard case .sessionStarted(let info) = parser.parse(line: Data(line.utf8)).first else {
+            Issue.record("expected sessionStarted")
+            return
+        }
+        #expect(info.skills == ["graphify", "code-review", "anthropic-skills:pdf"])
+        let older = #"{"type":"system","subtype":"init","session_id":"s2"}"#
+        guard case .sessionStarted(let without) = parser.parse(line: Data(older.utf8)).first else { return }
+        #expect(without.skills == nil)
+    }
+
     @Test func unknownAndMalformedLinesAreIgnored() {
         var parser = ClaudeStreamParser()
         #expect(parser.parse(line: Data("not json".utf8)).isEmpty)

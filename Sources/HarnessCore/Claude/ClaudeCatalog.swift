@@ -66,6 +66,46 @@ public struct SlashCommand: Sendable, Equatable, Codable, Identifiable {
 
     /// Only mean something in the terminal UI.
     public static let terminalOnly: Set<String> = ["color", "focus", "heapdump"]
+
+    /// The `/name` being typed at the end of the text: at its start or after a space, with
+    /// nothing after it yet. `start` is where its slash is.
+    public static func trailingCommand(in text: String) -> (start: String.Index, query: String)? {
+        guard let slash = text.lastIndex(of: "/") else { return nil }
+        if slash > text.startIndex, !text[text.index(before: slash)].isWhitespace { return nil }
+        let query = text[text.index(after: slash)...]
+        guard !query.contains(where: { $0.isWhitespace || $0 == "/" }) else { return nil }
+        return (slash, String(query))
+    }
+
+    /// `/name` words after the start of a message that name one of `known`, in order, once
+    /// each: skills to run along the way. The command a message starts with is Claude Code's
+    /// to run, so it isn't one of them.
+    public static func chainedCommands(in text: String, known: Set<String>) -> [String] {
+        var found: [String] = []
+        var index = text.startIndex
+        while let slash = text[index...].firstIndex(of: "/") {
+            index = text.index(after: slash)
+            // A word of its own, not the start of the message, not part of a path or `code`.
+            guard slash > text.startIndex, text[text.index(before: slash)].isWhitespace else { continue }
+            let name = text[index...].prefix { !$0.isWhitespace && !",.;!?)\"'`".contains($0) }
+            guard !name.isEmpty, !name.contains("/") else { continue }
+            let after = text.index(index, offsetBy: name.count)
+            if after < text.endIndex, text[after] == "/" { continue }
+            let key = String(name)
+            if known.contains(key), !found.contains(key) { found.append(key) }
+        }
+        return found
+    }
+
+    /// What's added to a message that chains skills, so the agent runs each where it comes up.
+    public static func chainNote(for names: [String]) -> String? {
+        guard !names.isEmpty else { return nil }
+        let list = names.map { "/\($0)" }
+        let joined = list.count == 1 ? list[0] : list.dropLast().joined(separator: ", ") + " and " + list.last!
+        return names.count == 1
+            ? "(Run the \(joined) skill where it comes up above, with the Skill tool.)"
+            : "(Run the \(joined) skills where they come up above, in that order, with the Skill tool.)"
+    }
 }
 
 public struct ClaudeCatalog: Sendable, Equatable {

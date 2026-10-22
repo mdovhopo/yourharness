@@ -400,11 +400,12 @@ final class ThreadModel: Identifiable {
 
         let stopFirst = working && interrupting
         if stopFirst { interruptingForMessage = true }
+        let forAgent = isSideChat ? text : app.messageForAgent(text, projectID: projectID)
         Task {
             do {
                 let session = try await ensureSession()
                 if stopFirst { try await session.interrupt() }
-                try await session.send(text: text, images: images, id: messageID, priority: stopFirst ? .now : nil)
+                try await session.send(text: forAgent, images: images, id: messageID, priority: stopFirst ? .now : nil)
             } catch {
                 fail(error.localizedDescription)
             }
@@ -632,6 +633,7 @@ final class ThreadModel: Identifiable {
             receivedInit = true
             sessionID = info.sessionID
             activeModelName = info.model
+            if let skills = info.skills, !isSideChat { app.noteSkills(skills, projectID: projectID) }
             app.save()
 
         case .status(let status):

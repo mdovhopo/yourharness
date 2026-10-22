@@ -137,6 +137,9 @@ struct PersistedState: Codable {
     /// Each project's slash commands and skills as the CLI last listed them, keyed by
     /// project ID, so the "/" menu fills instantly.
     var slashCommands: [String: [SlashCommand]] = [:]
+    /// Each project's skills as a session there last listed them: what the agent can run
+    /// partway through a message.
+    var skills: [String: [String]] = [:]
     var appearance = Appearance.system
     /// Tell you when a turn finishes or Claude needs you. On unless turned off.
     var notifications = true
@@ -173,6 +176,7 @@ struct PersistedState: Codable {
         titleGeneration = try container.decodeIfPresent(TitleGenerationSettings.self, forKey: .titleGeneration) ?? TitleGenerationSettings()
         showsInspector = try container.decodeIfPresent(Bool.self, forKey: .showsInspector) ?? false
         slashCommands = try container.decodeIfPresent([String: [SlashCommand]].self, forKey: .slashCommands) ?? [:]
+        skills = try container.decodeIfPresent([String: [String]].self, forKey: .skills) ?? [:]
         appearance = try container.decodeIfPresent(Appearance.self, forKey: .appearance) ?? .system
         notifications = try container.decodeIfPresent(Bool.self, forKey: .notifications) ?? true
         planChecklist = try container.decodeIfPresent(Bool.self, forKey: .planChecklist) ?? true

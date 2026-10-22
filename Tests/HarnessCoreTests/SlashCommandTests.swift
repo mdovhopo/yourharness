@@ -110,3 +110,34 @@ struct SideChatLaunchTests {
                                      environment: [:]).arguments.contains("--fork-session"))
     }
 }
+
+struct ChainedCommandTests {
+    @Test func findsTheCommandBeingTypedAnywhere() {
+        #expect(SlashCommand.trailingCommand(in: "/rev")?.query == "rev")
+        #expect(SlashCommand.trailingCommand(in: "fix the bug then /rev")?.query == "rev")
+        #expect(SlashCommand.trailingCommand(in: "then /")?.query == "")
+        #expect(SlashCommand.trailingCommand(in: "then /review ") == nil)
+        #expect(SlashCommand.trailingCommand(in: "see src/main") == nil)
+        #expect(SlashCommand.trailingCommand(in: "open /usr/bin") == nil)
+        let text = "a /re"
+        #expect(SlashCommand.trailingCommand(in: text).map { text[$0.start...] } == "/re")
+    }
+
+    @Test func listsSkillsChainedInAMessage() {
+        let known: Set<String> = ["review", "commit", "deploy:staging", "plan"]
+        #expect(SlashCommand.chainedCommands(in: "/plan the work, then /review and /commit.", known: known) == ["review", "commit"])
+        #expect(SlashCommand.chainedCommands(in: "do it then /deploy:staging", known: known) == ["deploy:staging"])
+        #expect(SlashCommand.chainedCommands(in: "run /review twice: /review", known: known) == ["review"])
+        #expect(SlashCommand.chainedCommands(in: "look at /review/notes.md and src/commit", known: known).isEmpty)
+        #expect(SlashCommand.chainedCommands(in: "unknown /nope here", known: known).isEmpty)
+        #expect(SlashCommand.chainedCommands(in: "/review only", known: known).isEmpty)
+        #expect(SlashCommand.chainedCommands(in: "then (/review)", known: known).isEmpty)
+    }
+
+    @Test func notesTheChain() {
+        #expect(SlashCommand.chainNote(for: []) == nil)
+        #expect(SlashCommand.chainNote(for: ["review"]) == "(Run the /review skill where it comes up above, with the Skill tool.)")
+        #expect(SlashCommand.chainNote(for: ["review", "commit", "deploy"])
+            == "(Run the /review, /commit and /deploy skills where they come up above, in that order, with the Skill tool.)")
+    }
+}

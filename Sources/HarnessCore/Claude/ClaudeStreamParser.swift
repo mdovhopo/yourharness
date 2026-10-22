@@ -81,7 +81,8 @@ public struct ClaudeStreamParser: Sendable {
                 model: object["model"] as? String,
                 cwd: object["cwd"] as? String,
                 permissionMode: object["permissionMode"] as? String,
-                cliVersion: object["claude_code_version"] as? String
+                cliVersion: object["claude_code_version"] as? String,
+                skills: object["skills"] as? [String]
             ))]
         case "status":
             guard let status = object["status"] as? String else { return [] }
