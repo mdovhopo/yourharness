@@ -59,6 +59,8 @@ struct MessageJump: Equatable {
     let direction: Direction
 }
 
+private let expandsAll = ProcessInfo.processInfo.environment["YH_EXPAND_WORK"] != nil
+
 extension ThreadModel {
     /// The transcript with each finished turn's work folded between your message and
     /// Claude's answer. The turn in progress shows everything, so you can follow along;
@@ -119,10 +121,12 @@ extension ThreadModel {
         }
         let hidden = turn.filter { !shows($0) }
         guard !hidden.isEmpty else { return turn.map(TranscriptRow.entry) }
-        let isExpanded = expanded.contains(first.id)
+        // Development: `YH_EXPAND_WORK=1` opens every turn's work, for checking how it looks.
+        let isExpanded = expanded.contains(first.id) || expandsAll
         let work = TurnWork(turnID: first.id, entries: hidden, startedAt: first.date, endedAt: first.turnEndedAt, isExpanded: isExpanded)
+        // Opened, the work shows inside its own row, as one group.
         var rows: [TranscriptRow] = [.entry(first), .work(work)]
-        for entry in turn.dropFirst() where isExpanded || shows(entry) {
+        for entry in turn.dropFirst() where shows(entry) {
             rows.append(.entry(entry))
         }
         return rows

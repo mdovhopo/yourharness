@@ -35,38 +35,66 @@ enum TurnDuration {
     }
 }
 
-/// A finished turn's work in one line, between your message and Claude's answer:
-/// "Worked for 2m 14s · 9 tool calls · edited 3 files". Click to see it all.
+/// A finished turn's work, folded into one row between your message and Claude's answer:
+/// "Worked for 2m 14s · 9 tool calls · edited 3 files". Opened, it shows every step as one
+/// group: thinking, tool calls, sub-agents, and what Claude said along the way.
 struct WorkSummaryRow: View {
     let work: TurnWork
     let toggle: () -> Void
     @State private var hovering = false
 
     var body: some View {
-        Button(action: toggle) {
-            HStack(spacing: 7) {
-                Image(systemName: "chevron.right")
-                    .font(.caption2.weight(.bold))
-                    .rotationEffect(.degrees(work.isExpanded ? 90 : 0))
-                Text(work.duration.map { "Worked for \(TurnDuration.format($0))" } ?? "Worked")
-                    .fontWeight(.medium)
-                if !details.isEmpty {
-                    Text(details)
-                        .foregroundStyle(.tertiary)
+        VStack(alignment: .leading, spacing: 0) {
+            Button(action: toggle) {
+                HStack(spacing: 8) {
+                    Image(systemName: "hammer")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(work.duration.map { "Worked for \(TurnDuration.format($0))" } ?? "Worked")
+                        .fontWeight(.medium)
+                    if !details.isEmpty {
+                        Text(details)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 8)
+                    Text(work.isExpanded ? "Hide work" : "Show work")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .opacity(hovering || work.isExpanded ? 1 : 0)
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(work.isExpanded ? 90 : 0))
                 }
-                Rectangle()
-                    .fill(.separator)
-                    .frame(height: 1)
-                    .frame(maxWidth: .infinity)
-                    .padding(.leading, 4)
+                .font(.callout)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .contentShape(.rect)
             }
-            .font(.callout)
-            .foregroundStyle(hovering ? .primary : .secondary)
-            .contentShape(.rect)
+            .buttonStyle(.plain)
+            .onHover { hovering = $0 }
+            .help(work.isExpanded ? "Hide Claude's work" : "Show what Claude did: thinking, tool calls and sub-agents")
+
+            if work.isExpanded {
+                Divider()
+                VStack(alignment: .leading, spacing: 14) {
+                    ForEach(work.entries) { entry in
+                        EntryView(entry: entry)
+                    }
+                }
+                .padding(.leading, 12)
+                .overlay(alignment: .leading) {
+                    Rectangle().fill(.separator).frame(width: 2)
+                }
+                .padding(12)
+                .transition(.opacity)
+            }
         }
-        .buttonStyle(.plain)
-        .onHover { hovering = $0 }
-        .help(work.isExpanded ? "Hide Claude's work" : "Show what Claude did: thinking, tool calls and sub-agents")
+        .background(hovering && !work.isExpanded ? AnyShapeStyle(.primary.opacity(0.06)) : AnyShapeStyle(.primary.opacity(0.035)),
+                    in: .rect(cornerRadius: Theme.innerRadius))
+        .overlay(RoundedRectangle(cornerRadius: Theme.innerRadius).strokeBorder(.separator.opacity(0.6)))
+        .animation(.easeOut(duration: 0.12), value: hovering)
     }
 
     /// Counted when the row shows, not for every turn of the thread.
@@ -85,7 +113,7 @@ struct WorkSummaryRow: View {
         if tools > 0 { parts.append(tools == 1 ? "1 tool call" : "\(tools) tool calls") }
         if !files.isEmpty { parts.append(files.count == 1 ? "edited 1 file" : "edited \(files.count) files") }
         if agents > 0 { parts.append(agents == 1 ? "1 agent" : "\(agents) agents") }
-        return parts.isEmpty ? "" : "· " + parts.joined(separator: " · ")
+        return parts.joined(separator: " · ")
     }
 
     private static let editTools: Set<String> = ["Edit", "MultiEdit", "Write", "NotebookEdit"]
@@ -102,19 +130,38 @@ struct MessageJumpControls: View {
     let thread: ThreadModel
 
     var body: some View {
-        VStack(spacing: 0) {
+        VStack(spacing: 8) {
             Button("Previous Message", systemImage: "chevron.up") { thread.jumpToMessage(.previous) }
                 .help("Your previous message (⌘[)")
-            Divider().frame(width: 18)
             Button("Next Message", systemImage: "chevron.down") { thread.jumpToMessage(.next) }
                 .help("Your next message, or the end (⌘])")
         }
         .labelStyle(.iconOnly)
-        .buttonStyle(.borderless)
+        .buttonStyle(.glass)
+        .buttonBorderShape(.circle)
+        .controlSize(.regular)
         .font(.callout.weight(.semibold))
+    }
+}
+
+/// Copies a message's text, and says so for a moment.
+struct CopyMessageButton: View {
+    let text: String
+    @State private var copied = false
+
+    var body: some View {
+        Button(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc") {
+            Pasteboard.copy(text)
+            copied = true
+            Task {
+                try? await Task.sleep(for: .seconds(1.5))
+                copied = false
+            }
+        }
+        .labelStyle(.iconOnly)
+        .buttonStyle(.borderless)
         .foregroundStyle(.secondary)
-        .padding(.vertical, 6)
-        .padding(.horizontal, 7)
-        .glassEffect(.regular, in: .capsule)
+        .contentTransition(.symbolEffect(.replace))
+        .help("Copy message")
     }
 }

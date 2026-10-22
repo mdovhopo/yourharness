@@ -12,7 +12,7 @@ struct EntryView: View {
         case .user:
             UserMessageView(text: entry.text, attachments: entry.attachments, delivery: entry.delivery, date: entry.date)
         case .assistant:
-            StreamingMarkdown(entry: entry)
+            AssistantMessageView(entry: entry)
         case .thinking:
             ThinkingView(entry: entry)
         case .tool where thread?.planSteps[entry.id] != nil:
@@ -31,6 +31,26 @@ struct EntryView: View {
     }
 }
 
+/// Claude's reply, with Copy under it while the pointer is over it.
+struct AssistantMessageView: View {
+    let entry: TranscriptEntry
+    @State private var hovering = false
+
+    var body: some View {
+        StreamingMarkdown(entry: entry)
+            // In the gap below, so showing it doesn't move anything.
+            .overlay(alignment: .bottomLeading) {
+                if hovering, !entry.isStreaming {
+                    CopyMessageButton(text: entry.text)
+                        .offset(y: 20)
+                        .transition(.opacity)
+                }
+            }
+            .onHover { hovering = $0 }
+            .animation(.easeOut(duration: 0.12), value: hovering)
+    }
+}
+
 struct UserMessageView: View {
     @Environment(AppModel.self) private var app
     @Environment(ThreadModel.self) private var thread: ThreadModel?
@@ -39,6 +59,7 @@ struct UserMessageView: View {
     let attachments: [String]
     var delivery = TranscriptEntry.Delivery.normal
     var date: Date?
+    @State private var hovering = false
 
     var body: some View {
         HStack {
@@ -79,11 +100,20 @@ struct UserMessageView: View {
                 case .normal:
                     EmptyView()
                 }
-                if let date {
-                    MessageTime(date: date)
+                HStack(spacing: 6) {
+                    if hovering, !text.isEmpty {
+                        CopyMessageButton(text: text)
+                            .font(.caption)
+                            .transition(.opacity)
+                    }
+                    if let date {
+                        MessageTime(date: date)
+                    }
                 }
             }
         }
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovering)
     }
 }
 
