@@ -12,6 +12,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 - **Claude's work folds away when a turn ends.** While Claude works you see every step; once it's done, the thinking, tool calls, sub-agents and what it said along the way fold into one line between your message and its answer: "Worked for 2m 14s · 9 tool calls · edited 3 files". Click it to see everything. Notices and messages you sent mid-turn stay in view.
 - **How long a turn takes.** The working indicator counts up while Claude works, and each finished turn says how long it took.
 - **Times on your messages,** and your messages stand out more: tinted and outlined, with a little more room above each turn.
+- **Claude can show you images and videos.** When a screenshot, a screen recording, a simulator capture or a chart would say more than words, Claude puts it in the conversation: images open in Preview, videos play right there. The files are copied into the thread, so they stay after the originals are gone. It doesn't ask first, since it only shows you files.
 - **Jump between your messages.** ⌘[ and ⌘] (Thread menu) or the small arrows at the bottom right of the transcript go to your previous and next message; past the last, to the end.
 
 ## [0.0.3] - 2026-10-22

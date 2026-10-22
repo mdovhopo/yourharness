@@ -907,6 +907,11 @@ final class AppModel {
         // Claude Code keeps its task tools from current models unless asked; they're what
         // the plan checklist shows, and cost nothing until used (they load on demand).
         if planChecklist, !thread.isSideChat { options.environment["CLAUDE_CODE_ENABLE_TODO_TOOLS"] = "1" }
+        if !thread.isSideChat {
+            // Showing you a file changes nothing: it doesn't ask.
+            options.allowedTools.append("mcp__harness")
+            options.appendSystemPrompt = [options.appendSystemPrompt, AgentInstructions.media].compactMap(\.self).joined(separator: "\n\n")
+        }
         if browserTools {
             // The browser is the app's own and touches none of your files: it doesn't ask.
             options.allowedTools.append("mcp__browser")
@@ -1095,12 +1100,13 @@ final class AppModel {
 
     /// The tools a thread's session serves from inside the app.
     func mcpServers(for thread: ThreadModel) -> [any MCPToolServer] {
-        guard browserTools else { return [] }
         if thread.isSideChat {
-            guard let parent = thread.parentThread else { return [] }
+            guard browserTools, let parent = thread.parentThread else { return [] }
             return [BrowserToolServer(browser: BrowserTools(thread: parent, app: self, readOnly: true))]
         }
-        return [BrowserToolServer(browser: BrowserTools(thread: thread, app: self, readOnly: false))]
+        var servers: [any MCPToolServer] = [HarnessToolServer(media: MediaTool(thread: thread, app: self))]
+        if browserTools { servers.append(BrowserToolServer(browser: BrowserTools(thread: thread, app: self, readOnly: false))) }
+        return servers
     }
 
     func setNotifications(_ enabled: Bool) {

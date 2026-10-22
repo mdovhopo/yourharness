@@ -26,6 +26,13 @@ enum AgentInstructions {
     needs changes, say what the main thread should do.
     """
 
+    /// The media tool, always on in a thread.
+    static let media = """
+    To show the user an image or a video (a screenshot, a screen recording, a chart or image you made), call \
+    mcp__harness__show_media with its path: it appears in the conversation. Use it when seeing it would help \
+    more than describing it.
+    """
+
     /// When the browser tools are on.
     static let browser = """
     YourHarness has a real web browser built in, which you drive with the mcp__browser__ tools. The user sees \

@@ -17,6 +17,8 @@ struct EntryView: View {
             ThinkingView(entry: entry)
         case .tool where thread?.planSteps[entry.id] != nil:
             PlanStepView(plan: thread?.planSteps[entry.id] ?? TaskPlan(), isLatest: thread?.latestPlanStep == entry.id)
+        case .tool where entry.toolName == MediaTool.toolName:
+            SharedMediaView(entry: entry)
         case .tool where SubagentReport.toolNames.contains(entry.toolName):
             SubagentCallView(entry: entry)
         case .tool:

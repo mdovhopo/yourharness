@@ -85,6 +85,8 @@ extension ThreadModel {
         let answer = turn.last { $0.kind == .assistant }
         let shows: (TranscriptEntry) -> Bool = { entry in
             entry === first || entry === answer || entry.kind == .user || entry.kind == .notice || entry.kind == .commandOutput
+                // What Claude put in front of you to see.
+                || entry.kind == .tool && entry.toolName == MediaTool.toolName && !entry.toolIsError
         }
         let hidden = turn.filter { !shows($0) }
         guard !hidden.isEmpty else { return turn.map(TranscriptRow.entry) }
