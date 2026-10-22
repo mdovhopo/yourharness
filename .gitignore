@@ -6,3 +6,6 @@
 xcuserdata/
 DerivedData/
 *.xcodeproj
+
+# Worktrees of background agents
+.claude/worktrees/
