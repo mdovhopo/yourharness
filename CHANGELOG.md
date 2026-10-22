@@ -6,6 +6,9 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+### Fixed
+- The left sidebar no longer goes missing at launch when the right sidebar was left open. Its button also said it was showing, so the first click did nothing.
+
 ## [0.0.2] - 2026-10-22
 
 ### Highlights

@@ -4,6 +4,11 @@ struct RootView: View {
     @Environment(AppModel.self) private var app
     @Environment(\.openWindow) private var openWindow
     @Environment(\.openSettings) private var openSettings
+    /// The window is first laid out at its default size, before it grows to the saved one.
+    /// Opening the right sidebar in that pass can leave no room for the left one, which
+    /// AppKit then collapses while its toggle still says it's shown; so it opens once the
+    /// window is on screen.
+    @State private var isOnScreen = false
 
     var body: some View {
         NavigationSplitView {
@@ -30,7 +35,7 @@ struct RootView: View {
             // A quick crossfade when switching threads, not a hard cut.
             .animation(.easeInOut(duration: 0.16), value: app.selectedThreadID)
             .animation(.easeInOut(duration: 0.16), value: app.overviewProjectID)
-            .inspector(isPresented: Binding(get: { app.showsInspector }, set: { app.setShowsInspector($0) })) {
+            .inspector(isPresented: Binding(get: { isOnScreen && app.showsInspector }, set: { app.setShowsInspector($0) })) {
                 ThreadInspector(thread: app.overviewProject == nil ? app.selectedThread : nil)
                     .inspectorColumnWidth(min: 300, ideal: 380, max: 960)
             }
@@ -39,6 +44,7 @@ struct RootView: View {
             ResumeSessionSheet()
         }
         .onAppear {
+            isOnScreen = true
             // Development: open the resume sheet filled in, for checking it without clicking.
             if ProcessInfo.processInfo.environment["YH_RESUME_SESSION"] != nil { app.isResumingSession = true }
             // Development: open Settings, for checking it without a shortcut.
