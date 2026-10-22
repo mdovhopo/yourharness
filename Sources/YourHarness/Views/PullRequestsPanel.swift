@@ -11,10 +11,13 @@ struct PullRequestsPanel: View {
 
     var body: some View {
         let items = app.pullRequests(for: thread)
-        let open = items.compactMap(\.pull).filter { $0.state == .open }
-        let done = items.compactMap(\.pull).filter { $0.state != .open }
+        // What the thread worked on, as a tree; what only came up in it, below.
+        let worked = items.filter(\.isWorkedOn)
+        let mentioned = items.filter { !$0.isWorkedOn }
+        let open = worked.compactMap(\.pull).filter { $0.state == .open }
+        let done = worked.compactMap(\.pull).filter { $0.state != .open }
             .sorted { ($0.mergedAt ?? $0.updatedAt ?? .distantPast) > ($1.mergedAt ?? $1.updatedAt ?? .distantPast) }
-        let unknown = items.filter { $0.pull == nil }
+        let unknown = worked.filter { $0.pull == nil }
         Group {
             if items.isEmpty {
                 ContentUnavailableView {
@@ -46,6 +49,10 @@ struct PullRequestsPanel: View {
                         ForEach(unknown) { item in
                             UnknownPullRequestRow(item: item)
                         }
+                        if !mentioned.isEmpty {
+                            MentionedPullRequests(items: mentioned)
+                                .padding(.top, worked.isEmpty ? 0 : 10)
+                        }
                     }
                     .padding(12)
                     .animation(.smooth(duration: 0.35), value: items.compactMap(\.pull))
@@ -58,6 +65,32 @@ struct PullRequestsPanel: View {
                 await app.syncPullRequests(for: thread)
                 try? await Task.sleep(for: .seconds(15))
             }
+        }
+    }
+}
+
+/// PRs that came up in the thread without it working on them: links you pasted, ones
+/// Claude looked at or cited. Below the thread's own, in a plain list.
+private struct MentionedPullRequests: View {
+    let items: [AppModel.ThreadPullRequest]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Mentioned")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .help("Came up in this thread, but it didn't change them")
+            VStack(spacing: 0) {
+                ForEach(items) { item in
+                    if let pull = item.pull {
+                        PullRequestCardRow(pull: pull, graph: nil)
+                    } else {
+                        UnknownPullRequestRow(item: item, inCard: true)
+                    }
+                    if item.id != items.last?.id { Divider().padding(.leading, 34) }
+                }
+            }
+            .card()
         }
     }
 }
@@ -326,6 +359,8 @@ enum StateChip {
 /// or with `gh` signed out.
 private struct UnknownPullRequestRow: View {
     let item: AppModel.ThreadPullRequest
+    /// A row in a list's card, rather than a card of its own.
+    var inCard = false
 
     var body: some View {
         Button {
@@ -343,11 +378,19 @@ private struct UnknownPullRequestRow: View {
                 }
                 Spacer()
             }
-            .padding(12)
+            .padding(inCard ? 10 : 12)
             .contentShape(.rect)
         }
         .buttonStyle(.plain)
-        .card()
+        .modifier(CardUnless(inCard: inCard))
         .help(item.url.absoluteString)
+    }
+}
+
+private struct CardUnless: ViewModifier {
+    let inCard: Bool
+
+    func body(content: Content) -> some View {
+        if inCard { content } else { content.card() }
     }
 }

@@ -22,7 +22,7 @@ struct ThreadInspector: View {
         }
         .environment(\.issueLinker, thread.map(app.issueLinker(for:)) ?? IssueLinker(repos: [], openPullRequests: []))
         .onChange(of: thread?.id, initial: true) { app.choosePanel(for: thread) }
-        .onChange(of: thread.map { app.pullRequests(for: $0).isEmpty } ?? true) { _, empty in
+        .onChange(of: thread.map { app.workedPullRequests(for: $0).isEmpty } ?? true) { _, empty in
             if !empty, let thread { app.pullRequestsAppeared(for: thread) }
         }
         .toolbar {

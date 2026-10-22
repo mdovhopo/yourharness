@@ -106,6 +106,11 @@ struct ThreadMeta: Codable {
     var workingDirectory: String?
     /// PR and MR links that came up in the thread. Nil until worked out.
     var pullRequests: [String]?
+    /// Folders the thread changed something in (edits, commits, pushes), newest last.
+    /// Nil until worked out.
+    var writtenFootprint: [String]?
+    /// The PRs it worked on, as opposed to ones it only mentioned. Nil until worked out.
+    var workedPullRequests: [String]?
 }
 
 struct PersistedState: Codable {

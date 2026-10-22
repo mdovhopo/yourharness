@@ -209,7 +209,7 @@ final class AppModel {
     func choosePanel(for thread: ThreadModel?) {
         panelPicked = false
         guard let thread else { return }
-        if !pullRequests(for: thread).isEmpty {
+        if !workedPullRequests(for: thread).isEmpty {
             inspectorPanel = .pullRequests
         } else if inspectorPanel == .pullRequests {
             inspectorPanel = .sideChat
@@ -219,7 +219,7 @@ final class AppModel {
     /// The thread on screen just got its first PRs (found a moment after it opened, or
     /// Claude just made one): show them, unless you've picked another tab.
     func pullRequestsAppeared(for thread: ThreadModel) {
-        guard !panelPicked, !pullRequests(for: thread).isEmpty else { return }
+        guard !panelPicked, !workedPullRequests(for: thread).isEmpty else { return }
         inspectorPanel = .pullRequests
     }
 
@@ -369,7 +369,7 @@ final class AppModel {
             guard !thread.isSettled, !thread.isEphemeral, !thread.isSideChat, thread.autoSettle, thread.reactivatedAt == nil,
                   !thread.isWorking, thread.pendingPermissions.isEmpty, visibleThreadID != thread.id
             else { continue }
-            let pulls = pullRequests(for: thread)
+            let pulls = workedPullRequests(for: thread)
             guard !pulls.isEmpty else { continue }
             let merges = pulls.compactMap { $0.pull?.state == .merged ? ($0.pull?.mergedAt ?? now) : nil }
             // Work after the last merge (beyond the turn that merged it) is new work.
@@ -388,7 +388,7 @@ final class AppModel {
     func syncPullRequestsForSettling() async {
         for thread in threads where !thread.isSettled && !thread.isEphemeral && !thread.isSideChat && thread.autoSettle
             && !thread.pullRequestLinks.isEmpty {
-            let pulls = pullRequests(for: thread)
+            let pulls = workedPullRequests(for: thread)
             guard pulls.contains(where: { $0.pull?.state != .merged }) else { continue }
             await syncPullRequests(for: thread)
         }
@@ -683,6 +683,9 @@ final class AppModel {
         let pull: PullRequest?
         /// The branch that ties it to the thread, when that's how it was found.
         let branch: String?
+        /// The thread changed it (opened, merged, commented…) or its branch; otherwise it
+        /// only came up.
+        let isWorkedOn: Bool
     }
 
     /// The thread's PRs as their forge last described them, any state, by link ID.
@@ -697,23 +700,56 @@ final class AppModel {
     func pullRequests(for thread: ThreadModel) -> [ThreadPullRequest] {
         var result: [ThreadPullRequest] = [], seen = Set<String>()
         let openPulls = workspaceModels.values.flatMap(\.pullRequests)
+        let worked = Set(thread.workedPullRequestLinks.compactMap { PullRequestLink.find(in: $0).first?.id })
         for pull in branchPullRequests(for: thread) where seen.insert(pull.pull.id).inserted {
             result.append(ThreadPullRequest(id: pull.pull.id, number: pull.pull.number, repo: pull.pull.remote.name, url: pull.pull.url,
-                                            pull: linkedPullRequests[pull.pull.id] ?? pull.pull, branch: pull.branch))
+                                            pull: linkedPullRequests[pull.pull.id] ?? pull.pull, branch: pull.branch, isWorkedOn: true))
         }
         for url in thread.pullRequestLinks.reversed() {
             guard let link = PullRequestLink.find(in: url).first, seen.insert(link.id).inserted else { continue }
             let pull = linkedPullRequests[link.id] ?? openPulls.first(where: link.matches)
-            result.append(ThreadPullRequest(id: link.id, number: link.number, repo: link.remote.name, url: link.url, pull: pull, branch: nil))
+            result.append(ThreadPullRequest(id: link.id, number: link.number, repo: link.remote.name, url: link.url, pull: pull, branch: nil,
+                                            isWorkedOn: worked.contains(link.id)))
         }
         return result
     }
 
-    /// Open PRs whose head branch is one the thread's checkouts are on.
+    /// Only the PRs the thread worked on: what its toolbar counts and what settles it.
+    func workedPullRequests(for thread: ThreadModel) -> [ThreadPullRequest] {
+        pullRequests(for: thread).filter(\.isWorkedOn)
+    }
+
+    /// The PR links a tool call's PR activity means: a URL as is; a number in the repo it
+    /// names, or else the one the thread runs in; no PR named, the branch's own.
+    func links(for activity: PullRequestActivity, in thread: ThreadModel) -> [String] {
+        let workspace = project(id: thread.projectID).flatMap(workspace(for:))
+        let here = workspace?.checkout(containing: thread.effectiveDirectory)
+        return activity.targets.compactMap { target -> String? in
+            switch target {
+            case .link(let link):
+                return link.url.absoluteString
+            case .number(let number, let repo):
+                let remote: GitRemote?
+                if let repo {
+                    remote = workspaceModels.values.lazy.flatMap(\.remotes.values).first { $0.path.lowercased() == repo.lowercased() }
+                        ?? GitRemote(host: "github.com", path: repo, forge: .github)
+                } else {
+                    remote = here.flatMap { workspace?.remotes[$0.repo.id] }
+                }
+                guard let remote, let web = remote.webURL else { return nil }
+                return web.absoluteString + (remote.forge == .gitlab ? "/-/merge_requests/\(number)" : "/pull/\(number)")
+            case .currentBranch:
+                guard let workspace, let here, let branch = workspace.branch(of: here) else { return nil }
+                return workspace.pullRequests(for: here.repo).first { $0.headBranch == branch }?.url.absoluteString
+            }
+        }
+    }
+
+    /// Open PRs whose head branch is one the thread changed something on (not only read).
     private func branchPullRequests(for thread: ThreadModel) -> [(pull: PullRequest, branch: String)] {
         guard let project = project(id: thread.projectID), let workspace = workspace(for: project) else { return [] }
         var found: [(PullRequest, String)] = []
-        for checkout in workspace.checkouts(for: thread) {
+        for checkout in workspace.writtenCheckouts(for: thread) {
             let branch = checkout.worktree?.branch ?? (checkout.worktree == nil ? workspace.statuses[checkout.repo.id]?.branch : nil)
             guard let branch, branch != workspace.defaultBranches[checkout.repo.id] else { continue }
             found += workspace.pullRequests(for: checkout.repo).filter { $0.headBranch == branch }.map { ($0, branch) }
@@ -725,7 +761,7 @@ final class AppModel {
     /// (so they stay after merging, when they leave the open list), then all of them are
     /// fetched, whatever their state. At most every few seconds unless forced.
     func syncPullRequests(for thread: ThreadModel, force: Bool = false) async {
-        thread.addPullRequestLinks(branchPullRequests(for: thread).map(\.pull.url.absoluteString))
+        thread.addWorkedPullRequestLinks(branchPullRequests(for: thread).map(\.pull.url.absoluteString))
         let links = thread.pullRequestLinks.compactMap { PullRequestLink.find(in: $0).first }
         guard !links.isEmpty, !pullsSyncing.contains(thread.id) else { return }
         if !force, let last = pullsSyncedAt[thread.id], Date.now.timeIntervalSince(last) < 10 { return }

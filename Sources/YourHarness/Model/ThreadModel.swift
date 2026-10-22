@@ -105,6 +105,12 @@ final class ThreadModel: Identifiable {
     /// PR and MR links that came up in the thread, oldest first.
     private(set) var pullRequestLinks: [String] = []
     @ObservationIgnored private var linksKnown = true
+    /// Folders it changed something in: a branch there is its own work, and so is the branch's PR.
+    private(set) var writtenFootprint: [String] = []
+    /// PRs it opened, merged, edited, reviewed or commented on; the rest were only mentioned.
+    private(set) var workedPullRequestLinks: [String] = []
+    /// False for a thread saved before work was told from mentions, until it's worked out.
+    @ObservationIgnored private var workKnown = true
     /// Where `claude` runs, when it isn't the project folder: a worktree, say.
     private(set) var workingDirectory: String?
     /// Ports that processes this thread started are listening on: its dev servers.
@@ -207,6 +213,9 @@ final class ThreadModel: Identifiable {
         footprintKnown = meta.footprint != nil
         pullRequestLinks = meta.pullRequests ?? []
         linksKnown = meta.pullRequests != nil
+        writtenFootprint = meta.writtenFootprint ?? []
+        workedPullRequestLinks = meta.workedPullRequests ?? []
+        workKnown = meta.writtenFootprint != nil && meta.workedPullRequests != nil
         workingDirectory = meta.workingDirectory
         transcriptLoaded = false
     }
@@ -222,7 +231,9 @@ final class ThreadModel: Identifiable {
                    browserTabs: Self.nilIfEmpty(browser?.savedURLs ?? savedBrowserTabs),
                    footprint: footprintKnown ? footprint : nil,
                    workingDirectory: workingDirectory,
-                   pullRequests: linksKnown ? pullRequestLinks : nil)
+                   pullRequests: linksKnown ? pullRequestLinks : nil,
+                   writtenFootprint: workKnown ? writtenFootprint : nil,
+                   workedPullRequests: workKnown ? workedPullRequestLinks : nil)
     }
 
     private static func nilIfEmpty(_ urls: [String]) -> [String]? {
@@ -771,6 +782,7 @@ final class ThreadModel: Identifiable {
                     if ["gh pr", "glab mr", "git push", "gh api"].contains(where: command.contains) { app.pullRequestActivity(in: self) }
                 }
                 noteLinks(in: result.content)
+                if !result.isError { noteWork(toolName: entry.toolName, inputJSON: entry.toolInput, result: result.content) }
                 if entry.toolName == "EnterWorktree", !result.isError {
                     addFootprint(ThreadFootprint.folders(inResult: result.content))
                 }
@@ -1037,14 +1049,15 @@ final class ThreadModel: Identifiable {
     /// For a thread saved before footprints were kept: read once from its saved history,
     /// off the main thread.
     func computeFootprintIfNeeded() {
-        guard !footprintKnown || !linksKnown, !isEphemeral else { return }
-        let needsFootprint = !footprintKnown, needsLinks = !linksKnown
+        guard !footprintKnown || !linksKnown || !workKnown, !isEphemeral else { return }
+        let needsFootprint = !footprintKnown, needsLinks = !linksKnown, needsWork = !workKnown
         footprintKnown = true
         linksKnown = true
+        workKnown = true
         let store = app.store, id = id, cwd = effectiveDirectory
         Task { [weak self] in
-            let (folders, links) = await Task.detached(priority: .utility) { () -> ([String], [String]) in
-                var found: [String] = [], links: [String] = []
+            let (folders, links, written, activities) = await Task.detached(priority: .utility) { () -> ([String], [String], [String], [PullRequestActivity]) in
+                var found: [String] = [], links: [String] = [], written: [String] = [], activities: [PullRequestActivity] = []
                 func walk(_ entries: [EntrySnapshot]) {
                     for entry in entries {
                         // PR links can be anywhere: your messages, replies, tool output.
@@ -1052,6 +1065,12 @@ final class ThreadModel: Identifiable {
                             links = Self.mergeLinks(PullRequestLink.find(in: text).map(\.url.absoluteString), into: links)
                         }
                         guard entry.kind == .tool else { continue }
+                        if entry.toolIsError != true {
+                            written = ThreadFootprint.merge(ThreadFootprint.writtenFolders(toolName: entry.toolName ?? "", inputJSON: entry.toolInput ?? "", workingDirectory: cwd), into: written)
+                            if let activity = PullRequestActivity.of(toolName: entry.toolName ?? "", inputJSON: entry.toolInput ?? "", result: entry.toolResult ?? "") {
+                                activities.append(activity)
+                            }
+                        }
                         found = ThreadFootprint.merge(ThreadFootprint.folders(toolName: entry.toolName ?? "", inputJSON: entry.toolInput ?? "", workingDirectory: cwd), into: found)
                         if entry.toolName == "EnterWorktree", let result = entry.toolResult {
                             found = ThreadFootprint.merge(ThreadFootprint.folders(inResult: result), into: found)
@@ -1060,7 +1079,7 @@ final class ThreadModel: Identifiable {
                     }
                 }
                 walk(store.loadTranscript(id))
-                return (found, links)
+                return (found, links, written, activities)
             }.value
             guard let self else { return }
             if needsFootprint {
@@ -1068,6 +1087,12 @@ final class ThreadModel: Identifiable {
                 self.app.footprintChanged(self)
             }
             if needsLinks { self.pullRequestLinks = Self.mergeLinks(self.pullRequestLinks, into: links) }
+            if needsWork {
+                self.writtenFootprint = ThreadFootprint.merge(self.writtenFootprint, into: written)
+                let worked = activities.flatMap { self.app.links(for: $0, in: self) }
+                self.workedPullRequestLinks = Self.mergeLinks(self.workedPullRequestLinks, into: worked)
+                self.pullRequestLinks = Self.mergeLinks(worked, into: self.pullRequestLinks)
+            }
             self.app.save()
         }
     }
@@ -1086,6 +1111,28 @@ final class ThreadModel: Identifiable {
         guard merged != pullRequestLinks else { return }
         pullRequestLinks = merged
         persist()
+    }
+
+    /// PRs it worked on: linked, and marked as its own work.
+    func addWorkedPullRequestLinks(_ urls: [String]) {
+        guard !urls.isEmpty else { return }
+        let links = Self.mergeLinks(urls, into: pullRequestLinks), worked = Self.mergeLinks(urls, into: workedPullRequestLinks)
+        guard links != pullRequestLinks || worked != workedPullRequestLinks else { return }
+        pullRequestLinks = links
+        workedPullRequestLinks = worked
+        persist()
+    }
+
+    /// What one finished tool call changed: folders it wrote in, PRs it acted on.
+    private func noteWork(toolName: String, inputJSON: String, result: String) {
+        let written = ThreadFootprint.writtenFolders(toolName: toolName, inputJSON: inputJSON, workingDirectory: effectiveDirectory)
+        if !written.isEmpty {
+            let merged = ThreadFootprint.merge(written, into: writtenFootprint)
+            if merged != writtenFootprint { writtenFootprint = merged }
+        }
+        if let activity = PullRequestActivity.of(toolName: toolName, inputJSON: inputJSON, result: result) {
+            addWorkedPullRequestLinks(app.links(for: activity, in: self))
+        }
     }
 
     nonisolated static func mergeLinks(_ new: [String], into existing: [String]) -> [String] {

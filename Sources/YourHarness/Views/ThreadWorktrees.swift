@@ -169,8 +169,9 @@ struct ThreadPullRequestsButton: View {
     let thread: ThreadModel
 
     var body: some View {
-        let count = app.pullRequests(for: thread).count
-        if count > 0 {
+        let all = app.pullRequests(for: thread)
+        let count = all.count { $0.isWorkedOn }
+        if !all.isEmpty {
             Button {
                 if app.showsInspector, app.inspectorPanel == .pullRequests {
                     app.setShowsInspector(false)
@@ -178,11 +179,18 @@ struct ThreadPullRequestsButton: View {
                     app.showInspector(.pullRequests)
                 }
             } label: {
-                Label("\(count)", systemImage: "arrow.triangle.pull")
-                    .labelStyle(.titleAndIcon)
-                    .monospacedDigit()
+                // Counts the PRs it worked on; only mentioned ones, just the icon.
+                if count > 0 {
+                    Label("\(count)", systemImage: "arrow.triangle.pull")
+                        .labelStyle(.titleAndIcon)
+                        .monospacedDigit()
+                } else {
+                    Label("Pull Requests", systemImage: "arrow.triangle.pull")
+                        .labelStyle(.iconOnly)
+                }
             }
-            .help(count == 1 ? "The pull request this thread is linked to" : "The \(count) pull requests this thread is linked to")
+            .help(count == 0 ? "Pull requests mentioned in this thread"
+                  : count == 1 ? "The pull request this thread worked on" : "The \(count) pull requests this thread worked on")
             .task(id: thread.pullRequestLinks) { await app.syncPullRequests(for: thread) }
         }
     }

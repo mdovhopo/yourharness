@@ -132,12 +132,13 @@ final class WorkspaceModel {
     /// Which threads work in which checkout, by path: every folder a thread touched counts
     /// for the innermost checkout holding it, so a worktree nested in its repo's folder
     /// doesn't also count for the repo.
-    func threadsByCheckout(_ threads: [ThreadModel]) -> [String: [ThreadModel]] {
+    func threadsByCheckout(_ threads: [ThreadModel], written: Bool = false) -> [String: [ThreadModel]] {
         let roots = (clonedRepos.map { Self.realPath($0.url.path) } + allWorktrees.map(\.path)).sorted { $0.count > $1.count }
         var result: [String: [ThreadModel]] = [:]
         for thread in threads where !thread.isSideChat {
             var hit = Set<String>()
-            for folder in thread.footprint + [thread.workingDirectory].compactMap({ $0.map(Self.realPath) }) {
+            let folders = written ? thread.writtenFootprint : thread.footprint + [thread.workingDirectory].compactMap({ $0.map(Self.realPath) })
+            for folder in folders {
                 if let root = roots.first(where: { ThreadFootprint.touches([folder], root: $0) }) { hit.insert(root) }
             }
             for root in hit { result[root, default: []].append(thread) }
@@ -165,6 +166,27 @@ final class WorkspaceModel {
             for thread in users { result[thread.id, default: []].append(Self.realPath(repo.url.path)) }
         }
         return result
+    }
+
+    /// The checkouts a thread changed something in: edited files, made commits, pushed.
+    func writtenCheckouts(for thread: ThreadModel) -> [Checkout] {
+        let used = threadsByCheckout([thread], written: true)
+        return allCheckouts.filter { used[$0.path] != nil }
+    }
+
+    /// The checkout a folder is in: the innermost repo or worktree holding it.
+    func checkout(containing folder: String) -> Checkout? {
+        let path = Self.realPath(folder)
+        return allCheckouts.filter { ThreadFootprint.touches([path], root: $0.path) }.max { $0.path.count < $1.path.count }
+    }
+
+    private var allCheckouts: [Checkout] {
+        clonedRepos.flatMap { repo in [Checkout(repo: repo, worktree: nil)] + (worktrees[repo.id] ?? []).map { Checkout(repo: repo, worktree: $0) } }
+    }
+
+    /// A checkout's branch: the worktree's, or the main checkout's.
+    func branch(of checkout: Checkout) -> String? {
+        checkout.worktree.map(\.branch) ?? statuses[checkout.repo.id]?.branch
     }
 
     /// The checkouts one thread works in, the one it runs in first.

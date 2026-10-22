@@ -24,6 +24,36 @@ public enum ThreadFootprint {
         return unique(found)
     }
 
+    /// Folders one tool call changed something in: files it edited or wrote, and where a
+    /// shell command made commits or pushed (`git commit`, `push`, `merge`, …). Reading
+    /// doesn't count: this is what makes a branch's PR the thread's own work.
+    public static func writtenFolders(toolName: String, inputJSON: String, workingDirectory: String) -> [String] {
+        if ["Edit", "MultiEdit", "Write", "NotebookEdit"].contains(toolName) {
+            return folders(toolName: toolName, inputJSON: inputJSON, workingDirectory: workingDirectory)
+        }
+        guard toolName == "Bash",
+              let input = (try? JSONSerialization.jsonObject(with: Data(inputJSON.utf8))) as? [String: Any],
+              let command = input["command"] as? String, writesGit(command)
+        else { return [] }
+        return unique(folders(toolName: toolName, inputJSON: inputJSON, workingDirectory: workingDirectory) + [workingDirectory])
+    }
+
+    static let gitWrites: Set<String> = ["commit", "push", "merge", "rebase", "cherry-pick", "revert", "am", "apply", "pull"]
+
+    /// Whether a command runs a git subcommand that adds commits or publishes them.
+    static func writesGit(_ command: String) -> Bool {
+        let words = command.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
+        for (index, word) in words.enumerated() where (word as NSString).lastPathComponent == "git" {
+            // `git -C path commit`: the subcommand is the first word that isn't an option or its value.
+            var next = index + 1
+            while next < words.count, words[next].hasPrefix("-") {
+                next += ["-C", "-c", "--git-dir", "--work-tree"].contains(words[next]) ? 2 : 1
+            }
+            if next < words.count, gitWrites.contains(words[next]) { return true }
+        }
+        return false
+    }
+
     /// Absolute paths in a tool's result: where `EnterWorktree` put the session, say.
     public static func folders(inResult result: String) -> [String] {
         unique(pathWords(in: result).filter { $0.hasPrefix("/") }.compactMap { word in
