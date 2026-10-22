@@ -324,6 +324,21 @@ final class Updater {
         guard copy.succeeded else { throw UpdateError("The new version couldn't be copied: \(copy.stderr.trimmingCharacters(in: .whitespacesAndNewlines))") }
         let verify = await CommandRunner.run(URL(fileURLWithPath: "/usr/bin/codesign"), arguments: ["--verify", "--deep", "--strict", stagedURL.path], timeout: 60)
         guard verify.succeeded else { throw UpdateError("The new version's signature doesn't check out, so it wasn't installed.") }
+        // Signed with an identity (not ad hoc): only an update signed the same way.
+        if let requirement = await Self.designatedRequirement(of: bundleURL) {
+            let same = await CommandRunner.run(URL(fileURLWithPath: "/usr/bin/codesign"),
+                                               arguments: ["--verify", "--deep", "--strict", "-R", "=" + requirement, stagedURL.path], timeout: 60)
+            guard same.succeeded else { throw UpdateError("The new version isn't signed the way this one is, so it wasn't installed.") }
+        }
+    }
+
+    /// What a build signed with an identity requires of itself (`identifier … and certificate
+    /// root = H"…"`); nil when it's signed ad hoc.
+    private static func designatedRequirement(of app: URL) async -> String? {
+        let output = await CommandRunner.run(URL(fileURLWithPath: "/usr/bin/codesign"), arguments: ["-d", "-r-", "--verbose=2", app.path], timeout: 30)
+        let text = output.stdout + "\n" + output.stderr
+        guard output.succeeded, !text.contains("Signature=adhoc") else { return nil }
+        return text.split(separator: "\n").first { $0.hasPrefix("designated => ") }.map { String($0.dropFirst("designated => ".count)) }
     }
 
     /// A new version downloaded before the app last quit is still ready.

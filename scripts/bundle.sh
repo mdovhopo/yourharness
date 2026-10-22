@@ -46,5 +46,25 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-codesign --force --sign - "$APP" >/dev/null
-echo "Built $APP ($VERSION, build $BUILD)"
+# Signed with the app's own identity when it's here (YH_SIGN_IDENTITY and YH_SIGN_KEYCHAIN
+# from scripts/signing-keychain.sh, as the release workflow does, or ~/.yourharness/signing):
+# every build is then the same app to macOS, which keeps the permissions you gave it, and
+# the updater only installs builds signed the same way. Otherwise ad hoc.
+SIGNING="${YH_SIGNING_DIR:-$HOME/.yourharness/signing}"
+IDENTITY="${YH_SIGN_IDENTITY:-}"
+KEYCHAIN="${YH_SIGN_KEYCHAIN:-}"
+if [[ -z "$IDENTITY" && -f "$SIGNING/signing.p12" ]]; then
+    KEYCHAIN="$SIGNING/signing.keychain-db"
+    if ! security unlock-keychain -p "$(<"$SIGNING/keychain-password")" "$KEYCHAIN" 2>/dev/null; then
+        "$ROOT/scripts/signing-keychain.sh" "$SIGNING/signing.p12" "$(<"$SIGNING/p12-password")" "$KEYCHAIN" "$(<"$SIGNING/keychain-password")" >/dev/null
+    fi
+    IDENTITY="$(security find-certificate -a -Z "$KEYCHAIN" | awk '/SHA-1 hash:/ { print $3; exit }')"
+fi
+if [[ -n "$IDENTITY" ]]; then
+    codesign --force --sign "$IDENTITY" --keychain "$KEYCHAIN" "$APP" >/dev/null
+    SIGNED="signed as $(security find-certificate -a -Z "$KEYCHAIN" | awk -F'"' '/"labl"/ { print $4; exit }')"
+else
+    codesign --force --sign - "$APP" >/dev/null
+    SIGNED="signed ad hoc"
+fi
+echo "Built $APP ($VERSION, build $BUILD, $SIGNED)"

@@ -32,6 +32,25 @@ jobs:
       - name: Test
         run: swift test
 
+      # The app's own identity, so every release is the same app to macOS and the updater
+      # can tell a real update. A tag must be signed: an ad hoc build would break that chain.
+      - name: Set up signing
+        env:
+          SIGNING_P12: ${{ secrets.SIGNING_P12 }}
+          SIGNING_P12_PASSWORD: ${{ secrets.SIGNING_P12_PASSWORD }}
+        run: |
+          if [ -z "$SIGNING_P12" ]; then
+            if [ "$GITHUB_REF_TYPE" = tag ]; then echo "::error::No SIGNING_P12 secret; releases must be signed."; exit 1; fi
+            echo "No signing secret: building ad hoc."
+            exit 0
+          fi
+          echo "$SIGNING_P12" | base64 --decode > "$RUNNER_TEMP/signing.p12"
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          identity="$(scripts/signing-keychain.sh "$RUNNER_TEMP/signing.p12" "$SIGNING_P12_PASSWORD" "$keychain" "$(openssl rand -hex 24)")"
+          rm "$RUNNER_TEMP/signing.p12"
+          echo "YH_SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
+          echo "YH_SIGN_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+
       - name: Build the DMG
         run: |
           scripts/bundle.sh
