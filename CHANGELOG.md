@@ -6,13 +6,17 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+### Highlights
+YourHarness now updates itself. From this version on, new releases show up in the app with their notes, download with a click, and install with a restart. No more downloading disk images by hand.
+
 ### Added
-- **Updates in the app.** The version shows at the bottom of the limits box and in Settings. When a new release is out, the box offers it with its notes (What's New), downloads it when you click Update, checks it against the release's checksum, then Restart (after a confirmation that says which threads it would stop) quits and opens the new version. YourHarness looks at launch and every six hours, and **Check for Updates…** is in the app menu.
-- **Release notes in the app.** What's New renders the notes from GitHub for every release since yours, each with a link to its page; after an update, the limits box says what you updated to and shows what's new. The notes of the version you're running are a click away from the version number, and a new **Releases** tab in Settings has the version, updates, and every release's notes (marked Installed and New).
+- **Updates in the app.** The version shows at the bottom of the limits box. When a new release is out, the box offers it with its notes (What's New), downloads it when you click Update, and checks it against the release's checksum. Restart then quits and opens the new version, after a confirmation that says which threads it would stop. YourHarness looks at launch and every six hours, and **Check for Updates…** is in the app menu. ([`dcb68b4`](https://github.com/mdovhopo/yourharness/commit/dcb68b4))
+- **Release notes in the app.** What's New renders the notes from GitHub for every release since yours, each with a link to its page; after an update, the limits box says what you updated to and shows what's new. ([`9941d67`](https://github.com/mdovhopo/yourharness/commit/9941d67))
+- **A Releases tab in Settings**, with the version, updates, and every release's notes, marked Installed and New. ([`bc19dd3`](https://github.com/mdovhopo/yourharness/commit/bc19dd3))
 
 ### Fixed
-- Settings no longer shows a stray, unnamed tab: it was the Agents tab's refresh button, now **Detect Again** at the end of that tab.
-- The left sidebar no longer goes missing at launch when the right sidebar was left open. Its button also said it was showing, so the first click did nothing.
+- Settings no longer shows a stray, unnamed tab: it was the Agents tab's refresh button, now **Detect Again** at the end of that tab. ([`bc19dd3`](https://github.com/mdovhopo/yourharness/commit/bc19dd3))
+- The left sidebar no longer goes missing at launch when the right sidebar was left open. Its button also said it was showing, so the first click did nothing. ([`8e2eac7`](https://github.com/mdovhopo/yourharness/commit/8e2eac7))
 
 ## [0.0.2] - 2026-10-22
 
