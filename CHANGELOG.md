@@ -6,6 +6,8 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+## [0.0.3] - 2026-10-22
+
 ### Highlights
 YourHarness now updates itself. From this version on, new releases show up in the app with their notes, download with a click, and install with a restart. No more downloading disk images by hand.
 
