@@ -19,7 +19,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 - **Jump between your messages.** ⌘[ and ⌘] (Thread menu) or the small arrows at the bottom right of the transcript go to your previous and next message; past the last, to the end.
 ### Changed
 - **⇧↩ starts a new line** in the composer and the side chat, where the cursor is, as in any text area; ↩ sends, as before (⌥↩ still works too). The / and @ menus leave ⇧↩ alone.
-- **A thread's PRs are the ones it worked on.** The PRs tab lists the PRs the thread opened, merged, edited, reviewed or commented on, and the ones on branches it changed (edits, commits, pushes), as the stack tree; PRs that only came up (links you pasted, ones Claude looked at or cited) are listed under Mentioned, below. The toolbar counts, the tab opening by default, and settling when work merges go by the PRs it worked on.
+- **A thread's PRs are the ones it worked on.** The PRs tab lists the PRs the thread (or one of its sub-agents) opened, merged, edited, reviewed or commented on, and the ones on branches it changed (edits, commits, pushes), as the stack tree; PRs that only came up (links you pasted, ones Claude looked at or cited) are listed under Mentioned, below. The toolbar counts, the tab opening by default, and settling when work merges go by the PRs it worked on.
 - **YourHarness is signed with its own certificate** instead of ad hoc. macOS will ask once more for the folders and keychain items it used (it's a new identity), and from then on remembers your answers across updates. Updates are only installed when they're signed the same way.
 
 ### Fixed

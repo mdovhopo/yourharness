@@ -765,7 +765,15 @@ final class ThreadModel: Identifiable {
 
         case .toolResults(let results, let parent):
             if let parent {
-                subagent(for: parent)?.apply(results)
+                // A sub-agent's work is the thread's work: PRs it opens or merges, folders
+                // it writes in, links it comes across.
+                for entry in subagent(for: parent)?.apply(results) ?? [] {
+                    noteLinks(in: entry.toolResult ?? "")
+                    addFootprint(ThreadFootprint.folders(toolName: entry.toolName, inputJSON: entry.toolInput, workingDirectory: effectiveDirectory))
+                    guard !entry.toolIsError else { continue }
+                    noteWork(toolName: entry.toolName, inputJSON: entry.toolInput, result: entry.toolResult ?? "")
+                    if entry.toolName == "Bash", Self.touchesPullRequests(entry.toolInput) { app.pullRequestActivity(in: self) }
+                }
                 return
             }
             var plansChanged = false, ranCommand = false
@@ -778,8 +786,7 @@ final class ThreadModel: Identifiable {
                 if entry.toolName == "Bash" {
                     ranCommand = true
                     // Merging, opening or pushing to a PR: its state is about to change.
-                    let command = (try? JSONSerialization.jsonObject(with: Data(entry.toolInput.utf8)) as? [String: Any])?["command"] as? String ?? ""
-                    if ["gh pr", "glab mr", "git push", "gh api"].contains(where: command.contains) { app.pullRequestActivity(in: self) }
+                    if Self.touchesPullRequests(entry.toolInput) { app.pullRequestActivity(in: self) }
                 }
                 noteLinks(in: result.content)
                 if !result.isError { noteWork(toolName: entry.toolName, inputJSON: entry.toolInput, result: result.content) }
@@ -1121,6 +1128,12 @@ final class ThreadModel: Identifiable {
         pullRequestLinks = links
         workedPullRequestLinks = worked
         persist()
+    }
+
+    /// A command that merges, opens or pushes to a PR: its state is about to change.
+    private static func touchesPullRequests(_ inputJSON: String) -> Bool {
+        let command = (try? JSONSerialization.jsonObject(with: Data(inputJSON.utf8)) as? [String: Any])?["command"] as? String ?? ""
+        return ["gh pr", "glab mr", "git push", "gh api"].contains(where: command.contains)
     }
 
     /// What one finished tool call changed: folders it wrote in, PRs it acted on.

@@ -112,13 +112,18 @@ final class SubagentRun: Identifiable {
         }
     }
 
-    func apply(_ results: [ToolResult]) {
+    /// The calls these results finished, for the thread to see what they did.
+    @discardableResult
+    func apply(_ results: [ToolResult]) -> [TranscriptEntry] {
+        var finished: [TranscriptEntry] = []
         for result in results {
             guard let entry = tools.removeValue(forKey: result.toolUseID) else { continue }
             entry.toolResult = result.content
             entry.toolIsError = result.isError
             entry.isStreaming = false
+            finished.append(entry)
         }
+        return finished
     }
 }
 
