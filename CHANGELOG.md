@@ -13,6 +13,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 - **How long a turn takes.** The working indicator counts up while Claude works, and each finished turn says how long it took.
 - **Times on your messages,** and your messages stand out more: tinted and outlined, with a little more room above each turn.
 - **Claude can show you images and videos.** When a screenshot, a screen recording, a simulator capture or a chart would say more than words, Claude puts it in the conversation: images open in Preview, videos play right there. The files are copied into the thread, so they stay after the originals are gone. It doesn't ask first, since it only shows you files.
+- **Syntax highlighting in code blocks,** in light and dark, for Swift, TypeScript, JavaScript, Python, Go, Rust, Java, Kotlin, C, Ruby, shell, JSON, YAML, TOML, SQL, HTML, CSS, diffs and more.
 - **Jump between your messages.** ⌘[ and ⌘] (Thread menu) or the small arrows at the bottom right of the transcript go to your previous and next message; past the last, to the end.
 ### Changed
 - **YourHarness is signed with its own certificate** instead of ad hoc. macOS will ask once more for the folders and keychain items it used (it's a new identity), and from then on remembers your answers across updates. Updates are only installed when they're signed the same way.
