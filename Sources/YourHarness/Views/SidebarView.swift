@@ -52,7 +52,13 @@ struct SidebarView: View {
                 .padding(.bottom, 10)
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            UsageFooter()
+            VStack(spacing: 0) {
+                if let notice = app.undoNotice {
+                    UndoToast(notice: notice)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+                UsageFooter()
+            }
         }
         .toolbar {
             ToolbarItemGroup {
@@ -274,7 +280,6 @@ private struct ThreadRow: View {
     let thread: ThreadModel
     let selection: Namespace.ID
     @State private var hovering = false
-    @State private var confirmingDelete = false
     @State private var renaming = false
 
     private var isSelected: Bool { app.visibleThreadID == thread.id }
@@ -300,7 +305,7 @@ private struct ThreadRow: View {
             }
             Spacer(minLength: 6)
             if hovering && !renaming {
-                RowActions(thread: thread, confirmDelete: $confirmingDelete, renaming: $renaming)
+                RowActions(thread: thread, renaming: $renaming)
                     .transition(.opacity)
             } else if thread.isPinned {
                 Image(systemName: "pin.fill")
@@ -338,14 +343,7 @@ private struct ThreadRow: View {
         .animation(.snappy, value: thread.hasUnread)
         .animation(.snappy, value: thread.isPinned)
         .animation(.easeInOut(duration: 0.25), value: thread.title)
-        .contextMenu { ThreadMenuItems(thread: thread, confirmDelete: $confirmingDelete, renaming: $renaming) }
-        .confirmationDialog("Delete “\(thread.title)”?", isPresented: $confirmingDelete) {
-            Button("Delete Thread", role: .destructive) {
-                withAnimation(.snappy) { app.deleteThread(thread) }
-            }
-        } message: {
-            Text("The conversation is removed from YourHarness. Claude Code keeps its own copy of the session in ~/.claude.")
-        }
+        .contextMenu { ThreadMenuItems(thread: thread, renaming: $renaming) }
     }
 }
 
@@ -353,13 +351,12 @@ private struct ThreadRow: View {
 private struct ThreadMenuItems: View {
     @Environment(AppModel.self) private var app
     let thread: ThreadModel
-    @Binding var confirmDelete: Bool
     @Binding var renaming: Bool
 
     var body: some View {
         if !thread.isSettled {
             Button(thread.isPinned ? "Unpin" : "Pin", systemImage: thread.isPinned ? "pin.slash" : "pin") {
-                withAnimation(.snappy) { app.setPinned(!thread.isPinned, thread) }
+                withAnimation(.snappy) { app.togglePinned(thread) }
             }
         }
         Button("Rename…", systemImage: "pencil") { renaming = true }
@@ -369,7 +366,7 @@ private struct ThreadMenuItems: View {
         .disabled(thread.isGeneratingTitle || app.titleGeneration.provider == nil || thread.sessionID == nil && thread.entries.isEmpty)
         Divider()
         Button(thread.isSettled ? "Un-settle" : "Settle", systemImage: thread.isSettled ? "arrow.uturn.backward.circle" : "checkmark.circle") {
-            withAnimation(.snappy) { app.setSettled(!thread.isSettled, thread) }
+            withAnimation(.snappy) { app.toggleSettled(thread) }
         }
         Toggle(isOn: Binding(get: { thread.autoSettle }, set: { app.setAutoSettle($0, thread) })) {
             Label("Settle Automatically When Idle", systemImage: "clock.arrow.circlepath")
@@ -382,7 +379,10 @@ private struct ThreadMenuItems: View {
         .help("Claude Code's session ID, for `claude --resume`")
         Button("Copy Thread ID", systemImage: "number") { Pasteboard.copy(thread.id.uuidString) }
         Divider()
-        Button("Delete Thread…", systemImage: "trash", role: .destructive) { confirmDelete = true }
+        Button("Delete Thread", systemImage: "trash", role: .destructive) {
+            withAnimation(.snappy) { app.deleteThread(thread) }
+        }
+        .help("Undo brings it back (⌘Z)")
     }
 }
 
@@ -419,23 +419,22 @@ private struct RenameField: View {
 private struct RowActions: View {
     @Environment(AppModel.self) private var app
     let thread: ThreadModel
-    @Binding var confirmDelete: Bool
     @Binding var renaming: Bool
 
     var body: some View {
         HStack(spacing: 8) {
             if !thread.isSettled {
                 Button(thread.isPinned ? "Unpin" : "Pin", systemImage: thread.isPinned ? "pin.slash" : "pin") {
-                    withAnimation(.snappy) { app.setPinned(!thread.isPinned, thread) }
+                    withAnimation(.snappy) { app.togglePinned(thread) }
                 }
                 .help(thread.isPinned ? "Unpin" : "Pin to the top")
             }
             Button(thread.isSettled ? "Un-settle" : "Settle", systemImage: thread.isSettled ? "arrow.uturn.backward.circle" : "checkmark.circle") {
-                withAnimation(.snappy) { app.setSettled(!thread.isSettled, thread) }
+                withAnimation(.snappy) { app.toggleSettled(thread) }
             }
             .help(thread.isSettled ? "Move back to active work" : "Settle: move finished work to the shelf and stop its session")
             Menu {
-                ThreadMenuItems(thread: thread, confirmDelete: $confirmDelete, renaming: $renaming)
+                ThreadMenuItems(thread: thread, renaming: $renaming)
             } label: {
                 Image(systemName: "ellipsis")
             }
@@ -596,6 +595,36 @@ private struct UsageFooter: View {
         .animation(.smooth(duration: 0.35), value: app.updater.updatedFrom)
         .glassEffect(.regular, in: .rect(cornerRadius: 14))
         .padding(10)
+    }
+}
+
+/// "Settled “Fix login” · Undo", for a few seconds after a thread action.
+private struct UndoToast: View {
+    @Environment(AppModel.self) private var app
+    let notice: AppModel.UndoNotice
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(notice.message)
+                .font(.callout)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 4)
+            Button("Undo") { notice.undo() }
+                .buttonStyle(.borderless)
+                .fontWeight(.semibold)
+                .help("Undo (⌘Z)")
+            Button("Dismiss", systemImage: "xmark") { app.dismissUndoNotice() }
+                .labelStyle(.iconOnly)
+                .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
+                .font(.caption)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .glassEffect(.regular, in: .capsule)
+        .padding(.horizontal, 10)
+        .padding(.top, 4)
     }
 }
 

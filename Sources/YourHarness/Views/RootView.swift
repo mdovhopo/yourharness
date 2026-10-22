@@ -4,6 +4,7 @@ struct RootView: View {
     @Environment(AppModel.self) private var app
     @Environment(\.openWindow) private var openWindow
     @Environment(\.openSettings) private var openSettings
+    @Environment(\.undoManager) private var undoManager
     /// The window is first laid out at its default size, before it grows to the saved one.
     /// Opening the right sidebar in that pass can leave no room for the left one, which
     /// AppKit then collapses while its toggle still says it's shown; so it opens once the
@@ -43,6 +44,7 @@ struct RootView: View {
         .sheet(isPresented: Bindable(app).isResumingSession) {
             ResumeSessionSheet()
         }
+        .onChange(of: undoManager, initial: true) { app.undoManager = undoManager }
         .onAppear {
             isOnScreen = true
             // Development: open the resume sheet filled in, for checking it without clicking.

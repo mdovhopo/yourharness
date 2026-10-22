@@ -28,8 +28,6 @@ A single chat that can reach across all projects and threads, instead of startin
 ## Later
 
 ### Small follow-ups
-- Undo for thread actions: a five-second Undo after settling, unpinning or deleting a thread (and ⌘Z), as in T3 Code.
-- Settle on merged PRs: comes with thread–PR linking (workspaces phase 2).
 
 ### Start agents from mobile
 Kick off or check on agents from a phone. Deprioritized for now.

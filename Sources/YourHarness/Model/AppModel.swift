@@ -1,5 +1,6 @@
 import AppKit
 import HarnessCore
+import SwiftUI
 
 enum HarnessError: LocalizedError {
     case claudeNotFound
@@ -300,11 +301,7 @@ final class AppModel {
         if settled {
             guard !thread.isSettled else { return }
             // Move the selection to a neighbour first, so the detail pane doesn't go blank.
-            if visibleThreadID == thread.id {
-                let ids = visibleThreadIDs
-                let index = ids.firstIndex(of: thread.id) ?? 0
-                selectedThreadID = ids.indices.contains(index + 1) ? ids[index + 1] : (index > 0 ? ids[index - 1] : nil)
-            }
+            if visibleThreadID == thread.id { selectNeighbour(of: thread) }
             thread.settledAt = .now
             thread.isPinned = false
             if !thread.isWorking {
@@ -317,6 +314,12 @@ final class AppModel {
             thread.reactivatedAt = .now
         }
         save()
+    }
+
+    private func selectNeighbour(of thread: ThreadModel) {
+        let ids = visibleThreadIDs
+        let index = ids.firstIndex(of: thread.id) ?? 0
+        selectedThreadID = ids.indices.contains(index + 1) ? ids[index + 1] : (index > 0 ? ids[index - 1] : nil)
     }
 
     func setAutoSettle(_ enabled: Bool, _ thread: ThreadModel) {
@@ -453,7 +456,7 @@ final class AppModel {
 
     func removeProject(_ project: Project) {
         guard !isHome(project) else { return }
-        for thread in threads(in: project) { deleteThread(thread) }
+        for thread in threads(in: project) { deleteThread(thread, purge: true) }
         projects.removeAll { $0.id == project.id }
         workspaceModels[project.id] = nil
         if overviewProjectID == project.id { overviewProjectID = nil }
@@ -512,14 +515,108 @@ final class AppModel {
         newThread(in: selectedProject)
     }
 
-    func deleteThread(_ thread: ThreadModel) {
+    /// Deletes a thread. Its files stay until the app quits, so Undo can bring it back;
+    /// `purge` removes them right away.
+    func deleteThread(_ thread: ThreadModel, purge: Bool = false) {
+        guard let index = threads.firstIndex(where: { $0.id == thread.id }) else { return }
         thread.endSession()
         thread.closeBrowser()
-        threads.removeAll { $0.id == thread.id }
-        store.deleteTranscript(thread.id)
-        store.deleteAttachments(thread: thread.id)
-        if selectedThreadID == thread.id { selectedThreadID = nil }
+        let wasSelected = selectedThreadID == thread.id
+        if wasSelected { selectNeighbour(of: thread) }
+        threads.remove(at: index)
         save()
+        if purge {
+            purgeFiles(of: thread.id)
+            return
+        }
+        recentlyDeleted[thread.id] = thread
+        offerUndo("Delete Thread", message: "Deleted “\(thread.title)”") { [weak self] in
+            guard let self, self.recentlyDeleted.removeValue(forKey: thread.id) != nil else { return }
+            self.threads.insert(thread, at: min(index, self.threads.count))
+            if wasSelected { self.selectedThreadID = thread.id }
+            self.save()
+        }
+    }
+
+    private func purgeFiles(of id: UUID) {
+        store.deleteTranscript(id)
+        store.deleteAttachments(thread: id)
+    }
+
+    // MARK: - Undo
+
+    /// What the last thread action did, with a way back, shown for a few seconds.
+    struct UndoNotice: Identifiable {
+        let id = UUID()
+        let message: String
+        let undo: @MainActor () -> Void
+    }
+
+    private(set) var undoNotice: UndoNotice?
+    /// The window's, for ⌘Z and Edit → Undo.
+    @ObservationIgnored weak var undoManager: UndoManager?
+    /// Deleted threads, kept until quitting so Undo can bring them back.
+    @ObservationIgnored private var recentlyDeleted: [UUID: ThreadModel] = [:]
+    @ObservationIgnored private var undoNoticeExpiry: Task<Void, Never>?
+
+    /// Shows `message` with Undo for five seconds, and puts the action on the window's undo
+    /// stack. Undoing twice (the button, then ⌘Z) does nothing the second time.
+    private func offerUndo(_ actionName: String, message: String, undo: @escaping @MainActor () -> Void) {
+        var done = false
+        let once: @MainActor () -> Void = { [weak self] in
+            guard !done else { return }
+            done = true
+            withAnimation(.snappy) { undo() }
+            if self?.undoNotice?.message == message { self?.dismissUndoNotice() }
+        }
+        undoManager?.registerUndo(withTarget: self) { _ in MainActor.assumeIsolated { once() } }
+        undoManager?.setActionName(actionName)
+        let notice = UndoNotice(message: message, undo: once)
+        withAnimation(.snappy) { undoNotice = notice }
+        undoNoticeExpiry?.cancel()
+        undoNoticeExpiry = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(5))
+            guard !Task.isCancelled, self?.undoNotice?.id == notice.id else { return }
+            self?.dismissUndoNotice()
+        }
+    }
+
+    func dismissUndoNotice() {
+        withAnimation(.snappy) { undoNotice = nil }
+    }
+
+    /// Pin or unpin from the sidebar; unpinning offers Undo.
+    func togglePinned(_ thread: ThreadModel) {
+        let pinned = thread.isPinned
+        setPinned(!pinned, thread)
+        let restore: @MainActor () -> Void = { [weak self] in self?.setPinned(pinned, thread) }
+        if pinned {
+            offerUndo("Unpin Thread", message: "Unpinned “\(thread.title)”", undo: restore)
+        } else {
+            undoManager?.registerUndo(withTarget: self) { _ in MainActor.assumeIsolated { restore() } }
+            undoManager?.setActionName("Pin Thread")
+        }
+    }
+
+    /// Settle or un-settle from the sidebar. Undo puts it back as it was, pin included.
+    func toggleSettled(_ thread: ThreadModel) {
+        let settledAt = thread.settledAt, reactivatedAt = thread.reactivatedAt, pinned = thread.isPinned
+        let wasSelected = selectedThreadID == thread.id
+        setSettled(!thread.isSettled, thread)
+        let restore: @MainActor () -> Void = { [weak self] in
+            guard let self else { return }
+            thread.settledAt = settledAt
+            thread.reactivatedAt = reactivatedAt
+            thread.isPinned = pinned
+            if wasSelected { self.selectedThreadID = thread.id }
+            self.save()
+        }
+        if settledAt == nil {
+            offerUndo("Settle Thread", message: "Settled “\(thread.title)”", undo: restore)
+        } else {
+            undoManager?.registerUndo(withTarget: self) { _ in MainActor.assumeIsolated { restore() } }
+            undoManager?.setActionName("Un-settle Thread")
+        }
     }
 
     // MARK: - Workspaces
@@ -1358,6 +1455,7 @@ final class AppModel {
     }
 
     func shutdown() {
+        for id in recentlyDeleted.keys { purgeFiles(of: id) }
         for thread in threads { thread.prepareForQuit() }
         save()
         for thread in threads { thread.endSession() }

@@ -8,6 +8,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ### Added
 - **Threads settle when their work lands.** Once every PR a thread is linked to has merged, and nothing new has happened in it since, it moves to the Settled shelf, the way idle threads do. One PR still open, or closed without merging, keeps it where it is. PRs are looked up in the background, so this happens for threads you aren't looking at too.
+- **Undo for thread actions.** Settling, unpinning or deleting a thread shows Undo for a few seconds above the limits box, and ⌘Z (Edit → Undo) takes it back too. Deleting no longer asks first: the thread's files are only removed when YourHarness quits.
 
 ## [0.0.3] - 2026-10-22
 
