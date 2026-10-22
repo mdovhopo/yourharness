@@ -74,6 +74,7 @@ final class AppModel {
     @ObservationIgnored private var fileListings: [UUID: Task<FileIndex, Never>] = [:]
 
     @ObservationIgnored let store = Store()
+    @ObservationIgnored let updater = Updater()
     @ObservationIgnored private var environment: [String: String] = [:]
     @ObservationIgnored private var bootstrap: Task<Void, Never>?
     @ObservationIgnored private var workspaceModels: [UUID: WorkspaceModel] = [:]

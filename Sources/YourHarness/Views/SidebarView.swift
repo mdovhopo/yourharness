@@ -562,6 +562,7 @@ private struct UsageFooter: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
+            UpdateBanner()
             TimelineView(.everyMinute) { context in
                 VStack(spacing: 7) {
                     ForEach(windows, id: \.name) { item in
@@ -577,6 +578,7 @@ private struct UsageFooter: View {
                         .contentTransition(.numericText())
                         .help("This app's memory use")
                 }
+                VersionButton()
                 Spacer()
                 RefreshLimitsButton()
                 SettingsLink {
@@ -589,6 +591,8 @@ private struct UsageFooter: View {
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .animation(.smooth(duration: 0.35), value: app.updater.phase.bannerKind)
+        .animation(.smooth(duration: 0.35), value: app.updater.announcesUpToDate)
         .glassEffect(.regular, in: .rect(cornerRadius: 14))
         .padding(10)
     }

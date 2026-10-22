@@ -14,6 +14,10 @@ struct YourHarnessApp: App {
         }
         .defaultSize(width: 1200, height: 800)
         .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") { app.updater.checkNow() }
+                    .disabled(!app.updater.isEnabled)
+            }
             CommandGroup(replacing: .newItem) {
                 Button("New Thread") { app.newThreadInCurrentProject() }
                     .keyboardShortcut("n")
@@ -110,6 +114,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         MainActor.assumeIsolated {
+            AppModel.shared.updater.start()
             CookieImport.importIfRequested(app: AppModel.shared)
             BrowserProbe.runIfRequested(app: AppModel.shared)
         }

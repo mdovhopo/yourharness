@@ -366,6 +366,22 @@ private struct GeneralSettingsView: View {
     var body: some View {
         Form {
             Section {
+                LabeledContent("Version") {
+                    Text(app.updater.build.map { "\(app.updater.versionLabel) (build \($0))" } ?? app.updater.versionLabel)
+                        .monospacedDigit()
+                        .textSelection(.enabled)
+                }
+                LabeledContent("Updates") {
+                    UpdateStatus()
+                }
+            } header: {
+                Text("YourHarness")
+            } footer: {
+                Text("Looks for a new release on GitHub at launch and every few hours. Updates download only when you ask, and apply when you restart.")
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
                 Picker(selection: Binding(get: { app.appearance }, set: { app.setAppearance($0) })) {
                     ForEach(Appearance.allCases) { appearance in
                         Text(appearance.label).tag(appearance)
