@@ -17,6 +17,16 @@ struct ThreadView: View {
     @State private var isAtBottom = true
     /// Rows on screen now, for jumping between your messages from where you are.
     @State private var visibleRowIDs: [String] = []
+    /// The thread's whole height, and the composer's with what sits on it: a new thread's
+    /// composer waits in the middle.
+    @State private var areaHeight: CGFloat = 0
+    @State private var composerHeight: CGFloat = 0
+
+    /// Nothing said yet: the composer sits in the middle, asking what to work on, and goes
+    /// down to its place when you send.
+    private var isFresh: Bool {
+        thread.sessionID == nil && thread.entries.isEmpty && thread.queuedMessages.isEmpty && thread.phase != .running
+    }
     private static let typingID = "typing-indicator"
 
     private var showsTypingIndicator: Bool {
@@ -155,6 +165,10 @@ struct ThreadView: View {
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 10) {
+                if isFresh {
+                    StartPrompt(thread: thread)
+                        .transition(.opacity.combined(with: .scale(scale: 0.97, anchor: .bottom)))
+                }
                 ForEach(thread.pendingPermissions) { request in
                     RequestCard(request: request, thread: thread)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -164,8 +178,13 @@ struct ThreadView: View {
             .frame(maxWidth: 820)
             .padding(.horizontal, 20)
             .padding(.bottom, 16)
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { composerHeight = $0 }
+            // The same composer, lifted to the middle: it keeps its focus and draft on the way down.
+            .offset(y: isFresh ? -max((areaHeight - composerHeight) / 2, 0) : 0)
             .animation(.snappy, value: thread.pendingPermissions)
+            .animation(.spring(response: 0.55, dampingFraction: 0.86), value: isFresh)
         }
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { areaHeight = $0 }
         .onDrop(of: [.fileURL, .image], isTargeted: $dropTargeted) { providers in
             Task { thread.attach(await ImageIntake.sources(from: providers)) }
             return true
@@ -253,6 +272,28 @@ struct ThreadView: View {
         if let folder = thread.workingDirectory { parts.append((folder as NSString).lastPathComponent) }
         if let model = thread.activeModelName { parts.append(model) }
         return parts.joined(separator: " · ")
+    }
+}
+
+/// Over a new thread's composer: where the work happens.
+private struct StartPrompt: View {
+    @Environment(AppModel.self) private var app
+    let thread: ThreadModel
+
+    var body: some View {
+        let project = app.project(id: thread.projectID)
+        VStack(spacing: 6) {
+            Text(project.map { app.isHome($0) } ?? true ? "What are we working on?" : "What are we working on in \(project?.name ?? "")?")
+                .font(.title2.weight(.semibold))
+                .multilineTextAlignment(.center)
+            Text(thread.effectiveDirectory.replacingOccurrences(of: NSHomeDirectory(), with: "~"))
+                .font(.callout.monospaced())
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .padding(.bottom, 14)
+        .frame(maxWidth: .infinity)
     }
 }
 

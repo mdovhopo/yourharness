@@ -16,6 +16,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 - **Syntax highlighting in code blocks,** in light and dark, for Swift, TypeScript, JavaScript, Python, Go, Rust, Java, Kotlin, C, Ruby, shell, JSON, YAML, TOML, SQL, HTML, CSS, diffs and more.
 - **Threads remember where you were.** Switch away and back and you're at the same place; if you were at the end, you're at the end, following new replies.
 - **Slash commands anywhere in a message, to chain skills.** Type `/` partway through a message and the menu lists the skills Claude can run itself; "implement it, then /code-review and /commit" runs each where it comes up, in order. Claude Code only runs the command a message starts with, so YourHarness adds a line asking Claude to run the others with its Skill tool; the message you see stays as you wrote it.
+- **A new thread asks what you're working on.** Its composer waits in the middle of the window under "What are we working on in acme?" and the project's folder, and glides down to its place when you send.
 - **Jump between your messages.** ⌘[ and ⌘] (Thread menu) or the small arrows at the bottom right of the transcript go to your previous and next message; past the last, to the end.
 ### Changed
 - **⇧↩ starts a new line** in the composer and the side chat, where the cursor is, as in any text area; ↩ sends, as before (⌥↩ still works too). The / and @ menus leave ⇧↩ alone.
