@@ -129,8 +129,17 @@ final class BrowserTools {
                 data = try await BrowserScreenshot.capture(tab, cssRect: rect)
             }
             if let toolUseID, !readOnly { app.saveBrowserScreenshot(data, thread: thread?.id, toolUseID: toolUseID) }
-            let size = NSBitmapImageRep(data: data).map { "\($0.pixelsWide)×\($0.pixelsHigh)" } ?? ""
-            var text = "Screenshot of tab \(tab.id), \(tab.shortURL) (\(size))."
+            var text = "Screenshot of tab \(tab.id), \(tab.shortURL)"
+            let viewport = await tab.cssViewport()
+            if let image = NSBitmapImageRep(data: data) {
+                // Shrunk to fit: say so, or sizes read off the image are a third off on a wide page.
+                let cssWidth = rect?.width ?? viewport.width
+                let scale = Double(image.pixelsWide) / max(cssWidth, 1)
+                text += " (\(image.pixelsWide)×\(image.pixelsHigh)"
+                text += abs(scale - 1) > 0.01 ? String(format: ", %.2f× CSS pixels", scale) : ", 1 pixel = 1 CSS pixel"
+                text += "; viewport \(Int(viewport.width))×\(Int(viewport.height)))."
+            }
+            if let note = await mobileLayoutNote(tab) { text += "\n" + note }
             if let note = news(tab) { text += "\n" + note }
             return MCPToolResult([.image(data, mimeType: "image/jpeg"), .text(text)])
 
@@ -249,9 +258,18 @@ final class BrowserTools {
             guard let from = args["from"], let to = args["to"] else { throw BrowserError("Give from and to, each a ref or selector.") }
             let start = try await locate(tab, from), end = try await locate(tab, to)
             tab.show("Drag", at: start.rect)
-            await tab.drag(from: start.point, to: end.point)
+            let outcome = await tab.drag(from: start.point, to: end.point)
             await tab.settleAfterAction()
-            return result(tab, session, "Dragged \(start.describe) to \(end.describe)")
+            switch outcome {
+            case .mouse:
+                return result(tab, session, "Dragged \(start.describe) to \(end.describe)")
+            case .html(started: false, _, _):
+                return result(tab, session, "The page cancelled the drag of \(start.describe) at dragstart")
+            case .html(_, dropped: true, let target):
+                return result(tab, session, "Dragged \(start.describe) to \(end.describe) (HTML drag and drop; \(target) took the drop)")
+            case .html(_, dropped: false, let target):
+                return result(tab, session, "Dragged \(start.describe) to \(end.describe), but nothing there accepts the drop (HTML drag and drop ended over \(target), which didn't cancel dragover)")
+            }
 
         case "wait_for":
             let tab = try page(session, args)
@@ -310,7 +328,9 @@ final class BrowserTools {
             if let scheme = args["color_scheme"]?.string { tab.setColorScheme(scheme) }
             await tab.settleAfterAction(timeout: .seconds(2))
             let size = await tab.cssViewport()
-            return result(tab, session, "Viewport is \(Int(size.width))×\(Int(size.height))\(tab.colorSchemeName.map { ", \($0)" } ?? "")")
+            var line = "Viewport is \(Int(size.width))×\(Int(size.height))\(tab.colorSchemeName.map { ", \($0)" } ?? "")"
+            if let note = await mobileLayoutNote(tab) { line += ".\n" + note.dropLast() }
+            return result(tab, session, line)
 
         case "dialog":
             try checkControl(session)
@@ -514,7 +534,20 @@ final class BrowserTools {
         return lines.joined(separator: "\n")
     }
 
-    /// The whole page: the view grows to the page's height for the capture, then back.
+    /// A phone-sized page without `width=device-width`: a phone lays it out 980px wide and
+    /// shrinks it to fit, which a Mac's WebKit doesn't, so here it looks better than on one.
+    private func mobileLayoutNote(_ tab: BrowserTab) async -> String? {
+        let width = await tab.cssViewport().width
+        guard width < 1024, !tab.viewport.fitsPanel, tab.url != nil,
+              let content = try? await tab.helper("return document.querySelector('meta[name=viewport]')?.content ?? ''") as? String,
+              !content.replacingOccurrences(of: " ", with: "").lowercased().contains("width=device-width")
+        else { return nil }
+        return "This page has no <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">: on a real phone or tablet it's laid out 980px wide and shrunk to fit, so it won't look like this \(Int(width))px layout there."
+    }
+
+    /// The whole page: the view grows to the page's height for the capture, then back. The
+    /// layout stays at the viewport's size meanwhile, so a `100vh` hero is one screen tall,
+    /// not the whole page, and what's below it isn't pushed out of the picture.
     private func fullPage(_ tab: BrowserTab) async throws -> Data {
         let height = try await tab.helper("return Math.min(document.documentElement.scrollHeight, 12000)") as? Double ?? 0
         let viewport = await tab.cssViewport()
@@ -523,11 +556,13 @@ final class BrowserTools {
         let original = tab.pageView.frame, originalCSS = web.frame.size
         let scroll = try await tab.helper("const s = document.scrollingElement; const y = s.scrollTop; s.scrollTop = 0; return y") as? Double ?? 0
         tab.holdsLayout = true
+        WebKitSPI.fixLayoutSize(web, to: originalCSS)
         tab.place(CGRect(origin: original.origin, size: CGSize(width: original.width, height: height * tab.displayScale)),
                   css: CGSize(width: originalCSS.width, height: height))
         defer {
             tab.holdsLayout = false
             tab.place(original, css: originalCSS)
+            WebKitSPI.fixLayoutSize(web, to: nil)
             Task { _ = try? await tab.helper("document.scrollingElement.scrollTop = y", ["y": scroll]) }
         }
         try? await Task.sleep(for: .milliseconds(120))

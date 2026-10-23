@@ -329,16 +329,18 @@ final class BrowserTab: NSObject, Identifiable {
 
     private func evaluateNow(_ source: String, isExpression: Bool) async throws -> String {
         // An expression first; if that isn't valid, a function body with its own `return`.
+        // The wrapper's names are ones a page won't use: the code runs in their scope, so a
+        // plain `seen` here hid the page's own `seen`.
         let wrapped = { (body: String) in
             """
-            const __value = await (async () => { \(body) })();
-            const seen = new WeakSet();
-            return JSON.stringify(__value, (key, v) => {
+            const __yhValue = await (async () => { \(body) })();
+            const __yhSeen = new WeakSet();
+            return JSON.stringify(__yhValue, (key, v) => {
               if (typeof Node !== 'undefined' && v instanceof Node) return v.nodeType === 1 ? v.outerHTML.slice(0, 500) : String(v.textContent).slice(0, 500);
               if (v instanceof Error) return String(v);
               if (typeof v === 'function') return 'ƒ ' + (v.name || 'anonymous');
               if (typeof v === 'bigint') return String(v);
-              if (v && typeof v === 'object') { if (seen.has(v)) return '[circular]'; seen.add(v); }
+              if (v && typeof v === 'object') { if (__yhSeen.has(v)) return '[circular]'; __yhSeen.add(v); }
               return v;
             }) ?? 'undefined';
             """
@@ -358,38 +360,115 @@ final class BrowserTab: NSObject, Identifiable {
     func click(at point: CGPoint, button: String = "left", count: Int = 1, modifiers: NSEvent.ModifierFlags = []) {
         withoutTakingFocus {
             let location = windowPoint(point)
-            webView.mouseMoved(with: mouseEvent(.mouseMoved, at: location, modifiers: modifiers))
+            movePointer(to: location, modifiers: modifiers)
             for click in 1...max(count, 1) {
                 switch button {
                 case "right":
-                    webView.rightMouseDown(with: mouseEvent(.rightMouseDown, at: location, clicks: click, modifiers: modifiers))
-                    webView.rightMouseUp(with: mouseEvent(.rightMouseUp, at: location, clicks: click, modifiers: modifiers))
+                    SyntheticMouse.holding(2) { webView.rightMouseDown(with: mouseEvent(.rightMouseDown, at: location, clicks: click, modifiers: modifiers)) }
+                    SyntheticMouse.holding(0) { webView.rightMouseUp(with: mouseEvent(.rightMouseUp, at: location, clicks: click, modifiers: modifiers)) }
                 default:
-                    webView.mouseDown(with: mouseEvent(.leftMouseDown, at: location, clicks: click, modifiers: modifiers))
-                    webView.mouseUp(with: mouseEvent(.leftMouseUp, at: location, clicks: click, modifiers: modifiers))
+                    SyntheticMouse.holding(1) { webView.mouseDown(with: mouseEvent(.leftMouseDown, at: location, clicks: click, modifiers: modifiers)) }
+                    SyntheticMouse.holding(0) { webView.mouseUp(with: mouseEvent(.leftMouseUp, at: location, clicks: click, modifiers: modifiers)) }
                 }
             }
         }
     }
 
     func hover(at point: CGPoint) {
-        webView.mouseMoved(with: mouseEvent(.mouseMoved, at: windowPoint(point)))
+        movePointer(to: windowPoint(point))
     }
 
-    func drag(from start: CGPoint, to end: CGPoint) async {
+    /// The pointer to a window point, as the page sees a mouse move: `:hover`, mouseover,
+    /// mousemove, no button down. WebKit hit-tests a plain move only in the key window (in
+    /// any other it just updates scroll bars), and these pages are rarely in it: parked off
+    /// screen, or in a window you've left. A move with the left button held is hit-tested
+    /// anywhere, and the page still sees no button, since WebKit reads the buttons from the
+    /// real mouse; with no mouse down before it, nothing is selected or dragged.
+    private func movePointer(to location: NSPoint, modifiers: NSEvent.ModifierFlags = []) {
+        SyntheticMouse.holding(0) {
+            webView.mouseDragged(with: NSEvent.mouseEvent(
+                with: .leftMouseDragged, location: location, modifierFlags: modifiers, timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: webView.window?.windowNumber ?? 0, context: nil, eventNumber: 0, clickCount: 0, pressure: 0)!)
+        }
+    }
+
+    enum DragOutcome {
+        case mouse
+        /// An HTML drag and drop: whether something under the pointer took the drop.
+        case html(started: Bool, dropped: Bool, target: String)
+    }
+
+    /// A drag with the mouse, in CSS pixels. From a `draggable` element it's an HTML drag and
+    /// drop, played as the page's drag events: WebKit hands that to an AppKit drag session,
+    /// which follows the real mouse, so mouse events alone never drop anything.
+    func drag(from start: CGPoint, to end: CGPoint) async -> DragOutcome {
+        // In the page's world, so its handlers see this drag's dropEffect and effectAllowed.
+        if let html = try? await webView.callAsyncJavaScript(Self.htmlDrag, arguments: ["from": [start.x, start.y], "to": [end.x, end.y]], contentWorld: .page) as? [String: Any] {
+            movePointer(to: windowPoint(end))
+            return .html(started: html["started"] as? Bool ?? false, dropped: html["dropped"] as? Bool ?? false, target: html["target"] as? String ?? "")
+        }
         let from = windowPoint(start), to = windowPoint(end)
         withoutTakingFocus {
-            webView.mouseMoved(with: mouseEvent(.mouseMoved, at: from))
-            webView.mouseDown(with: mouseEvent(.leftMouseDown, at: from))
+            movePointer(to: from)
+            SyntheticMouse.holding(1) { webView.mouseDown(with: mouseEvent(.leftMouseDown, at: from)) }
         }
         for step in 1...12 {
             let t = Double(step) / 12
             let point = CGPoint(x: from.x + (to.x - from.x) * t, y: from.y + (to.y - from.y) * t)
-            webView.mouseDragged(with: mouseEvent(.leftMouseDragged, at: point))
+            SyntheticMouse.holding(1) { webView.mouseDragged(with: mouseEvent(.leftMouseDragged, at: point)) }
             try? await Task.sleep(for: .milliseconds(16))
         }
-        withoutTakingFocus { webView.mouseUp(with: mouseEvent(.leftMouseUp, at: to)) }
+        withoutTakingFocus { SyntheticMouse.holding(0) { webView.mouseUp(with: mouseEvent(.leftMouseUp, at: to)) } }
+        return .mouse
     }
+
+    /// Null unless the drag starts on a `draggable` element; then the events a browser fires
+    /// for it, in order, and whether the drop was taken (the last dragover was cancelled).
+    private static let htmlDrag = """
+        const [x0, y0] = from, [x1, y1] = to;
+        const source = document.elementFromPoint(x0, y0)?.closest('[draggable="true"]');
+        if (!source) return null;
+        const data = new DataTransfer();
+        // A DataTransfer made by script ignores these outside a real drag; here they work as in one.
+        let dropEffect = 'none', effectAllowed = 'uninitialized';
+        Object.defineProperty(data, 'dropEffect', { configurable: true, get: () => dropEffect,
+            set: (value) => { if (['none', 'copy', 'link', 'move'].includes(value)) dropEffect = value; } });
+        Object.defineProperty(data, 'effectAllowed', { configurable: true, get: () => effectAllowed,
+            set: (value) => { if (['none', 'copy', 'copyLink', 'copyMove', 'link', 'linkMove', 'move', 'all', 'uninitialized'].includes(value)) effectAllowed = value; } });
+        const init = (x, y, extra) => ({ bubbles: true, cancelable: true, composed: true, view: window,
+            clientX: x, clientY: y, screenX: screenX + x, screenY: screenY + y, ...extra });
+        const fire = (target, type, x, y, extra = {}) => target.dispatchEvent(
+            type.startsWith('pointer') ? new PointerEvent(type, init(x, y, { pointerId: 1, pointerType: 'mouse', isPrimary: true, ...extra }))
+            : type.startsWith('mouse') ? new MouseEvent(type, init(x, y, extra))
+            : new DragEvent(type, init(x, y, { dataTransfer: data, ...extra })));
+        // What a browser starts each dragenter and dragover with, from effectAllowed; the page may change it.
+        const effect = () => ({ none: 'none', copy: 'copy', copyLink: 'copy', copyMove: 'copy', all: 'copy', link: 'link', linkMove: 'link' })[data.effectAllowed] ?? 'move';
+        const describe = (el) => el.id ? '#' + el.id : el.localName + (el.classList.length ? '.' + [...el.classList].join('.') : '');
+        fire(source, 'pointerdown', x0, y0, { button: 0, buttons: 1 });
+        fire(source, 'mousedown', x0, y0, { button: 0, buttons: 1 });
+        if (!fire(source, 'dragstart', x0, y0)) return { started: false, dropped: false, target: describe(source) };
+        fire(source, 'pointercancel', x0, y0);
+        let over = null, accepted = false;
+        for (let step = 1; step <= 12; step++) {
+            const x = x0 + (x1 - x0) * step / 12, y = y0 + (y1 - y0) * step / 12;
+            fire(source, 'drag', x, y);
+            const under = document.elementFromPoint(x, y) ?? document.documentElement;
+            if (under !== over) {
+                data.dropEffect = effect();
+                fire(under, 'dragenter', x, y);
+                if (over) fire(over, 'dragleave', x, y);
+                over = under;
+            }
+            data.dropEffect = effect();
+            accepted = !fire(under, 'dragover', x, y) && data.dropEffect !== 'none';
+            await new Promise((done) => setTimeout(done, 16));
+        }
+        if (accepted) fire(over, 'drop', x1, y1);
+        // dragend says what happened: the drop's effect, or none.
+        if (!accepted) data.dropEffect = 'none';
+        fire(source, 'dragend', x1, y1);
+        return { started: true, dropped: accepted, target: describe(over) };
+        """
 
     /// Text into whatever has focus in the page, as input events (no key presses), so it
     /// doesn't need the keyboard focus you might be typing with.
@@ -441,8 +520,12 @@ final class BrowserTab: NSObject, Identifiable {
         }
     }
 
+    /// A point in CSS pixels where the window has it. A hundredth of a pixel in: WebKit
+    /// truncates the page point it converts back, and scaled, 250 came back 249.9999, so
+    /// clicks landed a pixel up and left.
     private func windowPoint(_ point: CGPoint) -> NSPoint {
-        let local = NSPoint(x: point.x, y: webView.isFlipped ? point.y : webView.bounds.height - point.y)
+        let x = point.x + 0.01, y = point.y + 0.01
+        let local = NSPoint(x: x, y: webView.isFlipped ? y : webView.bounds.height - y)
         return webView.convert(local, to: nil)
     }
 
@@ -723,6 +806,20 @@ enum WebKitSPI {
 
     static func suppressFirstResponderChanges(_ webView: WKWebView, _ suppress: Bool) {
         call(webView, "_setShouldSuppressFirstResponderChanges:", suppress)
+    }
+
+    /// Lays the page out at `size` whatever the view's size, or at the view's size again
+    /// (nil). Viewport units and media queries follow the layout size.
+    static func fixLayoutSize(_ webView: WKWebView, to size: CGSize?) {
+        let setSize = NSSelectorFromString("_setFixedLayoutSize:"), setMode = NSSelectorFromString("_setLayoutMode:")
+        guard webView.responds(to: setSize), webView.responds(to: setMode) else { return }
+        if let size {
+            typealias SizeSetter = @convention(c) (AnyObject, Selector, CGSize) -> Void
+            unsafeBitCast(webView.method(for: setSize), to: SizeSetter.self)(webView, setSize, size)
+        }
+        // _WKLayoutModeViewSize, _WKLayoutModeFixedSize.
+        typealias ModeSetter = @convention(c) (AnyObject, Selector, Int) -> Void
+        unsafeBitCast(webView.method(for: setMode), to: ModeSetter.self)(webView, setMode, size == nil ? 0 : 1)
     }
 
     private static func call(_ object: NSObject, _ name: String, _ value: Bool) {

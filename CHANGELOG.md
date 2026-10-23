@@ -9,6 +9,11 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 ### Changed
 - **Claude's work is easy to find again.** Each finished turn's work is a row of its own ("Worked for 2m 14s · 9 tool calls"), with Show work; opened, every step shows inside it as one group, under Hide work.
 - **Copy buttons** under Claude's replies and beside your messages, when the pointer is over them.
+- **Full-page screenshots show the whole page.** A full-screen section (`100vh`, Tailwind's `h-screen`) stretched to the page's full height and pushed everything below it out of the picture; it stays one screen tall now, as in a browser.
+- **Hover and drag work as with a real mouse.** Hovering in the built-in browser never applied `:hover` unless its window was in front, so hover menus and styles looked broken. Clicks and drags now tell the page the button is down (drags that check let go halfway), and dragging a `draggable` element does HTML drag and drop, which never dropped anything before. A drag says whether the page took the drop.
+- Clicks in a scaled page land on the exact pixel; they could be a pixel off.
+- Browser screenshots say the page's real size and how much the image is scaled, and a phone-sized page without `<meta name="viewport" content="width=device-width">` gets a note that a real phone lays it out 980px wide.
+- Running JavaScript in the browser that uses a variable named `seen` no longer fails.
 - **The built-in browser shows pages at their true size.** Text under 18px came out at 18px, because the page was shrunk to fit the panel and WebKit kept small text readable, and pages saw a pixel ratio of 1 instead of a Retina screen's 2. Now fonts, layout and `devicePixelRatio` match Safari on the same screen.
 - The browser's page sizes match today's screens: Laptop (a 14-inch MacBook Pro, 1512 × 982, the new default), Desktop (1920 × 1080), Tablet (an 11-inch iPad Pro, 834 × 1210) and Phone (an iPhone 17 Pro, 402 × 874).
 - The arrows for jumping between your messages are two separate round buttons, and each shows only when it has somewhere to go: no ↓ at the end of the thread, no ↑ above your first message.

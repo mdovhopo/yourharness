@@ -500,7 +500,10 @@ final class BrowserHostView: NSView {
         guard let tab, !tab.holdsLayout else { return }
         let layout = BrowserPageLayout(viewport: tab.viewport, in: bounds.size)
         guard layout.frame.width > 1 else { return }
-        tab.place(layout.frame, css: CGSize(width: layout.frame.width / layout.zoom, height: layout.frame.height / layout.zoom))
+        // The page's own size, not the frame divided back by the zoom: that came out a hair
+        // short (1209.99), and WebKit rounded the page down a pixel.
+        let viewport = tab.viewport
+        tab.place(layout.frame, css: viewport.fitsPanel ? layout.frame.size : CGSize(width: viewport.width, height: viewport.height))
     }
 }
 

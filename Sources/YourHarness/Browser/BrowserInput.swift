@@ -1,5 +1,33 @@
 import AppKit
+import Synchronization
 import WebKit
+
+/// The mouse buttons WebKit sees held while the agent's mouse events go in. It reads them
+/// (`event.buttons`) from the real mouse, `NSEvent.pressedMouseButtons`, which is up: every
+/// press and drag said no button was down, and pages that check gave up on a drag halfway.
+@MainActor
+enum SyntheticMouse {
+    nonisolated private static let held = Mutex<Int?>(nil)
+    nonisolated private static let installed: Bool = {
+        let selector = #selector(getter: NSEvent.pressedMouseButtons)
+        guard let method = class_getClassMethod(NSEvent.self, selector) else { return false }
+        typealias Getter = @convention(c) (AnyClass, Selector) -> Int
+        let original = unsafeBitCast(method_getImplementation(method), to: Getter.self)
+        let replacement: @convention(block) (AnyClass) -> Int = { type in
+            held.withLock { $0 } ?? original(type, selector)
+        }
+        method_setImplementation(method, imp_implementationWithBlock(replacement))
+        return true
+    }()
+
+    /// `buttons` as `pressedMouseButtons` (1 left, 2 right) while `body` sends events.
+    static func holding(_ buttons: Int, _ body: () -> Void) {
+        _ = installed
+        held.withLock { $0 = buttons }
+        defer { held.withLock { $0 = nil } }
+        body()
+    }
+}
 
 /// A key as the agent names it (`Enter`, `Shift+Tab`, `Meta+A`, `a`), as AppKit sends it.
 struct BrowserKey {
