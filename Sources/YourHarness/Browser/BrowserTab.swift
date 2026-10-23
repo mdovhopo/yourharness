@@ -60,6 +60,9 @@ final class BrowserTab: NSObject, Identifiable {
     /// Short and stable, so the agent can say which tab: 1, 2, 3...
     let id: Int
     let webView: WKWebView
+    /// What panels and the parking window host: the web view at the page's CSS size,
+    /// drawn scaled to fit.
+    let pageView = FlippedView()
     private(set) var url: URL?
     private(set) var title = ""
     private(set) var isLoading = false
@@ -109,10 +112,11 @@ final class BrowserTab: NSObject, Identifiable {
     init(id: Int, configuration: WKWebViewConfiguration, openedByAgent: Bool) {
         self.id = id
         self.openedByAgent = openedByAgent
-        let frame = NSRect(x: 0, y: 0, width: Viewport.laptop.width / 2, height: Viewport.laptop.height / 2)
-        webView = WKWebView(frame: frame, configuration: configuration)
+        webView = WKWebView(frame: .zero, configuration: configuration)
         super.init()
-        webView.pageZoom = 0.5
+        pageView.addSubview(webView)
+        place(CGRect(x: 0, y: 0, width: Viewport.laptop.width / 2, height: Viewport.laptop.height / 2),
+              css: CGSize(width: Viewport.laptop.width, height: Viewport.laptop.height))
         webView.isInspectable = true
         webView.allowsBackForwardNavigationGestures = true
         webView.navigationDelegate = self
@@ -155,7 +159,7 @@ final class BrowserTab: NSObject, Identifiable {
         dialog = nil
         stopPicking()
         webView.stopLoading()
-        webView.removeFromSuperview()
+        pageView.removeFromSuperview()
         for waiter in loadWaiters { waiter.resume() }
         loadWaiters.removeAll()
     }
@@ -438,8 +442,7 @@ final class BrowserTab: NSObject, Identifiable {
     }
 
     private func windowPoint(_ point: CGPoint) -> NSPoint {
-        let zoom = webView.pageZoom
-        let local = NSPoint(x: point.x * zoom, y: webView.isFlipped ? point.y * zoom : webView.bounds.height - point.y * zoom)
+        let local = NSPoint(x: point.x, y: webView.isFlipped ? point.y : webView.bounds.height - point.y)
         return webView.convert(local, to: nil)
     }
 
@@ -462,18 +465,33 @@ final class BrowserTab: NSObject, Identifiable {
     func resize(to viewport: Viewport) {
         self.viewport = viewport
         // Shown in a panel, the panel lays it out; parked, it keeps the zoom it had.
-        if webView.window === BrowserParking.shared.windowForChecks || webView.superview == nil {
-            let zoom = webView.pageZoom
-            webView.frame.size = CGSize(width: viewport.width * zoom, height: viewport.height * zoom)
+        if pageView.window === BrowserParking.shared.windowForChecks || pageView.superview == nil {
+            let scale = displayScale
+            place(CGRect(origin: pageView.frame.origin, size: CGSize(width: viewport.width * scale, height: viewport.height * scale)),
+                  css: CGSize(width: viewport.width, height: viewport.height))
         } else {
-            webView.superview?.needsLayout = true
+            pageView.superview?.needsLayout = true
         }
     }
 
     /// What the page really has, CSS pixels: the panel may be fitting it.
     func cssViewport() async -> CGSize {
-        let zoom = webView.pageZoom
-        return CGSize(width: webView.bounds.width / zoom, height: webView.bounds.height / zoom)
+        webView.frame.size
+    }
+
+    /// The web view is `css` points, so a CSS pixel is a point, as in Safari, and the page
+    /// view around it draws that scaled into `frame`. Page zoom would shrink the page too,
+    /// but WebKit then holds text to its 9-point minimum on screen (at half size, every font
+    /// under 18px came out at 18px) and the page sees a device pixel ratio of 1.
+    func place(_ frame: CGRect, css: CGSize) {
+        pageView.frame = frame
+        if pageView.bounds.size != css { pageView.setBoundsSize(css) }
+        if webView.frame != CGRect(origin: .zero, size: css) { webView.frame = CGRect(origin: .zero, size: css) }
+    }
+
+    /// Screen points per CSS pixel.
+    var displayScale: Double {
+        pageView.bounds.width > 0 ? pageView.frame.width / pageView.bounds.width : 1
     }
 
     /// Light or dark for the page's `prefers-color-scheme`; "auto" follows the app.

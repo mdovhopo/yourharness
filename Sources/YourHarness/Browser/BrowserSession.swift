@@ -219,16 +219,18 @@ final class BrowserParking {
 
     /// Keeps its size and zoom, so the page doesn't relayout because you closed the panel.
     func park(_ tab: BrowserTab) {
-        let web = tab.webView
+        let page = tab.pageView
         guard let content = window.contentView else { return }
-        if web.superview !== content {
-            web.removeFromSuperview()
-            content.addSubview(web)
+        if page.superview !== content {
+            page.removeFromSuperview()
+            content.addSubview(page)
         }
-        let size = web.frame.size == .zero
-            ? CGSize(width: tab.viewport.width * web.pageZoom, height: tab.viewport.height * web.pageZoom)
-            : web.frame.size
-        web.frame = NSRect(origin: .zero, size: size)
+        if page.frame.size == .zero {
+            tab.place(NSRect(x: 0, y: 0, width: tab.viewport.width / 2, height: tab.viewport.height / 2),
+                      css: CGSize(width: tab.viewport.width, height: tab.viewport.height))
+        } else {
+            page.setFrameOrigin(.zero)
+        }
     }
 }
 

@@ -520,13 +520,14 @@ final class BrowserTools {
         let viewport = await tab.cssViewport()
         guard height > viewport.height + 1 else { return try await BrowserScreenshot.capture(tab) }
         let web = tab.webView
-        let original = web.frame
+        let original = tab.pageView.frame, originalCSS = web.frame.size
         let scroll = try await tab.helper("const s = document.scrollingElement; const y = s.scrollTop; s.scrollTop = 0; return y") as? Double ?? 0
         tab.holdsLayout = true
-        web.frame.size.height = height * web.pageZoom
+        tab.place(CGRect(origin: original.origin, size: CGSize(width: original.width, height: height * tab.displayScale)),
+                  css: CGSize(width: originalCSS.width, height: height))
         defer {
             tab.holdsLayout = false
-            web.frame = original
+            tab.place(original, css: originalCSS)
             Task { _ = try? await tab.helper("document.scrollingElement.scrollTop = y", ["y": scroll]) }
         }
         try? await Task.sleep(for: .milliseconds(120))

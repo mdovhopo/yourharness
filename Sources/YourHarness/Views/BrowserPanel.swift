@@ -486,12 +486,12 @@ final class BrowserHostView: NSView {
         guard self.tab !== tab else { return }
         release()
         self.tab = tab
-        addSubview(tab.webView)
+        addSubview(tab.pageView)
         needsLayout = true
     }
 
     func release() {
-        if let tab, tab.webView.superview === self { BrowserParking.shared.park(tab) }
+        if let tab, tab.pageView.superview === self { BrowserParking.shared.park(tab) }
         tab = nil
     }
 
@@ -500,8 +500,7 @@ final class BrowserHostView: NSView {
         guard let tab, !tab.holdsLayout else { return }
         let layout = BrowserPageLayout(viewport: tab.viewport, in: bounds.size)
         guard layout.frame.width > 1 else { return }
-        if abs(tab.webView.pageZoom - layout.zoom) > 0.001 { tab.webView.pageZoom = layout.zoom }
-        tab.webView.frame = layout.frame
+        tab.place(layout.frame, css: CGSize(width: layout.frame.width / layout.zoom, height: layout.frame.height / layout.zoom))
     }
 }
 

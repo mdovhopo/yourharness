@@ -70,13 +70,13 @@ enum BrowserScreenshot {
     /// view, at most `maxWidth` pixels wide: a full desktop page is readable at 1280.
     static func capture(_ tab: BrowserTab, cssRect: CGRect? = nil, maxWidth: Double = 1280) async throws -> Data {
         let web = tab.webView
-        let zoom = web.pageZoom
-        let viewSize = CGSize(width: web.bounds.width / zoom, height: web.bounds.height / zoom)
+        // The web view's bounds are CSS pixels.
+        let viewSize = web.bounds.size
         let area = (cssRect ?? CGRect(origin: .zero, size: viewSize)).intersection(CGRect(origin: .zero, size: viewSize))
         guard area.width >= 1, area.height >= 1 else { throw BrowserError("That's outside the visible page; scroll it into view first.") }
         let configuration = WKSnapshotConfiguration()
-        let y = web.isFlipped ? area.minY * zoom : web.bounds.height - area.maxY * zoom
-        configuration.rect = CGRect(x: area.minX * zoom, y: y, width: area.width * zoom, height: area.height * zoom)
+        let y = web.isFlipped ? area.minY : web.bounds.height - area.maxY
+        configuration.rect = CGRect(x: area.minX, y: y, width: area.width, height: area.height)
         let width = min(area.width, maxWidth)
         configuration.snapshotWidth = NSNumber(value: width)
         configuration.afterScreenUpdates = true
