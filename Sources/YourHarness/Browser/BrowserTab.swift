@@ -49,9 +49,12 @@ final class BrowserTab: NSObject, Identifiable {
         /// Follows the panel's size instead.
         var fitsPanel = false
 
-        static let desktop = Viewport(width: 1280, height: 800)
-        static let tablet = Viewport(width: 820, height: 1180)
-        static let phone = Viewport(width: 390, height: 844)
+        /// Today's screens, in the points a page sees: a 14-inch MacBook Pro at its
+        /// default scaling, a 1080p monitor, an 11-inch iPad Pro, an iPhone 17 Pro.
+        static let laptop = Viewport(width: 1512, height: 982)
+        static let desktop = Viewport(width: 1920, height: 1080)
+        static let tablet = Viewport(width: 834, height: 1210)
+        static let phone = Viewport(width: 402, height: 874)
     }
 
     /// Short and stable, so the agent can say which tab: 1, 2, 3...
@@ -69,7 +72,7 @@ final class BrowserTab: NSObject, Identifiable {
     private(set) var highlight: Highlight?
     /// What the agent is doing right now, shown over the page.
     private(set) var agentActivity: String?
-    var viewport = Viewport.desktop
+    var viewport = Viewport.laptop
     /// A full-page screenshot has the view grown to the page's height: the panel leaves it.
     var holdsLayout = false
     /// Opened by the agent (it may close it), or by you.
@@ -106,7 +109,7 @@ final class BrowserTab: NSObject, Identifiable {
     init(id: Int, configuration: WKWebViewConfiguration, openedByAgent: Bool) {
         self.id = id
         self.openedByAgent = openedByAgent
-        let frame = NSRect(x: 0, y: 0, width: Viewport.desktop.width / 2, height: Viewport.desktop.height / 2)
+        let frame = NSRect(x: 0, y: 0, width: Viewport.laptop.width / 2, height: Viewport.laptop.height / 2)
         webView = WKWebView(frame: frame, configuration: configuration)
         super.init()
         webView.pageZoom = 0.5

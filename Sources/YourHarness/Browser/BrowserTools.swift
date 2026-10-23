@@ -297,6 +297,7 @@ final class BrowserTools {
             let tab = try page(session, args)
             var viewport = tab.viewport
             switch args["preset"]?.string {
+            case "laptop": viewport = .laptop
             case "desktop": viewport = .desktop
             case "tablet": viewport = .tablet
             case "phone": viewport = .phone

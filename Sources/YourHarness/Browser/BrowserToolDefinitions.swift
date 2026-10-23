@@ -123,9 +123,9 @@ extension BrowserTools {
             inputSchema: MCPTool.schema(["expression": ["type": "string"], "tab": tab], required: ["expression"])),
         MCPTool(
             name: "resize",
-            description: "Change the viewport: a preset (desktop 1280×800, tablet 820×1180, phone 390×844, fit = the panel's size) or width and height, and the color scheme the page sees.",
+            description: "Change the viewport: a preset (laptop 1512×982, the default; desktop 1920×1080; tablet 834×1210; phone 402×874; fit = the panel's size) or width and height, and the color scheme the page sees.",
             inputSchema: MCPTool.schema([
-                "preset": ["type": "string", "enum": ["desktop", "tablet", "phone", "fit"]],
+                "preset": ["type": "string", "enum": ["laptop", "desktop", "tablet", "phone", "fit"]],
                 "width": ["type": "number"], "height": ["type": "number"],
                 "color_scheme": ["type": "string", "enum": ["light", "dark", "auto"]],
                 "tab": tab,

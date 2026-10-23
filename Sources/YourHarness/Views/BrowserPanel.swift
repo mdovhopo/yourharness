@@ -218,11 +218,12 @@ private struct BrowserMoreMenu: View {
 
 /// The page sizes the menu offers.
 private enum ViewportChoice: String, CaseIterable, Identifiable {
-    case fit, desktop, tablet, phone, custom
+    case fit, laptop, desktop, tablet, phone, custom
     var id: String { rawValue }
 
     init(_ viewport: BrowserTab.Viewport) {
         if viewport.fitsPanel { self = .fit }
+        else if viewport == .laptop { self = .laptop }
         else if viewport == .desktop { self = .desktop }
         else if viewport == .tablet { self = .tablet }
         else if viewport == .phone { self = .phone }
@@ -232,17 +233,19 @@ private enum ViewportChoice: String, CaseIterable, Identifiable {
     var label: String {
         switch self {
         case .fit: "Fit the Sidebar"
-        case .desktop: "Desktop (1280 × 800)"
-        case .tablet: "Tablet (820 × 1180)"
-        case .phone: "Phone (390 × 844)"
+        case .laptop: "Laptop (1512 × 982)"
+        case .desktop: "Desktop (1920 × 1080)"
+        case .tablet: "Tablet (834 × 1210)"
+        case .phone: "Phone (402 × 874)"
         case .custom: "Set by Claude"
         }
     }
 
     var viewport: BrowserTab.Viewport {
         switch self {
-        case .fit: BrowserTab.Viewport(width: 1280, height: 800, fitsPanel: true)
-        case .desktop, .custom: .desktop
+        case .fit: BrowserTab.Viewport(width: BrowserTab.Viewport.laptop.width, height: BrowserTab.Viewport.laptop.height, fitsPanel: true)
+        case .laptop, .custom: .laptop
+        case .desktop: .desktop
         case .tablet: .tablet
         case .phone: .phone
         }
