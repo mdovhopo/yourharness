@@ -231,8 +231,8 @@ private struct TranscriptView: View {
             if let jump { self.jump(jump.direction) }
         }
         .overlay(alignment: .bottomTrailing) {
-            if !isShort, thread.entries.contains(where: { $0.kind == .user }) {
-                MessageJumpControls(thread: thread)
+            if !isShort {
+                MessageJumpControls(thread: thread, canGoPrevious: hasMessageAbove, canGoNext: !isAtBottom)
                     .padding(.trailing, 14)
                     .padding(.bottom, 10)
                     .transition(.opacity)
@@ -296,6 +296,17 @@ private struct TranscriptView: View {
         }
         let order = Dictionary(thread.transcriptDisplayRows.enumerated().map { ($1.id, $0) }, uniquingKeysWith: { first, _ in first })
         thread.scrollAnchor = visibleRowIDs.max { (order[$0] ?? -1) < (order[$1] ?? -1) }
+    }
+
+    /// One of your messages above the top of the screen, shown or not yet.
+    private var hasMessageAbove: Bool {
+        let rows = thread.transcriptDisplayRows
+        let visible = Set(visibleRowIDs)
+        guard let top = rows.firstIndex(where: { visible.contains($0.id) }) else { return false }
+        return rows[..<top].contains { row in
+            if case .earlier = row { return true }
+            return row.entry?.kind == .user
+        }
     }
 
     /// To your previous message above the top of the screen, or your next one below it

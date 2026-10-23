@@ -9,7 +9,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 ### Changed
 - **Claude's work is easy to find again.** Each finished turn's work is a row of its own ("Worked for 2m 14s · 9 tool calls"), with Show work; opened, every step shows inside it as one group, under Hide work.
 - **Copy buttons** under Claude's replies and beside your messages, when the pointer is over them.
-- The arrows for jumping between your messages are two separate buttons.
+- The arrows for jumping between your messages are two separate round buttons, and each shows only when it has somewhere to go: no ↓ at the end of the thread, no ↑ above your first message.
 - **Switching threads is instant.** Going back to one of the last few threads you were in takes a few tens of milliseconds and keeps your exact place: their transcripts stay made. Everything else got lighter too: no crossfade or sliding selection to wait through, a long thread's history loads off the main thread and only its latest 40 turns are laid out (scroll to the top for more), the composer and toolbar stay put instead of being rebuilt, and transcripts you haven't looked at in a while are let go to save memory.
 - **Text in the transcript selects like Mac text.** Claude's replies are AppKit text: drag across paragraphs, lists and headings, double-click a word, ⌘C, Look Up; links show the pointing hand. Code blocks too, and they no longer slow down a long thread.
 

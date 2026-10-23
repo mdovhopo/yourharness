@@ -128,19 +128,52 @@ struct WorkSummaryRow: View {
 /// Up to your previous message, down to your next one (or the end). ⌘[ and ⌘] do the same.
 struct MessageJumpControls: View {
     let thread: ThreadModel
+    /// A message of yours above the screen; past the bottom of the conversation. Each
+    /// arrow shows only when it has somewhere to go.
+    let canGoPrevious: Bool
+    let canGoNext: Bool
 
     var body: some View {
-        VStack(spacing: 8) {
-            Button("Previous Message", systemImage: "chevron.up") { thread.jumpToMessage(.previous) }
-                .help("Your previous message (⌘[)")
-            Button("Next Message", systemImage: "chevron.down") { thread.jumpToMessage(.next) }
-                .help("Your next message, or the end (⌘])")
+        VStack(spacing: 10) {
+            if canGoPrevious {
+                Button("Previous Message", systemImage: "chevron.up") { thread.jumpToMessage(.previous) }
+                    .help("Your previous message (⌘[)")
+                    .transition(.scale(scale: 0.6).combined(with: .opacity))
+            }
+            if canGoNext {
+                Button("Next Message", systemImage: "chevron.down") { thread.jumpToMessage(.next) }
+                    .help("Your next message, or the end (⌘])")
+                    .transition(.scale(scale: 0.6).combined(with: .opacity))
+            }
         }
         .labelStyle(.iconOnly)
-        .buttonStyle(.glass)
-        .buttonBorderShape(.circle)
-        .controlSize(.regular)
-        .font(.callout.weight(.semibold))
+        .buttonStyle(JumpButtonStyle())
+        .animation(.snappy(duration: 0.2), value: canGoPrevious)
+        .animation(.snappy(duration: 0.2), value: canGoNext)
+    }
+}
+
+/// A small round button floating over the transcript: solid, a hairline edge, a soft shadow.
+private struct JumpButtonStyle: ButtonStyle {
+    @State private var hovering = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 15, weight: .medium))
+            .foregroundStyle(.secondary)
+            .frame(width: 34, height: 34)
+            .background {
+                Circle()
+                    .fill(Color(nsColor: .controlBackgroundColor))
+                    .overlay(Circle().fill(.fill.opacity(configuration.isPressed ? 0.8 : hovering ? 0.45 : 0)))
+                    .overlay(Circle().strokeBorder(.separator, lineWidth: 0.5))
+                    .shadow(color: .black.opacity(0.12), radius: 3, y: 1)
+            }
+            .scaleEffect(configuration.isPressed ? 0.94 : 1)
+            .contentShape(.circle)
+            .onHover { hovering = $0 }
+            .animation(.easeOut(duration: 0.15), value: hovering)
+            .animation(.spring(response: 0.25, dampingFraction: 0.7), value: configuration.isPressed)
     }
 }
 
