@@ -6,6 +6,8 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+## [0.0.5] - 2026-10-23
+
 ### Changed
 - **Claude's work is easy to find again.** Each finished turn's work is a row of its own ("Worked for 2m 14s · 9 tool calls"), with Show work; opened, every step shows inside it as one group, under Hide work.
 - **Copy buttons** under Claude's replies and beside your messages, when the pointer is over them.
