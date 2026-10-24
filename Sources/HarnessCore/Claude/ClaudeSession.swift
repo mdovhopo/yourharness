@@ -23,6 +23,8 @@ public struct ClaudeLaunchOptions: Sendable {
     public var persistsSession = true
     /// Tools that never ask: `mcp__server` covers all of a server's.
     public var allowedTools: [String] = []
+    /// Folders besides the working directory that tools may use (`--add-dir`).
+    public var addDirectories: [String] = []
 
     public init(
         executable: URL,
@@ -69,6 +71,7 @@ public struct ClaudeLaunchOptions: Sendable {
         if withoutMCP { args.append("--strict-mcp-config") }
         if !persistsSession { args.append("--no-session-persistence") }
         if !allowedTools.isEmpty { args += ["--allowedTools", allowedTools.joined(separator: ",")] }
+        for directory in addDirectories { args += ["--add-dir", directory] }
         return args
     }
 }

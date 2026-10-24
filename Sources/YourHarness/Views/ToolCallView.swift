@@ -40,6 +40,10 @@ struct ToolPresentation {
         case "ToolSearch" where string("query").hasPrefix("select:") && string("query").contains(BrowserCall.prefix):
             // Claude Code loads MCP tools when they're first needed.
             (symbol, verb, detail) = ("safari", "Load browser tools", "")
+        case "ToolSearch" where string("query").hasPrefix("select:") && string("query").contains(MemoryToolServer.toolPrefix):
+            (symbol, verb, detail) = ("brain", "Load memory tools", "")
+        case let name where name.hasPrefix(MemoryToolServer.toolPrefix):
+            (symbol, verb, detail) = MemoryCall.presentation(String(name.dropFirst(MemoryToolServer.toolPrefix.count)), input: input)
         case let name where name.hasPrefix(BrowserCall.prefix):
             (symbol, verb, detail) = BrowserCall.presentation(String(name.dropFirst(BrowserCall.prefix.count)), input: input, result: result)
         default:
@@ -296,5 +300,28 @@ private struct ShowBrowserButton: View {
         Button("Show Browser", systemImage: "safari") { app.showInspector(.browser) }
             .buttonStyle(.glass)
             .controlSize(.small)
+    }
+}
+
+/// Memory tool calls (`mcp__memory__*`), read as what they did: "Remember "Use pnpm"".
+enum MemoryCall {
+    static func presentation(_ tool: String, input: [String: Any]) -> (String, String, String) {
+        let string = { (key: String) in input[key] as? String ?? "" }
+        let ids = (input["ids"] as? [String])?.joined(separator: ", ") ?? string("ids")
+        return switch tool {
+        case "search": ("brain", "Search memory", string("query"))
+        case "read": ("brain", "Recall", ids)
+        case "save": ("brain.head.profile", "Remember", string("title"))
+        case "update": ("brain.head.profile", "Update memory", string("title").isEmpty ? string("id") : string("title"))
+        case "forget": ("brain", "Forget", string("id"))
+        case "link": ("link", "Link memories", "\(string("from")) → \(string("to"))")
+        case "unlink": ("link", "Unlink memories", "\(string("from")) → \(string("to"))")
+        case "merge": ("arrow.triangle.merge", "Merge memories", string("title"))
+        case "list": ("list.bullet", "List memories", string("kind"))
+        case "stats": ("chart.bar", "Memory stats", "")
+        case "restore": ("arrow.uturn.backward", "Restore memory", string("id"))
+        case "pin": ("pin", (input["pinned"] as? Bool) == false ? "Unpin memory" : "Pin memory", string("id"))
+        default: ("brain", "Memory: \(tool)", "")
+        }
     }
 }

@@ -95,7 +95,7 @@ public final class HarnessDatabase: Sendable {
     public static let resultHeadLength = 20_000
     /// Results kept whole in memory however big: a sub-agent's report is read from its result.
     public static let wholeResultTools = SubagentReport.toolNames
-    static let schemaVersion = 1
+    static let schemaVersion = 2
     private static let indexBatch = 500
 
     // MARK: - Setup
@@ -104,8 +104,8 @@ public final class HarnessDatabase: Sendable {
     /// Set when the database couldn't be read and was moved aside for a fresh one.
     public let recoveredFrom: URL?
 
-    private let writer: Mutex<Writer>
-    private let reader: Mutex<SQLiteConnection>
+    let writer: Mutex<Writer>
+    let reader: Mutex<SQLiteConnection>
     private let pending = Mutex(Pending())
     /// Old transcripts still to move in, by thread ID.
     private let legacyPending: Mutex<Set<String>>
@@ -151,6 +151,7 @@ public final class HarnessDatabase: Sendable {
             self?.importNextLegacyTranscript()
             self?.indexBatch()
             self?.collectGarbage()
+            self?.pruneMemoryEvents()
         }
     }
 
@@ -316,85 +317,6 @@ public final class HarnessDatabase: Sendable {
         return words.enumerated().map { index, word in
             "\"\(word)\"" + (index == words.count - 1 ? "*" : "")
         }.joined(separator: " ")
-    }
-
-    // MARK: - Memories
-
-    public struct Memory: Sendable, Equatable, Identifiable {
-        public enum Status: String, Sendable {
-            /// In use: given to agents.
-            case active
-            /// Suggested, waiting for you to review.
-            case proposed
-            /// Kept for the record, not used.
-            case archived
-        }
-
-        public var id: String
-        /// `global`, or `project:<id>`.
-        public var scope: String
-        public var kind: String
-        public var title: String
-        public var body: String
-        public var status: Status
-        public var createdAt: Date
-        public var updatedAt: Date
-        /// Where it was learned.
-        public var sources: [MemorySource]
-
-        public init(id: String = UUID().uuidString, scope: String = "global", kind: String = "fact", title: String, body: String,
-                    status: Status = .active, createdAt: Date = .now, updatedAt: Date = .now, sources: [MemorySource] = []) {
-            self.id = id
-            self.scope = scope
-            self.kind = kind
-            self.title = title
-            self.body = body
-            self.status = status
-            self.createdAt = createdAt
-            self.updatedAt = updatedAt
-            self.sources = sources
-        }
-    }
-
-    /// A transcript row a memory came from.
-    public struct MemorySource: Sendable, Equatable {
-        public var threadID: String
-        public var entryID: String
-        public var quote: String?
-
-        public init(threadID: String, entryID: String, quote: String? = nil) {
-            self.threadID = threadID
-            self.entryID = entryID
-            self.quote = quote
-        }
-    }
-
-    public func saveMemory(_ memory: Memory) {
-        try? writer.withLock { try $0.saveMemory(memory) }
-    }
-
-    public func deleteMemory(_ id: String) {
-        try? writer.withLock { writer in
-            try writer.connection.run("DELETE FROM memories WHERE id = ?", [.text(id)])
-        }
-    }
-
-    /// Memories in `scope` (all of them when nil), newest first.
-    public func memories(scope: String? = nil, status: Memory.Status? = nil) -> [Memory] {
-        (try? reader.withLock { connection in
-            try Writer.readMemories(connection, where: "(?1 IS NULL OR scope = ?1) AND (?2 IS NULL OR status = ?2)",
-                                    [.of(scope), .of(status?.rawValue)], order: "updated_at DESC")
-        }) ?? []
-    }
-
-    /// Memories matching `query` in their title or body, best first.
-    public func searchMemories(_ query: String, scope: String? = nil, limit: Int = 20) -> [Memory] {
-        guard let match = Self.matchExpression(query) else { return [] }
-        return (try? reader.withLock { connection in
-            try Writer.readMemories(connection,
-                                    where: "rowid IN (SELECT rowid FROM memories_fts WHERE memories_fts MATCH ?1) AND (?2 IS NULL OR scope = ?2)",
-                                    [.text(match), .of(scope)], order: "updated_at DESC", limit: limit)
-        }) ?? []
     }
 
     // MARK: - Writing
@@ -633,6 +555,76 @@ enum Schema {
             INSERT INTO memories_fts(rowid, title, body) VALUES (new.rowid, new.title, new.body);
         END;
         """,
+        // 2: memory you can explore: a one-line description, pins, where each came from,
+        // links between memories, every version, and what agents do with them.
+        """
+        ALTER TABLE memories ADD COLUMN description TEXT NOT NULL DEFAULT '';
+        ALTER TABLE memories ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE memories ADD COLUMN origin TEXT;
+        ALTER TABLE memories ADD COLUMN recall_count INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE memories ADD COLUMN surfaced_count INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE memories ADD COLUMN last_recalled_at REAL;
+        ALTER TABLE memories ADD COLUMN merged_into TEXT;
+
+        CREATE TABLE memory_links (
+            from_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+            to_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+            relation TEXT,
+            created_at REAL NOT NULL,
+            PRIMARY KEY (from_id, to_id)
+        ) WITHOUT ROWID;
+        CREATE INDEX memory_links_to ON memory_links(to_id);
+
+        CREATE TABLE memory_versions (
+            memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+            version INTEGER NOT NULL,
+            kind TEXT NOT NULL,
+            title TEXT NOT NULL,
+            description TEXT NOT NULL,
+            body TEXT NOT NULL,
+            status TEXT NOT NULL,
+            saved_at REAL NOT NULL,
+            actor TEXT,
+            thread_id TEXT,
+            PRIMARY KEY (memory_id, version)
+        ) WITHOUT ROWID;
+
+        CREATE TABLE memory_events (
+            id INTEGER PRIMARY KEY,
+            scope TEXT NOT NULL,
+            memory_id TEXT,
+            title TEXT,
+            kind TEXT NOT NULL,
+            actor TEXT,
+            thread_id TEXT,
+            at REAL NOT NULL,
+            query TEXT,
+            count INTEGER,
+            detail TEXT
+        );
+        CREATE INDEX memory_events_scope ON memory_events(scope, at);
+        CREATE INDEX memory_events_memory ON memory_events(memory_id, at) WHERE memory_id IS NOT NULL;
+
+        DROP TRIGGER memories_fts_insert;
+        DROP TRIGGER memories_fts_delete;
+        DROP TRIGGER memories_fts_update;
+        DROP TABLE memories_fts;
+        CREATE VIRTUAL TABLE memories_fts USING fts5(title, description, body, content = 'memories', content_rowid = 'rowid',
+                                                     tokenize = 'unicode61 remove_diacritics 2');
+        CREATE TRIGGER memories_fts_insert AFTER INSERT ON memories BEGIN
+            INSERT INTO memories_fts(rowid, title, description, body) VALUES (new.rowid, new.title, new.description, new.body);
+        END;
+        CREATE TRIGGER memories_fts_delete AFTER DELETE ON memories BEGIN
+            INSERT INTO memories_fts(memories_fts, rowid, title, description, body)
+            VALUES ('delete', old.rowid, old.title, old.description, old.body);
+        END;
+        CREATE TRIGGER memories_fts_update AFTER UPDATE OF title, description, body ON memories BEGIN
+            INSERT INTO memories_fts(memories_fts, rowid, title, description, body)
+            VALUES ('delete', old.rowid, old.title, old.description, old.body);
+            INSERT INTO memories_fts(rowid, title, description, body) VALUES (new.rowid, new.title, new.description, new.body);
+        END;
+        INSERT INTO memories_fts(memories_fts) VALUES ('rebuild');
+        """,
     ]
 
     static func migrate(_ connection: SQLiteConnection) throws {
@@ -654,7 +646,7 @@ enum Schema {
 // MARK: - Writer
 
 /// The write connection and what it remembers between saves. Only used under its mutex.
-private final class Writer: @unchecked Sendable {
+final class Writer: @unchecked Sendable {
     let connection: SQLiteConnection
     let legacy: LegacyStore?
     /// The last revision handed out.
@@ -675,7 +667,7 @@ private final class Writer: @unchecked Sendable {
         stateBaseline = try Self.readState(connection)
     }
 
-    private func nextRev() -> Int {
+    func nextRev() -> Int {
         rev += 1
         return rev
     }
@@ -964,45 +956,6 @@ private final class Writer: @unchecked Sendable {
         case .thinking:
             nil
         }
-    }
-
-    // MARK: Memories
-
-    func saveMemory(_ memory: HarnessDatabase.Memory) throws {
-        try connection.transaction {
-            try connection.run("""
-                INSERT INTO memories(id, scope, kind, title, body, status, created_at, updated_at, rev)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET scope = excluded.scope, kind = excluded.kind, title = excluded.title,
-                    body = excluded.body, status = excluded.status, updated_at = excluded.updated_at, rev = excluded.rev
-                """, [.text(memory.id), .text(memory.scope), .text(memory.kind), .text(memory.title), .text(memory.body),
-                      .text(memory.status.rawValue), .of(memory.createdAt), .of(memory.updatedAt), .int(Int64(nextRev()))])
-            try connection.run("DELETE FROM memory_sources WHERE memory_id = ?", [.text(memory.id)])
-            for source in memory.sources {
-                try connection.run("INSERT OR REPLACE INTO memory_sources(memory_id, thread_id, entry_id, quote) VALUES (?, ?, ?, ?)",
-                                   [.text(memory.id), .text(source.threadID), .text(source.entryID), .of(source.quote)])
-            }
-        }
-    }
-
-    static func readMemories(_ connection: SQLiteConnection, where condition: String, _ values: [SQLiteValue],
-                             order: String, limit: Int = -1) throws -> [HarnessDatabase.Memory] {
-        var memories: [HarnessDatabase.Memory] = []
-        try connection.query("""
-            SELECT id, scope, kind, title, body, status, created_at, updated_at FROM memories
-            WHERE \(condition) ORDER BY \(order) LIMIT \(limit)
-            """, values) { row in
-            guard let id = row.text(0) else { return }
-            memories.append(.init(id: id, scope: row.text(1) ?? "global", kind: row.text(2) ?? "fact", title: row.text(3) ?? "",
-                                  body: row.text(4) ?? "", status: row.text(5).flatMap(HarnessDatabase.Memory.Status.init) ?? .active,
-                                  createdAt: row.date(6) ?? .now, updatedAt: row.date(7) ?? .now))
-        }
-        for index in memories.indices {
-            try connection.query("SELECT thread_id, entry_id, quote FROM memory_sources WHERE memory_id = ?", [.text(memories[index].id)]) { row in
-                memories[index].sources.append(.init(threadID: row.text(0) ?? "", entryID: row.text(1) ?? "", quote: row.text(2)))
-            }
-        }
-        return memories
     }
 
     // MARK: Old files

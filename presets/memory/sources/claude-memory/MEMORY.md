@@ -1,0 +1,2 @@
+- [Deploys go through Fly](deploys-fly.md) — fly deploy from main, never from a branch
+- [Prefers short answers](short-answers.md) — the user wants terse replies

@@ -159,6 +159,14 @@ struct PersistedState: Codable {
     var repoUsage: [String: RepoUsage] = [:]
     /// Repos whose worktrees are shown in the repos view, by path; the rest are folded.
     var expandedWorktrees: Set<String> = []
+    /// A project's memory that was open at quit, shown again at launch.
+    var memoryProjectID: UUID?
+    /// Give agents the workspace's memory. On unless turned off.
+    var memoryEnabled = true
+    /// While it's on, Claude Code's own memory files are off, so there's one memory.
+    var claudeCodeMemoryOff = true
+    /// Removed projects' IDs by folder: adding the folder again brings its memory back.
+    var removedProjectIDs: [String: UUID] = [:]
 
     init() {}
 
@@ -190,6 +198,10 @@ struct PersistedState: Codable {
         browserAutoShow = try container.decodeIfPresent(Bool.self, forKey: .browserAutoShow) ?? true
         repoUsage = try container.decodeIfPresent([String: RepoUsage].self, forKey: .repoUsage) ?? [:]
         expandedWorktrees = try container.decodeIfPresent(Set<String>.self, forKey: .expandedWorktrees) ?? []
+        memoryProjectID = try container.decodeIfPresent(UUID.self, forKey: .memoryProjectID)
+        memoryEnabled = try container.decodeIfPresent(Bool.self, forKey: .memoryEnabled) ?? true
+        claudeCodeMemoryOff = try container.decodeIfPresent(Bool.self, forKey: .claudeCodeMemoryOff) ?? true
+        removedProjectIDs = try container.decodeIfPresent([String: UUID].self, forKey: .removedProjectIDs) ?? [:]
     }
 }
 

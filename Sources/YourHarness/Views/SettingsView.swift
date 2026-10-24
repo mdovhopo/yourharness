@@ -454,6 +454,21 @@ private struct GeneralSettingsView: View {
             TitleGenerationSection()
 
             Section {
+                Toggle(isOn: Binding(get: { app.memoryEnabled }, set: { app.setMemoryEnabled($0) })) {
+                    Label("Give agents the workspace's memory", systemImage: "brain")
+                }
+                Toggle(isOn: Binding(get: { app.claudeCodeMemoryOff }, set: { app.setClaudeCodeMemoryOff($0) })) {
+                    Label("Turn off Claude Code's own memory files", systemImage: "doc.on.doc")
+                }
+                .disabled(!app.memoryEnabled)
+            } header: {
+                Text("Memory")
+            } footer: {
+                Text("Each project has its own memory, which every thread there starts with: an index of what's remembered (a line each, about 2,000 tokens at most) and tools to search, read and save. Memory tools don't ask for approval: they only touch the app's own database. With Claude Code's memory off there's one memory, not two; import Claude Code's from a project's Memory view (⇧⌘M).")
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
                 Toggle(isOn: Binding(get: { app.planChecklist }, set: { app.setPlanChecklist($0) })) {
                     Label("Let Claude keep a plan checklist", systemImage: "checklist")
                 }

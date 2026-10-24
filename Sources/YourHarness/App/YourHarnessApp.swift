@@ -40,6 +40,9 @@ struct YourHarnessApp: App {
                     .disabled(app.selectedThread?.find.matches.isEmpty ?? true)
             }
             CommandGroup(after: .sidebar) {
+                Button("Memory") { app.showMemory(of: app.memoryProject ?? app.overviewProject ?? app.selectedProject) }
+                    .keyboardShortcut("m", modifiers: [.command, .shift])
+                Divider()
                 Button(app.showsInspector ? "Hide Right Sidebar" : "Show Right Sidebar") { app.setShowsInspector(!app.showsInspector) }
                     .keyboardShortcut("0", modifiers: [.command, .option])
                     .disabled(!app.inspectorHasThread)
@@ -89,6 +92,15 @@ struct YourHarnessApp: App {
         .defaultSize(width: 1320, height: 960)
         .restorationBehavior(.disabled)
 
+        WindowGroup("Memory Agent", id: "memory-agent", for: MemoryAgentKey.self) { $key in
+            if let key {
+                MemoryAgentWindow(key: key)
+                    .environment(app)
+            }
+        }
+        .defaultSize(width: 1040, height: 760)
+        .restorationBehavior(.disabled)
+
         WindowGroup("Diagram", id: "diagram", for: String.self) { $source in
             if let source {
                 DiagramWindow(source: source)
@@ -133,6 +145,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             BrowserProbe.runIfRequested(app: AppModel.shared)
             SwitchProbe.runIfRequested(app: AppModel.shared)
             SearchProbe.runIfRequested(app: AppModel.shared)
+            MemoryProbe.runIfRequested(app: AppModel.shared)
             StackProbe.runIfRequested(app: AppModel.shared)
             WindowSnapshot.runIfRequested()
             if let panel = ProcessInfo.processInfo.environment["YH_INSPECTOR_PANEL"].flatMap(AppModel.InspectorPanel.init(rawValue:)) {

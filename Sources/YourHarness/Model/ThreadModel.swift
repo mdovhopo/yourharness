@@ -128,6 +128,14 @@ final class ThreadModel: Identifiable {
     private(set) var sideChat: ThreadModel?
     /// A thread's `/btw` side chat: not saved, read-only tools, never reaped.
     let isSideChat: Bool
+    /// The memory importer or reconciler, in its own window: not a thread of the project.
+    let memoryRole: MemoryRole?
+    /// For a memory specialist: folders it may read besides the project (what it imports).
+    var extraDirectories: [String] = []
+    /// For the importer: sources picked elsewhere (a file that wasn't memory), waiting in its window.
+    var pendingImportSources: [String] = []
+    /// A side chat or a memory specialist: it works beside the project's threads, not in them.
+    var isAside: Bool { isSideChat || memoryRole != nil }
     /// For a side chat: the session it forks from when it starts. Nil starts fresh.
     let forksSession: String?
     /// For a side chat: the thread it's on the side of. It can look at its browser.
@@ -197,6 +205,7 @@ final class ThreadModel: Identifiable {
         self.app = app
         self.isEphemeral = isEphemeral
         isSideChat = false
+        memoryRole = nil
         forksSession = nil
         title = Self.untitled
         createdAt = .now
@@ -211,6 +220,7 @@ final class ThreadModel: Identifiable {
         self.app = app
         isEphemeral = true
         isSideChat = true
+        memoryRole = nil
         forksSession = parent.sessionID
         parentThread = parent
         // Its session lives with the folder the thread's runs in.
@@ -223,8 +233,24 @@ final class ThreadModel: Identifiable {
         transcriptLoaded = true
     }
 
+    /// The memory importer or reconciler for `projectID`'s memory.
+    init(memoryRole role: MemoryRole, projectID: UUID, app: AppModel) {
+        id = UUID()
+        self.projectID = projectID
+        self.app = app
+        isEphemeral = true
+        isSideChat = false
+        memoryRole = role
+        forksSession = nil
+        title = role.title
+        createdAt = .now
+        updatedAt = .now
+        transcriptLoaded = true
+    }
+
     init(meta: ThreadMeta, app: AppModel) {
         isSideChat = false
+        memoryRole = nil
         forksSession = nil
         id = meta.id
         projectID = meta.projectID
@@ -719,7 +745,7 @@ final class ThreadModel: Identifiable {
             receivedInit = true
             sessionID = info.sessionID
             activeModelName = info.model
-            if let skills = info.skills, !isSideChat { app.noteSkills(skills, projectID: projectID) }
+            if let skills = info.skills, !isAside { app.noteSkills(skills, projectID: projectID) }
             app.save()
 
         case .status(let status):
@@ -765,7 +791,7 @@ final class ThreadModel: Identifiable {
 
         case .titleChanged(let newTitle):
             // Only for your /rename: a title the CLI picks itself doesn't replace ours.
-            guard renameRequested, !isSideChat else { return }
+            guard renameRequested, !isAside else { return }
             renameRequested = false
             rename(newTitle)
 
@@ -901,14 +927,14 @@ final class ThreadModel: Identifiable {
             contextTokens = tokens
 
         case .catalog(let catalog):
-            app.updateCatalog(catalog, projectID: projectID)
+            app.updateCatalog(catalog, projectID: isAside ? nil : projectID)
 
         case .controlFailed, .mcpMessage:
             break
 
         case .turnCompleted(let result):
             activity = nil
-            if !isSideChat { Task { await app.syncPullRequests(for: self, force: true) } }
+            if !isAside { Task { await app.syncPullRequests(for: self, force: true) } }
             app.rememberContextWindows(result.contextWindows)
             if let model = activeModelName, let window = result.contextWindows[model] {
                 contextWindow = window
@@ -932,7 +958,7 @@ final class ThreadModel: Identifiable {
             }
             interruptRequested = false
             settle()
-            if !isSideChat { app.turnFinished(in: projectID) }
+            if !isAside { app.turnFinished(in: projectID) }
             if titleNeedsRefinement, !result.isError {
                 titleNeedsRefinement = false
                 app.generateTitle(for: self, from: .conversation)
@@ -1047,8 +1073,8 @@ final class ThreadModel: Identifiable {
 
     private func scheduleIdleReap() {
         idleReaper?.cancel()
-        // A side chat can't be resumed: it isn't saved. It lives while it's open.
-        if isSideChat { return }
+        // A side chat or a memory specialist can't be resumed: it isn't saved. It lives while it's open.
+        if isAside { return }
         idleReaper = Task { [weak self] in
             try? await Task.sleep(for: Self.idleTimeout)
             guard !Task.isCancelled, let self, !self.isWorking else { return }

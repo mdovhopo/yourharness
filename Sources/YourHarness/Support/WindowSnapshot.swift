@@ -16,7 +16,10 @@ enum WindowSnapshot {
     /// Draws the main window into a PNG now.
     @discardableResult
     static func write(to path: String) -> Bool {
-        guard let window = NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil && $0.frame.width > 600 }),
+        // `YH_SNAPSHOT_WINDOW=<title>` draws the window with that title instead (a memory agent's, say).
+        let title = ProcessInfo.processInfo.environment["YH_SNAPSHOT_WINDOW"]
+        guard let window = NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil && $0.frame.width > 600
+                && (title == nil || $0.title.contains(title!)) }),
               let view = window.contentView?.superview ?? window.contentView
         else {
             FileHandle.standardError.write(Data("snapshot: no window\n".utf8))

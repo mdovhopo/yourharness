@@ -1,0 +1,14 @@
+{
+ "projects": [
+  {"id": "AAAAAAAA-0000-4000-8000-0000000000A1", "name": "Home", "path": "{{ROOT}}/home", "permissionMode": "auto"},
+  {"id": "AAAAAAAA-0000-4000-8000-0000000000A2", "name": "Acme", "path": "{{ROOT}}/acme", "permissionMode": "auto"}
+ ],
+ "homeProjectID": "AAAAAAAA-0000-4000-8000-0000000000A1",
+ "threads": [
+  {"id": "BBBBBBBB-0000-4000-8000-0000000000B1", "projectID": "AAAAAAAA-0000-4000-8000-0000000000A2",
+   "title": "New Thread", "createdAt": "2026-10-25T10:00:00Z", "updatedAt": "2026-10-25T10:00:00Z", "model": "haiku"}
+ ],
+ "selectedThreadID": "BBBBBBBB-0000-4000-8000-0000000000B1",
+ "defaults": {"model": "haiku"},
+ "titleGeneration": {"provider": "claude", "model": "haiku"}
+}

@@ -20,3 +20,4 @@ has a `home` folder, the Home project's, so `claude` never runs in your real hom
 | `sandbox-prs` | A project on a clone of [yourharness-test-prs](https://github.com/mdovhopo/yourharness-test-prs), where a run may push branches and open PRs. New threads use Haiku. |
 
 The made folders live in `test-harness-root/`, which git ignores.
+| `memory` | A project (`acme`) for trying memory: Claude Code-format memory files in `sources/claude-memory` (import them directly) and a ChatGPT memory export in `sources/chatgpt-memory.txt` (for the Importer). New threads use Haiku. |

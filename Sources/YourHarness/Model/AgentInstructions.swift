@@ -60,4 +60,10 @@ enum AgentInstructions {
     You can look at the thread's browser, built into YourHarness, with the mcp__browser__ tools: status, \
     snapshot, screenshot, console and network. You can't click or type there; that's for the main thread.
     """
+
+    /// The side chat's view of the workspace's memory.
+    static let memoryReadOnly = """
+    This workspace has a memory kept by YourHarness: mcp__memory__search finds what earlier sessions learned \
+    and mcp__memory__read reads it. You can't change it from here.
+    """
 }

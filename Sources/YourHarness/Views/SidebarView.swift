@@ -164,7 +164,7 @@ private struct ProjectHeader: View {
         app.threads(in: project).contains { $0.isWorking || $0.hasUnread || !$0.pendingPermissions.isEmpty }
     }
     private var workspace: WorkspaceModel? { app.workspace(for: project) }
-    private var isSelected: Bool { app.overviewProjectID == project.id }
+    private var isSelected: Bool { app.overviewProjectID == project.id || app.memoryProjectID == project.id }
     private var reviewCount: Int {
         workspace?.pullRequests.count(where: \.reviewRequestedFromMe) ?? 0
     }
@@ -230,6 +230,16 @@ private struct ProjectHeader: View {
                 }
             }
 
+            if hovering || app.memoryProjectID == project.id {
+                Button("\(project.name) Memory", systemImage: "brain") { app.showMemory(of: project) }
+                    .labelStyle(.iconOnly)
+                    .buttonStyle(.borderless)
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(app.memoryProjectID == project.id ? AnyShapeStyle(Color.claude) : AnyShapeStyle(.secondary))
+                    .help("What agents remember in \(project.name) (⇧⌘M)")
+                    .transition(.opacity)
+            }
+
             Button("New Thread in \(project.name)", systemImage: "plus") {
                 withAnimation(SidebarMetrics.selectionSpring) { _ = app.newThread(in: project) }
             }
@@ -260,6 +270,7 @@ private struct ProjectHeader: View {
             if !app.isHome(project) {
                 Button("Repos & Pull Requests", systemImage: "arrow.triangle.pull") { app.showOverview(of: project) }
             }
+            Button("Memory", systemImage: "brain") { app.showMemory(of: project) }
             Button("Show in Finder", systemImage: "folder") { app.revealInFinder(project) }
             if app.isHome(project) {
                 Button("Change Default Folder…", systemImage: "house") { app.presentChooseHomeFolder() }

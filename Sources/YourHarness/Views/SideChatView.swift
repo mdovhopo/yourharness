@@ -153,7 +153,7 @@ private struct SideChatConversation: View {
     }
 }
 
-private struct SideChatComposer: View {
+struct SideChatComposer: View {
     let placeholder: String
     let isRunning: Bool
     let stop: () -> Void

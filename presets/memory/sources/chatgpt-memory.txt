@@ -1,0 +1,10 @@
+Saved memories (exported from ChatGPT, October 2026)
+
+- Is a backend engineer, mostly Go and Postgres; newer to React.
+- Works at Acme on the checkout team.
+- Prefers metric units.
+- Is planning a trip to Lisbon in November.
+- Likes code examples over long explanations.
+- The checkout service talks to Stripe through the payments-gateway service, never directly.
+- Their API key for testing is sk-ant-api03-FAKEFAKEFAKEFAKEFAKEFAKE1234567890 (do not share).
+- Wants answers kept short.

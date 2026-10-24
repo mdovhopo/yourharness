@@ -25,6 +25,7 @@ final class AppModel {
     var selectedThreadID: UUID? {
         didSet {
             overviewProjectID = nil
+            memoryProjectID = nil
             selectedThread?.markRead()
             if let selectedThreadID { notifier.clear(thread: selectedThreadID) }
             noteViewed()
@@ -85,14 +86,31 @@ final class AppModel {
     private(set) var browserAutoShow: Bool
     @ObservationIgnored let notifier = Notifier()
 
+    // Memory (see AppModel+Memory.swift).
+    /// Whether agents get the workspace's memory.
+    var memoryEnabled: Bool
+    /// While memory is on, Claude Code's own memory files are off.
+    var claudeCodeMemoryOff: Bool
+    /// Removed projects' IDs by folder, so adding one back brings back its memory.
+    @ObservationIgnored var removedProjectIDs: [String: UUID] = [:]
+    /// When set, the detail pane shows this project's memory.
+    var memoryProjectID: UUID?
+    /// Bumped whenever a scope's memory changes, so what shows it reloads.
+    var memoryRevisions: [String: Int] = [:]
+    /// The importer and reconciler conversations, by project and role: they outlive their window.
+    var memoryAgents: [String: ThreadModel] = [:]
+    @ObservationIgnored var memoryLibraries: [UUID: MemoryLibrary] = [:]
+    /// What the last direct import did, until dismissed.
+    var importReport: MemoryImportReport?
+
     /// Each project's files for `@` mentions, and when they were listed.
     @ObservationIgnored private var fileIndexes: [UUID: (index: FileIndex, listedAt: Date)] = [:]
     @ObservationIgnored private var fileListings: [UUID: Task<FileIndex, Never>] = [:]
 
     @ObservationIgnored let store = Store()
     @ObservationIgnored let updater = Updater()
-    @ObservationIgnored private var environment: [String: String] = [:]
-    @ObservationIgnored private var bootstrap: Task<Void, Never>?
+    @ObservationIgnored private(set) var environment: [String: String] = [:]
+    @ObservationIgnored private(set) var bootstrap: Task<Void, Never>?
     @ObservationIgnored private var workspaceModels: [UUID: WorkspaceModel] = [:]
     @ObservationIgnored private var workspacePoller: Task<Void, Never>?
     @ObservationIgnored private var activationObserver: NSObjectProtocol?
@@ -136,12 +154,17 @@ final class AppModel {
         repoUsage = state.repoUsage
         expandedWorktrees = state.expandedWorktrees
         browserAutoShow = state.browserAutoShow
+        memoryEnabled = state.memoryEnabled
+        claudeCodeMemoryOff = state.claudeCodeMemoryOff
+        removedProjectIDs = state.removedProjectIDs
 
         threads = state.threads.map { ThreadModel(meta: $0, app: self) }
         selectedThreadID = state.selectedThreadID
         if selectedThread == nil { newThreadInCurrentProject() }
         if let id = state.overviewProjectID, let project = project(id: id), !isHome(project) {
             overviewProjectID = id
+        } else if let id = state.memoryProjectID, project(id: id) != nil {
+            memoryProjectID = id
         }
         bootstrap = Task {
             await loadEnvironment()
@@ -245,7 +268,7 @@ final class AppModel {
     }
 
     /// A thread is showing, so the right sidebar has something to show.
-    var inspectorHasThread: Bool { overviewProject == nil && selectedThread != nil }
+    var inspectorHasThread: Bool { overviewProject == nil && memoryProject == nil && selectedThread != nil }
 
     func showInspector(_ panel: InspectorPanel) {
         inspectorPanel = panel
@@ -266,7 +289,7 @@ final class AppModel {
 
     /// The thread on screen right now; nil while a project overview is showing.
     var visibleThreadID: UUID? {
-        overviewProjectID == nil ? selectedThreadID : nil
+        overviewProjectID == nil && memoryProjectID == nil ? selectedThreadID : nil
     }
 
     var overviewProject: Project? {
@@ -276,11 +299,23 @@ final class AppModel {
     func showOverview(of project: Project) {
         guard !isHome(project) else { return }
         overviewProjectID = project.id
+        memoryProjectID = nil
         save()
         if let workspace = workspace(for: project) {
             let tools = workspaceTools
             Task { await workspace.refresh(tools: tools, pullsMaxAge: 60) }
         }
+    }
+
+    var memoryProject: Project? {
+        memoryProjectID.flatMap(project(id:))
+    }
+
+    /// Shows a project's memory in the detail pane.
+    func showMemory(of project: Project) {
+        overviewProjectID = nil
+        memoryProjectID = project.id
+        save()
     }
 
     var selectedProject: Project {
@@ -468,8 +503,10 @@ final class AppModel {
             newThread(in: existing)
             return
         }
-        let project = Project(name: url.lastPathComponent, path: url.path,
+        var project = Project(name: url.lastPathComponent, path: url.path,
                               permissionMode: defaults.permissionMode ?? .standard)
+        // A folder you had before gets its old ID back, and with it its memory.
+        if let id = removedProjectIDs.removeValue(forKey: url.path), self.project(id: id) == nil { project.id = id }
         projects.append(project)
         newThread(in: project)
         refreshWorkspaces()
@@ -481,6 +518,9 @@ final class AppModel {
         projects.removeAll { $0.id == project.id }
         workspaceModels[project.id] = nil
         if overviewProjectID == project.id { overviewProjectID = nil }
+        if memoryProjectID == project.id { memoryProjectID = nil }
+        for role in MemoryRole.allCases { closeMemoryAgent(role, projectID: project.id) }
+        removedProjectIDs[project.path] = project.id
         save()
     }
 
@@ -973,6 +1013,13 @@ final class AppModel {
             resumeSessionID: thread.sessionID,
             appendSystemPrompt: diagramInstructions ? AgentInstructions.diagrams : nil
         )
+        if memoryEnabled && claudeCodeMemoryOff {
+            // One memory: the app's. Claude Code's own files would compete with it.
+            options.environment["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
+        }
+        if let role = thread.memoryRole {
+            return memorySpecialistOptions(options, role: role, thread: thread, project: project)
+        }
         // Claude Code keeps its task tools from current models unless asked; they're what
         // the plan checklist shows, and cost nothing until used (they load on demand).
         if planChecklist, !thread.isSideChat { options.environment["CLAUDE_CODE_ENABLE_TODO_TOOLS"] = "1" }
@@ -990,6 +1037,16 @@ final class AppModel {
             options.allowedTools.append("mcp__browser")
             let instructions = thread.isSideChat ? AgentInstructions.browserReadOnly : AgentInstructions.browser
             options.appendSystemPrompt = [options.appendSystemPrompt, instructions].compactMap(\.self).joined(separator: "\n\n")
+        }
+        if memoryEnabled {
+            // Memory tools only touch the app's own database: they don't ask.
+            options.allowedTools.append("mcp__memory")
+            if thread.isSideChat {
+                options.appendSystemPrompt = [options.appendSystemPrompt, AgentInstructions.memoryReadOnly].compactMap(\.self).joined(separator: "\n\n")
+            } else {
+                let prompt = await memoryPrompt(for: project, thread: thread)
+                options.appendSystemPrompt = [options.appendSystemPrompt, prompt.text].compactMap(\.self).joined(separator: "\n\n")
+            }
         }
         if thread.isSideChat {
             // A copy of the thread's conversation that can look but not edit, and leaves
@@ -1198,12 +1255,20 @@ final class AppModel {
 
     /// The tools a thread's session serves from inside the app.
     func mcpServers(for thread: ThreadModel) -> [any MCPToolServer] {
+        if let role = thread.memoryRole {
+            return [memoryServer(for: thread, access: .specialist, actor: .init(role == .importer ? "importer" : "reconciler", threadID: thread.id.uuidString))]
+        }
         if thread.isSideChat {
-            guard browserTools, let parent = thread.parentThread else { return [] }
-            return [BrowserToolServer(browser: BrowserTools(thread: parent, app: self, readOnly: true))]
+            var servers: [any MCPToolServer] = []
+            if browserTools, let parent = thread.parentThread {
+                servers.append(BrowserToolServer(browser: BrowserTools(thread: parent, app: self, readOnly: true)))
+            }
+            if memoryEnabled { servers.append(memoryServer(for: thread, access: .readOnly, actor: .init("agent", threadID: thread.parentThread?.id.uuidString))) }
+            return servers
         }
         var servers: [any MCPToolServer] = [HarnessToolServer(media: MediaTool(thread: thread, app: self))]
         if browserTools { servers.append(BrowserToolServer(browser: BrowserTools(thread: thread, app: self, readOnly: false))) }
+        if memoryEnabled { servers.append(memoryServer(for: thread, access: .agent, actor: .init("agent", threadID: thread.id.uuidString))) }
         return servers
     }
 
@@ -1216,7 +1281,7 @@ final class AppModel {
     /// is in the background (the sidebar marks it otherwise); Claude waiting for you,
     /// whenever it's another thread.
     func notify(_ kind: Notifier.Kind, about thread: ThreadModel, _ body: String) {
-        guard notifications, !thread.isSideChat else { return }
+        guard notifications, !thread.isAside else { return }
         let isLooking = NSApp.isActive && visibleThreadID == thread.id
         guard !isLooking, kind == .needsYou || !NSApp.isActive else { return }
         notifier.post(kind, thread: thread.id, title: thread.title, subtitle: project(id: thread.projectID)?.name ?? "",
@@ -1600,6 +1665,10 @@ final class AppModel {
         state.repoUsage = repoUsage
         state.expandedWorktrees = expandedWorktrees
         state.browserAutoShow = browserAutoShow
+        state.memoryProjectID = memoryProjectID
+        state.memoryEnabled = memoryEnabled
+        state.claudeCodeMemoryOff = claudeCodeMemoryOff
+        state.removedProjectIDs = removedProjectIDs
         store.saveState(state)
     }
 

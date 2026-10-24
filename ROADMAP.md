@@ -11,7 +11,7 @@ Workspace support built in, like T3 Code, where you can follow PRs and related w
 Built: a real browser per thread that the agent drives and you watch and take over. Still to come: recordings, annotations. See [docs/browser.md](docs/browser.md).
 
 ### 2. Memory
-Memory as a first-class feature: a local store, shared with every agent session, that you can visualize and review automatically.
+Memory as a first-class feature: a local store, shared with every agent session, that you can visualize and review automatically. Per-project memory, its view, analytics, import/export and the Importer and Reconciler agents are in (docs/memory.md); next: a global scope shared across projects, and proposing memories from finished threads.
 
 ### 3. Scheduled tasks
 Run agents on a schedule: recurring jobs, one-off tasks at a set time, with results waiting in a thread.

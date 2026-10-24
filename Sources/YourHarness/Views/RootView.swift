@@ -1,3 +1,4 @@
+import HarnessCore
 import SwiftUI
 
 struct RootView: View {
@@ -21,6 +22,9 @@ struct RootView: View {
                 if let project = app.overviewProject, let workspace = app.workspace(for: project) {
                     WorkspaceView(project: project, workspace: workspace)
                         .id(project.id)
+                } else if let project = app.memoryProject {
+                    MemoryView(project: project, library: app.memoryLibrary(for: project))
+                        .id(project.id)
                 } else if let thread = app.selectedThread {
                     // Not keyed on the thread: it keeps its composer and toolbar, and only its
                     // transcript is made anew.
@@ -34,6 +38,7 @@ struct RootView: View {
             .canvasBackground()
             .transaction(value: app.selectedThreadID) { $0.animation = nil }
             .transaction(value: app.overviewProjectID) { $0.animation = nil }
+            .transaction(value: app.memoryProjectID) { $0.animation = nil }
             // Everything in the right sidebar belongs to a thread: on a project's overview it has
             // nothing to show, so it steps aside, and comes back as it was with a thread.
             .inspector(isPresented: Binding(get: { isOnScreen && app.showsInspector && app.inspectorHasThread },
@@ -56,6 +61,11 @@ struct RootView: View {
             // Development: open the selected thread's browser in its own window.
             if ProcessInfo.processInfo.environment["YH_OPEN_BROWSER_WINDOW"] != nil, let thread = app.selectedThread {
                 openWindow(id: "browser", value: thread.id)
+            }
+            // Development: open a memory specialist's window (importer or reconciler) for the
+            // selected project, for checking it without clicking.
+            if let role = ProcessInfo.processInfo.environment["YH_MEMORY_AGENT"].flatMap(MemoryRole.init(rawValue:)) {
+                openWindow(id: "memory-agent", value: MemoryAgentKey(projectID: app.memoryProject?.id ?? app.selectedProject.id, role: role))
             }
             // Development: open a Mermaid file in the diagram window, for checking it without clicking.
             if let path = ProcessInfo.processInfo.environment["YH_OPEN_DIAGRAM"],

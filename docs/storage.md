@@ -17,7 +17,8 @@ and the app's `Model/Store.swift`, which turns its state into rows and back.
 | `blobs` | Tool inputs, results and sub-agent runs over 32 KB, by SHA-256, LZFSE-compressed, stored once however many rows point at them. A big result also keeps its first 20,000 characters in the row: that's what's loaded (`toolResultRef` names the whole one, `fullToolResult` reads it). |
 | `entries_fts` | FTS5 index over what was said, tool names and inputs, and the start of tool output. Its rowid is the entry's. |
 | `index_state` | How far each indexer has read the change feed (`rev`). |
-| `memories`, `memory_sources`, `memories_fts` | Memories (scope `global` or `project:<id>`, kind, title, body, status active/proposed/archived) and the transcript rows each came from. Searchable. No UI yet. |
+| `memories`, `memory_sources`, `memories_fts` | Memories (scope `global` or `project:<id>`, kind, title, description, body, status active/proposed/archived, pinned, origin, read and search counts, what it was merged into) and the transcript rows each came from. Searchable, a title match counting most. See [memory.md](memory.md). |
+| `memory_links`, `memory_versions`, `memory_events` | Links between memories; every version of each; and the log of what was done with them (saves, reads, searches, session starts, merges…), which the analytics are made of. |
 | `legacy_imports` | Which old JSON files have been moved in. |
 
 ## Writing
@@ -47,8 +48,8 @@ let changes = database.changes(after: database.bookmark("memory"))
 if let last = changes.last { database.setBookmark("memory", rev: last.rev) }
 ```
 
-`search(_:projectID:limit:)` searches every transcript, best match first; `searchMemories`
-searches memories.
+`search(_:projectID:limit:)` searches every transcript, best match first; `findMemories`
+searches memories (any word, the last as a prefix).
 
 ## Upgrading from the JSON files
 
