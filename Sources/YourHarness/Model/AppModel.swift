@@ -1404,19 +1404,22 @@ final class AppModel {
         }.value
     }
 
-    /// Opens a thread that shows the session's history and continues it with `--resume`,
-    /// in the project for the folder it ran in (added if you don't have one yet).
+    /// Opens a thread that shows the session's history and continues it with `--resume`.
+    /// It goes in `destination`, or the project for the folder it ran in (added if you don't
+    /// have one yet). Either way it runs in that folder: `--resume` only finds it from there.
     @discardableResult
-    func resumeClaudeSession(_ archive: ClaudeSessionArchive) throws(SessionImportError) -> ThreadModel {
+    func resumeClaudeSession(_ archive: ClaudeSessionArchive, into destination: Project? = nil) throws(SessionImportError) -> ThreadModel {
         if let existing = thread(forSession: archive.sessionID) {
             if existing.isSettled { setSettled(false, existing) }
             selectedThreadID = existing.id
             return existing
         }
-        let project = try project(forSessionFolder: archive.cwd)
+        let folder = try sessionFolder(archive.cwd)
+        let project: Project
+        if let destination { project = destination } else { project = try self.project(forSessionFolder: archive.cwd) }
         if isCollapsed(project) { setCollapsed(false, for: project) }
 
-        let meta = ThreadMeta(
+        var meta = ThreadMeta(
             id: UUID(), projectID: project.id,
             title: archive.title ?? archive.firstMessage.map(ThreadTitlePrompt.seed) ?? ThreadModel.untitled,
             createdAt: archive.startedAt ?? .now, updatedAt: archive.updatedAt ?? .now,
@@ -1424,6 +1427,7 @@ final class AppModel {
             // Fresh in the list and safe from auto-settling until you send something.
             reactivatedAt: .now
         )
+        if let folder, folder != Self.standardized(project.path) { meta.workingDirectory = folder }
         let thread = ThreadModel(meta: meta, app: self)
         thread.importTranscript(archive.items.map(TranscriptEntry.init(item:)))
         threads.append(thread)
@@ -1436,20 +1440,46 @@ final class AppModel {
     }
 
     private func project(forSessionFolder cwd: String?) throws(SessionImportError) -> Project {
-        guard let cwd else { return homeProject }
-        let path = URL(fileURLWithPath: cwd).standardizedFileURL.path
-        if let existing = projects.first(where: { URL(fileURLWithPath: $0.path).standardizedFileURL.path == path }) {
+        guard let path = try sessionFolder(cwd) else { return homeProject }
+        if let existing = projects.first(where: { Self.standardized($0.path) == path }) {
             return existing
-        }
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue else {
-            throw .folderMissing(cwd)
         }
         let project = Project(name: URL(fileURLWithPath: path).lastPathComponent, path: path,
                               permissionMode: defaults.permissionMode ?? .standard)
         projects.append(project)
         refreshWorkspaces()
         return project
+    }
+
+    /// The folder a session ran in, if it said, as long as it's still there.
+    private func sessionFolder(_ cwd: String?) throws(SessionImportError) -> String? {
+        guard let cwd else { return nil }
+        let path = Self.standardized(cwd)
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            throw .folderMissing(cwd)
+        }
+        return path
+    }
+
+    /// Where a resumed session goes unless you pick: the project for its folder, else the
+    /// innermost project its folder is inside (a workspace), else nil, a new project for the
+    /// folder. Home holds every folder under it, so it only counts as itself.
+    func suggestedProject(forSessionFolder cwd: String?) -> Project? {
+        guard let cwd else { return homeProject }
+        return Self.project(containing: cwd, in: projects, home: homeProjectID)
+    }
+
+    nonisolated static func project(containing folder: String, in projects: [Project], home: UUID) -> Project? {
+        let path = standardized(folder)
+        if let exact = projects.first(where: { standardized($0.path) == path }) { return exact }
+        return projects
+            .filter { $0.id != home && path.hasPrefix(standardized($0.path) + "/") }
+            .max { standardized($0.path).count < standardized($1.path).count }
+    }
+
+    nonisolated private static func standardized(_ path: String) -> String {
+        URL(fileURLWithPath: path).standardizedFileURL.path
     }
 
     func setDefaultPermissionMode(_ mode: PermissionMode?) {

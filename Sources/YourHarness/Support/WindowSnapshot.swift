@@ -2,7 +2,8 @@ import AppKit
 
 /// Development: `YH_SNAPSHOT=<file.png>` draws the main window into a PNG a few seconds after
 /// launch (and `YH_SNAPSHOT_DELAY=<seconds>`), whether or not it's on screen: for checking
-/// how things look when the screen can't be captured. Off unless set.
+/// how things look when the screen can't be captured. A sheet open on it is drawn too, into
+/// `<file>-sheet.png`. Off unless set.
 @MainActor
 enum WindowSnapshot {
     static func runIfRequested() {
@@ -16,12 +17,21 @@ enum WindowSnapshot {
     @discardableResult
     static func write(to path: String) -> Bool {
         guard let window = NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil && $0.frame.width > 600 }),
-              let view = window.contentView?.superview ?? window.contentView,
-              let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds)
+              let view = window.contentView?.superview ?? window.contentView
         else {
             FileHandle.standardError.write(Data("snapshot: no window\n".utf8))
             return false
         }
+        let written = draw(view, to: path)
+        if let sheet = window.attachedSheet, let view = sheet.contentView?.superview ?? sheet.contentView {
+            draw(view, to: (path as NSString).deletingPathExtension + "-sheet.png")
+        }
+        return written
+    }
+
+    @discardableResult
+    private static func draw(_ view: NSView, to path: String) -> Bool {
+        guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return false }
         view.cacheDisplay(in: view.bounds, to: bitmap)
         let written = (try? bitmap.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))) != nil
         FileHandle.standardError.write(Data("snapshot: \(written ? "wrote" : "couldn't write") \(path)\n".utf8))

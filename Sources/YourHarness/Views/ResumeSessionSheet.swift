@@ -7,7 +7,15 @@ struct ResumeSessionSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var input = ""
     @State private var lookup = Lookup.idle
+    /// Which project the thread goes in.
+    @State private var destination = Destination.newProject
     @FocusState private var focused: Bool
+
+    private enum Destination: Hashable {
+        case project(UUID)
+        /// A new project for the session's folder.
+        case newProject
+    }
 
     private enum Lookup: Equatable {
         case idle, loading
@@ -42,6 +50,10 @@ struct ResumeSessionSheet: View {
 
             preview
                 .frame(maxWidth: .infinity, minHeight: 64, alignment: .topLeading)
+
+            if let archive, existing == nil {
+                destinationPicker(for: archive)
+            }
 
             HStack {
                 Spacer()
@@ -99,7 +111,11 @@ struct ResumeSessionSheet: View {
         let result = await app.loadClaudeSession(sessionID)
         guard !Task.isCancelled else { return }
         switch result {
-        case .success(let archive): lookup = .found(archive)
+        case .success(let archive):
+            destination = app.suggestedProject(forSessionFolder: archive.cwd).map { .project($0.id) } ?? .newProject
+            lookup = .found(archive)
+            // Development: `YH_RESUME_CONFIRM=1` resumes into the suggested project, as clicking Resume does.
+            if ProcessInfo.processInfo.environment["YH_RESUME_CONFIRM"] == "1" { resume() }
         case .failure(let error): lookup = .failed(error.localizedDescription)
         }
     }
@@ -111,12 +127,36 @@ struct ResumeSessionSheet: View {
             return
         }
         guard let archive else { return }
+        let project: Project? = if case .project(let id) = destination { app.project(id: id) } else { nil }
         do {
-            try app.resumeClaudeSession(archive)
+            try app.resumeClaudeSession(archive, into: project)
             dismiss()
         } catch {
             lookup = .failed(error.localizedDescription)
         }
+    }
+}
+
+extension ResumeSessionSheet {
+    /// Your projects, the one the session belongs in picked to start with. A project
+    /// whose folder isn't the session's still runs the thread in the session's folder.
+    private func destinationPicker(for archive: ClaudeSessionArchive) -> some View {
+        let folderName = archive.cwd.map { URL(fileURLWithPath: $0).lastPathComponent }
+        let hasOwnProject = archive.cwd == nil || app.projects.contains {
+            URL(fileURLWithPath: $0.path).standardizedFileURL.path == URL(fileURLWithPath: archive.cwd!).standardizedFileURL.path
+        }
+        return Picker("Add to", selection: $destination) {
+            if !hasOwnProject, let folderName {
+                Label("New Project “\(folderName)”", systemImage: "folder.badge.plus")
+                    .tag(Destination.newProject)
+                Divider()
+            }
+            ForEach(app.projects) { project in
+                Label(project.name, systemImage: app.isHome(project) ? "house" : "folder")
+                    .tag(Destination.project(project.id))
+            }
+        }
+        .pickerStyle(.menu)
     }
 }
 
