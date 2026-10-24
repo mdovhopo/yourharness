@@ -45,6 +45,16 @@ enum AgentInstructions {
     is enough. Sub-agents share it: one working in parallel should use its own tab (open with new_tab).
     """
 
+    /// When `gh stack` is installed: how GitHub's stacked PRs are made here.
+    static let stacks = """
+    The user works with GitHub's stacked pull requests through the `gh stack` extension. For a stack (or \
+    stacked PRs): `gh stack init --base <trunk> [branches…]` starts one or adopts existing branches, bottom \
+    first; `gh stack add <branch>` adds a branch on top (run it on the top branch, then commit there); \
+    `gh stack submit --auto --open` pushes and opens or updates the PRs; `gh stack sync` rebases and pushes \
+    after changes below; `gh stack view --json` shows the stack. Pass flags so nothing prompts. Don't merge a \
+    stack unless asked: YourHarness shows the stack with its merge buttons.
+    """
+
     /// The side chat's view of its thread's browser.
     static let browserReadOnly = """
     You can look at the thread's browser, built into YourHarness, with the mcp__browser__ tools: status, \

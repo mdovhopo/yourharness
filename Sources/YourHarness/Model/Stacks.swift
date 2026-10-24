@@ -66,6 +66,46 @@ extension AppModel {
         }
     }
 
+    /// Makes `branches` (bottom first) a stack onto `base` in `checkout`, which ends up on the
+    /// top branch, and submits it when asked. Nil when it worked, else what went wrong.
+    func createStack(branches: [String], base: String?, in checkout: URL, of workspace: WorkspaceModel, submit: Bool) async -> String? {
+        guard let tools = workspaceTools.stacks else { return "gh isn't available." }
+        if let error = await tools.create(branches: branches, base: base, in: checkout) { return error }
+        if submit, let error = await tools.submit(in: checkout) {
+            await workspace.refreshStatus(tools: workspaceTools, minInterval: 0)
+            return "The stack was made, but submitting it failed: \(error)"
+        }
+        await workspace.refreshStatus(tools: workspaceTools, minInterval: 0)
+        await workspace.refreshPulls(tools: workspaceTools, maxAge: 0)
+        return nil
+    }
+
+    /// A new branch on top of a stack, in the checkout that's on its top branch.
+    func addBranch(_ branch: String, onTopOf stackID: String, in checkout: URL, of workspace: WorkspaceModel) async {
+        guard let tools = workspaceTools.stacks else { return }
+        await run(stackID, "Adding \(branch)…", workspace) {
+            await tools.add(branch: branch, in: checkout)
+        }
+    }
+
+    /// Rebases the stack's branches on what's merged below, pushes them and updates the PRs.
+    func syncStack(_ stackID: String, in checkout: URL, of workspace: WorkspaceModel) async {
+        guard let tools = workspaceTools.stacks else { return }
+        await run(stackID, "Syncing…", workspace) {
+            await tools.sync(in: checkout)
+        }
+    }
+
+    /// Asks Claude to turn the thread's work into a stack of small PRs.
+    func splitIntoStack(_ thread: ThreadModel) {
+        thread.send("""
+        Split the work in this thread into a GitHub stack of small pull requests with `gh stack`. Group the \
+        changes into layers that each make sense on their own and build on the one below, bottom first, one \
+        branch per layer with its changes committed there (`gh stack init`, then `gh stack add` for each layer \
+        above). Then run `gh stack submit --auto --open` and tell me the stack number and its PRs. Don't merge anything.
+        """)
+    }
+
     /// Runs a stack command with its button showing what it's doing, then looks again at
     /// the PRs, now and a little later (GitHub merges and retargets in the background).
     private func run(_ id: String, _ activity: String, _ workspace: WorkspaceModel, _ command: () async -> String?) async {

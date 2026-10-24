@@ -623,6 +623,7 @@ private struct RepoRow: View {
     let threads: [ThreadModel]
     @State private var hovering = false
     @State private var addingWorktree = false
+    @State private var addingStack = false
 
     private var status: RepoStatus? { workspace.statuses[repo.id] }
     private var remote: GitRemote? { workspace.remotes[repo.id] }
@@ -724,6 +725,9 @@ private struct RepoRow: View {
             }
             Divider()
             Button("New Worktree…", systemImage: "plus.square.on.square") { addingWorktree = true }
+            if remote?.forge == .github {
+                Button("New Stack from Branches…", systemImage: "square.stack") { addingStack = true }
+            }
             if let project = app.project(id: workspace.projectID) {
                 Button("New Thread Here", systemImage: "square.and.pencil") { app.newThread(in: project, workingIn: repo.url.path) }
             }
@@ -732,6 +736,7 @@ private struct RepoRow: View {
             }
         }
         .sheet(isPresented: $addingWorktree) { NewWorktreeSheet(repo: repo, workspace: workspace) }
+        .sheet(isPresented: $addingStack) { NewStackSheet(repo: repo, workspace: workspace) }
     }
 }
 

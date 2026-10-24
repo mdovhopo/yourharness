@@ -95,6 +95,7 @@ struct StackHeader: View {
                           : count == 1 ? "Push the stack and open a PR for its new branch" : "Push the stack and open PRs for its \(count) new branches")
                 }
                 mergeControl
+                StackMoreMenu(stack: stack)
             }
         }
         .controlSize(.small)
@@ -263,4 +264,209 @@ struct UnsubmittedLayers: View {
             }
         }
     }
+}
+
+/// New Stack from Branches…: existing branches of a repo made a GitHub stack, bottom first,
+/// with `gh stack init`, and submitted if you like.
+struct NewStackSheet: View {
+    @Environment(AppModel.self) private var app
+    @Environment(\.dismiss) private var dismiss
+    let repo: WorkspaceRepo
+    let workspace: WorkspaceModel
+    @State private var branches: [String] = []
+    /// Bottom first.
+    @State private var chosen: [String] = []
+    @State private var base = ""
+    @State private var submit = true
+    @State private var working = false
+    @State private var error: String?
+
+    private var trunk: String { base.isEmpty ? workspace.defaultBranches[repo.id] ?? "main" : base }
+
+    /// Where `gh stack` runs: a checkout already on one of the branches, else the repo's
+    /// own. Either way it ends up on the top branch.
+    private var checkout: URL { workspace.checkout(of: repo, onAnyOf: chosen) ?? repo.url }
+
+    private var checkoutIsDirty: Bool {
+        if checkout == repo.url { return workspace.statuses[repo.id]?.isDirty ?? false }
+        return workspace.worktreeStatuses[checkout.path]?.isDirty ?? false
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("New Stack in \(repo.name)")
+                .font(.title2.weight(.semibold))
+            Text("Existing branches, each a pull request on the one below it. Pick them bottom first: the first goes into \(trunk).")
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(alignment: .top, spacing: 12) {
+                List {
+                    ForEach(branches.filter { !chosen.contains($0) && $0 != trunk }, id: \.self) { branch in
+                        Button {
+                            chosen.append(branch)
+                        } label: {
+                            Label(branch, systemImage: "plus.circle").font(.callout.monospaced())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .frame(height: 220)
+                .overlay { if branches.isEmpty { ProgressView() } }
+                List {
+                    ForEach(Array(chosen.enumerated().reversed()), id: \.element) { index, branch in
+                        HStack {
+                            Text("\(index + 1)").font(.caption.monospacedDigit()).foregroundStyle(.secondary).frame(width: 16)
+                            Text(branch).font(.callout.monospaced()).lineLimit(1)
+                            Spacer()
+                            Button("Remove", systemImage: "minus.circle") { chosen.removeAll { $0 == branch } }
+                                .labelStyle(.iconOnly)
+                                .buttonStyle(.borderless)
+                        }
+                    }
+                    .onMove { from, to in
+                        // Shown top first: move in that order, then flip back.
+                        var shown = Array(chosen.reversed())
+                        shown.move(fromOffsets: from, toOffset: to)
+                        chosen = shown.reversed()
+                    }
+                }
+                .frame(height: 220)
+                .overlay {
+                    if chosen.isEmpty {
+                        Text("Click branches to add them,\nbottom first").multilineTextAlignment(.center).foregroundStyle(.tertiary)
+                    }
+                }
+            }
+            Form {
+                TextField("Into", text: $base, prompt: Text(workspace.defaultBranches[repo.id] ?? "main"))
+                Toggle("Submit to GitHub now (push and open the PRs)", isOn: $submit)
+            }
+            .formStyle(.grouped)
+            if !chosen.isEmpty {
+                Label("Runs in \(checkout.path.replacingOccurrences(of: NSHomeDirectory(), with: "~")), which ends up on \(chosen.last ?? "")",
+                      systemImage: "arrow.triangle.branch")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if checkoutIsDirty {
+                Label("That checkout has uncommitted changes. Commit or stash them first.", systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.orange)
+            }
+            if let error {
+                Label(error, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack {
+                if app.stacksInstalled == false { InstallStacksButton() }
+                Spacer()
+                if working { ProgressView().controlSize(.small) }
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button("Create Stack") { Task { await create() } }
+                    .buttonStyle(.glassProminent)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(chosen.isEmpty || working || checkoutIsDirty || app.stacksInstalled == false)
+            }
+        }
+        .padding(20)
+        .frame(width: 620)
+        .task {
+            await app.checkStacksInstalled()
+            if let git = app.workspaceTools.git { branches = await git.localBranches(in: repo.url) }
+        }
+    }
+
+    private func create() async {
+        working = true
+        defer { working = false }
+        let into = base.trimmingCharacters(in: .whitespaces)
+        error = await app.createStack(branches: chosen, base: into.isEmpty ? nil : into, in: checkout, of: workspace, submit: submit)
+        if error == nil { dismiss() }
+    }
+}
+
+/// A stack's other actions: a branch on top, and catching up with what merged below.
+struct StackMoreMenu: View {
+    @Environment(AppModel.self) private var app
+    let stack: PullRequestStack
+    @State private var naming = false
+    @State private var name = ""
+
+    /// A checkout on the stack's top branch, and the workspace it's in.
+    private var top: (checkout: URL, workspace: WorkspaceModel)? {
+        guard let clone = app.clone(of: stack.pullRequest.remote) else { return nil }
+        var branches = stack.all.map(\.headBranch)
+        if let number = stack.number, let local = clone.workspace.localStack(number: number, remote: stack.pullRequest.remote) {
+            branches = local.layers.map(\.branch)
+        }
+        guard let last = branches.last, let checkout = clone.workspace.checkout(of: clone.repo, onAnyOf: [last]) else { return nil }
+        return (checkout, clone.workspace)
+    }
+
+    private var anyCheckout: (checkout: URL, workspace: WorkspaceModel)? {
+        guard let clone = app.clone(of: stack.pullRequest.remote),
+              let checkout = clone.workspace.checkout(of: clone.repo, onAnyOf: stack.all.map(\.headBranch)) else { return nil }
+        return (checkout, clone.workspace)
+    }
+
+    var body: some View {
+        let top = top, any = anyCheckout
+        Menu {
+            Button("Add Branch on Top…", systemImage: "plus.square.on.square") { naming = true }
+                .disabled(top == nil)
+            Button("Sync with GitHub", systemImage: "arrow.triangle.2.circlepath") {
+                if let any { Task { await app.syncStack(stack.id, in: any.checkout, of: any.workspace) } }
+            }
+            .disabled(any == nil)
+            if top == nil || any == nil {
+                Text("Check out one of the stack's branches (its top one, to add) to use these")
+            }
+        } label: {
+            Image(systemName: "ellipsis")
+        }
+        .menuStyle(.button)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("More for this stack")
+        .alert("Add a Branch on Top", isPresented: $naming) {
+            TextField("Branch", text: $name)
+            Button("Add") {
+                let branch = name.trimmingCharacters(in: .whitespaces)
+                if let top, !branch.isEmpty { Task { await app.addBranch(branch, onTopOf: stack.id, in: top.checkout, of: top.workspace) } }
+                name = ""
+            }
+            Button("Cancel", role: .cancel) { name = "" }
+        } message: {
+            Text("A new branch at the top branch's latest commit, checked out there. Commit to it, then Submit.")
+        }
+    }
+}
+
+/// Asks Claude to make the thread's work a stack of small PRs. Only with `gh stack` there,
+/// and while Claude isn't busy.
+struct SplitIntoStackButton: View {
+    @Environment(AppModel.self) private var app
+    let thread: ThreadModel
+    var compact = false
+
+    var body: some View {
+        if app.stacksInstalled == true, !thread.isSideChat {
+            Button("Split into a Stack", systemImage: "square.stack") { app.splitIntoStack(thread) }
+                .labelStyle(compact ? AnyLabelStyle(.iconOnly) : AnyLabelStyle(.titleAndIcon))
+                .buttonStyle(.borderless)
+                .disabled(thread.phase == .running)
+                .help("Ask Claude to split this thread's work into a stack of small pull requests, with gh stack")
+        }
+    }
+}
+
+private struct AnyLabelStyle: LabelStyle {
+    private let make: (Configuration) -> AnyView
+
+    init(_ style: some LabelStyle) {
+        make = { AnyView(style.makeBody(configuration: $0)) }
+    }
+
+    func makeBody(configuration: Configuration) -> some View { make(configuration) }
 }

@@ -28,6 +28,8 @@ struct PullRequestsPanel: View {
                     Label("No Pull Requests", systemImage: "arrow.triangle.pull")
                 } description: {
                     Text("PRs show up here once this thread works on a branch that has one, or a PR link comes up in it, such as Claude running gh pr create.")
+                } actions: {
+                    SplitIntoStackButton(thread: thread)
                 }
                 .frame(maxHeight: .infinity)
             } else {
@@ -137,6 +139,7 @@ private struct SyncStatus: View {
                         .foregroundStyle(.tertiary)
                 }
             }
+            SplitIntoStackButton(thread: thread, compact: true)
             Button("Refresh", systemImage: "arrow.clockwise") {
                 Task {
                     syncing = true

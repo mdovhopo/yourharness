@@ -978,6 +978,10 @@ final class AppModel {
             options.allowedTools.append("mcp__harness")
             options.appendSystemPrompt = [options.appendSystemPrompt, AgentInstructions.media].compactMap(\.self).joined(separator: "\n\n")
         }
+        await checkStacksInstalled()
+        if stacksInstalled == true, !thread.isSideChat {
+            options.appendSystemPrompt = [options.appendSystemPrompt, AgentInstructions.stacks].compactMap(\.self).joined(separator: "\n\n")
+        }
         if browserTools {
             // The browser is the app's own and touches none of your files: it doesn't ask.
             options.allowedTools.append("mcp__browser")

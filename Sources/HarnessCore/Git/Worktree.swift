@@ -108,6 +108,13 @@ extension Git {
         return output.succeeded && !output.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    /// Local branches, most recently committed to first.
+    public func localBranches(in repo: URL) async -> [String] {
+        let output = await run(["for-each-ref", "--sort=-committerdate", "--format=%(refname:short)", "refs/heads"], in: repo)
+        guard output.succeeded else { return [] }
+        return output.stdout.split(whereSeparator: \.isNewline).map(String.init)
+    }
+
     public func branchExists(_ branch: String, in repo: URL) async -> Bool {
         await run(["rev-parse", "--verify", "--quiet", "refs/heads/\(branch)"], in: repo).succeeded
     }
