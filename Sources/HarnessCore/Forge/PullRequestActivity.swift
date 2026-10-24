@@ -20,7 +20,10 @@ public struct PullRequestActivity: Sendable, Equatable {
         let input = (try? JSONSerialization.jsonObject(with: Data(inputJSON.utf8))) as? [String: Any] ?? [:]
         if toolName == "Bash" {
             guard let command = input["command"] as? String, var targets = commandTargets(command) else { return nil }
-            targets += PullRequestLink.find(in: result).map(Target.link)
+            let linked = PullRequestLink.find(in: result).map(Target.link)
+            // `gh stack` names its PRs in its output; the branch's own PR is only a fallback.
+            if !linked.isEmpty, command.contains("gh stack") { targets.removeAll { $0 == .currentBranch } }
+            targets += linked
             return PullRequestActivity(targets: unique(targets))
         }
         return toolTargets(toolName: toolName, input: input, inputJSON: inputJSON, result: result)
@@ -29,6 +32,8 @@ public struct PullRequestActivity: Sendable, Equatable {
     // MARK: - Commands
 
     static let ghWrites: Set<String> = ["create", "merge", "edit", "ready", "close", "reopen", "review", "comment", "update-branch", "lock", "unlock"]
+    /// `gh stack` commands that open, update or merge a stack's PRs: which ones, their output says.
+    static let stackWrites: Set<String> = ["submit", "merge", "sync", "push", "link", "rebase", "unstack"]
     static let glabWrites: Set<String> = ["create", "merge", "update", "close", "reopen", "approve", "unapprove", "note", "rebase", "revoke"]
 
     /// The PRs a shell command changes; nil when it changes none.
@@ -42,6 +47,10 @@ public struct PullRequestActivity: Sendable, Equatable {
                 if tool == "gh", rest.first == "pr", rest.count > 1, ghWrites.contains(rest[1]) {
                     changes = true
                     targets.append(contentsOf: named(in: Array(rest.dropFirst(2))))
+                } else if tool == "gh", rest.first == "stack", rest.count > 1, stackWrites.contains(rest[1]) {
+                    // The PRs are the ones its output links; failing that, the branch's own.
+                    changes = true
+                    targets.append(.currentBranch)
                 } else if tool == "glab", rest.first == "mr", rest.count > 1, glabWrites.contains(rest[1]) {
                     changes = true
                     targets.append(contentsOf: named(in: Array(rest.dropFirst(2))))

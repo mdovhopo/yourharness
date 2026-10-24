@@ -21,6 +21,21 @@ struct PullRequestActivityTests {
         #expect(bash("gh api repos/acme/api/pulls/60/comments -f body=hi")?.targets == [.number(60, repo: "acme/api")])
     }
 
+    /// `gh stack submit` prints every PR it opened or updated (from a real run, renamed).
+    @Test func stackCommandsChangeTheirPullRequests() throws {
+        let submitted = try #require(bash("gh stack submit --auto --open", result: """
+        Pushing to origin...
+        ✓ Created PR #1 (https://github.com/acme/api/pull/1) for stack-a
+        ✓ Created PR #2 (https://github.com/acme/api/pull/2) for stack-b
+        ✓ Stack created on GitHub with 2 PRs (stack #4)
+        """))
+        #expect(submitted.targets.count == 2)
+        #expect(!submitted.targets.contains(.currentBranch))
+        #expect(bash("gh stack merge 4 --squash --yes")?.targets == [.currentBranch])
+        #expect(bash("gh stack view --json") == nil)
+        #expect(bash("gh stack add layer-3") == nil)
+    }
+
     @Test func lookingIsNotChanging() {
         #expect(bash("gh pr view 57 --json state") == nil)
         #expect(bash("gh pr list --author @me", result: "https://github.com/acme/api/pull/57") == nil)

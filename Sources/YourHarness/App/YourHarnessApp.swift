@@ -131,6 +131,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             CookieImport.importIfRequested(app: AppModel.shared)
             BrowserProbe.runIfRequested(app: AppModel.shared)
             SwitchProbe.runIfRequested(app: AppModel.shared)
+            StackProbe.runIfRequested(app: AppModel.shared)
             WindowSnapshot.runIfRequested()
         }
         if ProcessInfo.processInfo.environment["YH_SIMULATE_STREAMING"] == "1" {

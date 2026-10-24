@@ -1183,7 +1183,7 @@ final class ThreadModel: Identifiable {
     /// A command that merges, opens or pushes to a PR: its state is about to change.
     private static func touchesPullRequests(_ inputJSON: String) -> Bool {
         let command = (try? JSONSerialization.jsonObject(with: Data(inputJSON.utf8)) as? [String: Any])?["command"] as? String ?? ""
-        return ["gh pr", "glab mr", "git push", "gh api"].contains(where: command.contains)
+        return ["gh pr", "gh stack", "glab mr", "git push", "gh api"].contains(where: command.contains)
     }
 
     /// What one finished tool call changed: folders it wrote in, PRs it acted on.

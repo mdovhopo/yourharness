@@ -412,7 +412,7 @@ struct StackMoreMenu: View {
 
     var body: some View {
         let top = top, any = anyCheckout
-        Menu {
+        Menu("More for This Stack", systemImage: "ellipsis") {
             Button("Add Branch on Top…", systemImage: "plus.square.on.square") { naming = true }
                 .disabled(top == nil)
             Button("Sync with GitHub", systemImage: "arrow.triangle.2.circlepath") {
@@ -422,11 +422,9 @@ struct StackMoreMenu: View {
             if top == nil || any == nil {
                 Text("Check out one of the stack's branches (its top one, to add) to use these")
             }
-        } label: {
-            Image(systemName: "ellipsis")
         }
+        .labelStyle(.iconOnly)
         .menuStyle(.button)
-        .menuIndicator(.hidden)
         .fixedSize()
         .help("More for this stack")
         .alert("Add a Branch on Top", isPresented: $naming) {
