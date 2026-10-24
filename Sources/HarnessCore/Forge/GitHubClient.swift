@@ -95,7 +95,8 @@ public struct GitHubClient: Sendable {
             var arguments = ["api", "graphql", "-f", "query=\(Self.query(for: group))"]
             if host != "github.com" { arguments += ["--hostname", host] }
             let output = await CommandRunner.run(executable, arguments: arguments, environment: environment, timeout: 20)
-            guard output.succeeded else { continue }
+            // One PR or repo that doesn't resolve (deleted, private, a number that never
+            // existed) makes `gh` exit non-zero, but it still prints the rest: read them.
             found += Self.parse(links: output.stdout, group)
         }
         return found

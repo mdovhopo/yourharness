@@ -7,6 +7,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 ## [Unreleased]
 
 ### Changed
+- **A thread's PRs stay current** when they're merged or closed outside the app. One link in the thread that GitHub couldn't find (a deleted repo, a PR number that doesn't exist) stopped all of them updating, Refresh included.
 - **Claude's replies read and select as one text.** Paragraphs, lists, quotes and tables are one piece of text: drag across a whole reply, table included, and ⌘C copies what you see (table cells separated by tabs), with formatting and a real table when you paste into Notes or Pages. Code blocks still scroll sideways and copy on their own.
 - **Copy a table** with the button on its header row when the pointer is over it: markdown, or a table where spreadsheets and rich text go.
 - The Copy button under Claude's replies sits on the right.

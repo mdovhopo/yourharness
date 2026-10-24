@@ -17,6 +17,16 @@ struct PullRequestLinkTests {
         #expect(PullRequestLink.find(in: "no links here").isEmpty)
     }
 
+    /// What `gh` prints, exiting 1, when one of the links doesn't resolve: the others are still there.
+    @Test func parsesLinkedPullRequestsAroundOnesThatDontResolve() {
+        let remote = GitRemote(host: "github.com", path: "acme/api", forge: .github)
+        let links = [41, 42, 43].map { PullRequestLink(remote: remote, number: $0, url: URL(string: "https://github.com/acme/api/pull/\($0)")!) }
+        let json = #"{"data":{"viewer":{"login":"me"},"p0":{"pullRequest":null},"p1":{"pullRequest":{"number":42,"title":"Return 429","url":"https://github.com/acme/api/pull/42","isDraft":false,"headRefName":"fix/rate-limit","baseRefName":"main","state":"MERGED","mergedAt":"2026-10-21T10:00:00Z","reviewDecision":"APPROVED","author":{"login":"you"},"commits":{"nodes":[]}}},"p2":null},"errors":[{"type":"NOT_FOUND","path":["p0","pullRequest"],"message":"Could not resolve to a PullRequest with the number of 41."}]}"#
+        let pulls = GitHubClient.parse(links: json, links)
+        #expect(pulls.count == 1)
+        #expect(pulls.first?.number == 42 && pulls.first?.state == .merged)
+    }
+
     @Test func parsesLinkedPullRequestsWithState() {
         let link = PullRequestLink(remote: GitRemote(host: "github.com", path: "acme/api", forge: .github), number: 42,
                                    url: URL(string: "https://github.com/acme/api/pull/42")!)
