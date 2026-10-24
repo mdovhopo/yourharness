@@ -36,6 +36,22 @@ public struct PullRequest: Sendable, Hashable, Identifiable {
     public var autoMerge = false
     public var inMergeQueue = false
     public var mergedAt: Date?
+    /// Its place in one of GitHub's own stacks (`gh stack`), when it's in one.
+    public var stack: StackPlace?
+
+    /// Which of a repo's GitHub stacks a PR is in, how many PRs it has, and where this
+    /// one sits: 1 is the bottom, on the stack's base branch.
+    public struct StackPlace: Sendable, Hashable {
+        public var number: Int
+        public var size: Int
+        public var position: Int
+
+        public init(number: Int, size: Int, position: Int) {
+            self.number = number
+            self.size = size
+            self.position = position
+        }
+    }
 
     public var id: String { "\(remote.host)/\(remote.path)#\(number)" }
 

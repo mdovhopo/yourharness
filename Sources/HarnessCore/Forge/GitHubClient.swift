@@ -20,13 +20,20 @@ public struct GitHubClient: Sendable {
         )
     }
 
+    /// A PR's place in a GitHub stack. Only github.com has it: an Enterprise server without
+    /// the fields would fail the whole query.
+    static func stackFields(host: String?) -> String {
+        host == "github.com" ? "\n      stack { number size } stackEntry { position }" : ""
+    }
+
     static func query(for batch: [GitRemote]) -> String {
+        let stack = stackFields(host: batch.first?.host)
         let repos = batch.enumerated().map { index, remote in
             """
             r\(index): repository(owner: \(quoted(remote.owner)), name: \(quoted(remote.name))) {
               pullRequests(states: OPEN, first: \(pullsPerRepo), orderBy: {field: UPDATED_AT, direction: DESC}) {
                 nodes {
-                  number title url isDraft headRefName baseRefName updatedAt reviewDecision
+                  number title url isDraft headRefName baseRefName updatedAt reviewDecision mergeStateStatus\(stack)
                   author { login }
                   reviewRequests(first: 20) { nodes { requestedReviewer { ... on User { login } } } }
                   commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
@@ -71,7 +78,7 @@ public struct GitHubClient: Sendable {
             .compactMap { ($0["requestedReviewer"] as? [String: Any])?["login"] as? String }
         let rollup = (((node["commits"] as? [String: Any])?["nodes"] as? [[String: Any]])?.first?["commit"] as? [String: Any])?["statusCheckRollup"] as? [String: Any]
 
-        return PullRequest(
+        var pull = PullRequest(
             remote: remote,
             number: number,
             title: node["title"] as? String ?? "",
@@ -86,6 +93,12 @@ public struct GitHubClient: Sendable {
             isMine: login != nil && author == login,
             reviewRequestedFromMe: login.map(reviewers.contains) ?? false
         )
+        pull.mergeStatus = node["mergeStateStatus"] as? String
+        if let stack = node["stack"] as? [String: Any], let number = stack["number"] as? Int,
+           let position = (node["stackEntry"] as? [String: Any])?["position"] as? Int {
+            pull.stack = PullRequest.StackPlace(number: number, size: stack["size"] as? Int ?? position, position: position)
+        }
+        return pull
     }
 
     /// Specific PRs a thread links to, whatever their state: one query per host.
@@ -103,12 +116,13 @@ public struct GitHubClient: Sendable {
     }
 
     static func query(for links: [PullRequestLink]) -> String {
+        let stack = stackFields(host: links.first?.remote.host)
         let parts = links.enumerated().map { index, link in
             """
             p\(index): repository(owner: \(quoted(link.remote.owner)), name: \(quoted(link.remote.name))) {
               pullRequest(number: \(link.number)) {
                 number title url isDraft headRefName baseRefName updatedAt reviewDecision state
-                mergedAt mergeStateStatus isInMergeQueue autoMergeRequest { enabledAt }
+                mergedAt mergeStateStatus isInMergeQueue autoMergeRequest { enabledAt }\(stack)
                 author { login }
                 commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
               }
