@@ -42,6 +42,7 @@ struct YourHarnessApp: App {
             CommandGroup(after: .sidebar) {
                 Button(app.showsInspector ? "Hide Right Sidebar" : "Show Right Sidebar") { app.setShowsInspector(!app.showsInspector) }
                     .keyboardShortcut("0", modifiers: [.command, .option])
+                    .disabled(!app.inspectorHasThread)
             }
             CommandMenu("Thread") {
                 Button("Previous Thread") {

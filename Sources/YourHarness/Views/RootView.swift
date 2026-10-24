@@ -34,8 +34,11 @@ struct RootView: View {
             .canvasBackground()
             .transaction(value: app.selectedThreadID) { $0.animation = nil }
             .transaction(value: app.overviewProjectID) { $0.animation = nil }
-            .inspector(isPresented: Binding(get: { isOnScreen && app.showsInspector }, set: { app.setShowsInspector($0) })) {
-                ThreadInspector(thread: app.overviewProject == nil ? app.selectedThread : nil)
+            // Everything in the right sidebar belongs to a thread: on a project's overview it has
+            // nothing to show, so it steps aside, and comes back as it was with a thread.
+            .inspector(isPresented: Binding(get: { isOnScreen && app.showsInspector && app.inspectorHasThread },
+                                            set: { if app.inspectorHasThread { app.setShowsInspector($0) } })) {
+                ThreadInspector(thread: app.inspectorHasThread ? app.selectedThread : nil)
                     .inspectorColumnWidth(min: 300, ideal: 380, max: 960)
             }
         }

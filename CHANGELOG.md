@@ -18,6 +18,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 - PRs Claude opens or merges with `gh stack` count as the thread's own work, so its stack shows whole in the thread's PRs instead of mostly under Mentioned.
 - **Make GitHub Stack** on a stack made only of branches (each PR based on the one below) turns its PRs into one of GitHub's stacks, as they are, so they merge as a stack from the app.
 - **The right sidebar switches tabs like a Mac window.** The toolbar no longer fades out and back in on every switch, and tabs you've opened stay as they were (scrolled, half-typed) when you come back. New Side Chat moved into the side chat itself.
+- A project's overview uses the whole window: the right sidebar, which only ever said No Thread Selected there, steps aside, with its toggle, and comes back as you left it when you open a thread.
 - **Top and end of a thread** in one click: arrows above and below the message arrows, and Thread → Top of Thread (⇧⌘[) and End of Thread (⇧⌘]). Going to the top shows the earlier turns on the way.
 
 ## [0.0.5] - 2026-10-23

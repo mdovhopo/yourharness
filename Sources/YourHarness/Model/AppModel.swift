@@ -244,6 +244,9 @@ final class AppModel {
         inspectorPanel = panel
     }
 
+    /// A thread is showing, so the right sidebar has something to show.
+    var inspectorHasThread: Bool { overviewProject == nil && selectedThread != nil }
+
     func showInspector(_ panel: InspectorPanel) {
         inspectorPanel = panel
         setShowsInspector(true)

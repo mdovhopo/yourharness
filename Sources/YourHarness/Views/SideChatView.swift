@@ -57,9 +57,12 @@ struct ThreadInspector: View {
             // The same items whichever tab shows: a toolbar that changes with the tab is rebuilt,
             // and fades, on every switch.
             ToolbarSpacer(.flexible)
-            ToolbarItem {
-                Button("Sidebar", systemImage: "sidebar.trailing") { app.setShowsInspector(!app.showsInspector) }
-                    .help(app.showsInspector ? "Hide the side chat and sub-agents (⌥⌘0)" : "Show the side chat and sub-agents (⌥⌘0)")
+            // Only where there's a thread for it to show.
+            if app.inspectorHasThread {
+                ToolbarItem {
+                    Button("Sidebar", systemImage: "sidebar.trailing") { app.setShowsInspector(!app.showsInspector) }
+                        .help(app.showsInspector ? "Hide the side chat and sub-agents (⌥⌘0)" : "Show the side chat and sub-agents (⌥⌘0)")
+                }
             }
         }
     }
