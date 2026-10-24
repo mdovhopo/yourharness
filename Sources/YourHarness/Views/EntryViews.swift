@@ -31,7 +31,7 @@ struct EntryView: View {
     }
 }
 
-/// Claude's reply, with Copy under it while the pointer is over it.
+/// Claude's reply, with Copy under its trailing edge while the pointer is over it.
 struct AssistantMessageView: View {
     let entry: TranscriptEntry
     @State private var hovering = false
@@ -39,7 +39,7 @@ struct AssistantMessageView: View {
     var body: some View {
         StreamingMarkdown(entry: entry)
             // In the gap below, so showing it doesn't move anything.
-            .overlay(alignment: .bottomLeading) {
+            .overlay(alignment: .bottomTrailing) {
                 if hovering, !entry.isStreaming {
                     CopyMessageButton(text: entry.text)
                         .offset(y: 20)

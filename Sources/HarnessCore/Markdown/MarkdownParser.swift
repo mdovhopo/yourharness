@@ -3,7 +3,7 @@ import Foundation
 /// Block-level markdown, the subset agents actually write: headings, paragraphs, lists
 /// (nested, numbered, task), fenced code, quotes, tables and rules. Inline syntax is left
 /// to `AttributedString(markdown:)` at render time.
-public enum MarkdownBlock: Equatable, Sendable {
+public enum MarkdownBlock: Hashable, Sendable {
     case heading(level: Int, text: String)
     case paragraph(String)
     case list([MarkdownListItem])
@@ -13,8 +13,8 @@ public enum MarkdownBlock: Equatable, Sendable {
     case rule
 }
 
-public struct MarkdownListItem: Equatable, Sendable {
-    public enum Marker: Equatable, Sendable {
+public struct MarkdownListItem: Hashable, Sendable {
+    public enum Marker: Hashable, Sendable {
         case bullet
         case number(Int)
     }
@@ -26,8 +26,8 @@ public struct MarkdownListItem: Equatable, Sendable {
     public var depth: Int
 }
 
-public struct MarkdownTable: Equatable, Sendable {
-    public enum Alignment: Equatable, Sendable {
+public struct MarkdownTable: Hashable, Sendable {
+    public enum Alignment: Hashable, Sendable {
         case leading, center, trailing
     }
 

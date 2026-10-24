@@ -22,7 +22,11 @@ struct StreamingMarkdown: View {
     var body: some View {
         // `??` only reads `entry.text` when not revealing, so deltas don't re-render this
         // view directly: the reveal loop paces them.
-        MarkdownView(text: shown ?? entry.text, streaming: shown != nil)
+        let text = shown ?? entry.text
+        MarkdownView(text: text, streaming: shown != nil)
+            // Text grows in place. When a row is added in the same moment, the transcript
+            // animates the change; text animated to its new height draws clipped meanwhile.
+            .animation(nil, value: text)
             .task(id: entry.id) { await reveal() }
     }
 
@@ -78,10 +82,10 @@ struct MarkdownView: View {
         let groups = MarkdownGroup.make(blocks)
         VStack(alignment: .leading, spacing: 12) {
             ForEach(groups) { group in
-                // Prose runs are one piece of text, so selection runs across their paragraphs.
+                // Prose runs, tables included, are one piece of text, so selection runs across them.
                 let isTail = streaming && group.id == groups.last?.id
                 if let prose = group.prose {
-                    ProseView(blocks: prose, source: text, index: group.id, isTail: isTail)
+                    RichText(blocks: prose, isTail: isTail)
                 } else if let block = group.block {
                     BlockView(block: block, isTail: isTail)
                         .equatable()
@@ -94,7 +98,8 @@ struct MarkdownView: View {
     }
 }
 
-/// A message's blocks, with the prose next to each other gathered into one run.
+/// A message's blocks, with the prose next to each other gathered into one run. Code and
+/// diagrams stand on their own: code scrolls sideways.
 struct MarkdownGroup: Identifiable {
     let id: Int
     var prose: [MarkdownBlock]?
@@ -104,10 +109,10 @@ struct MarkdownGroup: Identifiable {
         var groups: [MarkdownGroup] = []
         for block in blocks {
             switch block {
-            case .heading, .paragraph, .list, .quote:
+            case .heading, .paragraph, .list, .quote, .table, .rule:
                 if groups.last?.prose != nil { groups[groups.count - 1].prose?.append(block) }
                 else { groups.append(MarkdownGroup(id: groups.count, prose: [block])) }
-            case .code, .table, .rule:
+            case .code:
                 groups.append(MarkdownGroup(id: groups.count, block: block))
             }
         }
@@ -115,297 +120,13 @@ struct MarkdownGroup: Identifiable {
     }
 }
 
-/// A run of prose in AppKit text: selectable across its paragraphs, and measured once.
-private struct ProseView: View {
-    let blocks: [MarkdownBlock]
-    let source: String
-    let index: Int
-    let isTail: Bool
-    @Environment(\.issueLinker) private var linker
-    @Environment(\.findHighlight) private var findHighlight
-
-    var body: some View {
-        let key = NativeTextKey(source: source, style: "prose\(index)\(isTail ? "~" : "")|\(linker.repos.count)|\(linker.openPullRequests.count)",
-                                find: findHighlight.map { "\($0.query)|\($0.isCurrent)" } ?? "")
-        NativeText(text: ProseCache.text(for: key, cached: !isTail) {
-            ProseText.build(blocks, tail: isTail, linker: linker, find: findHighlight)
-        }, key: key)
-    }
-}
-
-/// Built prose, kept so scrolling back to a message doesn't build its text again.
-@MainActor
-enum ProseCache {
-    private static var texts: [NativeTextKey: NSAttributedString] = [:]
-
-    static func text(for key: NativeTextKey, cached: Bool, build: () -> NSAttributedString) -> NSAttributedString {
-        if let known = texts[key] { return known }
-        let text = build()
-        guard cached else { return text }
-        if texts.count > 1_500 { texts.removeAll(keepingCapacity: true) }
-        texts[key] = text
-        return text
-    }
-}
-
-/// Inline markdown with links and `#12` references, for the AppKit text too.
+/// Inline markdown via `AttributedString`, plus bare URLs as links and `#12`-style
+/// references linked to their PR or issue.
 @MainActor
 enum InlineMarkdown {
     static func render(_ source: String, linker: IssueLinker) -> AttributedString {
-        InlineText.render(source, linker: linker)
-    }
-}
-
-/// Equatable on its content, so while streaming only the last block re-renders.
-private struct BlockView: View, Equatable {
-    let block: MarkdownBlock
-    let isTail: Bool
-
-    nonisolated static func == (lhs: BlockView, rhs: BlockView) -> Bool {
-        lhs.block == rhs.block && lhs.isTail == rhs.isTail
-    }
-
-    var body: some View {
-        switch block {
-        case .heading(let level, let text):
-            InlineText(text, isTail: isTail)
-                .font(Self.headingFont(level))
-                .padding(.top, level <= 2 ? 8 : 2)
-                .accessibilityAddTraits(.isHeader)
-        case .paragraph(let text):
-            InlineText(text, isTail: isTail)
-                .lineSpacing(3)
-        case .list(let items):
-            ListBlock(items: items, isTail: isTail)
-        case .code(let language, let text):
-            if language.lowercased() == "mermaid" {
-                if isTail {
-                    // Still streaming: the fence may not be closed yet.
-                    DiagramPlaceholder()
-                } else {
-                    MermaidBlockView(source: text)
-                }
-            } else {
-                CodeBlockView(language: language, code: text, streaming: isTail)
-            }
-        case .quote(let text):
-            HStack(alignment: .top, spacing: 12) {
-                Capsule()
-                    .fill(.tint.opacity(0.45))
-                    .frame(width: 3)
-                InlineText(text, isTail: isTail)
-                    .foregroundStyle(.secondary)
-                    .lineSpacing(3)
-            }
-            .fixedSize(horizontal: false, vertical: true)
-        case .table(let table):
-            TableBlock(table: table)
-        case .rule:
-            Divider()
-                .padding(.vertical, 4)
-        }
-    }
-
-    private static func headingFont(_ level: Int) -> Font {
-        switch level {
-        case 1: .system(size: 22, weight: .semibold)
-        case 2: .system(size: 18, weight: .semibold)
-        case 3: .system(size: 15.5, weight: .semibold)
-        default: .system(size: MarkdownMetrics.body, weight: .semibold)
-        }
-    }
-}
-
-private struct ListBlock: View {
-    let items: [MarkdownListItem]
-    let isTail: Bool
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            ForEach(Array(items.enumerated()), id: \.offset) { index, item in
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Marker(item: item)
-                    InlineText(item.text, isTail: isTail && index == items.count - 1)
-                        .lineSpacing(3)
-                        .strikethrough(item.task == true, color: .secondary)
-                        .foregroundStyle(item.task == true ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
-                }
-                .padding(.leading, CGFloat(item.depth) * 20)
-            }
-        }
-    }
-
-    private struct Marker: View {
-        let item: MarkdownListItem
-
-        var body: some View {
-            Group {
-                if let done = item.task {
-                    Image(systemName: done ? "checkmark.square.fill" : "square")
-                        .foregroundStyle(done ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
-                } else {
-                    switch item.marker {
-                    case .bullet:
-                        Text(["•", "◦", "▪︎"][item.depth % 3])
-                            .foregroundStyle(.secondary)
-                    case .number(let number):
-                        Text("\(number).")
-                            .monospacedDigit()
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-            .frame(minWidth: 14, alignment: .trailing)
-        }
-    }
-}
-
-private struct TableBlock: View {
-    let table: MarkdownTable
-
-    var body: some View {
-        Grid(alignment: .leading, horizontalSpacing: 0, verticalSpacing: 0) {
-            GridRow {
-                ForEach(0..<table.columnCount, id: \.self) { column in
-                    cell(table.header[column], column: column)
-                        .font(.system(size: MarkdownMetrics.small, weight: .semibold))
-                        .background(.fill.quaternary)
-                        .gridColumnAlignment(alignment(column))
-                }
-            }
-            ForEach(Array(table.rows.enumerated()), id: \.offset) { _, row in
-                Divider()
-                GridRow {
-                    ForEach(0..<table.columnCount, id: \.self) { column in
-                        cell(row[column], column: column)
-                            .font(.system(size: MarkdownMetrics.small))
-                    }
-                }
-            }
-        }
-        .clipShape(.rect(cornerRadius: Theme.cardRadius, style: .continuous))
-        .card()
-        .fixedSize(horizontal: false, vertical: true)
-    }
-
-    private func cell(_ text: String, column: Int) -> some View {
-        InlineText(text)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 7)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: frameAlignment(column))
-    }
-
-    private func alignment(_ column: Int) -> HorizontalAlignment {
-        switch table.alignments[column] {
-        case .leading: .leading
-        case .center: .center
-        case .trailing: .trailing
-        }
-    }
-
-    private func frameAlignment(_ column: Int) -> Alignment {
-        switch table.alignments[column] {
-        case .leading: .topLeading
-        case .center: .top
-        case .trailing: .topTrailing
-        }
-    }
-}
-
-/// Inline markdown via `AttributedString`, plus subtle backgrounds on code spans, bare
-/// URLs as links, and `#12`-style references linked to their PR or issue.
-/// Text with links that shows the pointing hand over them, as links do everywhere else
-/// on the Mac. Selectable text doesn't: its links keep the text cursor, and it's drawn
-/// without custom renderers. So an invisible, non-selectable twin with the same text in
-/// the same frame lays out identically, notes where its link pieces land, and draws
-/// nothing; hovering checks those frames.
-private struct LinkedText: View {
-    let text: AttributedString
-    @State private var linkFrames = LinkFrames()
-    @State private var overLink = false
-
-    var body: some View {
-        Text(text)
-            .textSelection(.enabled)
-            .fixedSize(horizontal: false, vertical: true)
-            .background {
-                Self.tagged(text)
-                    .textRenderer(LinkFrameRenderer(frames: linkFrames))
-                    .fixedSize(horizontal: false, vertical: true)
-                    .allowsHitTesting(false)
-                    .accessibilityHidden(true)
-            }
-            .onContinuousHover { phase in
-                let isOver = switch phase {
-                case .active(let location): linkFrames.rects.contains { $0.contains(location) }
-                case .ended: false
-                }
-                if isOver != overLink { overLink = isOver }
-            }
-            .pointerStyle(overLink ? .link : nil)
-    }
-
-    /// One Text, with each link run carrying a marker the renderer can see.
-    private static func tagged(_ text: AttributedString) -> Text {
-        text.runs.reduce(Text(verbatim: "")) { result, run in
-            let piece = Text(AttributedString(text[run.range]))
-            return run.link == nil ? Text("\(result)\(piece)") : Text("\(result)\(piece.customAttribute(LinkMarker()))")
-        }
-    }
-}
-
-private struct LinkMarker: TextAttribute {}
-
-/// Written while drawing, read while hovering; never observed, so drawing doesn't loop.
-private final class LinkFrames {
-    var rects: [CGRect] = []
-}
-
-/// Draws nothing: it only notes where the link pieces are.
-private struct LinkFrameRenderer: TextRenderer {
-    let frames: LinkFrames
-
-    func draw(layout: Text.Layout, in context: inout GraphicsContext) {
-        var rects: [CGRect] = []
-        for line in layout {
-            for run in line where run[LinkMarker.self] != nil {
-                rects.append(run.typographicBounds.rect)
-            }
-        }
-        frames.rects = rects
-    }
-}
-
-private struct InlineText: View {
-    let source: String
-    var isTail = false
-    @Environment(\.issueLinker) private var linker
-    @Environment(\.findHighlight) private var findHighlight
-
-    init(_ source: String, isTail: Bool = false) {
-        self.source = source
-        self.isTail = isTail
-    }
-
-    var body: some View {
-        let rendered = Self.render(isTail ? MarkdownInline.closingUnterminated(source) : source, linker: linker)
-            .highlighted(findHighlight)
-        if rendered.runs.contains(where: { $0.link != nil }) {
-            LinkedText(text: rendered)
-        } else {
-            Text(rendered)
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-
-    static func render(_ source: String, linker: IssueLinker) -> AttributedString {
         let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
         var text = (try? AttributedString(markdown: source, options: options)) ?? AttributedString(source)
-
-        for run in text.runs where run.inlinePresentationIntent?.contains(.code) == true {
-            text[run.range].backgroundColor = Color.primary.opacity(0.07)
-        }
 
         let plain = String(text.characters)
         guard plain.contains("://") || plain.contains("#") || plain.contains("!") else { return text }
@@ -445,64 +166,29 @@ private struct InlineText: View {
     }
 }
 
-/// Highlighted code, kept so finished blocks aren't tokenized again each time the transcript
-/// re-renders. A streaming block changes on every frame, so it gets one slot of its own.
-@MainActor
-enum CodeHighlighting {
-    /// Past these, a block stays plain.
-    static let maxBytes = 200_000
-    static let maxLines = 2_000
-    /// While it streams, a block is tokenized again on every frame: a long one waits until it's done.
-    static let maxStreamingLines = 400
+/// A code block or a diagram. Equatable on its content, so while streaming only the last
+/// one re-renders.
+private struct BlockView: View, Equatable {
+    let block: MarkdownBlock
+    let isTail: Bool
 
-    private struct Key: Hashable {
-        let language: String
-        let code: String
+    nonisolated static func == (lhs: BlockView, rhs: BlockView) -> Bool {
+        lhs.block == rhs.block && lhs.isTail == rhs.isTail
     }
 
-    private static var entries: [Key: AttributedString] = [:]
-    private static var order: [Key] = []
-    private static var cachedBytes = 0
-    private static var tail: (key: Key, text: AttributedString)?
-
-    static func text(_ code: String, language: String, streaming: Bool) -> AttributedString {
-        guard SyntaxHighlighter.highlights(language), code.utf8.count <= maxBytes else { return AttributedString(code) }
-        let key = Key(language: language, code: code)
-        if let cached = entries[key] { return cached }
-        if let tail, tail.key == key { return tail.text }
-
-        if streaming, code.utf8.count(where: { $0 == UInt8(ascii: "\n") }) > maxStreamingLines { return AttributedString(code) }
-        let text = highlight(code, language: language)
-        if streaming {
-            tail = (key, text)
-        } else {
-            entries[key] = text
-            order.append(key)
-            cachedBytes += code.utf8.count
-            while order.count > 128 || cachedBytes > 2_000_000 {
-                let evicted = order.removeFirst()
-                entries[evicted] = nil
-                cachedBytes -= evicted.code.utf8.count
+    var body: some View {
+        if case .code(let language, let text) = block {
+            if language.lowercased() == "mermaid" {
+                if isTail {
+                    // Still streaming: the fence may not be closed yet.
+                    DiagramPlaceholder()
+                } else {
+                    MermaidBlockView(source: text)
+                }
+            } else {
+                CodeBlockView(language: language, code: text, streaming: isTail)
             }
         }
-        return text
-    }
-
-    private static func highlight(_ code: String, language: String) -> AttributedString {
-        guard code.utf8.count(where: { $0 == UInt8(ascii: "\n") }) < maxLines else { return AttributedString(code) }
-        var text = AttributedString()
-        var cursor = code.startIndex
-        for token in SyntaxHighlighter.tokens(in: code, language: language) {
-            if cursor < token.range.lowerBound {
-                text.append(AttributedString(code[cursor..<token.range.lowerBound]))
-            }
-            text.append(AttributedString(code[token.range], attributes: SyntaxPalette.attributes(token.kind)))
-            cursor = token.range.upperBound
-        }
-        if cursor < code.endIndex {
-            text.append(AttributedString(code[cursor...]))
-        }
-        return text
     }
 }
 
@@ -520,7 +206,7 @@ struct CodeBlockView: View {
             ScrollView(.horizontal) {
                 // AppKit text, its size from its lines: measuring a long block costs nothing.
                 let built = CodeText.build(code, language: language, streaming: streaming, find: findHighlight)
-                NativeText(text: built.text, key: built.key, wraps: false, size: built.size)
+                NativeText(text: built.text, key: built.key, size: built.size)
                     .padding(.horizontal, 14)
                     .padding(.top, language.isEmpty ? 12 : 28)
                     .padding(.bottom, 12)

@@ -141,9 +141,15 @@ private struct TranscriptView: View {
     @State private var visibleRowIDs: [String] = []
     private static let typingID = "typing-indicator"
 
-    private var showsTypingIndicator: Bool {
+    /// Claude is working and nothing is streaming in. Between two of its steps (text ending,
+    /// a tool call starting) that's true for a moment only, so there it waits a little
+    /// before showing: a row flashing in and out moves everything above it.
+    private var wantsTypingIndicator: Bool {
         thread.phase == .running && thread.pendingPermissions.isEmpty && !(thread.entries.last?.isStreaming ?? false)
     }
+    @State private var typingIndicatorDue = false
+
+    private var showsTypingIndicator: Bool { wantsTypingIndicator && typingIndicatorDue }
 
     /// The row the conversation ends with right now, as shown: a finished turn's last
     /// entry may be folded away.
@@ -153,6 +159,16 @@ private struct TranscriptView: View {
 
     var body: some View {
         transcript
+            .task(id: wantsTypingIndicator) {
+                typingIndicatorDue = false
+                guard wantsTypingIndicator else { return }
+                // Right after your message it shows at once.
+                if thread.entries.last?.kind != .user {
+                    try? await Task.sleep(for: .milliseconds(400))
+                    guard !Task.isCancelled else { return }
+                }
+                typingIndicatorDue = true
+            }
             .task {
                 await thread.loadTranscriptSoon()
                 thread.computeFootprintIfNeeded()

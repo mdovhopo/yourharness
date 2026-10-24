@@ -6,6 +6,13 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+### Changed
+- **Claude's replies read and select as one text.** Paragraphs, lists, quotes and tables are one piece of text: drag across a whole reply, table included, and ⌘C copies what you see (table cells separated by tabs), with formatting and a real table when you paste into Notes or Pages. Code blocks still scroll sideways and copy on their own.
+- **Copy a table** with the button on its header row when the pointer is over it: markdown, or a table where spreadsheets and rich text go.
+- The Copy button under Claude's replies sits on the right.
+- **Smoother streaming.** Only the part of a reply that's still arriving is redrawn, so long replies no longer slow down as they grow (a third of the work on an 8 KB reply), and you can select text while the rest streams in. Text no longer clips or jumps when a tool call appears, and "Working…" no longer flashes between Claude's steps.
+- A line break inside a list item keeps its indent.
+
 ## [0.0.5] - 2026-10-23
 
 ### Changed

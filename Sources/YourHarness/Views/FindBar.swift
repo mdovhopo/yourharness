@@ -57,7 +57,7 @@ final class ThreadFind {
     }
 }
 
-struct FindHighlight: Equatable {
+struct FindHighlight: Hashable {
     var query: String
     /// The message the find bar is on: marked more strongly than the rest.
     var isCurrent: Bool
