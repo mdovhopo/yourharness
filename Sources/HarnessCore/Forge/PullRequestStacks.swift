@@ -18,6 +18,9 @@ public struct PullRequestStack: Sendable, Hashable, Identifiable {
     public var all: [PullRequest] { flattened.map(\.pullRequest) }
     public var isStacked: Bool { !children.isEmpty }
 
+    /// One PR on another, no forks: the only shape a GitHub stack can take.
+    public var isLine: Bool { flattened.enumerated().allSatisfy { $0.offset == $0.element.depth } }
+
     /// GitHub's number for the stack, when it's one of GitHub's own.
     public var number: Int? { pullRequest.stack?.number }
 

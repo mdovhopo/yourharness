@@ -133,6 +133,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             SwitchProbe.runIfRequested(app: AppModel.shared)
             StackProbe.runIfRequested(app: AppModel.shared)
             WindowSnapshot.runIfRequested()
+            if let panel = ProcessInfo.processInfo.environment["YH_INSPECTOR_PANEL"].flatMap(AppModel.InspectorPanel.init(rawValue:)) {
+                AppModel.shared.showInspector(panel)
+            }
         }
         if ProcessInfo.processInfo.environment["YH_SIMULATE_STREAMING"] == "1" {
             MainActor.assumeIsolated {

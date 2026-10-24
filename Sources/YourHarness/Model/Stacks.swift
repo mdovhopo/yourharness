@@ -57,6 +57,14 @@ extension AppModel {
         }
     }
 
+    /// Turns PRs stacked by their branches into one of GitHub's stacks, as they are.
+    func linkStack(_ stack: PullRequestStack) async {
+        guard let tools = workspaceTools.stacks, let clone = clone(of: stack.pullRequest.remote) else { return }
+        await run(stack.id, "Making it a GitHub stack…", clone.workspace) {
+            await tools.link(stack.all.map(\.url), in: clone.repo.url)
+        }
+    }
+
     /// Pushes a stack's branches and opens PRs for the ones without, from a checkout on one of them.
     func submitStack(_ stack: LocalStack, id: String, in repo: WorkspaceRepo, of workspace: WorkspaceModel) async {
         guard let tools = workspaceTools.stacks,

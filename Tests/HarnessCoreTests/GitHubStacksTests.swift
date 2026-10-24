@@ -51,6 +51,14 @@ struct GitHubStacksTests {
         #expect(stacks[1].number == nil)
     }
 
+    /// Only a line of PRs can become a GitHub stack; a fork can't.
+    @Test func onlyALineCanBeAGitHubStack() {
+        let line = PullRequestStack.build([Self.pull(1, head: "a", base: "main"), Self.pull(2, head: "b", base: "a"), Self.pull(3, head: "c", base: "b")])
+        #expect(line.count == 1 && line[0].isLine)
+        let fork = PullRequestStack.build([Self.pull(1, head: "a", base: "main"), Self.pull(2, head: "b", base: "a"), Self.pull(3, head: "c", base: "a")])
+        #expect(fork.count == 1 && !fork[0].isLine)
+    }
+
     /// `.git/gh-stack` before and after `gh stack submit` (from a real run, renamed).
     @Test func readsLocalStacks() {
         let json = #"""

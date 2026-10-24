@@ -107,6 +107,12 @@ public struct GitHubStacks: Sendable {
         await run(["stack", "add", branch], in: checkout, timeout: 60)
     }
 
+    /// Makes PRs that already exist one GitHub stack, bottom first. Branches and PRs stay as
+    /// they are; GitHub only learns they're a stack.
+    public func link(_ pullRequests: [URL], in repo: URL) async -> String? {
+        await run(["stack", "link"] + pullRequests.map(\.absoluteString), in: repo, timeout: 120)
+    }
+
     /// Fetches, rebases what needs it, pushes and brings PR state up to date.
     public func sync(in checkout: URL) async -> String? {
         await run(["stack", "sync"], in: checkout, timeout: 300)

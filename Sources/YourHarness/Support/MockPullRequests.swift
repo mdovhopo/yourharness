@@ -5,7 +5,8 @@ import HarnessCore
 /// asking `gh`/`glab`, so a scratch workspace can show PRs. Each entry:
 /// `{"repo": "github.com/acme/api", "number": 57, "title": "…", "head": "feature/login",
 /// "base": "main", "draft": false, "review": "approved", "checks": "passing",
-/// "state": "open", "author": "you", "mine": true}`. Off unless set.
+/// "state": "open", "author": "you", "mine": true}`, and optionally `"stack": {"number": 4,
+/// "size": 3, "position": 1}` for a GitHub stack and `"ageMinutes": 90`. Off unless set.
 @MainActor
 enum MockPullRequests {
     /// Read again whenever the file changes, so editing it (a PR merged) shows up live.
@@ -35,7 +36,7 @@ enum MockPullRequests {
                 url: URL(string: "https://\(repo)/\(isGitLab ? "-/merge_requests" : "pull")/\(number)")!,
                 author: item["author"] as? String, isDraft: item["draft"] as? Bool ?? false,
                 headBranch: item["head"] as? String ?? "", baseBranch: item["base"] as? String ?? "main",
-                updatedAt: .now, review: PullRequest.Review(rawValue: item["review"] as? String ?? "none") ?? .none,
+                updatedAt: Date.now.addingTimeInterval(-60 * (item["ageMinutes"] as? Double ?? 0)), review: PullRequest.Review(rawValue: item["review"] as? String ?? "none") ?? .none,
                 checks: PullRequest.Checks(rawValue: item["checks"] as? String ?? "none") ?? .none,
                 isMine: item["mine"] as? Bool ?? false, reviewRequestedFromMe: item["reviewRequested"] as? Bool ?? false,
                 state: PullRequest.State(rawValue: item["state"] as? String ?? "open") ?? .open)
@@ -43,7 +44,10 @@ enum MockPullRequests {
                 pull.mergeStatus = item["mergeStatus"] as? String
                 pull.autoMerge = item["autoMerge"] as? Bool ?? false
                 pull.inMergeQueue = item["mergeQueue"] as? Bool ?? false
-                if pull.state == .merged { pull.mergedAt = .now }
+                if pull.state == .merged { pull.mergedAt = pull.updatedAt }
+                if let stack = item["stack"] as? [String: Any], let number = stack["number"] as? Int, let position = stack["position"] as? Int {
+                    pull.stack = PullRequest.StackPlace(number: number, size: stack["size"] as? Int ?? position, position: position)
+                }
             }
         }
     }

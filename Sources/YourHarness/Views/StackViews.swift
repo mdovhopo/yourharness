@@ -38,14 +38,18 @@ struct StackHeader: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                 Spacer(minLength: 4)
-                if stack.number != nil { actions }
+                if stack.number != nil {
+                    actions
+                } else if stack.pullRequest.remote.forge == .github, stack.all.contains(where: { $0.state == .open }) {
+                    linkButton
+                }
             }
             if let error = app.stackErrors[stack.id] {
                 StackError(text: error) { app.stackErrors[stack.id] = nil }
             }
         }
         .task(id: stack.number) {
-            if stack.number != nil { await app.checkStacksInstalled() }
+            if stack.pullRequest.remote.forge == .github { await app.checkStacksInstalled() }
         }
         .confirmationDialog(confirmTitle, isPresented: Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } }),
                             presenting: confirming) { request in
@@ -96,6 +100,27 @@ struct StackHeader: View {
                 }
                 mergeControl
                 StackMoreMenu(stack: stack)
+            }
+        }
+        .controlSize(.small)
+    }
+
+    /// A stack only its branches know about: one click makes it one of GitHub's.
+    @ViewBuilder
+    private var linkButton: some View {
+        HStack(spacing: 6) {
+            if let activity = app.stackActivity[stack.id] {
+                ProgressView().controlSize(.mini)
+                Text(activity).font(.caption).foregroundStyle(.secondary)
+            } else if app.stacksInstalled == false {
+                InstallStacksButton()
+            } else {
+                let clone = app.clone(of: stack.pullRequest.remote)
+                Button("Make GitHub Stack") { Task { await app.linkStack(stack) } }
+                    .disabled(!stack.isLine || clone == nil)
+                    .help(!stack.isLine ? "GitHub stacks are one line of PRs; this one forks"
+                          : clone == nil ? "This runs gh stack in a clone of \(stack.pullRequest.remote.name); there isn't one in your projects"
+                          : "Make these PRs one of GitHub's stacked pull requests, bottom up, so they merge as a stack. Branches and PRs stay as they are.")
             }
         }
         .controlSize(.small)
