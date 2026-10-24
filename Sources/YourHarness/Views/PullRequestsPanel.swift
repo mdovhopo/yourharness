@@ -8,6 +8,8 @@ import SwiftUI
 struct PullRequestsPanel: View {
     @Environment(AppModel.self) private var app
     let thread: ThreadModel
+    /// On screen: only then does it keep looking for changes.
+    var isShown = true
 
     var body: some View {
         let items = app.pullRequests(for: thread)
@@ -69,7 +71,8 @@ struct PullRequestsPanel: View {
             }
         }
         // Kept current while it's on screen.
-        .task(id: thread.id) {
+        .task(id: "\(thread.id)\(isShown)") {
+            guard isShown else { return }
             while !Task.isCancelled {
                 await app.syncPullRequests(for: thread)
                 try? await Task.sleep(for: .seconds(15))

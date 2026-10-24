@@ -17,6 +17,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 - **Make stacks from the app.** New Stack from Branches… (a repo's menu in the repos view) makes existing branches a GitHub stack, bottom first, and submits it; a stack's ⋯ menu adds a branch on top or syncs it with GitHub after merges below; Split into a Stack in a thread's PRs asks Claude to split its work into stacked PRs. Claude knows how `gh stack` works when it's installed.
 - PRs Claude opens or merges with `gh stack` count as the thread's own work, so its stack shows whole in the thread's PRs instead of mostly under Mentioned.
 - **Make GitHub Stack** on a stack made only of branches (each PR based on the one below) turns its PRs into one of GitHub's stacks, as they are, so they merge as a stack from the app.
+- **The right sidebar switches tabs like a Mac window.** The toolbar no longer fades out and back in on every switch, and tabs you've opened stay as they were (scrolled, half-typed) when you come back. New Side Chat moved into the side chat itself.
 - **Top and end of a thread** in one click: arrows above and below the message arrows, and Thread → Top of Thread (⇧⌘[) and End of Thread (⇧⌘]). Going to the top shows the earlier turns on the way.
 
 ## [0.0.5] - 2026-10-23

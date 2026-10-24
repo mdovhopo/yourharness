@@ -6,22 +6,38 @@ import SwiftUI
 struct ThreadInspector: View {
     @Environment(AppModel.self) private var app
     let thread: ThreadModel?
+    /// Tabs opened for this thread: they stay made, so switching back is instant and finds
+    /// them as they were (scrolled, typed into), as tabs in a Mac window do.
+    @State private var opened: Set<AppModel.InspectorPanel> = []
 
     var body: some View {
         Group {
             if let thread {
-                switch app.inspectorPanel {
-                case .pullRequests: PullRequestsPanel(thread: thread)
-                case .sideChat: SideChatPanel(thread: thread)
-                case .subagents: SubagentInspector(thread: thread)
-                case .browser: BrowserPanel(thread: thread)
+                ZStack {
+                    ForEach(AppModel.InspectorPanel.allCases.filter { $0 != .browser && (opened.contains($0) || $0 == app.inspectorPanel) }) { panel in
+                        let shown = panel == app.inspectorPanel
+                        self.panel(panel, for: thread, shown: shown)
+                            .opacity(shown ? 1 : 0)
+                            .allowsHitTesting(shown)
+                            .accessibilityHidden(!shown)
+                    }
+                    // The browser's page moves between the sidebar and its own window, so it's
+                    // made when it shows, as before.
+                    if app.inspectorPanel == .browser { BrowserPanel(thread: thread) }
                 }
+                .id(thread.id)
+                // A tab change shows the other tab at once: nothing fades or slides.
+                .transaction { $0.animation = nil }
             } else {
                 ContentUnavailableView("No Thread Selected", systemImage: "sidebar.trailing")
             }
         }
         .environment(\.issueLinker, thread.map(app.issueLinker(for:)) ?? IssueLinker(repos: [], openPullRequests: []))
-        .onChange(of: thread?.id, initial: true) { app.choosePanel(for: thread) }
+        .onChange(of: thread?.id, initial: true) {
+            opened = []
+            app.choosePanel(for: thread)
+        }
+        .onChange(of: app.inspectorPanel, initial: true) { opened.insert(app.inspectorPanel) }
         .onChange(of: thread.map { app.workedPullRequests(for: $0).isEmpty } ?? true) { _, empty in
             if !empty, let thread { app.pullRequestsAppeared(for: thread) }
         }
@@ -38,17 +54,23 @@ struct ThreadInspector: View {
                     .labelsHidden()
                 }
             }
+            // The same items whichever tab shows: a toolbar that changes with the tab is rebuilt,
+            // and fades, on every switch.
             ToolbarSpacer(.flexible)
-            if app.showsInspector, app.inspectorPanel == .sideChat, let thread, thread.sideChat != nil {
-                ToolbarItem {
-                    Button("New Side Chat", systemImage: "square.and.pencil", action: thread.closeSideChat)
-                        .help("End this side chat. The next question starts from a fresh copy of the thread.")
-                }
-            }
             ToolbarItem {
                 Button("Sidebar", systemImage: "sidebar.trailing") { app.setShowsInspector(!app.showsInspector) }
                     .help(app.showsInspector ? "Hide the side chat and sub-agents (⌥⌘0)" : "Show the side chat and sub-agents (⌥⌘0)")
             }
+        }
+    }
+
+    @ViewBuilder
+    private func panel(_ panel: AppModel.InspectorPanel, for thread: ThreadModel, shown: Bool) -> some View {
+        switch panel {
+        case .pullRequests: PullRequestsPanel(thread: thread, isShown: shown)
+        case .sideChat: SideChatPanel(thread: thread)
+        case .subagents: SubagentInspector(thread: thread)
+        case .browser: EmptyView()
         }
     }
 }
@@ -60,7 +82,7 @@ private struct SideChatPanel: View {
 
     var body: some View {
         if let chat = thread.sideChat {
-            SideChatConversation(chat: chat)
+            SideChatConversation(chat: chat, startOver: thread.closeSideChat)
                 .id(chat.id)
         } else {
             VStack(spacing: 0) {
@@ -81,6 +103,7 @@ private struct SideChatPanel: View {
 
 private struct SideChatConversation: View {
     let chat: ThreadModel
+    let startOver: () -> Void
 
     private var showsTypingIndicator: Bool {
         chat.phase == .running && chat.pendingPermissions.isEmpty && !(chat.entries.last?.isStreaming ?? false)
@@ -88,6 +111,18 @@ private struct SideChatConversation: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            HStack {
+                Text("Side Chat")
+                    .font(.callout.weight(.medium))
+                Spacer()
+                Button("New Side Chat", systemImage: "square.and.pencil", action: startOver)
+                    .labelStyle(.iconOnly)
+                    .buttonStyle(.borderless)
+                    .help("End this side chat. The next question starts from a fresh copy of the thread.")
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            Divider()
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
                     ForEach(chat.entries) { entry in
