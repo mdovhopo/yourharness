@@ -207,6 +207,17 @@ private struct PullRequestsSection: View {
                     }
                 }
 
+                let unsubmitted = workspace.unsubmittedStacks.filter { $0.stack.number == nil }
+                if !unsubmitted.isEmpty {
+                    GroupLabel(title: "Not Submitted", symbol: "square.stack", count: unsubmitted.count)
+                        .foregroundStyle(.secondary)
+                        .padding(.bottom, 8)
+                    ForEach(unsubmitted, id: \.stack.id) { item in
+                        LocalStackCard(stack: item.stack, repo: item.repo, workspace: workspace)
+                            .padding(.bottom, 8)
+                    }
+                    Color.clear.frame(height: 10)
+                }
                 if !sections.needsReview.isEmpty {
                     PullRequestGroup(title: "Needs Your Review", symbol: "eye", stacks: sections.needsReview, workspace: workspace)
                 }
@@ -283,11 +294,10 @@ private struct StackList: View {
         ForEach(stacks) { stack in
                 // A staircase: each PR a step in from its base, the lines joined up.
                 let rows = StackGraph.layout(stack, lanes: .depth).rows
+                let isStack = stack.isStacked || stack.number != nil
                 VStack(alignment: .leading, spacing: 0) {
-                    if stack.isStacked {
-                        Label("Stack of \(rows.count)", systemImage: "square.stack")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
+                    if isStack {
+                        StackHeader(stack: stack)
                             .padding(.horizontal, 12)
                             .padding(.top, 9)
                             .padding(.bottom, 2)
@@ -296,12 +306,13 @@ private struct StackList: View {
                         PullRequestRow(
                             pullRequest: row.pullRequest,
                             repoName: workspace.repo(for: row.pullRequest)?.name ?? row.pullRequest.remote.name,
-                            graph: stack.isStacked ? GraphCell(row: row, laneCount: row.lane + 1, step: 22, dotY: nil) : nil
+                            graph: isStack ? GraphCell(row: row, laneCount: row.lane + 1, step: 22, dotY: nil) : nil
                         )
-                        if index < rows.count - 1, !stack.isStacked {
+                        if index < rows.count - 1, !isStack {
                             Divider().padding(.leading, 40)
                         }
                     }
+                    UnsubmittedLayers(stack: stack, below: rows.count)
                 }
                 .padding(.vertical, 3)
                 .card()

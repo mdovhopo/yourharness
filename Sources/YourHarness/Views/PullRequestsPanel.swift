@@ -14,8 +14,12 @@ struct PullRequestsPanel: View {
         // What the thread worked on, as a tree; what only came up in it, below.
         let worked = items.filter(\.isWorkedOn)
         let mentioned = items.filter { !$0.isWorkedOn }
-        let open = worked.compactMap(\.pull).filter { $0.state == .open }
-        let done = worked.compactMap(\.pull).filter { $0.state != .open }
+        // A GitHub stack still going keeps its merged layers, to show how far along it is.
+        let pulls = worked.compactMap(\.pull)
+        let live = Set(pulls.filter { $0.state == .open }.compactMap { $0.stack.map { [pull = $0] in "\(pull.remote.path)#\($0.number)" } })
+        let inLiveStack = { (pull: PullRequest) in pull.stack.map { live.contains("\(pull.remote.path)#\($0.number)") } ?? false }
+        let open = pulls.filter { $0.state == .open || inLiveStack($0) }
+        let done = pulls.filter { $0.state != .open && !inLiveStack($0) }
             .sorted { ($0.mergedAt ?? $0.updatedAt ?? .distantPast) > ($1.mergedAt ?? $1.updatedAt ?? .distantPast) }
         let unknown = worked.filter { $0.pull == nil }
         Group {
@@ -29,9 +33,12 @@ struct PullRequestsPanel: View {
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 10) {
-                        SyncStatus(thread: thread, openCount: open.count)
+                        SyncStatus(thread: thread, openCount: open.filter { $0.state == .open }.count)
                         ForEach(PullRequestStack.build(open)) { stack in
                             StackCard(stack: stack)
+                        }
+                        ForEach(localStacks, id: \.stack.id) { local in
+                            LocalStackCard(stack: local.stack, repo: local.repo, workspace: local.workspace)
                         }
                         if !done.isEmpty {
                             Text("Merged and Closed")
@@ -66,6 +73,22 @@ struct PullRequestsPanel: View {
                 try? await Task.sleep(for: .seconds(15))
             }
         }
+    }
+}
+
+extension PullRequestsPanel {
+    /// Stacks made with `gh stack` and not on GitHub yet, on a branch this thread works on.
+    var localStacks: [(stack: LocalStack, repo: WorkspaceRepo, workspace: WorkspaceModel)] {
+        guard let project = app.project(id: thread.projectID), let workspace = app.workspace(for: project) else { return [] }
+        var found: [(LocalStack, WorkspaceRepo, WorkspaceModel)] = [], seen = Set<String>()
+        for checkout in workspace.checkouts(for: thread) {
+            guard let branch = workspace.branch(of: checkout) else { continue }
+            for stack in workspace.localStacks[checkout.repo.id] ?? [] where stack.number == nil
+                && stack.layers.contains(where: { $0.branch == branch }) && seen.insert(checkout.repo.id + stack.id).inserted {
+                found.append((stack, checkout.repo, workspace))
+            }
+        }
+        return found
     }
 }
 
@@ -137,21 +160,21 @@ private struct StackCard: View {
 
     var body: some View {
         let graph = StackGraph.layout(stack)
+        let isStack = stack.isStacked || stack.number != nil
         VStack(alignment: .leading, spacing: 0) {
-            if stack.isStacked {
-                Label("Stack of \(graph.rows.count)", systemImage: "square.stack")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
+            if isStack {
+                StackHeader(stack: stack)
                     .padding(.horizontal, 12)
                     .padding(.top, 9)
                     .padding(.bottom, 2)
             }
             ForEach(graph.rows, id: \.pullRequest.id) { row in
                 PullRequestCardRow(pull: row.pullRequest,
-                                   graph: stack.isStacked ? GraphCell(row: row, laneCount: graph.laneCount) : nil)
+                                   graph: isStack ? GraphCell(row: row, laneCount: graph.laneCount) : nil)
             }
+            UnsubmittedLayers(stack: stack, below: graph.rows.count)
         }
-        .padding(.bottom, stack.isStacked ? 3 : 0)
+        .padding(.bottom, isStack ? 3 : 0)
         .card()
     }
 }
@@ -197,7 +220,8 @@ struct GraphCell: View {
             context.stroke(path, with: .style(.quaternary), style: StrokeStyle(lineWidth: 2, lineCap: .round))
         }
         .overlay(alignment: dotY == nil ? .leading : .topLeading) {
-            Text("\(row.layer)")
+            // GitHub's own place in the stack when it has one: layers merged away still count.
+            Text("\(row.pullRequest.stack?.position ?? row.layer)")
                 .font(.system(size: 9, weight: .bold).monospacedDigit())
                 .foregroundStyle(StateChip.color(row.pullRequest))
                 .frame(width: Self.dot, height: Self.dot)

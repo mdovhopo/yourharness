@@ -132,6 +132,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             BrowserProbe.runIfRequested(app: AppModel.shared)
             SwitchProbe.runIfRequested(app: AppModel.shared)
             WindowSnapshot.runIfRequested()
+            } }
         }
         if ProcessInfo.processInfo.environment["YH_SIMULATE_STREAMING"] == "1" {
             MainActor.assumeIsolated {

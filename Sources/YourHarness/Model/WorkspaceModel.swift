@@ -7,6 +7,8 @@ struct WorkspaceTools: Sendable {
     var git: Git?
     var github: GitHubClient?
     var gitlab: GitLabClient?
+    /// `gh stack`, when gh is there; whether the extension is installed is asked separately.
+    var stacks: GitHubStacks?
 }
 
 /// Read-only view of one project's repos and their open PRs. Everything here is
@@ -45,6 +47,8 @@ final class WorkspaceModel {
     private(set) var mainLines: [String: Set<String>] = [:]
     /// Detached worktrees, by path: whether some branch also holds their commit.
     private(set) var detachedReachable: [String: Bool] = [:]
+    /// The stacks `gh stack` keeps in each repo, by repo ID: branches not submitted yet show too.
+    private(set) var localStacks: [String: [LocalStack]] = [:]
 
     init(projectID: UUID, root: URL) {
         self.projectID = projectID
@@ -358,6 +362,8 @@ final class WorkspaceModel {
         }
         let reachable = Dictionary(reach, uniquingKeysWith: { $1 })
         if reachable != detachedReachable { detachedReachable = reachable }
+        let stacks = Dictionary(cloned.map { ($0.id, LocalStack.read(in: $0.url)) }.filter { !$0.1.isEmpty }, uniquingKeysWith: { $1 })
+        if stacks != localStacks { localStacks = stacks }
         if worktrees != self.worktrees { self.worktrees = worktrees }
         if worktreeStatuses != self.worktreeStatuses { self.worktreeStatuses = worktreeStatuses }
         if bases != defaultBranches { defaultBranches = bases }

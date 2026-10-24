@@ -670,7 +670,8 @@ final class AppModel {
         return WorkspaceTools(
             git: ready("git").map { Git(executable: $0, environment: environment) },
             github: ready("gh").map { GitHubClient(executable: $0, environment: environment) },
-            gitlab: ready("glab").map { GitLabClient(executable: $0, environment: environment) }
+            gitlab: ready("glab").map { GitLabClient(executable: $0, environment: environment) },
+            stacks: ready("gh").map { GitHubStacks(executable: $0, environment: environment) }
         )
     }
 
@@ -702,6 +703,13 @@ final class AppModel {
         /// only came up.
         let isWorkedOn: Bool
     }
+
+    /// What a stack's button is doing ("Merging…"), by stack ID.
+    var stackActivity: [String: String] = [:]
+    /// What went wrong with a stack's last action, by stack ID, until dismissed.
+    var stackErrors: [String: String] = [:]
+    /// Whether `gh stack` is installed; nil until asked.
+    var stacksInstalled: Bool?
 
     /// The thread's PRs as their forge last described them, any state, by link ID.
     private var linkedPullRequests: [String: PullRequest] = [:]

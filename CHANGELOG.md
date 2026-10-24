@@ -13,6 +13,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 - The Copy button under Claude's replies sits on the right.
 - **Smoother streaming.** Only the part of a reply that's still arriving is redrawn, so long replies no longer slow down as they grow (a third of the work on an 8 KB reply), and you can select text while the rest streams in. Text no longer clips or jumps when a tool call appears, and "Working…" no longer flashes between Claude's steps.
 - A line break inside a list item keeps its indent.
+- **GitHub stacks, with their buttons.** PRs in one of GitHub's stacked pull requests show as that stack ("Stack #4 · 2 of 4 merged"), in GitHub's order, merged layers included, in a thread's PRs and the repos view. **Merge Stack** squash-merges the whole stack on GitHub, or pick **Merge Up to #n** from its menu; branches made with `gh stack` that have no PR yet show as Not submitted, and **Submit** pushes them and opens their PRs. Stacks made with `gh stack` and not on GitHub yet have a card of their own. It all runs GitHub's `gh stack` extension, which the app offers to install.
 - **Top and end of a thread** in one click: arrows above and below the message arrows, and Thread → Top of Thread (⇧⌘[) and End of Thread (⇧⌘]). Going to the top shows the earlier turns on the way.
 
 ## [0.0.5] - 2026-10-23
