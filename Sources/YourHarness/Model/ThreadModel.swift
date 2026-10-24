@@ -28,10 +28,18 @@ final class ThreadModel: Identifiable {
     /// Tokens currently in context, from the latest assistant message.
     private(set) var contextTokens: Int?
     private(set) var contextWindow: Int?
-    private(set) var entries: [TranscriptEntry] = []
-    private(set) var phase = Phase.idle
+    private(set) var entries: [TranscriptEntry] = [] {
+        didSet { rowsChanged() }
+    }
+    private(set) var phase = Phase.idle {
+        didSet { if phase != oldValue { rowsChanged() } }
+    }
     private(set) var pendingPermissions: [PermissionRequest] = [] {
-        didSet { if pendingPermissions.isEmpty != oldValue.isEmpty { app.waitingChanged() } }
+        didSet {
+            guard pendingPermissions.isEmpty != oldValue.isEmpty else { return }
+            app.waitingChanged()
+            rowsChanged()
+        }
     }
     /// Sub-agents still at work. Background ones outlive the turn that started them.
     private(set) var liveSubagents: [SubagentRun] = []
@@ -40,9 +48,23 @@ final class ThreadModel: Identifiable {
     /// A reply finished while you were looking at another thread.
     private(set) var hasUnread = false
     /// Finished turns you've opened to see Claude's work, by their first message's ID.
-    var expandedTurns: Set<String> = []
+    var expandedTurns: Set<String> = [] {
+        didSet { rowsChanged() }
+    }
     /// How many of the latest turns the transcript shows; scrolling to the top adds more.
-    var shownTurns = ThreadModel.turnsPerPage
+    var shownTurns = ThreadModel.turnsPerPage {
+        didSet { if shownTurns != oldValue { rowsChanged() } }
+    }
+    /// Bumped whenever the rows the transcript shows may have changed. They're worked out
+    /// again on the next read, once, however many times the view asks.
+    private(set) var rowsRevision = 0
+    @ObservationIgnored var transcriptRowsCache: (revision: Int, rows: [TranscriptEntry], turnStarts: [Int])?
+    @ObservationIgnored var displayRowsCache: (revision: Int, rows: [TranscriptRow])?
+
+    /// For changes the rows depend on that aren't to the list itself: a turn's end, a result.
+    func rowsChanged() {
+        rowsRevision &+= 1
+    }
     static let turnsPerPage = ProcessInfo.processInfo.environment["YH_TURNS_PER_PAGE"].flatMap(Int.init) ?? 40
 
     func showEarlierTurns() {
@@ -51,7 +73,7 @@ final class ThreadModel: Identifiable {
 
     /// Every turn, for going to the very top.
     func showAllTurns() {
-        shownTurns = max(shownTurns, Self.turnStarts(in: transcriptRows).count)
+        shownTurns = max(shownTurns, transcriptTurnStarts.count)
     }
     /// Where you were when you last left the thread: the row at the bottom of the screen;
     /// nil when you were at the end, which is where it opens then.
@@ -96,7 +118,9 @@ final class ThreadModel: Identifiable {
     /// The plan as of each run of task tool calls, keyed by the run's last call.
     private(set) var planSteps: [String: TaskPlan] = [:]
     /// Task tool calls followed by another: their run shows once, at its end.
-    private(set) var foldedPlanCalls: Set<String> = []
+    private(set) var foldedPlanCalls: Set<String> = [] {
+        didSet { rowsChanged() }
+    }
     /// The newest run, shown as the full checklist.
     private(set) var latestPlanStep: String?
     /// `/btw`: questions on the side, in a copy of this conversation. Shown in the right
@@ -322,7 +346,21 @@ final class ThreadModel: Identifiable {
 
     /// What the transcript shows: each run of task tool calls as one plan row.
     var transcriptRows: [TranscriptEntry] {
-        foldedPlanCalls.isEmpty ? entries : entries.filter { !foldedPlanCalls.contains($0.id) }
+        cachedTranscriptRows.rows
+    }
+
+    /// Where each turn starts in `transcriptRows`.
+    var transcriptTurnStarts: [Int] {
+        cachedTranscriptRows.turnStarts
+    }
+
+    private var cachedTranscriptRows: (revision: Int, rows: [TranscriptEntry], turnStarts: [Int]) {
+        let revision = rowsRevision
+        if let cached = transcriptRowsCache, cached.revision == revision { return cached }
+        let rows = foldedPlanCalls.isEmpty ? entries : entries.filter { !foldedPlanCalls.contains($0.id) }
+        let cached = (revision, rows, Self.turnStarts(in: rows))
+        transcriptRowsCache = cached
+        return cached
     }
 
     /// Replays the task tool calls. Only when one arrives or gets its result, so a
@@ -364,7 +402,7 @@ final class ThreadModel: Identifiable {
         }
         let known = entries.map(\.archiveItem)
         let count = entries.count
-        let savedAt = cutOff ? nil : app.store.transcriptModified(id)
+        let savedAt = cutOff ? nil : app.store.transcriptSavedAt(id)
         Task {
             let backfill = await app.sessionBackfill(sessionID: sessionID, known: known, changedSince: savedAt)
             // You've carried on meanwhile: what's on screen is what counts.
@@ -386,6 +424,7 @@ final class ThreadModel: Identifiable {
                 entries.append(.notice("Continued outside YourHarness"))
             }
             entries.append(contentsOf: backfill.missing.map(TranscriptEntry.init(item:)))
+            rowsChanged()
             rebuildPlan()
             if cutOff {
                 entries.append(.notice(backfill.isEmpty
@@ -830,6 +869,8 @@ final class ThreadModel: Identifiable {
                     addFootprint(ThreadFootprint.folders(inResult: result.content))
                 }
             }
+            // A result can change how its turn folds (an error, a picture to show).
+            rowsChanged()
             if plansChanged { rebuildPlan() }
             if ranCommand { refreshLocalServers() }
 
@@ -967,6 +1008,7 @@ final class ThreadModel: Identifiable {
     private func noteTurnEnded() {
         guard let start = entries.last(where: \.startsTurn), start.turnEndedAt == nil else { return }
         start.turnEndedAt = .now
+        rowsChanged()
     }
 
     func jumpToMessage(_ direction: MessageJump.Direction) {
@@ -1022,7 +1064,8 @@ final class ThreadModel: Identifiable {
         pendingSave?.cancel()
         pendingSave = nil
         guard !isEphemeral else { return }
-        app.store.saveTranscript(id, entries: entries.map(\.snapshot))
+        // Only a transcript that's in memory: one that isn't would be saved as empty.
+        if transcriptLoaded { app.store.saveTranscript(id, entries: entries.map(\.snapshot)) }
         app.save()
     }
 
@@ -1037,6 +1080,7 @@ final class ThreadModel: Identifiable {
         entries.removeAll()
         expandedTurns.removeAll()
         rebuildPlan()
+        app.store.forgetTranscript(id)
     }
 
     /// At most one save every couple of seconds while Claude streams.
@@ -1135,7 +1179,7 @@ final class ThreadModel: Identifiable {
                         if let subagent = entry.subagent { walk(subagent.entries) }
                     }
                 }
-                walk(store.loadTranscript(id))
+                store.scanTranscript(id) { walk($0) }
                 return (found, links, written, activities)
             }.value
             guard let self else { return }

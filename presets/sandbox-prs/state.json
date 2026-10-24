@@ -1,0 +1,39 @@
+{
+  "projects": [
+    {
+      "id": "CCCCCCCC-0000-4000-8000-000000000001",
+      "name": "Home",
+      "path": "{{ROOT}}/home",
+      "permissionMode": "auto"
+    },
+    {
+      "id": "CCCCCCCC-0000-4000-8000-000000000002",
+      "name": "yourharness-test-prs",
+      "path": "{{ROOT}}/yourharness-test-prs",
+      "permissionMode": "auto"
+    }
+  ],
+  "threads": [
+    {
+      "id": "DDDDDDDD-0000-4000-8000-000000000001",
+      "projectID": "CCCCCCCC-0000-4000-8000-000000000002",
+      "title": "Start here",
+      "createdAt": "2026-10-24T10:00:00Z",
+      "updatedAt": "2026-10-24T10:00:00Z",
+      "model": "haiku"
+    }
+  ],
+  "homeProjectID": "CCCCCCCC-0000-4000-8000-000000000001",
+  "defaults": {
+    "model": "haiku",
+    "effort": "low"
+  },
+  "titleGeneration": {
+    "provider": "claude",
+    "model": "haiku"
+  },
+  "autoSettleDays": 0,
+  "browserAutoShow": false,
+  "overviewProjectID": null,
+  "selectedThreadID": "DDDDDDDD-0000-4000-8000-000000000001"
+}

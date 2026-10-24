@@ -6,6 +6,11 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+### Changed
+- **Your threads live in a database now.** Everything the app keeps moves into one SQLite file the first time this version opens, without you doing anything: settings, projects, threads and every transcript, the old files left as they were. Saving while Claude works writes only what changed instead of the whole thread every couple of seconds, so a long thread costs no more to save than a short one, and big tool output (whole files read, long logs) is stored once, compressed, and kept out of memory beyond what a tool call shows. It's the groundwork for memory.
+- **Every thread is searchable underneath**: what was said, commands and the start of their output are indexed in the background, ready for search across threads and for memory.
+- A thread you hadn't opened since launch could lose its saved history when one of its PRs was found through its branch; Claude's own session history usually filled it back in, under "Continued outside YourHarness".
+
 ## [0.0.6] - 2026-10-24
 
 ### Changed

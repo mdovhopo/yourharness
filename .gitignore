@@ -9,3 +9,5 @@ DerivedData/
 
 # Worktrees of background agents
 .claude/worktrees/
+
+test-harness-root/*

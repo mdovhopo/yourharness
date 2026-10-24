@@ -75,9 +75,12 @@ public struct ClaudeSessionArchive: Sendable, Equatable {
         return archive
     }
 
+    /// Where a message sits in the file and how it links up. The message itself is parsed
+    /// again only if it's on the live branch, so a long session's dead branches and
+    /// bookkeeping aren't all held at once.
     private struct Record {
         var line: Int
-        var object: [String: Any]
+        var bytes: Range<Data.Index>
         var uuid: String
         var parent: String?
         var type: String
@@ -119,7 +122,7 @@ public struct ClaudeSessionArchive: Sendable, Equatable {
                 if type == "user", let blocks = (object["message"] as? [String: Any])?["content"] as? [[String: Any]] {
                     toolResultOnly = !blocks.isEmpty && blocks.allSatisfy { $0["type"] as? String == "tool_result" }
                 }
-                records[uuid] = Record(line: lineNumber, object: object, uuid: uuid, parent: parent, type: type,
+                records[uuid] = Record(line: lineNumber, bytes: line.startIndex..<line.endIndex, uuid: uuid, parent: parent, type: type,
                                        isCompactBoundary: isBoundary, isToolResultOnly: toolResultOnly)
                 if type == "user" || type == "assistant" { lastMessage = uuid }
             }
@@ -139,7 +142,7 @@ public struct ClaudeSessionArchive: Sendable, Equatable {
 
         var toolIndex: [String: Int] = [:]
         for record in kept {
-            let object = record.object
+            guard let object = try? JSONSerialization.jsonObject(with: data[record.bytes]) as? [String: Any] else { continue }
             if let cwd = object["cwd"] as? String { archive.cwd = cwd }
             if let date = (object["timestamp"] as? String).flatMap(Self.date) {
                 archive.startedAt = archive.startedAt ?? date

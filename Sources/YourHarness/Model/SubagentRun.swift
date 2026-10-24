@@ -5,9 +5,7 @@ import HarnessCore
 /// transcript, and its report. Hangs off that tool call's transcript entry.
 @MainActor @Observable
 final class SubagentRun: Identifiable {
-    enum Status: String, Codable {
-        case running, completed, failed, stopped
-    }
+    typealias Status = SubagentStatus
 
     /// The Agent tool call's ID.
     let id: String
@@ -128,20 +126,6 @@ final class SubagentRun: Identifiable {
 }
 
 // MARK: - Persistence
-
-struct SubagentSnapshot: Codable, Sendable {
-    var description: String
-    var agentType: String?
-    var prompt: String
-    var isBackground: Bool?
-    var status: SubagentRun.Status
-    var toolUses: Int?
-    var tokens: Int?
-    var durationMs: Int?
-    var report: String?
-    var startedAt: Date
-    var entries: [EntrySnapshot]
-}
 
 extension SubagentRun {
     var snapshot: SubagentSnapshot {

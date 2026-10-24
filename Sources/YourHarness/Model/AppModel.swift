@@ -1529,7 +1529,21 @@ final class AppModel {
 
     // MARK: - Persistence
 
+    /// Saves a moment later, so a burst of changes (a selection, a rename, a draft) is one
+    /// save. Quitting saves right away.
     func save() {
+        guard !saveScheduled else { return }
+        saveScheduled = true
+        Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(300))
+            self?.saveNow()
+        }
+    }
+
+    @ObservationIgnored private var saveScheduled = false
+
+    func saveNow() {
+        saveScheduled = false
         var state = PersistedState()
         state.projects = projects
         state.threads = threads.filter { !$0.isEphemeral }.map(\.meta)
@@ -1562,7 +1576,7 @@ final class AppModel {
     func shutdown() {
         for id in recentlyDeleted.keys { purgeFiles(of: id) }
         for thread in threads { thread.prepareForQuit() }
-        save()
+        saveNow()
         for thread in threads { thread.endSession() }
         store.flush()
     }

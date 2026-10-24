@@ -1,5 +1,6 @@
 import AppKit
 import HarnessCore
+import Synchronization
 
 enum PermissionMode: String, Codable, CaseIterable, Identifiable {
     case auto, ask, acceptEdits, plan, bypass
@@ -268,16 +269,25 @@ enum EffortLevel: String, CaseIterable, Identifiable {
     }
 }
 
-/// JSON files under Application Support. Thread metadata loads at launch; transcripts
-/// load lazily when a thread is first opened, so startup cost doesn't grow with history.
-struct Store: Sendable {
+/// Where the app keeps things: everything but files in one database (`HarnessDatabase`,
+/// `harness.sqlite`) under Application Support, and images as files beside it. Thread
+/// metadata loads at launch; transcripts load when a thread is first opened, so startup cost
+/// doesn't grow with history. The JSON files of earlier versions move in on first launch.
+final class Store: Sendable {
     let root: URL
     /// A development run against `YH_DATA_DIR`: it must never wander into your real folders.
     let isScratch: Bool
+    let database: HarnessDatabase
+    /// Attachments and screenshots, and turning the state into rows.
     private let queue = DispatchQueue(label: "yourharness.store", qos: .utility)
+    /// Rows this version can't read (a newer one's), saved back as they were so they aren't lost.
+    private let unreadable = Mutex<(projects: [HarnessDatabase.ProjectRow], threads: [HarnessDatabase.ThreadRow])>(([], []))
 
-    init() {
-        if let override = ProcessInfo.processInfo.environment["YH_DATA_DIR"], !override.isEmpty {
+    init(root override: URL? = nil) {
+        if let override {
+            root = override
+            isScratch = true
+        } else if let override = ProcessInfo.processInfo.environment["YH_DATA_DIR"], !override.isEmpty {
             // Development: run against a throwaway state instead of your real one.
             root = URL(fileURLWithPath: override, isDirectory: true)
             isScratch = true
@@ -286,13 +296,10 @@ struct Store: Sendable {
             let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             root = base.appending(path: "YourHarness", directoryHint: .isDirectory)
         }
-        try? FileManager.default.createDirectory(at: threadsDirectory, withIntermediateDirectories: true)
+        database = HarnessDatabase(directory: root)
         try? FileManager.default.createDirectory(at: attachmentsDirectory, withIntermediateDirectories: true)
     }
 
-    private var stateURL: URL { root.appending(path: "state.json") }
-    private var threadsDirectory: URL { root.appending(path: "threads", directoryHint: .isDirectory) }
-    private func transcriptURL(_ id: UUID) -> URL { threadsDirectory.appending(path: "\(id.uuidString).json") }
     /// Images you sent, one file each, named `<thread id>-<image id>.<ext>`.
     private var attachmentsDirectory: URL { root.appending(path: "attachments", directoryHint: .isDirectory) }
 
@@ -331,68 +338,121 @@ struct Store: Sendable {
         }
     }
 
-    func loadState() -> PersistedState {
-        guard let data = try? Data(contentsOf: stateURL) else { return PersistedState() }
-        do {
-            return try Self.decoder.decode(PersistedState.self, from: data)
-        } catch {
-            // Said out loud in a development run, where a bad hand-written state would
-            // otherwise start fresh without a word.
-            if isScratch { FileHandle.standardError.write(Data("state.json didn't load: \(error)\n".utf8)) }
-            return PersistedState()
-        }
-    }
-
-    func saveState(_ state: PersistedState) {
-        write(state, to: stateURL)
-    }
-
     func revealInFinder() {
         NSWorkspace.shared.activateFileViewerSelecting([root])
     }
 
-    func loadTranscript(_ id: UUID) -> [EntrySnapshot] {
-        guard let data = try? Data(contentsOf: transcriptURL(id)) else { return [] }
-        if let entries = try? Self.decoder.decode([EntrySnapshot].self, from: data) { return entries }
-        // One entry it can't read (a newer app's, a damaged one) costs that entry, not the thread.
-        let entries = (try? Self.decoder.decode([Lossy<EntrySnapshot>].self, from: data))?.compactMap(\.value) ?? []
-        if !entries.isEmpty {
-            FileHandle.standardError.write(Data("Transcript \(id): skipped entries it couldn't read\n".utf8))
+    // MARK: - State
+
+    func loadState() -> PersistedState {
+        let rows = database.loadState()
+        var state = decodeSettings(rows.values)
+        var unreadableProjects: [HarnessDatabase.ProjectRow] = [], unreadableThreads: [HarnessDatabase.ThreadRow] = []
+        for row in rows.projects {
+            if let project = try? Self.decoder.decode(Project.self, from: row.json) { state.projects.append(project) } else { unreadableProjects.append(row) }
         }
-        return entries
+        for row in rows.threads {
+            if let thread = try? Self.decoder.decode(ThreadMeta.self, from: row.json) { state.threads.append(thread) } else { unreadableThreads.append(row) }
+        }
+        if !unreadableProjects.isEmpty || !unreadableThreads.isEmpty {
+            FileHandle.standardError.write(Data("Kept \(unreadableProjects.count) projects and \(unreadableThreads.count) threads this version can't read\n".utf8))
+        }
+        unreadable.withLock { $0 = (unreadableProjects, unreadableThreads) }
+        return state
     }
 
+    /// Settings come one row each. One a newer version changed so this one can't read it
+    /// costs that setting, not the rest.
+    private func decodeSettings(_ values: [String: Data]) -> PersistedState {
+        var object: [String: Any] = [:]
+        for (key, value) in values {
+            object[key] = try? JSONSerialization.jsonObject(with: value, options: .fragmentsAllowed)
+        }
+        func decode(_ object: [String: Any]) -> PersistedState? {
+            guard let data = try? JSONSerialization.data(withJSONObject: object) else { return nil }
+            return try? Self.decoder.decode(PersistedState.self, from: data)
+        }
+        if let state = decode(object) { return state }
+        var readable: [String: Any] = [:]
+        for key in object.keys.sorted() {
+            readable[key] = object[key]
+            if decode(readable) == nil {
+                readable[key] = nil
+                // Said out loud in a development run, where a bad hand-written state would
+                // otherwise start fresh without a word.
+                if isScratch { FileHandle.standardError.write(Data("Setting \(key) didn't load\n".utf8)) }
+            }
+        }
+        return decode(readable) ?? PersistedState()
+    }
+
+    /// Turned into rows and written in the background; only what changed is written.
+    func saveState(_ state: PersistedState) {
+        let database = database, unreadable = unreadable.withLock { $0 }
+        queue.async {
+            var settings = state
+            settings.projects = []
+            settings.threads = []
+            var rows = HarnessDatabase.StateRows()
+            if let object = (try? Self.encoder.encode(settings)).flatMap({ try? JSONSerialization.jsonObject(with: $0) }) as? [String: Any] {
+                for (key, value) in object where key != "projects" && key != "threads" {
+                    rows.values[key] = try? JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed, .sortedKeys, .withoutEscapingSlashes])
+                }
+            }
+            rows.projects = state.projects.compactMap { project in
+                (try? Self.encoder.encode(project)).map { .init(id: project.id.uuidString, json: $0) }
+            } + unreadable.projects
+            rows.threads = state.threads.compactMap { thread in
+                (try? Self.encoder.encode(thread)).map {
+                    .init(id: thread.id.uuidString, projectID: thread.projectID.uuidString, updatedAt: thread.updatedAt,
+                          sessionID: thread.sessionID, json: $0)
+                }
+            } + unreadable.threads
+            database.saveState(rows)
+        }
+    }
+
+    // MARK: - Transcripts
+
+    func loadTranscript(_ id: UUID) -> [EntrySnapshot] {
+        database.loadTranscript(id)
+    }
+
+    /// Only the rows that changed are written, in the background.
     func saveTranscript(_ id: UUID, entries: [EntrySnapshot]) {
-        write(entries, to: transcriptURL(id))
+        database.saveTranscript(id, entries: entries)
+    }
+
+    /// The transcript was let go of in memory.
+    func forgetTranscript(_ id: UUID) {
+        database.forgetTranscript(id)
+    }
+
+    /// The transcript a page at a time, for going through a long one off the main thread.
+    func scanTranscript(_ id: UUID, _ body: ([EntrySnapshot]) -> Void) {
+        database.scanTranscript(id, body)
     }
 
     /// When the transcript was last written, to tell whether the session went on without it.
-    func transcriptModified(_ id: UUID) -> Date? {
-        try? FileManager.default.attributesOfItem(atPath: transcriptURL(id).path)[.modificationDate] as? Date
+    func transcriptSavedAt(_ id: UUID) -> Date? {
+        database.transcriptSavedAt(id)
+    }
+
+    func deleteTranscript(_ id: UUID) {
+        database.deleteTranscript(id)
     }
 
     /// Waits for every write so far; at quit, so none is cut off.
     func flush() {
         queue.sync {}
-    }
-
-    func deleteTranscript(_ id: UUID) {
-        let url = transcriptURL(id)
-        queue.async { try? FileManager.default.removeItem(at: url) }
-    }
-
-    /// Encodes and writes on a serial background queue, so writes stay ordered and a long
-    /// transcript saved mid-turn costs the main thread nothing.
-    private func write(_ value: some Encodable & Sendable, to url: URL) {
-        queue.async {
-            guard let data = try? Self.encoder.encode(value) else { return }
-            try? data.write(to: url, options: .atomic)
-        }
+        database.flush()
     }
 
     private static let encoder: JSONEncoder = {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
+        // The same value always makes the same bytes, so an unchanged row isn't rewritten.
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         return encoder
     }()
 
@@ -401,13 +461,4 @@ struct Store: Sendable {
         decoder.dateDecodingStrategy = .iso8601
         return decoder
     }()
-}
-
-/// An element that may not decode: nil instead of failing the whole array.
-struct Lossy<Value: Decodable>: Decodable {
-    let value: Value?
-
-    init(from decoder: Decoder) throws {
-        value = try? Value(from: decoder)
-    }
 }

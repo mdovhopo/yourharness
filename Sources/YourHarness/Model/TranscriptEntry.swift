@@ -5,14 +5,9 @@ import HarnessCore
 /// row it touches, not the whole list.
 @MainActor @Observable
 final class TranscriptEntry: Identifiable {
-    enum Kind: String, Codable {
-        /// `commandOutput`: what a built-in command printed, e.g. `/context`.
-        case user, assistant, thinking, tool, notice, commandOutput
-    }
-
-    enum NoticeStyle: String, Codable {
-        case info, error
-    }
+    typealias Kind = EntryKind
+    typealias NoticeStyle = HarnessCore.NoticeStyle
+    typealias Delivery = MessageDelivery
 
     let id: String
     let kind: Kind
@@ -33,6 +28,9 @@ final class TranscriptEntry: Identifiable {
     /// JSON; partial while the model is still streaming the input.
     var toolInput = ""
     var toolResult: String?
+    /// For a big result loaded as its head: where the whole one is kept, and its length.
+    @ObservationIgnored var toolResultRef: String?
+    @ObservationIgnored var toolResultLength: Int?
     var toolIsError = false
     /// For an Agent tool call: the sub-agent it started.
     var subagent: SubagentRun?
@@ -42,14 +40,6 @@ final class TranscriptEntry: Identifiable {
     var attachments: [String] = []
     /// How a message you sent while Claude was working got to it.
     @ObservationIgnored var delivery = Delivery.normal
-
-    enum Delivery: String, Codable {
-        case normal
-        /// Waited for Claude's current step, then joined the turn: steering.
-        case steered
-        /// Claude was stopped so this went in right away.
-        case interrupted
-    }
 
     init(id: String = UUID().uuidString, kind: Kind, text: String = "", isStreaming: Bool = false, date: Date? = .now) {
         self.id = id
@@ -72,22 +62,6 @@ final class TranscriptEntry: Identifiable {
 
 // MARK: - Persistence
 
-struct EntrySnapshot: Codable, Sendable {
-    var id: String
-    var kind: TranscriptEntry.Kind
-    var text: String
-    var toolName: String?
-    var toolInput: String?
-    var toolResult: String?
-    var toolIsError: Bool?
-    var noticeStyle: TranscriptEntry.NoticeStyle?
-    var attachments: [String]?
-    var subagent: SubagentSnapshot?
-    var delivery: TranscriptEntry.Delivery?
-    var date: Date?
-    var turnEndedAt: Date?
-}
-
 extension TranscriptEntry {
     var snapshot: EntrySnapshot {
         EntrySnapshot(
@@ -103,7 +77,9 @@ extension TranscriptEntry {
             subagent: subagent?.snapshot,
             delivery: delivery == .normal ? nil : delivery,
             date: date,
-            turnEndedAt: turnEndedAt
+            turnEndedAt: turnEndedAt,
+            toolResultRef: toolResultRef,
+            toolResultLength: toolResultLength
         )
     }
 
@@ -113,6 +89,8 @@ extension TranscriptEntry {
         toolName = snapshot.toolName ?? ""
         toolInput = snapshot.toolInput ?? ""
         toolResult = snapshot.toolResult
+        toolResultRef = snapshot.toolResultRef
+        toolResultLength = snapshot.toolResultLength
         toolIsError = snapshot.toolIsError ?? false
         noticeStyle = snapshot.noticeStyle ?? .info
         attachments = snapshot.attachments ?? []
@@ -139,6 +117,8 @@ extension TranscriptEntry {
         case .assistant(let text), .thinking(let text): self.text = text
         case .tool(_, _, _, let result, let isError):
             toolResult = result
+            toolResultRef = nil
+            toolResultLength = nil
             toolIsError = isError
         case .user, .notice: break
         }

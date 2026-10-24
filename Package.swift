@@ -21,5 +21,10 @@ let package = Package(
             dependencies: ["HarnessCore"],
             resources: [.copy("Fixtures")]
         ),
+        // The app's own model: what it saves, and moving in what older versions saved.
+        .testTarget(
+            name: "YourHarnessTests",
+            dependencies: ["YourHarness", "HarnessCore"]
+        ),
     ]
 )

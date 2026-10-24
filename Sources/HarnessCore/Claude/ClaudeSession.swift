@@ -277,7 +277,7 @@ private final class LineWriter: Sendable {
 /// has drained and the process has exited, so no trailing events are lost.
 private final class OutputReader: Sendable {
     private struct State {
-        var buffer = Data()
+        var lines = LineBuffer()
         var parser = ClaudeStreamParser()
         var stderrTail = Data()
         var stdoutOpen = true
@@ -298,13 +298,8 @@ private final class OutputReader: Sendable {
 
     func consume(_ chunk: Data) {
         let events = state.withLock { state -> [AgentEvent] in
-            state.buffer.append(chunk)
             var events: [AgentEvent] = []
-            while let newline = state.buffer.firstIndex(of: 0x0A) {
-                let line = state.buffer[state.buffer.startIndex..<newline]
-                if !line.isEmpty { events += state.parser.parse(line: Data(line)) }
-                state.buffer.removeSubrange(state.buffer.startIndex...newline)
-            }
+            for line in state.lines.append(chunk) { events += state.parser.parse(line: line) }
             return events
         }
         for event in events {
@@ -343,5 +338,30 @@ private final class OutputReader: Sendable {
         guard let (code, stderr) = exit else { return }
         continuation.yield(.processExited(code: code, stderrTail: stderr))
         continuation.finish()
+    }
+}
+
+/// Splits a byte stream into lines. Each chunk is searched once and the buffer is cut once,
+/// so a line of megabytes (a screenshot) arriving in small chunks costs its length, not its
+/// length times the number of chunks.
+struct LineBuffer {
+    private var buffer = Data()
+    /// How much of the buffer is known to hold no newline.
+    private var searched = 0
+
+    /// The lines `chunk` completes, without their newlines; empty lines are skipped.
+    mutating func append(_ chunk: Data) -> [Data] {
+        buffer.append(chunk)
+        var lines: [Data] = []
+        var lineStart = buffer.startIndex
+        var searchFrom = buffer.startIndex + searched
+        while let newline = buffer[searchFrom...].firstIndex(of: 0x0A) {
+            if newline > lineStart { lines.append(Data(buffer[lineStart..<newline])) }
+            lineStart = newline + 1
+            searchFrom = lineStart
+        }
+        if lineStart > buffer.startIndex { buffer.removeSubrange(buffer.startIndex..<lineStart) }
+        searched = buffer.count
+        return lines
     }
 }

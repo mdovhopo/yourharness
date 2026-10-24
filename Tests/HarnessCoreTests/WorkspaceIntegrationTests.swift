@@ -11,7 +11,8 @@ struct WorkspaceIntegrationTests {
     @Test func scansAndReadsThisRepo() async throws {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let layout = WorkspaceScanner.scan(root)
-        #expect(layout.kind == .repo)
+        // A shell once a preset has cloned a sandbox repo into test-harness-root (gitignored).
+        #expect(layout.kind == .repo || layout.kind == .shell)
 
         let git = Git(executable: URL(fileURLWithPath: "/usr/bin/git"), environment: environment)
         let status = try #require(await git.status(of: root))

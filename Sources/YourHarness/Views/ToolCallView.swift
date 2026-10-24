@@ -1,3 +1,4 @@
+import HarnessCore
 import SwiftUI
 
 /// How a tool call reads at a glance: an icon, a verb, and the one argument that matters.
@@ -123,7 +124,7 @@ struct ToolCallView: View {
                 CodeBox(text: Self.prettyJSON(entry.toolInput))
             }
             if let result = entry.toolResult, !result.isEmpty {
-                CodeBox(text: Self.clipped(result), tint: entry.toolIsError ? .red : nil)
+                CodeBox(text: Self.clipped(result, length: entry.toolResultLength), tint: entry.toolIsError ? .red : nil)
             }
             if entry.toolName == BrowserCall.prefix + "screenshot", !entry.toolIsError {
                 BrowserShotThumbnail(toolUseID: entry.id, large: true)
@@ -134,10 +135,12 @@ struct ToolCallView: View {
         }
     }
 
-    /// Huge outputs (full file reads, long logs) would stall layout; show the head.
-    private static func clipped(_ text: String, limit: Int = 20_000) -> String {
-        guard text.count > limit else { return text }
-        return String(text.prefix(limit)) + "\n… \(text.count - limit) more characters"
+    /// Huge outputs (full file reads, long logs) would stall layout; show the head. A big
+    /// result is only loaded as its head anyway, with `length` saying how long it really is.
+    private static func clipped(_ text: String, length: Int?, limit: Int = HarnessDatabase.resultHeadLength) -> String {
+        let length = length ?? text.count
+        guard length > limit else { return text }
+        return String(text.prefix(limit)) + "\n… \(length - limit) more characters"
     }
 
     private static func prettyJSON(_ json: String) -> String {

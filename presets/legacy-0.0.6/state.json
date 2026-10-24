@@ -1,0 +1,89 @@
+{
+ "projects": [
+  {
+   "id": "AAAAAAAA-0000-4000-8000-000000000001",
+   "name": "Home",
+   "path": "{{ROOT}}/home",
+   "permissionMode": "auto"
+  },
+  {
+   "id": "AAAAAAAA-0000-4000-8000-000000000002",
+   "name": "Notes",
+   "path": "{{ROOT}}/notes",
+   "permissionMode": "acceptEdits"
+  }
+ ],
+ "threads": [
+  {
+   "id": "BBBBBBBB-0000-4000-8000-000000000001",
+   "projectID": "AAAAAAAA-0000-4000-8000-000000000002",
+   "title": "Fix the flaky date test",
+   "createdAt": "2026-10-20T10:00:00Z",
+   "updatedAt": "2026-10-22T09:00:00Z",
+   "model": "haiku",
+   "isPinned": true,
+   "draft": "Also check the time zone",
+   "footprint": [
+    "{{ROOT}}/notes"
+   ],
+   "writtenFootprint": [
+    "{{ROOT}}/notes"
+   ],
+   "pullRequests": [],
+   "workedPullRequests": []
+  },
+  {
+   "id": "BBBBBBBB-0000-4000-8000-000000000002",
+   "projectID": "AAAAAAAA-0000-4000-8000-000000000002",
+   "title": "Explore the parser",
+   "createdAt": "2026-10-20T10:00:00Z",
+   "updatedAt": "2026-10-21T15:00:00Z",
+   "model": "haiku",
+   "footprint": [
+    "{{ROOT}}/notes"
+   ]
+  },
+  {
+   "id": "BBBBBBBB-0000-4000-8000-000000000003",
+   "projectID": "AAAAAAAA-0000-4000-8000-000000000001",
+   "title": "Release notes draft",
+   "createdAt": "2026-10-20T10:00:00Z",
+   "updatedAt": "2026-10-10T12:00:00Z",
+   "model": "haiku",
+   "settledAt": "2026-10-14T12:00:00Z"
+  },
+  {
+   "id": "BBBBBBBB-0000-4000-8000-000000000004",
+   "projectID": "AAAAAAAA-0000-4000-8000-000000000001",
+   "title": "Screenshot question",
+   "createdAt": "2026-10-20T10:00:00Z",
+   "updatedAt": "2026-10-21T08:00:00Z",
+   "model": "haiku"
+  }
+ ],
+ "selectedThreadID": "BBBBBBBB-0000-4000-8000-000000000001",
+ "homeProjectID": "AAAAAAAA-0000-4000-8000-000000000001",
+ "defaults": {
+  "model": "haiku",
+  "effort": "low"
+ },
+ "titleGeneration": {
+  "provider": "claude",
+  "model": "haiku"
+ },
+ "autoSettleDays": 0,
+ "collapsedProjectIDs": [],
+ "diagramInstructions": true,
+ "notifications": true,
+ "planChecklist": true,
+ "browserTools": true,
+ "browserAutoShow": false,
+ "showsInspector": false,
+ "appearance": "system",
+ "cliPathOverrides": {},
+ "contextWindows": {},
+ "slashCommands": {},
+ "skills": {},
+ "repoUsage": {},
+ "expandedWorktrees": []
+}

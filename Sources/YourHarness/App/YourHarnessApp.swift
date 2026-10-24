@@ -132,6 +132,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             CookieImport.importIfRequested(app: AppModel.shared)
             BrowserProbe.runIfRequested(app: AppModel.shared)
             SwitchProbe.runIfRequested(app: AppModel.shared)
+            SearchProbe.runIfRequested(app: AppModel.shared)
             StackProbe.runIfRequested(app: AppModel.shared)
             WindowSnapshot.runIfRequested()
             if let panel = ProcessInfo.processInfo.environment["YH_INSPECTOR_PANEL"].flatMap(AppModel.InspectorPanel.init(rawValue:)) {

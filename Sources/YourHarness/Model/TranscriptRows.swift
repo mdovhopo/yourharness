@@ -69,8 +69,16 @@ extension ThreadModel {
     /// Only the last `shownTurns` turns: a long thread opens as fast as a short one, and
     /// scrolling to the top shows more.
     var transcriptDisplayRows: [TranscriptRow] {
+        let revision = rowsRevision
+        if let cached = displayRowsCache, cached.revision == revision { return cached.rows }
+        let rows = computeDisplayRows()
+        displayRowsCache = (revision, rows)
+        return rows
+    }
+
+    private func computeDisplayRows() -> [TranscriptRow] {
         let rows = transcriptRows
-        let turns = Self.turnStarts(in: rows)
+        let turns = transcriptTurnStarts
         let hidden = max(turns.count - shownTurns, 0)
         var result: [TranscriptRow] = []
         var index: Int
@@ -105,7 +113,7 @@ extension ThreadModel {
     func showTurns(including entryID: String) {
         let rows = transcriptRows
         guard let position = rows.firstIndex(where: { $0.id == entryID }) else { return }
-        let turns = Self.turnStarts(in: rows)
+        let turns = transcriptTurnStarts
         let turn = turns.lastIndex(where: { $0 <= position }) ?? 0
         let needed = turns.count - turn
         if needed > shownTurns { shownTurns = needed }
