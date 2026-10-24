@@ -23,6 +23,8 @@ struct WorkspaceView: View {
                     } description: {
                         Text("Repos and pull requests show up here once this folder, or folders inside it, are git repositories.")
                     }
+                    // The column's width, so it sits centred under the header, not at its leading edge.
+                    .frame(maxWidth: .infinity)
                     .padding(.top, 40)
                 } else if workspace.layout != nil {
                     PullRequestsSection(workspace: workspace)
