@@ -12,6 +12,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 - The Copy button under Claude's replies sits on the right.
 - **Smoother streaming.** Only the part of a reply that's still arriving is redrawn, so long replies no longer slow down as they grow (a third of the work on an 8 KB reply), and you can select text while the rest streams in. Text no longer clips or jumps when a tool call appears, and "Working…" no longer flashes between Claude's steps.
 - A line break inside a list item keeps its indent.
+- **Top and end of a thread** in one click: arrows above and below the message arrows, and Thread → Top of Thread (⇧⌘[) and End of Thread (⇧⌘]). Going to the top shows the earlier turns on the way.
 
 ## [0.0.5] - 2026-10-23
 

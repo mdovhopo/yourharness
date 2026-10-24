@@ -48,6 +48,11 @@ final class ThreadModel: Identifiable {
     func showEarlierTurns() {
         shownTurns += Self.turnsPerPage
     }
+
+    /// Every turn, for going to the very top.
+    func showAllTurns() {
+        shownTurns = max(shownTurns, Self.turnStarts(in: transcriptRows).count)
+    }
     /// Where you were when you last left the thread: the row at the bottom of the screen;
     /// nil when you were at the end, which is where it opens then.
     var scrollAnchor: String?

@@ -137,6 +137,7 @@ private struct TranscriptView: View {
     /// back on.
     @State private var followsBottom = true
     @State private var isAtBottom = true
+    @State private var isAtTop = false
     /// Rows on screen now, for jumping between your messages from where you are.
     @State private var visibleRowIDs: [String] = []
     private static let typingID = "typing-indicator"
@@ -201,9 +202,11 @@ private struct TranscriptView: View {
             // very bottom, offset + container + top inset equals it (measured both ways).
             ScrollState(offset: geometry.contentOffset.y, contentHeight: geometry.contentSize.height,
                         containerHeight: geometry.containerSize.height,
-                        isAtBottom: geometry.contentOffset.y + geometry.containerSize.height + geometry.contentInsets.top >= geometry.contentSize.height - 40)
+                        isAtBottom: geometry.contentOffset.y + geometry.containerSize.height + geometry.contentInsets.top >= geometry.contentSize.height - 40,
+                        isAtTop: geometry.contentOffset.y + geometry.contentInsets.top <= 40)
         } action: { old, new in
             isAtBottom = new.isAtBottom
+            isAtTop = new.isAtTop
             isShort = new.contentHeight <= new.containerHeight + 0.5
             // Moved while the content stayed the same size: that's scrolling, by any means
             // (a scroll bar drag may report no phase), so follow only if it ended at the bottom.
@@ -248,7 +251,7 @@ private struct TranscriptView: View {
         }
         .overlay(alignment: .bottomTrailing) {
             if !isShort {
-                MessageJumpControls(thread: thread, canGoPrevious: hasMessageAbove, canGoNext: !isAtBottom)
+                MessageJumpControls(thread: thread, canGoTop: !isAtTop || hasEarlierTurns, canGoPrevious: hasMessageAbove, canGoNext: !isAtBottom)
                     .padding(.trailing, 14)
                     .padding(.bottom, 10)
                     .transition(.opacity)
@@ -314,6 +317,11 @@ private struct TranscriptView: View {
         thread.scrollAnchor = visibleRowIDs.max { (order[$0] ?? -1) < (order[$1] ?? -1) }
     }
 
+    /// Turns not shown yet, above the first one that is.
+    private var hasEarlierTurns: Bool {
+        if case .earlier = thread.transcriptDisplayRows.first { true } else { false }
+    }
+
     /// One of your messages above the top of the screen, shown or not yet.
     private var hasMessageAbove: Bool {
         let rows = thread.transcriptDisplayRows
@@ -352,6 +360,19 @@ private struct TranscriptView: View {
                 followsBottom = true
                 withAnimation(.smooth(duration: 0.3)) { position.scrollTo(id: last, anchor: .bottom) }
             }
+        // A long way: straight there, as ⌘↑ goes to the top of a document. Scrolled
+        // through, the rows in between would each be laid out on the way.
+        case .top:
+            followsBottom = false
+            if case .earlier = rows.first {
+                thread.showAllTurns()
+                Task { @MainActor in jump(.top) }
+                return
+            }
+            position.scrollTo(edge: .top)
+        case .bottom:
+            followsBottom = true
+            if let last = lastRowID { position.scrollTo(id: last, anchor: .bottom) }
         }
     }
 
@@ -436,6 +457,7 @@ private struct ScrollState: Equatable {
     var contentHeight: CGFloat
     var containerHeight: CGFloat
     var isAtBottom: Bool
+    var isAtTop: Bool
 }
 
 struct TypingIndicator: View {

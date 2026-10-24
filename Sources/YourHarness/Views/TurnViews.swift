@@ -125,16 +125,23 @@ struct WorkSummaryRow: View {
     }
 }
 
-/// Up to your previous message, down to your next one (or the end). ⌘[ and ⌘] do the same.
+/// To the top of the thread, up to your previous message, down to your next one (or the
+/// end), and to the end. ⇧⌘[, ⌘[, ⌘] and ⇧⌘] do the same.
 struct MessageJumpControls: View {
     let thread: ThreadModel
-    /// A message of yours above the screen; past the bottom of the conversation. Each
-    /// arrow shows only when it has somewhere to go.
+    /// Anything above the screen; a message of yours above it; past the bottom of the
+    /// conversation. Each arrow shows only when it has somewhere to go.
+    let canGoTop: Bool
     let canGoPrevious: Bool
     let canGoNext: Bool
 
     var body: some View {
         VStack(spacing: 10) {
+            if canGoTop {
+                Button("Top of Thread", systemImage: "chevron.up.2") { thread.jumpToMessage(.top) }
+                    .help("The top of the thread (⇧⌘[)")
+                    .transition(.scale(scale: 0.6).combined(with: .opacity))
+            }
             if canGoPrevious {
                 Button("Previous Message", systemImage: "chevron.up") { thread.jumpToMessage(.previous) }
                     .help("Your previous message (⌘[)")
@@ -144,10 +151,14 @@ struct MessageJumpControls: View {
                 Button("Next Message", systemImage: "chevron.down") { thread.jumpToMessage(.next) }
                     .help("Your next message, or the end (⌘])")
                     .transition(.scale(scale: 0.6).combined(with: .opacity))
+                Button("End of Thread", systemImage: "chevron.down.2") { thread.jumpToMessage(.bottom) }
+                    .help("The end of the thread (⇧⌘])")
+                    .transition(.scale(scale: 0.6).combined(with: .opacity))
             }
         }
         .labelStyle(.iconOnly)
         .buttonStyle(JumpButtonStyle())
+        .animation(.snappy(duration: 0.2), value: canGoTop)
         .animation(.snappy(duration: 0.2), value: canGoPrevious)
         .animation(.snappy(duration: 0.2), value: canGoNext)
     }

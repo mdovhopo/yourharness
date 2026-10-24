@@ -52,9 +52,9 @@ struct TurnWork: Equatable {
     }
 }
 
-/// "Previous message" or "next message", once per request.
+/// "Previous message", "next message", or the thread's very top or end, once per request.
 struct MessageJump: Equatable {
-    enum Direction { case previous, next }
+    enum Direction { case previous, next, top, bottom }
     let id = UUID()
     let direction: Direction
 }
