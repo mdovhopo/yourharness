@@ -7,16 +7,16 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 ## [Unreleased]
 
 ### Changed
-- **A thread's PRs stay current** when they're merged or closed outside the app. One link in the thread that GitHub couldn't find (a deleted repo, a PR number that doesn't exist) stopped all of them updating, Refresh included.
 - **Claude's replies read and select as one text.** Paragraphs, lists, quotes and tables are one piece of text: drag across a whole reply, table included, and ⌘C copies what you see (table cells separated by tabs), with formatting and a real table when you paste into Notes or Pages. Code blocks still scroll sideways and copy on their own.
+- **Smoother streaming.** Only the part of a reply that's still arriving is redrawn, so long replies no longer slow down as they grow (a third of the work on an 8 KB reply), and you can select text while the rest streams in. Text no longer clips or jumps when a tool call appears, and "Working…" no longer flashes between Claude's steps.
 - **Copy a table** with the button on its header row when the pointer is over it: markdown, or a table where spreadsheets and rich text go.
 - The Copy button under Claude's replies sits on the right.
-- **Smoother streaming.** Only the part of a reply that's still arriving is redrawn, so long replies no longer slow down as they grow (a third of the work on an 8 KB reply), and you can select text while the rest streams in. Text no longer clips or jumps when a tool call appears, and "Working…" no longer flashes between Claude's steps.
 - A line break inside a list item keeps its indent.
 - **GitHub stacks, with their buttons.** PRs in one of GitHub's stacked pull requests show as that stack ("Stack #4 · 2 of 4 merged"), in GitHub's order, merged layers included, in a thread's PRs and the repos view. **Merge Stack** squash-merges the whole stack on GitHub, or pick **Merge Up to #n** from its menu; branches made with `gh stack` that have no PR yet show as Not submitted, and **Submit** pushes them and opens their PRs. Stacks made with `gh stack` and not on GitHub yet have a card of their own. It all runs GitHub's `gh stack` extension, which the app offers to install.
 - **Make stacks from the app.** New Stack from Branches… (a repo's menu in the repos view) makes existing branches a GitHub stack, bottom first, and submits it; a stack's ⋯ menu adds a branch on top or syncs it with GitHub after merges below; Split into a Stack in a thread's PRs asks Claude to split its work into stacked PRs. Claude knows how `gh stack` works when it's installed.
-- PRs Claude opens or merges with `gh stack` count as the thread's own work, so its stack shows whole in the thread's PRs instead of mostly under Mentioned.
 - **Make GitHub Stack** on a stack made only of branches (each PR based on the one below) turns its PRs into one of GitHub's stacks, as they are, so they merge as a stack from the app.
+- PRs Claude opens or merges with `gh stack` count as the thread's own work, so its stack shows whole in the thread's PRs instead of mostly under Mentioned.
+- **A thread's PRs stay current** when they're merged or closed outside the app. One link in the thread that GitHub couldn't find (a deleted repo, a PR number that doesn't exist) stopped all of them updating, Refresh included.
 - **The right sidebar switches tabs like a Mac window.** The toolbar no longer fades out and back in on every switch, and tabs you've opened stay as they were (scrolled, half-typed) when you come back. New Side Chat moved into the side chat itself.
 - A project's overview uses the whole window: the right sidebar, which only ever said No Thread Selected there, steps aside, with its toggle, and comes back as you left it when you open a thread.
 - **Top and end of a thread** in one click: arrows above and below the message arrows, and Thread → Top of Thread (⇧⌘[) and End of Thread (⇧⌘]). Going to the top shows the earlier turns on the way.
