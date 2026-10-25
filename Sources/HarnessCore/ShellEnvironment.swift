@@ -35,6 +35,8 @@ public enum ShellEnvironment {
         // ask you for access on behalf of every fresh test build.
         if let path = inherited["YH_PATH"], !path.isEmpty {
             base["PATH"] = path
+            // A scratch Claude Code config, for testing what the app reads from it.
+            if let config = inherited["CLAUDE_CONFIG_DIR"], !config.isEmpty { base["CLAUDE_CONFIG_DIR"] = config }
             return base
         }
 

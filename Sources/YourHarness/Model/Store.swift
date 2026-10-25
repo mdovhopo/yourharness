@@ -168,6 +168,10 @@ struct PersistedState: Codable {
     /// The model and effort the Importer and Reconciler start with; nil is the default for threads.
     var memoryAgentModel: String?
     var memoryAgentEffort: String?
+    /// When each project's Claude Code memory was last brought in (or said to be in), by project ID.
+    var claudeMemorySyncedAt: [String: Date] = [:]
+    /// Projects whose "two memories" nudge you put off.
+    var claudeMemoryNudgeDismissed: Set<UUID> = []
     /// Removed projects' IDs by folder: adding the folder again brings its memory back.
     var removedProjectIDs: [String: UUID] = [:]
 
@@ -206,6 +210,8 @@ struct PersistedState: Codable {
         claudeCodeMemoryOff = try container.decodeIfPresent(Bool.self, forKey: .claudeCodeMemoryOff) ?? true
         removedProjectIDs = try container.decodeIfPresent([String: UUID].self, forKey: .removedProjectIDs) ?? [:]
         memoryAgentModel = try container.decodeIfPresent(String.self, forKey: .memoryAgentModel)
+        claudeMemorySyncedAt = try container.decodeIfPresent([String: Date].self, forKey: .claudeMemorySyncedAt) ?? [:]
+        claudeMemoryNudgeDismissed = try container.decodeIfPresent(Set<UUID>.self, forKey: .claudeMemoryNudgeDismissed) ?? []
         memoryAgentEffort = try container.decodeIfPresent(String.self, forKey: .memoryAgentEffort)
     }
 }

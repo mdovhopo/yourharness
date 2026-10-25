@@ -44,8 +44,17 @@ by folder, so adding the folder again brings its memory back.
   title the workspace already has, kinds it doesn't know, memories over 6,000 characters, and
   anything that looks like a key or token, and names similar memories so the agent can merge.
 - **One memory, not two**: with Settings → General → Memory → "Turn off Claude Code's own memory
-  files" (on by default), sessions run with `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`. Bring what
-  Claude Code had remembered in with Import.
+  files" (on by default), the app's sessions run with `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`. That
+  doesn't reach `claude` you run in Terminal, so a project's Memory page (and, in one line, its
+  Pull Requests page) nudges while Claude Code still keeps a second memory for the folder, or has
+  memory files YourHarness doesn't (matched by title, with its `MEMORY.md` index, or by what they
+  say, changed since the last time they were brought in). **Use One Memory** imports only what's
+  missing (never bringing back one you archived), then sets `autoMemoryEnabled: false` in the
+  folder's `.claude/settings.local.json` (other settings kept, added to `.git/info/exclude` so it
+  stays out of git; for your home folder, in your own Claude Code settings). Its files are left
+  as they were. The page then says **One memory**. Settings has **Turn Off Everywhere…** for your
+  own Claude Code settings. Claude Code names its folder after the real path (`/private/tmp`,
+  not `/tmp`), and so does the app.
 
 ## What's recorded
 
@@ -123,6 +132,9 @@ the thread with Find on the matched word. With nothing typed it lists recent thr
   - `YH_SEND_MESSAGE="Plan X in steps, do only the first"`: the agent should `track` a task;
     a second launch with "continue X" should read it and move it along.
   - `YH_SPOTLIGHT=<words>` opens ⌘K with them typed.
+  - `CLAUDE_CONFIG_DIR=<scratch> YH_MEMORY_USE_ONE=1`: a scratch Claude Code config with memory
+    files under `projects/<folder as a name>/memory`; prints what it found, imports what's
+    missing and turns Claude Code's memory off for the folder.
   - `YH_OPEN_MEMORY=1 YH_MEMORY_TAB=insights` (or `tasks`), `YH_MEMORY_SEED=2000` (made-up memories and
     activity), `YH_MEMORY_EXPORT=<folder>`, with `YH_SNAPSHOT` (and `YH_SNAPSHOT_WINDOW=Memory
     Importer` for a specialist's window).

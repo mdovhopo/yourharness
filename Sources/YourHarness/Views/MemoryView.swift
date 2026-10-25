@@ -20,6 +20,9 @@ struct MemoryView: View {
                 .padding(.horizontal, 28)
                 .padding(.top, 20)
                 .padding(.bottom, 14)
+            ClaudeMemoryNudge(project: project)
+                .padding(.horizontal, 28)
+                .padding(.bottom, 14)
             Divider()
             Group {
                 if !library.isLoaded {
@@ -136,6 +139,7 @@ private struct MemoryHeader: View {
                     .contentTransition(.opacity)
             }
             Spacer()
+            OneMemoryChip(project: project)
             if !library.memories.isEmpty {
                 Picker("View", selection: Bindable(library).tab) {
                     ForEach(MemoryLibrary.Tab.allCases) { tab in

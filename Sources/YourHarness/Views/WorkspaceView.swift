@@ -16,6 +16,8 @@ struct WorkspaceView: View {
             LazyVStack(alignment: .leading, spacing: 0) {
                 WorkspaceHeader(project: project, workspace: workspace)
                     .padding(.bottom, 28)
+                ClaudeMemoryNudge(project: project, compact: true)
+                    .padding(.bottom, 20)
 
                 if let layout = workspace.layout, layout.kind == .plain {
                     ContentUnavailableView {

@@ -370,6 +370,16 @@ private struct GeneralSettingsView: View {
         Binding(get: { app.defaults.permissionMode ?? .standard }, set: { app.setDefaultPermissionMode($0) })
     }
 
+    /// Writes to your own Claude Code settings, so it asks first.
+    private func confirmTurnOffEverywhere() {
+        let alert = NSAlert()
+        alert.messageText = "Turn off Claude Code's memory everywhere?"
+        alert.informativeText = "Sets autoMemoryEnabled to false in your Claude Code settings (\(app.claudeConfigDirectory.appending(path: "settings.json").path.replacingOccurrences(of: NSHomeDirectory(), with: "~"))), so claude keeps no memory files of its own in any folder, in YourHarness or in Terminal. YourHarness keeps the memory. Its existing files are left as they are; import them from a project's Memory page."
+        alert.addButton(withTitle: "Turn Off")
+        alert.addButton(withTitle: "Cancel")
+        if alert.runModal() == .alertFirstButtonReturn { app.turnOffClaudeMemoryEverywhere() }
+    }
+
     var body: some View {
         Form {
             Section {
@@ -462,6 +472,16 @@ private struct GeneralSettingsView: View {
                 }
                 .disabled(!app.memoryEnabled)
                 LabeledContent {
+                    if app.claudeMemoryOffEverywhere {
+                        Text("Off for every folder").foregroundStyle(.secondary)
+                    } else {
+                        Button("Turn Off Everywhere…") { confirmTurnOffEverywhere() }
+                    }
+                } label: {
+                    Label("Claude Code's memory outside the app", systemImage: "terminal")
+                }
+                .disabled(!app.memoryEnabled)
+                LabeledContent {
                     MemoryAgentModelPicker(model: Binding(get: { app.memoryAgentModel }, set: { app.setMemoryAgentModel($0) }),
                                            effort: Binding(get: { app.memoryAgentEffort }, set: { app.setMemoryAgentEffort($0) }))
                 } label: {
@@ -470,7 +490,7 @@ private struct GeneralSettingsView: View {
             } header: {
                 Text("Memory")
             } footer: {
-                Text("Each project has its own memory, which every thread there starts with: an index of what's remembered (a line each, about 2,000 tokens at most) and tools to search, read and save. Memory tools don't ask for approval: they only touch the app's own database. With Claude Code's memory off there's one memory, not two; import Claude Code's from a project's Memory view (⇧⌘M).")
+                Text("Each project has its own memory, which every thread there starts with: an index of what's remembered (a line each, about 2,000 tokens at most) and tools to search, read and save. Memory tools don't ask for approval: they only touch the app's own database. Claude Code's memory files are always off in YourHarness's own threads when the second switch is on; a project's Memory page nudges you to bring in what it has and to turn it off for `claude` you run in Terminal too, so there's one memory, not two.")
                     .foregroundStyle(.secondary)
             }
 

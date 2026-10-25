@@ -7,6 +7,8 @@ import HarnessCore
 /// - `YH_MEMORY_SEED=<n>` adds n made-up memories with links, reads and searches, for
 ///   looking at the views and their speed at scale.
 /// - `YH_MEMORY_IMPORT=<file or folder>` imports an export or Markdown memory files.
+/// - `YH_MEMORY_USE_ONE=1` does what "Use One Memory" does for the selected project, once the
+///   environment is loaded (with `CLAUDE_CONFIG_DIR` to try it on a scratch Claude Code config).
 /// - `YH_MEMORY_EXPORT=<folder>` exports the memory there, as `memory.json` and `markdown/`.
 /// - `YH_MEMORY_AGENT=importer|reconciler` (RootView) opens a specialist's window;
 ///   `YH_MEMORY_AGENT_START=1` sets it going (the importer on `YH_MEMORY_IMPORT_SOURCES`,
@@ -37,6 +39,16 @@ enum MemoryProbe {
                 FileHandle.standardError.write(Data("memory: exported \(memories.count) to \(path)\n".utf8))
             } catch {
                 FileHandle.standardError.write(Data("memory: export failed: \(error)\n".utf8))
+            }
+        }
+        if environment["YH_MEMORY_USE_ONE"] == "1" {
+            Task {
+                await app.bootstrap?.value
+                let status = await app.claudeMemoryStatus(for: project)
+                FileHandle.standardError.write(Data("memory: before: on \(status.isOn), \(status.files) files in \(app.claudeCodeMemoryFolder(for: project).path), \(status.unimported.count) not imported\n".utf8))
+                app.useOneMemory(project, status: status)
+                let after = await app.claudeMemoryStatus(for: project)
+                FileHandle.standardError.write(Data("memory: after: on \(after.isOn), \(after.unimported.count) not imported\n".utf8))
             }
         }
         if environment["YH_OPEN_MEMORY"] == "1" {

@@ -366,6 +366,72 @@ struct MemoryTests {
         #expect(imported.first { $0.kind == "project" }?.title == "Vision")
     }
 
+    @Test func claudeCodeMemoryTurnsOffPerFolder() throws {
+        let config = directory.appending(path: "config"), project = directory.appending(path: "project")
+        try FileManager.default.createDirectory(at: project.appending(path: ".git/info"), withIntermediateDirectories: true)
+        #expect(ClaudeCodeMemory.setting(for: project.path, configDirectory: config).isOff == false)
+
+        // Other settings in the file stay.
+        let local = ClaudeCodeMemory.localSettings(for: project.path)
+        try FileManager.default.createDirectory(at: local.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(#"{"permissions":{"allow":["Bash(ls)"]}}"#.utf8).write(to: local)
+        try ClaudeCodeMemory.turnOff(in: local)
+        let written = try JSONSerialization.jsonObject(with: Data(contentsOf: local)) as? [String: Any]
+        #expect(written?["autoMemoryEnabled"] as? Bool == false)
+        #expect(written?["permissions"] != nil)
+        #expect(ClaudeCodeMemory.setting(for: project.path, configDirectory: config).offHere)
+
+        ClaudeCodeMemory.excludeFromGit(project.path)
+        ClaudeCodeMemory.excludeFromGit(project.path)
+        #expect(try String(contentsOf: project.appending(path: ".git/info/exclude"), encoding: .utf8) == ".claude/settings.local.json\n")
+
+        // Off for you everywhere, unless a folder turns it back on.
+        let elsewhere = directory.appending(path: "elsewhere")
+        try ClaudeCodeMemory.turnOff(in: config.appending(path: "settings.json"))
+        #expect(ClaudeCodeMemory.setting(for: elsewhere.path, configDirectory: config).isOff)
+        try FileManager.default.createDirectory(at: elsewhere.appending(path: ".claude"), withIntermediateDirectories: true)
+        try Data(#"{"autoMemoryEnabled":true}"#.utf8).write(to: elsewhere.appending(path: ".claude/settings.json"))
+        #expect(!ClaudeCodeMemory.setting(for: elsewhere.path, configDirectory: config).isOff)
+
+        // A file that isn't JSON is left alone.
+        try Data("not json".utf8).write(to: local)
+        #expect(throws: ClaudeCodeMemory.WriteError.self) { try ClaudeCodeMemory.turnOff(in: local) }
+        #expect(try String(contentsOf: local, encoding: .utf8) == "not json")
+    }
+
+    @Test func claudeCodeMemoryNotYetImported() throws {
+        let config = directory.appending(path: "config"), folder = directory.appending(path: "work").path
+        let memoryFolder = ClaudeCodeMemory.directory(for: folder, configDirectory: config)
+        try FileManager.default.createDirectory(at: memoryFolder, withIntermediateDirectories: true)
+        let file = { (name: String, body: String) in
+            "---\nname: \(name)\ndescription: d\nmetadata:\n  type: feedback\n---\n\n\(body)\n"
+        }
+        try file("short-answers", "Keep it short.").write(to: memoryFolder.appending(path: "short-answers.md"), atomically: true, encoding: .utf8)
+        try file("deploys", "Fly from main.").write(to: memoryFolder.appending(path: "deploys.md"), atomically: true, encoding: .utf8)
+        let have = [memory("Short answers", "Keep it short.")]
+        #expect(ClaudeCodeMemory.unimported(for: folder, configDirectory: config, memories: have, since: nil).map(\.lastPathComponent) == ["deploys.md"])
+        #expect(ClaudeCodeMemory.unimported(for: folder, configDirectory: config, memories: have, since: .now.addingTimeInterval(60)).isEmpty)
+        // Titled by the index, as an import titles it.
+        try "- [Deploys go through Fly](deploys.md) — x\n".write(to: memoryFolder.appending(path: "MEMORY.md"), atomically: true, encoding: .utf8)
+        var archived = memory("Deploys go through Fly", "Rewritten since")
+        archived.status = .archived
+        #expect(ClaudeCodeMemory.unimported(for: folder, configDirectory: config, memories: have + [archived], since: nil).isEmpty)
+        // An import doesn't bring back one you archived.
+        let database = open()
+        database.saveMemory(archived)
+        let report = MemoryArchive.merge([memory("Deploys go through Fly", "Fly from main.")], into: scope, database: database, actor: .user)
+        #expect(report.unchanged == 1)
+        #expect(database.memories(scope: scope).count == 1)
+    }
+
+    @Test func claudeCodeNamesFoldersAfterTheirRealPath() throws {
+        let folder = URL(fileURLWithPath: "/tmp").appending(path: "yh-memory-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let name = ClaudeCodeMemory.directory(for: folder.path, configDirectory: URL(fileURLWithPath: "/c")).deletingLastPathComponent().lastPathComponent
+        #expect(name.hasPrefix("-private-tmp-yh-memory-"))
+    }
+
     @Test func claudeCodeNamesFoldersAfterTheirPath() {
         let config = URL(fileURLWithPath: "/Users/me/.claude")
         #expect(ClaudeCodeMemory.directory(for: "/Users/me/dev/tricky_lake.app", configDirectory: config).path

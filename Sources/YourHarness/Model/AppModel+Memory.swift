@@ -130,6 +130,9 @@ extension AppModel {
             agent.restartSession()
         }
         agent.send(MemoryPrompt.importRequest(sources: sources, note: note))
+        if let project = project(id: projectID), sources.contains(claudeCodeMemoryFolder(for: project).path) {
+            markClaudeMemorySynced(project)
+        }
     }
 
     func startMemoryReview(projectID: UUID, note: String?) {
@@ -164,6 +167,96 @@ extension AppModel {
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let url = folder.appending(path: "pasted-\(Int(Date.now.timeIntervalSince1970)).md")
         return (try? text.write(to: url, atomically: true, encoding: .utf8)) != nil ? url.path : nil
+    }
+
+    // MARK: - Claude Code's own memory
+
+    /// Whether a project still has a second memory: Claude Code's own, on for its folder, or
+    /// holding memories YourHarness doesn't have.
+    struct ClaudeMemoryStatus: Equatable {
+        var setting: ClaudeCodeMemory.Setting
+        var files: Int
+        var unimported: [URL]
+        var isHome: Bool
+
+        var isOn: Bool { !setting.isOff }
+        var needsNudge: Bool { isOn || !unimported.isEmpty }
+    }
+
+    var claudeConfigDirectory: URL { ClaudeSessionArchive.configDirectory(environment: environment) }
+
+    func claudeMemoryStatus(for project: Project) async -> ClaudeMemoryStatus {
+        // The environment says where Claude Code's config is.
+        await bootstrap?.value
+        let config = claudeConfigDirectory, path = project.path, database = store.database
+        let scope = memoryScope(for: project.id), since = claudeMemorySyncedAt[project.id.uuidString]
+        let isHome = URL(fileURLWithPath: path).standardizedFileURL.path == NSHomeDirectory()
+        return await Task.detached(priority: .utility) {
+            ClaudeMemoryStatus(setting: ClaudeCodeMemory.setting(for: path, configDirectory: config),
+                               files: ClaudeCodeMemory.files(for: path, configDirectory: config).count,
+                               unimported: ClaudeCodeMemory.unimported(for: path, configDirectory: config,
+                                                                       memories: database.memories(scope: scope), since: since),
+                               isHome: isHome)
+        }.value
+    }
+
+    /// One memory for the project: what Claude Code had that YourHarness doesn't comes in,
+    /// then Claude Code's own is turned off for the folder (its `.claude/settings.local.json`,
+    /// kept out of git), so `claude` in Terminal stops keeping a second one too. For your home
+    /// folder, which has no settings of its own, it's off everywhere.
+    func useOneMemory(_ project: Project, status: ClaudeMemoryStatus) {
+        if !status.unimported.isEmpty { importClaudeMemory(status.unimported, into: project) }
+        markClaudeMemorySynced(project)
+        guard status.isOn else { return }
+        do {
+            if status.isHome {
+                try ClaudeCodeMemory.turnOff(in: claudeConfigDirectory.appending(path: "settings.json"))
+            } else {
+                try ClaudeCodeMemory.turnOff(in: ClaudeCodeMemory.localSettings(for: project.path))
+                ClaudeCodeMemory.excludeFromGit(project.path)
+            }
+        } catch {
+            presentMemoryError("Couldn't turn off Claude Code's memory", "\(error)")
+        }
+        memoryChanged(memoryScope(for: project.id))
+    }
+
+    /// Only `files` of the folder's Claude Code memory, titled from its index, links between them kept.
+    func importClaudeMemory(_ files: [URL], into project: Project) {
+        let scope = memoryScope(for: project.id), folder = claudeCodeMemoryFolder(for: project)
+        let wanted = Set(files.map(\.lastPathComponent))
+        let all = MemoryArchive.readMarkdownFolder(folder).filter { wanted.contains($0.key) || $0.key == "MEMORY.md" }
+        let incoming = MemoryArchive.memories(fromMarkdown: all, scope: scope)
+        guard !incoming.isEmpty else { return }
+        let report = MemoryArchive.merge(incoming, into: scope, database: store.database, actor: .user)
+        memoryChanged(scope)
+        importReport = MemoryImportReport(projectName: project.name, report: report, unstructured: [], problems: [])
+    }
+
+    /// What Claude Code has for the folder is in YourHarness already (you said so, or it was imported).
+    func markClaudeMemorySynced(_ project: Project) {
+        claudeMemorySyncedAt[project.id.uuidString] = .now
+        save()
+        memoryChanged(memoryScope(for: project.id))
+    }
+
+    func dismissClaudeMemoryNudge(_ project: Project) {
+        claudeMemoryNudgeDismissed.insert(project.id)
+        save()
+    }
+
+    /// Off in your own Claude Code settings: every folder, in the app or not.
+    func turnOffClaudeMemoryEverywhere() {
+        do {
+            try ClaudeCodeMemory.turnOff(in: claudeConfigDirectory.appending(path: "settings.json"))
+        } catch {
+            presentMemoryError("Couldn't turn off Claude Code's memory", "\(error)")
+        }
+        for project in projects { memoryChanged(memoryScope(for: project.id)) }
+    }
+
+    var claudeMemoryOffEverywhere: Bool {
+        ClaudeCodeMemory.setting(for: "/nonexistent-folder", configDirectory: claudeConfigDirectory).offEverywhere
     }
 
     // MARK: - Files
@@ -260,6 +353,10 @@ extension AppModel {
             } else {
                 unstructured.append(url.path)
             }
+        }
+        if urls.contains(where: { $0.standardizedFileURL == claudeCodeMemoryFolder(for: project).standardizedFileURL }) {
+            claudeMemorySyncedAt[project.id.uuidString] = .now
+            save()
         }
         if !incoming.isEmpty {
             let report = MemoryArchive.merge(incoming, into: scope, database: store.database, actor: .user)

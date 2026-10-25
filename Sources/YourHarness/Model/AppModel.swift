@@ -114,6 +114,9 @@ final class AppModel {
     /// What the Importer and Reconciler run on, unless picked in their window; nil: the threads' default.
     var memoryAgentModel: String?
     var memoryAgentEffort: String?
+    /// When each project's Claude Code memory was last brought in.
+    var claudeMemorySyncedAt: [String: Date] = [:]
+    var claudeMemoryNudgeDismissed: Set<UUID> = []
     /// Removed projects' IDs by folder, so adding one back brings back its memory.
     @ObservationIgnored var removedProjectIDs: [String: UUID] = [:]
     /// Bumped whenever a scope's memory changes, so what shows it reloads.
@@ -181,6 +184,8 @@ final class AppModel {
         claudeCodeMemoryOff = state.claudeCodeMemoryOff
         removedProjectIDs = state.removedProjectIDs
         memoryAgentModel = state.memoryAgentModel
+        claudeMemorySyncedAt = state.claudeMemorySyncedAt
+        claudeMemoryNudgeDismissed = state.claudeMemoryNudgeDismissed
         memoryAgentEffort = state.memoryAgentEffort
 
         threads = state.threads.map { ThreadModel(meta: $0, app: self) }
@@ -1708,6 +1713,8 @@ final class AppModel {
         state.claudeCodeMemoryOff = claudeCodeMemoryOff
         state.removedProjectIDs = removedProjectIDs
         state.memoryAgentModel = memoryAgentModel
+        state.claudeMemorySyncedAt = claudeMemorySyncedAt
+        state.claudeMemoryNudgeDismissed = claudeMemoryNudgeDismissed
         state.memoryAgentEffort = memoryAgentEffort
         store.saveState(state)
     }

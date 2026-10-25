@@ -274,12 +274,19 @@ public enum MemoryArchive {
                              actor: HarnessDatabase.MemoryActor) -> ImportReport {
         let existing = database.memories(scope: scope)
         let byID = Dictionary(existing.map { ($0.id, $0) }) { first, _ in first }
-        let byTitle = Dictionary(existing.filter { $0.status == .active }.map { ($0.title.lowercased(), $0) }) { first, _ in first }
+        // In use first: a title that's also on an archived memory matches the one in use.
+        let byTitle = Dictionary(existing.sorted { ($0.status == .active ? 0 : 1) < ($1.status == .active ? 0 : 1) }
+            .map { ($0.title.lowercased(), $0) }) { first, _ in first }
         var report = ImportReport(), remap: [String: String] = [:], toSave: [HarnessDatabase.Memory] = []
         for var memory in incoming {
             memory.scope = scope
             if let current = byID[memory.id] ?? byTitle[memory.title.lowercased()] {
                 remap[memory.id] = current.id
+                // One you archived stays archived: an import doesn't bring it back.
+                if current.status == .archived && current.id != memory.id {
+                    report.unchanged += 1
+                    continue
+                }
                 let same = current.title == memory.title && current.description == memory.description && current.body == memory.body
                     && current.kind == memory.kind && current.status == memory.status && current.taskState == memory.taskState
                     && current.steps == memory.steps
@@ -328,7 +335,9 @@ public enum ClaudeCodeMemory {
     /// Claude Code names a project's folder after its path, every character that isn't a
     /// letter or digit a dash.
     public static func directory(for folder: String, configDirectory: URL) -> URL {
-        let path = URL(fileURLWithPath: folder).resolvingSymlinksInPath().path
+        // The real path, as Claude Code sees its working directory: `resolvingSymlinksInPath`
+        // would drop the `/private` of `/private/tmp`, and name another folder.
+        let path = realpath(folder, nil).map { pointer in defer { free(pointer) }; return String(cString: pointer) } ?? folder
         let name = String(path.map { $0.isASCII && ($0.isLetter || $0.isNumber) ? $0 : "-" })
         return configDirectory.appending(path: "projects").appending(path: name).appending(path: "memory")
     }
@@ -338,5 +347,101 @@ public enum ClaudeCodeMemory {
         let directory = directory(for: folder, configDirectory: configDirectory)
         let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
         return names.filter { $0.hasSuffix(".md") && $0 != "MEMORY.md" }.sorted().map { directory.appending(path: $0) }
+    }
+
+    // MARK: - On or off
+
+    /// Whether Claude Code keeps its own memory for a folder, as its settings say
+    /// (`autoMemoryEnabled`): the folder's `.claude/settings.local.json` and
+    /// `.claude/settings.json`, then your own `settings.json`.
+    public struct Setting: Sendable, Equatable {
+        /// Off in the folder's own settings.
+        public var offHere: Bool
+        /// Off in your Claude Code settings, for every folder.
+        public var offEverywhere: Bool
+        /// The folder's settings turn it back on, whatever yours say.
+        public var onHere: Bool
+
+        public var isOff: Bool { offHere || offEverywhere && !onHere }
+    }
+
+    public static let settingKey = "autoMemoryEnabled"
+
+    /// Where a folder's own setting goes: the local file, which isn't shared with the repo.
+    public static func localSettings(for folder: String) -> URL {
+        URL(fileURLWithPath: folder).appending(path: ".claude").appending(path: "settings.local.json")
+    }
+
+    public static func setting(for folder: String, configDirectory: URL) -> Setting {
+        let claude = URL(fileURLWithPath: folder).appending(path: ".claude")
+        // A folder that is your config's own parent (your home folder) has no settings of its own.
+        let own = claude.standardizedFileURL.path == configDirectory.standardizedFileURL.path
+            ? [] : [claude.appending(path: "settings.local.json"), claude.appending(path: "settings.json")]
+        let here = own.lazy.compactMap(value).first
+        let everywhere = value(configDirectory.appending(path: "settings.json"))
+        return Setting(offHere: here == false, offEverywhere: everywhere == false, onHere: here == true)
+    }
+
+    private static func value(_ url: URL) -> Bool? {
+        guard let data = try? Data(contentsOf: url),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return object[settingKey] as? Bool
+    }
+
+    public enum WriteError: Error, CustomStringConvertible {
+        case unreadable(URL)
+
+        public var description: String {
+            switch self {
+            case .unreadable(let url): "\(url.path) isn't valid JSON, so it was left alone."
+            }
+        }
+    }
+
+    /// Turns Claude Code's own memory off in `url` (a settings file), keeping everything else
+    /// in it. A file that isn't JSON is left alone.
+    public static func turnOff(in url: URL) throws {
+        var object: [String: Any] = [:]
+        if let data = try? Data(contentsOf: url), !data.isEmpty {
+            guard let existing = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw WriteError.unreadable(url) }
+            object = existing
+        }
+        object[settingKey] = false
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let data = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+        try (data + Data("\n".utf8)).write(to: url, options: .atomic)
+    }
+
+    /// Keeps a folder's local settings out of git, in the repo's own `.git/info/exclude` (never
+    /// a file that's committed), when the folder is a repo's root.
+    public static func excludeFromGit(_ folder: String) {
+        let info = URL(fileURLWithPath: folder).appending(path: ".git").appending(path: "info")
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: URL(fileURLWithPath: folder).appending(path: ".git").path, isDirectory: &isDirectory),
+              isDirectory.boolValue else { return }
+        let exclude = info.appending(path: "exclude"), line = ".claude/settings.local.json"
+        let current = (try? String(contentsOf: exclude, encoding: .utf8)) ?? ""
+        guard !current.split(separator: "\n").contains(where: { $0.trimmingCharacters(in: .whitespaces) == line }) else { return }
+        try? FileManager.default.createDirectory(at: info, withIntermediateDirectories: true)
+        let text = current.isEmpty || current.hasSuffix("\n") ? current + line + "\n" : current + "\n" + line + "\n"
+        try? text.write(to: exclude, atomically: true, encoding: .utf8)
+    }
+
+    /// Memory files there that `memories` doesn't have (by title or what they say), changed
+    /// after `since`.
+    public static func unimported(for folder: String, configDirectory: URL, memories: [HarnessDatabase.Memory], since: Date?) -> [URL] {
+        let files = files(for: folder, configDirectory: configDirectory)
+        guard !files.isEmpty else { return [] }
+        let titles = Set(memories.map { $0.title.lowercased() })
+        let bodies = Set(memories.map { $0.body.trimmingCharacters(in: .whitespacesAndNewlines) })
+        let index = (try? String(contentsOf: directory(for: folder, configDirectory: configDirectory).appending(path: "MEMORY.md"), encoding: .utf8)) ?? ""
+        return files.filter { url in
+            if let since, let modified = (try? FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate]) as? Date,
+               modified <= since { return false }
+            guard let text = try? String(contentsOf: url, encoding: .utf8),
+                  let memory = MemoryArchive.memories(fromMarkdown: [url.lastPathComponent: text, "MEMORY.md": index], scope: "").first
+            else { return false }
+            return !titles.contains(memory.title.lowercased()) && !bodies.contains(memory.body)
+        }
     }
 }
