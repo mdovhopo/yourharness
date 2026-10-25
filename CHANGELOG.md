@@ -7,6 +7,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 ## [Unreleased]
 
 ### Fixed
+- **No more freezing or quitting in full screen.** With the window full screen or filling the screen, opening a project's Memory page froze the app for many seconds and then made it quit unexpectedly: the page asked for a window taller than the screen, and the window couldn't grow.
 - **The window keeps the size you give it.** Opening a project's Memory page (with its "Two memories" note) made the window as tall as it could go, past the bottom of the screen, and it stayed that tall: a short thread then sat below the screen's edge and looked blank. No page can make the window bigger any more, and a window saved too big fits the screen again.
 - **Memory opens without resizing the window.** With memories in it, a project's Memory page (from the brain in the sidebar) widened the window to about 1,300 pt, past the edge of a narrow screen. No page can make the window wider now, and Memory fits a narrow window: the tabs go under the title, the list narrows, and a task's state becomes a menu.
 - An opened Thought no longer leaves a gap of empty lines under it (Claude's thinking ends in blank lines, and they were drawn).
