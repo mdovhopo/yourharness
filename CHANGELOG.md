@@ -6,6 +6,8 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+## [0.0.8] - 2026-10-26
+
 ### Fixed
 - **No more freezing or quitting in full screen.** With the window full screen or filling the screen, opening a project's Memory page froze the app for many seconds and then made it quit unexpectedly: the page asked for a window taller than the screen, and the window couldn't grow.
 - **The window keeps the size you give it.** Opening a project's Memory page (with its "Two memories" note) made the window as tall as it could go, past the bottom of the screen, and it stayed that tall: a short thread then sat below the screen's edge and looked blank. No page can make the window bigger any more, and a window saved too big fits the screen again.
