@@ -106,6 +106,11 @@ private struct HowItWorks: View {
             let missed = stats.searches - stats.searchesWithHits
             lines.append(("magnifyingglass", "Agents searched memory \(stats.searches) times; \(missed == 0 ? "every search found something" : "\(missed) found nothing (listed below: things they expected to know)").", missed > 0))
         }
+        let openTasks = (stats.tasks["active"] ?? 0) + (stats.tasks["blocked"] ?? 0) + (stats.tasks["todo"] ?? 0)
+        if openTasks > 0 {
+            let blocked = stats.tasks["blocked"] ?? 0
+            lines.append(("checklist", "\(openTasks) task\(openTasks == 1 ? " is" : "s are") open\(blocked > 0 ? ", \(blocked) blocked" : ""): every session starts knowing where they stand and what's next.", blocked > 0))
+        }
         if !stats.neverRecalled.isEmpty {
             lines.append(("moon.zzz", "\(stats.neverRecalled.count) memor\(stats.neverRecalled.count == 1 ? "y has" : "ies have") never been read in over a week. Each still costs a line in every session.", true))
         }
@@ -475,6 +480,11 @@ private struct EventRow: View {
         case .pinned: return ("pin", "\(who) pinned \(what)")
         case .unpinned: return ("pin.slash", "\(who) unpinned \(what)")
         case .imported: return ("square.and.arrow.down", "\(who) imported memories: \(event.detail ?? "")")
+        case .progressed:
+            let parts = (event.detail ?? "").split(separator: " ")
+            let state = parts.first.flatMap { HarnessDatabase.TaskState(rawValue: String($0)) }?.label.lowercased() ?? "updated"
+            let steps = parts.count > 1 ? ", \(parts[1].replacingOccurrences(of: "/", with: " of ")) steps done" : ""
+            return ("checklist", "\(who) moved \(what) along: \(state)\(steps)")
         case .exported: return ("square.and.arrow.up", "\(who) exported \(event.count ?? 0) memories to \(event.detail ?? "a file")")
         }
     }

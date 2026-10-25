@@ -62,19 +62,9 @@ private struct MemoryAgentView: View {
         .navigationSubtitle(project.name)
         .toolbar {
             ToolbarItemGroup {
-                Menu {
-                    Picker("Model", selection: Binding(get: { agent.model ?? "" }, set: { agent.setModel($0.isEmpty ? nil : $0) })) {
-                        Text("Default (\(app.modelDisplayName(for: app.defaults.model)))").tag("")
-                        ForEach(app.claudeModels.filter { $0.value != "default" }, id: \.value) { model in
-                            Text(model.displayName).tag(model.value)
-                        }
-                    }
-                    .pickerStyle(.inline)
-                } label: {
-                    Label(app.modelDisplayName(for: agent.effectiveModel), systemImage: "cpu")
-                        .labelStyle(.titleAndIcon)
-                }
-                .help("The model this specialist uses")
+                MemoryAgentModelPicker(model: Binding(get: { agent.model }, set: { agent.setModel($0) }),
+                                       effort: Binding(get: { agent.effort }, set: { agent.setEffort($0) }), compact: true)
+                    .help(started ? "The model this specialist uses; a change applies from your next message" : "The model this specialist uses")
                 Button("Open Memory", systemImage: "brain") {
                     app.showMemory(of: project)
                     openWindow(id: "main")
@@ -152,6 +142,7 @@ private struct ImporterSetup: View {
                         .padding(8)
                         .card()
                 }
+                ModelRow(agent: agent)
                 VStack(alignment: .leading, spacing: 8) {
                     SectionLabel("Anything the Importer should know")
                     TextField("e.g. only what's about the iOS app; I'm the tech lead", text: $note, axis: .vertical)
@@ -243,6 +234,7 @@ private struct ReconcilerSetup: View {
                         .card()
                     }
                 }
+                if let agent = app.existingMemoryAgent(.reconciler, projectID: project.id) { ModelRow(agent: agent) }
                 VStack(alignment: .leading, spacing: 8) {
                     SectionLabel("Anything to focus on")
                     TextField("e.g. merge the deploy notes; drop what's about the old API", text: $note, axis: .vertical)
@@ -267,6 +259,107 @@ private struct ReconcilerSetup: View {
         }
         .task(id: app.memoryRevision(for: project.id)) {
             app.memoryLibrary(for: project).refresh(revision: app.memoryRevision(for: project.id))
+        }
+    }
+}
+
+/// Which model does the work, right where you set it going: memory is worth a strong one.
+private struct ModelRow: View {
+    @Environment(AppModel.self) private var app
+    let agent: ThreadModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SectionLabel("Model")
+            HStack(spacing: 10) {
+                MemoryAgentModelPicker(model: Binding(get: { agent.model }, set: { agent.setModel($0) }),
+                                       effort: Binding(get: { agent.effort }, set: { agent.setEffort($0) }))
+                Text("A stronger model sorts and merges memory more carefully. Settings → General → Memory sets what both specialists start with.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+}
+
+/// Model and reasoning effort, as two menus: for the specialists' windows and Settings.
+struct MemoryAgentModelPicker: View {
+    @Environment(AppModel.self) private var app
+    @Binding var model: String?
+    @Binding var effort: String?
+    /// One text menu, for a toolbar (which shows only icons for labels).
+    var compact = false
+
+    private var modelName: String { app.modelDisplayName(for: model ?? app.defaults.model) }
+    private var effortName: String { effort.flatMap(EffortLevel.init(rawValue:))?.label ?? "Auto effort" }
+
+    var body: some View {
+        if compact {
+            Menu {
+                modelPicker
+                effortPicker
+            } label: {
+                Text("\(modelName) · \(effortName)")
+            }
+            .fixedSize()
+        } else {
+            full
+        }
+    }
+
+    private var modelPicker: some View {
+        Picker("Model", selection: Binding(get: { model ?? "" }, set: { model = $0.isEmpty ? nil : $0 })) {
+            Text("Default (\(app.modelDisplayName(for: app.defaults.model)))").tag("")
+            ForEach(app.claudeModels.filter { $0.value != "default" }, id: \.value) { model in
+                Text(model.displayName).tag(model.value)
+            }
+        }
+        .pickerStyle(.inline)
+    }
+
+    private var effortPicker: some View {
+        Picker("Effort", selection: Binding(get: { effort ?? "" }, set: { effort = $0.isEmpty ? nil : $0 })) {
+            Text("Auto").tag("")
+            ForEach(app.effortLevels(for: model ?? app.defaults.model)) { level in
+                Text(level.label).tag(level.rawValue)
+            }
+        }
+        .pickerStyle(.inline)
+    }
+
+    private var full: some View {
+        HStack(spacing: 6) {
+            Menu {
+                Picker("Model", selection: Binding(get: { model ?? "" }, set: { model = $0.isEmpty ? nil : $0 })) {
+                    Text("Default (\(app.modelDisplayName(for: app.defaults.model)))").tag("")
+                    ForEach(app.claudeModels.filter { $0.value != "default" }, id: \.value) { model in
+                        Text(model.displayName).tag(model.value)
+                    }
+                }
+                .pickerStyle(.inline)
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "cpu")
+                    Text(app.modelDisplayName(for: model ?? app.defaults.model))
+                }
+            }
+            .fixedSize()
+            Menu {
+                Picker("Effort", selection: Binding(get: { effort ?? "" }, set: { effort = $0.isEmpty ? nil : $0 })) {
+                    Text("Auto").tag("")
+                    ForEach(app.effortLevels(for: model ?? app.defaults.model)) { level in
+                        Text(level.label).tag(level.rawValue)
+                    }
+                }
+                .pickerStyle(.inline)
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: (effort.flatMap(EffortLevel.init(rawValue:)) ?? .medium).symbol)
+                    Text(effort.flatMap(EffortLevel.init(rawValue:))?.label ?? "Auto effort")
+                }
+            }
+            .fixedSize()
         }
     }
 }
@@ -417,6 +510,7 @@ private struct SessionChanges: View {
         case .linked, .unlinked: "link"
         case .restored: "arrow.uturn.backward.circle"
         case .pinned, .unpinned: "pin"
+        case .progressed: "checklist"
         default: "circle"
         }
     }

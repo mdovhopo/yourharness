@@ -173,7 +173,7 @@ struct MemoryTests {
         let changes = Counter()
         let server = MemoryToolServer(database: database, scope: scope, access: .agent, actor: .init("agent", threadID: "T1"),
                                       onChange: { _ in changes.bump() })
-        #expect(server.tools.map(\.name) == ["search", "read", "save", "update", "forget", "link"])
+        #expect(server.tools.map(\.name) == ["search", "read", "save", "update", "forget", "link", "track"])
 
         let saved = await call(server, "save", ["title": "Use pnpm", "description": "Package manager for the web app",
                                                 "body": "Run pnpm, never npm.\n**Why:** lockfile.", "kind": "feedback"], toolUseID: "toolu_9")
@@ -231,6 +231,81 @@ struct MemoryTests {
         let server = MemoryToolServer(database: database, scope: scope, access: .agent, actor: .init("agent"))
         #expect((await call(server, "read", ["ids": [.string(elsewhere.shortID)]])).isError)
         #expect(text(await call(server, "search", ["query": "plan"])).contains("No memory"))
+    }
+
+    // MARK: - Tasks
+
+    @Test func tasksTrackProgressAcrossSessions() async throws {
+        let database = open()
+        let first = MemoryToolServer(database: database, scope: scope, access: .agent, actor: .init("agent", threadID: "T1"))
+        let started = await call(first, "track", ["title": "Move billing to Stripe Checkout", "description": "Replace the custom form",
+                                                  "steps": [["text": "Spike Checkout"], ["text": "Webhooks"], ["text": "Remove old form"]]],
+                                 toolUseID: "toolu_1")
+        #expect(!started.isError)
+        #expect(text(started).contains("0 of 3 steps done. Next: Spike Checkout"))
+        let task = try #require(database.memories(scope: scope).first)
+        #expect(task.isTask)
+        #expect(task.taskState == .active)
+
+        // Another thread picks it up by title and ticks a step.
+        let second = MemoryToolServer(database: database, scope: scope, access: .agent, actor: .init("agent", threadID: "T2"))
+        let ticked = await call(second, "track", ["title": "move billing to stripe checkout", "note": "Checkout session works in test mode",
+                                                  "steps": [["text": "Spike Checkout", "done": true], ["text": "Webhooks"], ["text": "Remove old form"]]])
+        #expect(text(ticked).contains("1 of 3 steps done. Next: Webhooks"))
+        let updated = try #require(database.memory(task.id))
+        #expect(database.memories(scope: scope).count == 1)
+        #expect(updated.stepsDone == 1)
+        #expect(updated.body.contains("Checkout session works in test mode"))
+        #expect(Set(updated.sources.map(\.threadID)) == ["T1", "T2"])
+        #expect(database.tasks(forThread: "T2").map(\.id) == [task.id])
+        #expect(database.memoryEvents(scope: scope).first?.kind == .progressed)
+        #expect(database.memoryEvents(scope: scope).first?.detail == "active 1/3")
+
+        let blocked = await call(second, "track", ["id": .string(task.shortID), "state": "blocked", "note": "Needs the Stripe key"])
+        #expect(!blocked.isError)
+        #expect(database.memory(task.id)?.taskState == .blocked)
+        #expect((await call(second, "save", ["title": "x", "description": "", "body": "y", "kind": "task"])).isError)
+        #expect(text(await call(second, "read", ["ids": [.string(task.shortID)]])).contains("- [x] Spike Checkout"))
+
+        // Restoring an old version brings its progress back.
+        database.restoreMemoryVersion(task.id, version: 1)
+        #expect(database.memory(task.id)?.stepsDone == 0)
+        #expect(database.memory(task.id)?.taskState == .active)
+
+        let stats = database.memoryStats(scope: scope)
+        #expect(stats.tasks == ["active": 1])
+    }
+
+    @Test func theIndexLeadsWithOpenTasks() {
+        var doing = memory("Ship dark mode")
+        doing.kind = MemoryKind.task.rawValue
+        doing.taskState = .active
+        doing.steps = [.init("Colors", done: true), .init("Settings toggle")]
+        var finished = memory("Fix login")
+        finished.kind = MemoryKind.task.rawValue
+        finished.taskState = .done
+        var stale = finished
+        stale.id = UUID().uuidString
+        stale.title = "Old cleanup"
+        stale.updatedAt = .now.addingTimeInterval(-30 * 86_400)
+        let prompt = MemoryPrompt.build(memories: [doing, finished, stale, memory("Uses pnpm")], workspace: "acme")
+        #expect(prompt.text.contains("In Progress:\n- \(doing.shortID) Ship dark mode — 1 of 2 steps done; next: Settings toggle"))
+        #expect(prompt.text.contains("Done lately:\n- \(finished.shortID) Fix login (done"))
+        #expect(!prompt.text.contains("Old cleanup"))
+        #expect(prompt.text.range(of: "## Tasks")!.lowerBound < prompt.text.range(of: "## Memory index")!.lowerBound)
+    }
+
+    @Test func tasksSurviveExportAndImport() throws {
+        var task = memory("Ship dark mode")
+        task.kind = MemoryKind.task.rawValue
+        task.taskState = .blocked
+        task.steps = [.init("Colors", done: true), .init("Settings toggle")]
+        let json = try MemoryArchive.json([task], workspace: "acme", path: nil)
+        #expect(try MemoryArchive.memories(fromJSON: json, scope: scope).first?.steps == task.steps)
+        let back = MemoryArchive.memories(fromMarkdown: MemoryArchive.markdownFiles([task], workspace: "acme"), scope: scope).first
+        #expect(back?.taskState == .blocked)
+        #expect(back?.steps == task.steps)
+        #expect(back?.body == task.body)
     }
 
     // MARK: - Files

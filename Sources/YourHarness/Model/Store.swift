@@ -165,6 +165,9 @@ struct PersistedState: Codable {
     var memoryEnabled = true
     /// While it's on, Claude Code's own memory files are off, so there's one memory.
     var claudeCodeMemoryOff = true
+    /// The model and effort the Importer and Reconciler start with; nil is the default for threads.
+    var memoryAgentModel: String?
+    var memoryAgentEffort: String?
     /// Removed projects' IDs by folder: adding the folder again brings its memory back.
     var removedProjectIDs: [String: UUID] = [:]
 
@@ -202,6 +205,8 @@ struct PersistedState: Codable {
         memoryEnabled = try container.decodeIfPresent(Bool.self, forKey: .memoryEnabled) ?? true
         claudeCodeMemoryOff = try container.decodeIfPresent(Bool.self, forKey: .claudeCodeMemoryOff) ?? true
         removedProjectIDs = try container.decodeIfPresent([String: UUID].self, forKey: .removedProjectIDs) ?? [:]
+        memoryAgentModel = try container.decodeIfPresent(String.self, forKey: .memoryAgentModel)
+        memoryAgentEffort = try container.decodeIfPresent(String.self, forKey: .memoryAgentEffort)
     }
 }
 

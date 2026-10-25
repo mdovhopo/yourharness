@@ -7,6 +7,19 @@ app serves, and you can see and change all of it in the Memory view.
 The code: `Sources/HarnessCore/Memory/` (no UI imports, all tested in `MemoryTests`) and the
 app's `Model/AppModel+Memory.swift` and `Views/Memory*.swift`.
 
+## Tasks
+
+Your asks are memories too, of kind `task`: a title, a state (to do, in progress, blocked, done),
+steps with the done ones ticked, and a dated log of what happened, with every thread that worked
+on it. Agents keep them with `mcp__memory__track`: before starting multi-step work (or work that
+goes on later), after each step, when blocked (and why), and when done. Every session's index
+starts with the open tasks and their next step, and the ones done in the last week, so "carry on
+with dark mode" lands where the last thread stopped. A step ticked or a note added is logged as
+progress (`progressed`), not a rewrite; every change is a version, so restoring one brings its
+progress back. The Memory view's **Tasks** tab shows them by state with a progress bar and next
+step; you can tick steps, add them or change the state in a task's detail; a thread's toolbar
+shows the tasks it's working on (state and steps done), with a popover of their steps.
+
 ## What a memory is
 
 One fact, preference, decision or pointer: a title, a one-line description (what the index
@@ -46,7 +59,10 @@ links, growth and activity by day, kinds and ages. The log keeps a year.
 
 ## The Memory view
 
-Open it with ⇧⌘M, the brain button on a project's row in the sidebar, or the project's menu.
+Click a project's name in the sidebar: its page opens on its pull requests, with **Pull Requests |
+Memory** in the middle of the toolbar (Home has no workspace, so its page is its memory). ⇧⌘M,
+the brain button on a project's row and its menu go straight to Memory. Memory's own tabs sit in
+its header: Memories, Tasks, Insights, Activity, Graph.
 - **Memories**: search, filter by kind, in use or archived; edit title, description, kind and
   body (Markdown), pin, archive, delete, link; see how agents use it, where it was learned
   (click to open the thread at that point) and its history, with Restore This Version.
@@ -68,7 +84,9 @@ Open it with ⇧⌘M, the brain button on a project's row in the sidebar, or the
 
 ## The specialists
 
-Two agents with their own windows, one conversation per project each, that outlive the window
+Pick their model and reasoning effort in their window (before starting, or in the toolbar; a
+change applies from the next message), or the default for both in Settings → General → Memory:
+memory is worth a strong model. Two agents with their own windows, one conversation per project each, that outlive the window
 until New Session. They run Claude Code with only Read, Glob, Grep, AskUserQuestion and the full
 memory tools (also `list`, `stats`, `merge`, `unlink`, `restore`, `pin`), no MCP servers of
 yours, nothing saved to Claude Code's history (`MemoryPrompt.specialist` has their instructions).
@@ -80,6 +98,15 @@ A column on the right shows what the session has changed so far; each change ope
 - **The Reconciler** starts from `stats` and `list`, then proposes merges, fixes, archives,
   tighter wording and links, and asks before applying (unless told not to). Every change keeps
   the old version.
+
+## ⌘K
+
+Search Everything (⌘K, or Search at the top of the sidebar) is a Spotlight-style panel over the
+window: thread titles and actions match as you type; then the full-text indexes add memories and
+tasks from every project and what was said in threads (one hit a thread, what was said before
+tool input, none for a thread already found by title). ↑↓ and ↩ to go; a conversation hit opens
+the thread with Find on the matched word. With nothing typed it lists recent threads and actions
+(New Thread, Open Memory, Open Tasks, Import, Reconcile, Add Project, Resume, Settings).
 
 ## Checking it
 
@@ -93,6 +120,9 @@ A column on the right shows what the session has changed so far; each change ope
   - `YH_MEMORY_IMPORT=<dir>/sources/claude-memory`: a direct import.
   - `YH_MEMORY_AGENT=importer YH_MEMORY_AGENT_START=1 YH_MEMORY_IMPORT_SOURCES=<file> YH_MEMORY_AGENT_MODEL=haiku`,
     or `YH_MEMORY_AGENT=reconciler YH_MEMORY_AGENT_START=1 YH_MEMORY_AGENT_NOTE="apply directly"`.
-  - `YH_OPEN_MEMORY=1 YH_MEMORY_TAB=insights`, `YH_MEMORY_SEED=2000` (made-up memories and
+  - `YH_SEND_MESSAGE="Plan X in steps, do only the first"`: the agent should `track` a task;
+    a second launch with "continue X" should read it and move it along.
+  - `YH_SPOTLIGHT=<words>` opens ⌘K with them typed.
+  - `YH_OPEN_MEMORY=1 YH_MEMORY_TAB=insights` (or `tasks`), `YH_MEMORY_SEED=2000` (made-up memories and
     activity), `YH_MEMORY_EXPORT=<folder>`, with `YH_SNAPSHOT` (and `YH_SNAPSHOT_WINDOW=Memory
     Importer` for a specialist's window).

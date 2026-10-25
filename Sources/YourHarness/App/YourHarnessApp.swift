@@ -29,6 +29,8 @@ struct YourHarnessApp: App {
             }
             CommandGroup(after: .textEditing) {
                 Divider()
+                Button("Search Everything…") { app.spotlight.toggle(app) }
+                    .keyboardShortcut("k")
                 Button("Find in Thread…") { app.selectedThread?.find.open() }
                     .keyboardShortcut("f")
                     .disabled(app.visibleThreadID == nil)

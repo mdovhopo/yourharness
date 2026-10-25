@@ -31,6 +31,8 @@ public enum MemoryArchive {
             var lastRecalledAt: Date?
             var links: [HarnessDatabase.MemoryLink]?
             var sources: [HarnessDatabase.MemorySource]?
+            var taskState: String?
+            var steps: [HarnessDatabase.TaskStep]?
         }
 
         var format: String
@@ -47,7 +49,8 @@ public enum MemoryArchive {
                           status: memory.status.rawValue, pinned: memory.pinned ? true : nil, origin: memory.origin,
                           createdAt: memory.createdAt, updatedAt: memory.updatedAt, recallCount: memory.recallCount,
                           lastRecalledAt: memory.lastRecalledAt, links: memory.links.isEmpty ? nil : memory.links,
-                          sources: memory.sources.isEmpty ? nil : memory.sources)
+                          sources: memory.sources.isEmpty ? nil : memory.sources, taskState: memory.taskState?.rawValue,
+                          steps: memory.steps.isEmpty ? nil : memory.steps)
         })
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
@@ -78,7 +81,8 @@ public enum MemoryArchive {
                                    body: item.body, status: item.status.flatMap(HarnessDatabase.Memory.Status.init) ?? .active,
                                    pinned: item.pinned ?? false, origin: item.origin, createdAt: item.createdAt ?? .now,
                                    updatedAt: item.updatedAt ?? .now, recallCount: item.recallCount ?? 0,
-                                   lastRecalledAt: item.lastRecalledAt, sources: item.sources ?? [], links: item.links ?? [])
+                                   lastRecalledAt: item.lastRecalledAt, sources: item.sources ?? [], links: item.links ?? [],
+                                   taskState: item.taskState.flatMap(HarnessDatabase.TaskState.init), steps: item.steps ?? [])
         }
     }
 
@@ -121,7 +125,11 @@ public enum MemoryArchive {
             text += "  created: \(memory.createdAt.formatted(.iso8601))\n  updated: \(memory.updatedAt.formatted(.iso8601))\n"
             if memory.status != .active { text += "  status: \(memory.status.rawValue)\n" }
             if memory.pinned { text += "  pinned: true\n" }
+            if let state = memory.taskState { text += "  state: \(state.rawValue)\n" }
             text += "---\n\n\(memory.body.trimmingCharacters(in: .whitespacesAndNewlines))\n"
+            if !memory.steps.isEmpty {
+                text += "\n## Steps\n\n" + memory.steps.map { "- [\($0.done ? "x" : " ")] \($0.text)" }.joined(separator: "\n") + "\n"
+            }
             let links = memory.links.compactMap { slugs[$0.to] }
             if !links.isEmpty { text += "\nRelated: " + links.map { "[[\($0)]]" }.joined(separator: " ") + "\n" }
             files[slug + ".md"] = text
@@ -152,6 +160,15 @@ public enum MemoryArchive {
                 cleanBody = String(cleanBody[..<range.lowerBound])
             }
             linkNames = Array(NSOrderedSet(array: linkNames)) as? [String] ?? linkNames
+            var steps: [HarnessDatabase.TaskStep] = []
+            if let range = cleanBody.range(of: "\n## Steps\n") {
+                for line in cleanBody[range.upperBound...].split(separator: "\n") {
+                    let trimmed = line.trimmingCharacters(in: .whitespaces)
+                    if trimmed.hasPrefix("- [x] ") || trimmed.hasPrefix("- [X] ") { steps.append(.init(String(trimmed.dropFirst(6)), done: true)) }
+                    else if trimmed.hasPrefix("- [ ] ") { steps.append(.init(String(trimmed.dropFirst(6)))) }
+                }
+                cleanBody = String(cleanBody[..<range.lowerBound])
+            }
             let fileName = String(file.split(separator: "/").last ?? Substring(file))
             let title = front["metadata.title"] ?? titles[fileName] ?? humanize(name)
             let memory = HarnessDatabase.Memory(
@@ -159,7 +176,8 @@ public enum MemoryArchive {
                 description: front["description"] ?? "", body: cleanBody.trimmingCharacters(in: .whitespacesAndNewlines),
                 status: front["metadata.status"].flatMap(HarnessDatabase.Memory.Status.init) ?? .active,
                 pinned: front["metadata.pinned"] == "true", origin: "import",
-                createdAt: front["metadata.created"].flatMap(date) ?? now, updatedAt: front["metadata.updated"].flatMap(date) ?? front["metadata.modified"].flatMap(date) ?? now)
+                createdAt: front["metadata.created"].flatMap(date) ?? now, updatedAt: front["metadata.updated"].flatMap(date) ?? front["metadata.modified"].flatMap(date) ?? now,
+                taskState: front["metadata.state"].flatMap(HarnessDatabase.TaskState.init), steps: steps)
             parsed.append((name, memory, linkNames))
         }
         let ids = Dictionary(parsed.map { ($0.name, $0.memory.id) }) { first, _ in first }
@@ -263,7 +281,8 @@ public enum MemoryArchive {
             if let current = byID[memory.id] ?? byTitle[memory.title.lowercased()] {
                 remap[memory.id] = current.id
                 let same = current.title == memory.title && current.description == memory.description && current.body == memory.body
-                    && current.kind == memory.kind && current.status == memory.status
+                    && current.kind == memory.kind && current.status == memory.status && current.taskState == memory.taskState
+                    && current.steps == memory.steps
                 if same || memory.updatedAt <= current.updatedAt {
                     report.unchanged += 1
                     continue
@@ -274,6 +293,8 @@ public enum MemoryArchive {
                 updated.body = memory.body
                 updated.kind = memory.kind
                 updated.status = memory.status
+                updated.taskState = memory.taskState
+                updated.steps = memory.steps
                 updated.pinned = memory.pinned || current.pinned
                 updated.updatedAt = max(memory.updatedAt, current.updatedAt)
                 updated.links = Array(Set(current.links + memory.links))

@@ -132,6 +132,8 @@ final class ThreadModel: Identifiable {
     let memoryRole: MemoryRole?
     /// For a memory specialist: folders it may read besides the project (what it imports).
     var extraDirectories: [String] = []
+    /// Tasks in memory this thread has worked on, for its toolbar; loaded by the thread view.
+    var tasks: [HarnessDatabase.Memory] = []
     /// For the importer: sources picked elsewhere (a file that wasn't memory), waiting in its window.
     var pendingImportSources: [String] = []
     /// A side chat or a memory specialist: it works beside the project's threads, not in them.

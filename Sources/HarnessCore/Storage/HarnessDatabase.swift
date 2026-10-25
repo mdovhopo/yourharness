@@ -95,7 +95,7 @@ public final class HarnessDatabase: Sendable {
     public static let resultHeadLength = 20_000
     /// Results kept whole in memory however big: a sub-agent's report is read from its result.
     public static let wholeResultTools = SubagentReport.toolNames
-    static let schemaVersion = 2
+    static let schemaVersion = 3
     private static let indexBatch = 500
 
     // MARK: - Setup
@@ -624,6 +624,14 @@ enum Schema {
             INSERT INTO memories_fts(rowid, title, description, body) VALUES (new.rowid, new.title, new.description, new.body);
         END;
         INSERT INTO memories_fts(memories_fts) VALUES ('rebuild');
+        """,
+        // 3: tasks, the user's asks and how far they've got.
+        """
+        ALTER TABLE memories ADD COLUMN task_state TEXT;
+        ALTER TABLE memories ADD COLUMN task_steps TEXT;
+        ALTER TABLE memory_versions ADD COLUMN task_state TEXT;
+        ALTER TABLE memory_versions ADD COLUMN task_steps TEXT;
+        CREATE INDEX memories_tasks ON memories(scope, task_state) WHERE task_state IS NOT NULL;
         """,
     ]
 

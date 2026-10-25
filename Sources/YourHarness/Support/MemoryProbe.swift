@@ -78,6 +78,12 @@ enum MemoryProbe {
             if index > 0, index % 3 != 0 { memory.links = [.init(to: memories[(index * 17) % index].id)] }
             memories.append(memory)
         }
+        for (index, state) in [HarnessDatabase.TaskState.active, .blocked, .todo, .done].enumerated() {
+            memories.append(HarnessDatabase.Memory(
+                scope: scope, kind: MemoryKind.task.rawValue, title: ["Ship dark mode", "Move billing to Stripe", "Write API docs", "Fix login loop"][index],
+                description: "A made-up task", body: "", origin: "agent", taskState: state,
+                steps: [.init("Plan it", done: true), .init("Build it", done: index != 2 && index != 0), .init("Test it", done: index == 3)]))
+        }
         database.saveMemories(memories, actor: .app)
         let actor = HarnessDatabase.MemoryActor("agent")
         for index in stride(from: 0, to: count, by: 4) {

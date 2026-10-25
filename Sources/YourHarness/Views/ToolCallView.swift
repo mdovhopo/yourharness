@@ -319,6 +319,7 @@ enum MemoryCall {
         case "merge": ("arrow.triangle.merge", "Merge memories", string("title"))
         case "list": ("list.bullet", "List memories", string("kind"))
         case "stats": ("chart.bar", "Memory stats", "")
+        case "track": ("checklist", "Track task", string("title").isEmpty ? [string("state"), string("note")].filter { !$0.isEmpty }.joined(separator: ": ") : string("title"))
         case "restore": ("arrow.uturn.backward", "Restore memory", string("id"))
         case "pin": ("pin", (input["pinned"] as? Bool) == false ? "Unpin memory" : "Pin memory", string("id"))
         default: ("brain", "Memory: \(tool)", "")

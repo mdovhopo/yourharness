@@ -461,6 +461,12 @@ private struct GeneralSettingsView: View {
                     Label("Turn off Claude Code's own memory files", systemImage: "doc.on.doc")
                 }
                 .disabled(!app.memoryEnabled)
+                LabeledContent {
+                    MemoryAgentModelPicker(model: Binding(get: { app.memoryAgentModel }, set: { app.setMemoryAgentModel($0) }),
+                                           effort: Binding(get: { app.memoryAgentEffort }, set: { app.setMemoryAgentEffort($0) }))
+                } label: {
+                    Label("Importer and Reconciler", systemImage: "wand.and.sparkles")
+                }
             } header: {
                 Text("Memory")
             } footer: {

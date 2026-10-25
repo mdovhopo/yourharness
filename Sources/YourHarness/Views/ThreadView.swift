@@ -94,10 +94,16 @@ struct ThreadView: View {
             })
             .navigationTitle(thread.title)
             .navigationSubtitle(subtitle)
+            .task(id: "\(thread.id)-\(app.memoryRevision(for: thread.projectID))") { await ThreadTasksButton.load(thread, app: app) }
             .toolbar {
                 if let project = app.project(id: thread.projectID), let workspace = app.workspace(for: project) {
                     ToolbarItem {
                         ThreadWorktreesButton(thread: thread, project: project, workspace: workspace)
+                    }
+                }
+                if !thread.tasks.isEmpty {
+                    ToolbarItem {
+                        ThreadTasksButton(thread: thread)
                     }
                 }
                 ToolbarItem {

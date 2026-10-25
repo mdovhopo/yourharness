@@ -40,12 +40,16 @@ extension HarnessDatabase {
         public var sources: [MemorySource]
         /// Memories it points at.
         public var links: [MemoryLink]
+        /// For a task (kind `task`): where it stands.
+        public var taskState: TaskState?
+        /// For a task: its steps, in order.
+        public var steps: [TaskStep]
 
         public init(id: String = UUID().uuidString, scope: String = "global", kind: String = "project", title: String,
                     description: String = "", body: String, status: Status = .active, pinned: Bool = false,
                     origin: String? = nil, createdAt: Date = .now, updatedAt: Date = .now, recallCount: Int = 0,
                     surfacedCount: Int = 0, lastRecalledAt: Date? = nil, mergedInto: String? = nil,
-                    sources: [MemorySource] = [], links: [MemoryLink] = []) {
+                    sources: [MemorySource] = [], links: [MemoryLink] = [], taskState: TaskState? = nil, steps: [TaskStep] = []) {
             self.id = id
             self.scope = scope
             self.kind = kind
@@ -63,6 +67,18 @@ extension HarnessDatabase {
             self.mergedInto = mergedInto
             self.sources = sources
             self.links = links
+            self.taskState = taskState
+            self.steps = steps
+        }
+
+        public var isTask: Bool { kind == MemoryKind.task.rawValue }
+        public var stepsDone: Int { steps.count(where: \.done) }
+        /// The first step not done yet.
+        public var nextStep: String? { steps.first { !$0.done }?.text }
+        /// Done steps as a share of all, or by state when it has none.
+        public var progress: Double {
+            guard !steps.isEmpty else { return taskState == .done ? 1 : 0 }
+            return Double(stepsDone) / Double(steps.count)
         }
 
         /// The first eight characters of the ID: what agents and the index use. Tools take
@@ -83,6 +99,30 @@ extension HarnessDatabase {
             self.threadID = threadID
             self.entryID = entryID
             self.quote = quote
+        }
+    }
+
+    /// Where one of your asks stands.
+    public enum TaskState: String, Sendable, Codable, CaseIterable {
+        case todo, active, blocked, done
+
+        public var label: String {
+            switch self {
+            case .todo: "To Do"
+            case .active: "In Progress"
+            case .blocked: "Blocked"
+            case .done: "Done"
+            }
+        }
+    }
+
+    public struct TaskStep: Sendable, Equatable, Hashable, Codable {
+        public var text: String
+        public var done: Bool
+
+        public init(_ text: String, done: Bool = false) {
+            self.text = text
+            self.done = done
         }
     }
 
@@ -125,6 +165,8 @@ extension HarnessDatabase {
         public var savedAt: Date
         public var actor: String?
         public var threadID: String?
+        public var taskState: TaskState?
+        public var steps: [TaskStep] = []
 
         public var id: Int { version }
     }
@@ -134,7 +176,7 @@ extension HarnessDatabase {
     public struct MemoryEvent: Sendable, Equatable, Identifiable {
         public enum Kind: String, Sendable, CaseIterable {
             case created, updated, recalled, searched, injected, archived, restored, deleted, linked, unlinked, merged,
-                 pinned, unpinned, imported, exported
+                 pinned, unpinned, imported, exported, progressed
         }
 
         public var id: Int
@@ -165,6 +207,8 @@ extension HarnessDatabase {
 /// keeps them.
 public enum MemoryKind: String, CaseIterable, Sendable {
     case user, feedback, project, reference
+    /// One of your asks and how far it's got: kept across sessions, so any thread can pick it up.
+    case task
 
     public var label: String {
         switch self {
@@ -172,6 +216,7 @@ public enum MemoryKind: String, CaseIterable, Sendable {
         case .feedback: "Feedback"
         case .project: "Project"
         case .reference: "Reference"
+        case .task: "Task"
         }
     }
 
@@ -181,6 +226,7 @@ public enum MemoryKind: String, CaseIterable, Sendable {
         case .feedback: "How you want agents to work: corrections and approaches you confirmed."
         case .project: "Ongoing work, goals and constraints the code doesn't record."
         case .reference: "Where to look things up: dashboards, docs, tickets."
+        case .task: "Something you asked for, its steps and how far it's got, across sessions."
         }
     }
 

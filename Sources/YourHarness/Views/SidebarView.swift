@@ -46,10 +46,13 @@ struct SidebarView: View {
         .onKeyPress(.upArrow) { move(-1) }
         .onKeyPress(.downArrow) { move(1) }
         .safeAreaInset(edge: .top, spacing: 0) {
-            NewThreadButton()
-                .padding(.horizontal, 10)
-                .padding(.top, 4)
-                .padding(.bottom, 10)
+            VStack(spacing: 6) {
+                NewThreadButton()
+                SearchButton()
+            }
+            .padding(.horizontal, 10)
+            .padding(.top, 4)
+            .padding(.bottom, 10)
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 0) {
@@ -109,6 +112,29 @@ private struct NewThreadButton: View {
     }
 }
 
+/// Opens ⌘K: search threads, memories and tasks everywhere.
+private struct SearchButton: View {
+    @Environment(AppModel.self) private var app
+
+    var body: some View {
+        Button {
+            app.spotlight.open(app)
+        } label: {
+            HStack(spacing: 9) {
+                Image(systemName: "magnifyingglass")
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Text("Search")
+                    .foregroundStyle(.secondary)
+                Spacer()
+                KeyCap("⌘K")
+            }
+        }
+        .buttonStyle(SidebarActionStyle())
+        .help("Search threads, what was said in them, memories and tasks, and jump there (⌘K)")
+    }
+}
+
 /// Soft fill that brightens on hover and dips slightly when pressed.
 private struct SidebarActionStyle: ButtonStyle {
     @State private var hovering = false
@@ -164,7 +190,7 @@ private struct ProjectHeader: View {
         app.threads(in: project).contains { $0.isWorking || $0.hasUnread || !$0.pendingPermissions.isEmpty }
     }
     private var workspace: WorkspaceModel? { app.workspace(for: project) }
-    private var isSelected: Bool { app.overviewProjectID == project.id || app.memoryProjectID == project.id }
+    private var isSelected: Bool { app.overviewProjectID == project.id }
     private var reviewCount: Int {
         workspace?.pullRequests.count(where: \.reviewRequestedFromMe) ?? 0
     }
@@ -223,11 +249,7 @@ private struct ProjectHeader: View {
             }
             .contentShape(.rect)
             .onTapGesture {
-                if app.isHome(project) {
-                    withAnimation(.snappy(duration: 0.25)) { app.setCollapsed(!collapsed, for: project) }
-                } else {
-                    app.showOverview(of: project)
-                }
+                app.showProject(project)
             }
 
             if hovering || app.memoryProjectID == project.id {
@@ -264,7 +286,7 @@ private struct ProjectHeader: View {
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.15), value: hovering)
         .animation(.snappy, value: reviewCount)
-        .help(app.isHome(project) ? project.path : "Repos and pull requests in \(project.name)")
+        .help(app.isHome(project) ? "\(project.path): its memory" : "Pull requests, repos and memory of \(project.name)")
         .contextMenu {
             Button("New Thread", systemImage: "square.and.pencil") { app.newThread(in: project) }
             if !app.isHome(project) {

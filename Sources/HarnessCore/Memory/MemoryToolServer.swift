@@ -40,7 +40,7 @@ public struct MemoryToolServer: MCPToolServer {
 
     public var tools: [MCPTool] {
         var tools = [Self.search, Self.read]
-        if access != .readOnly { tools += [Self.save, Self.update, Self.forget, Self.link] }
+        if access != .readOnly { tools += [Self.save, Self.update, Self.forget, Self.link, Self.track] }
         if access == .specialist { tools += [Self.list, Self.stats, Self.merge, Self.unlink, Self.restore, Self.pin] }
         return tools
     }
@@ -50,6 +50,7 @@ public struct MemoryToolServer: MCPToolServer {
         case "search": return search(arguments)
         case "read": return read(arguments)
         case "save": return save(arguments, toolUseID: toolUseID)
+        case "track": return track(arguments, toolUseID: toolUseID)
         case "update": return update(arguments)
         case "forget": return forget(arguments)
         case "link": return link(arguments)
@@ -65,8 +66,8 @@ public struct MemoryToolServer: MCPToolServer {
 
     // MARK: - Definitions
 
-    private static let kinds: JSONValue = ["type": "string", "enum": .array(MemoryKind.allCases.map { .string($0.rawValue) }),
-                                           "description": "user, feedback, project or reference."]
+    private static let kinds: JSONValue = ["type": "string", "enum": .array(MemoryKind.allCases.filter { $0 != .task }.map { .string($0.rawValue) }),
+                                           "description": "user, feedback, project or reference. Tasks are kept with `track`."]
     private static let ids: JSONValue = ["type": "array", "items": ["type": "string"], "minItems": 1,
                                          "description": "Memory IDs (the 8-character ones in the index are enough)."]
 
@@ -113,6 +114,24 @@ public struct MemoryToolServer: MCPToolServer {
             "body": ["type": "string"],
             "kind": kinds,
         ], required: ["id"]))
+
+    static let track = MCPTool(
+        name: "track",
+        description: """
+        Keep one of the user's asks as a task, with its steps and where it stands, so this and later sessions \
+        know how far it's got. Without `id`, starts a task (or picks up the open one with the same title); with \
+        `id`, updates it. Give the whole `steps` list each time, ticking what's done.
+        """,
+        inputSchema: MCPTool.schema([
+            "id": ["type": "string", "description": "The task to update; leave out to start one."],
+            "title": ["type": "string", "description": "What was asked, in a few words, e.g. \"Move billing to Stripe Checkout\"."],
+            "description": ["type": "string", "description": "One line: the goal and anything that defines done."],
+            "state": ["type": "string", "enum": ["todo", "active", "blocked", "done"],
+                      "description": "todo (not started), active (in progress; the default), blocked (waiting on something: say what in `note`), done."],
+            "steps": ["type": "array", "description": "Every step, in order, with what's done ticked.",
+                      "items": ["type": "object", "properties": ["text": ["type": "string"], "done": ["type": "boolean"]], "required": ["text"]]],
+            "note": ["type": "string", "description": "What just happened, in a line: kept in the task's log with today's date."],
+        ]))
 
     static let forget = MCPTool(
         name: "forget",
@@ -213,9 +232,14 @@ public struct MemoryToolServer: MCPToolServer {
         var text = found.map { memory in
             var block = "## \(memory.title)\nid: \(memory.shortID) · kind: \(memory.kind) · updated \(Self.day(memory.updatedAt))"
             if memory.status != .active { block += " · \(memory.status.rawValue)" }
+            if let state = memory.taskState { block += " · task: \(state.label.lowercased())" }
             if let merged = memory.mergedInto { block += " · merged into \(String(merged.prefix(8)))" }
             if !memory.description.isEmpty { block += "\n\(memory.description)" }
-            block += "\n\n\(memory.body)"
+            if !memory.steps.isEmpty {
+                block += "\n\nSteps (\(memory.stepsDone) of \(memory.steps.count) done):\n"
+                    + memory.steps.map { "- [\($0.done ? "x" : " ")] \($0.text)" }.joined(separator: "\n")
+            }
+            if !memory.body.isEmpty { block += "\n\n\(memory.body)" }
             let links = memory.links.compactMap { link in
                 titles[link.to].map { "\($0.shortID) \($0.title)" + (link.relation.map { " (\($0))" } ?? "") }
             }
@@ -239,6 +263,7 @@ public struct MemoryToolServer: MCPToolServer {
         if let same = existing.first(where: { $0.title.caseInsensitiveCompare(title) == .orderedSame }) {
             return .error("Memory \(same.shortID) already has this title. Update it with `update` instead of saving another.")
         }
+        if arguments["kind"]?.string == MemoryKind.task.rawValue { return .error("Keep tasks with `track`.") }
         var memory = HarnessDatabase.Memory(scope: scope, kind: kind.rawValue, title: title, description: description, body: body,
                                             origin: Self.origin(actor))
         if let threadID = actor.threadID, let toolUseID { memory.sources = [.init(threadID: threadID, entryID: toolUseID)] }
@@ -252,6 +277,54 @@ public struct MemoryToolServer: MCPToolServer {
                 + ". If one says the same thing, merge them by updating it and forgetting this one."
         }
         return .text(text)
+    }
+
+    private func track(_ arguments: JSONValue, toolUseID: String?) -> MCPToolResult {
+        var task: HarnessDatabase.Memory
+        if let raw = arguments["id"]?.string {
+            guard let id = database.resolveMemoryID(raw, scope: scope), let found = database.memory(id) else { return notFound(arguments["id"]) }
+            guard found.isTask else { return .error("\(found.shortID) isn't a task; use `update` for memories.") }
+            task = found
+        } else {
+            guard let title = clean(arguments["title"]) else { return .error("Give the task a `title` (or an `id` to update one).") }
+            let open = database.memories(scope: scope, status: .active).first {
+                $0.isTask && $0.taskState != .done && $0.title.caseInsensitiveCompare(title) == .orderedSame
+            }
+            task = open ?? HarnessDatabase.Memory(scope: scope, kind: MemoryKind.task.rawValue, title: title, body: "",
+                                                  origin: Self.origin(actor), taskState: .active)
+        }
+        // A title finds the task when there's no ID; with one, it renames it.
+        if arguments["id"]?.string != nil, let title = clean(arguments["title"]) { task.title = title }
+        if let description = arguments["description"]?.string { task.description = description.trimmingCharacters(in: .whitespacesAndNewlines) }
+        if let raw = arguments["state"]?.string {
+            guard let state = HarnessDatabase.TaskState(rawValue: raw) else { return .error("`state` must be todo, active, blocked or done.") }
+            task.taskState = state
+        }
+        if task.taskState == nil { task.taskState = .active }
+        if let steps = arguments["steps"]?.array {
+            task.steps = steps.compactMap { step in
+                if let text = step.string?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty { return .init(text) }
+                guard let text = step["text"]?.string?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return nil }
+                return .init(text, done: step["done"]?.bool ?? false)
+            }
+            guard task.steps.count <= 40 else { return .error("At most 40 steps: group smaller ones.") }
+        }
+        if let note = clean(arguments["note"]) {
+            let line = "- \(Self.day(.now)): \(note.replacingOccurrences(of: "\n", with: " "))"
+            task.body = task.body.isEmpty ? line : task.body + "\n" + line
+        }
+        if let problem = Self.problem(title: task.title, description: task.description, body: task.body) { return .error(problem) }
+        if let threadID = actor.threadID, !task.sources.contains(where: { $0.threadID == threadID }) {
+            task.sources.append(.init(threadID: threadID, entryID: toolUseID ?? ""))
+        }
+        task.updatedAt = .now
+        if task.status == .archived { task.status = .active }
+        database.saveMemory(task, actor: actor)
+        onChange(scope)
+        var text = "Tracked \(task.shortID) \(task.title): \(task.taskState?.label.lowercased() ?? "in progress")"
+        if !task.steps.isEmpty { text += ", \(task.stepsDone) of \(task.steps.count) steps done" }
+        if let next = task.nextStep, task.taskState != .done { text += ". Next: \(next)" }
+        return .text(text + ".")
     }
 
     private func update(_ arguments: JSONValue) -> MCPToolResult {
@@ -323,6 +396,7 @@ public struct MemoryToolServer: MCPToolServer {
             if !memory.description.isEmpty { line += " — \(memory.description)" }
             line += " (\(memory.size) B, read \(memory.recallCount)×, updated \(Self.day(memory.updatedAt))"
             if memory.pinned { line += ", pinned" }
+            if let state = memory.taskState { line += ", \(state.rawValue)" + (memory.steps.isEmpty ? "" : " \(memory.stepsDone)/\(memory.steps.count)") }
             if memory.status != .active { line += ", \(memory.status.rawValue)" }
             if !memory.links.isEmpty { line += ", links \(memory.links.map { String($0.to.prefix(8)).lowercased() }.joined(separator: " "))" }
             return line + ")"

@@ -75,13 +75,14 @@ extension HarnessDatabase {
         var versions: [MemoryVersion] = []
         try? reader.withLock { connection in
             try connection.query("""
-                SELECT version, kind, title, description, body, status, saved_at, actor, thread_id
+                SELECT version, kind, title, description, body, status, saved_at, actor, thread_id, task_state, task_steps
                 FROM memory_versions WHERE memory_id = ? ORDER BY version
                 """, [.text(id)]) { row in
                 versions.append(MemoryVersion(memoryID: id, version: row.int(0) ?? 0, kind: row.text(1) ?? "project",
                                               title: row.text(2) ?? "", description: row.text(3) ?? "", body: row.text(4) ?? "",
                                               status: row.text(5).flatMap(Memory.Status.init) ?? .active,
-                                              savedAt: row.date(6) ?? .now, actor: row.text(7), threadID: row.text(8)))
+                                              savedAt: row.date(6) ?? .now, actor: row.text(7), threadID: row.text(8),
+                                              taskState: row.text(9).flatMap(TaskState.init), steps: Writer.decodeSteps(row.text(10))))
             }
         }
         return versions
@@ -106,6 +107,16 @@ extension HarnessDatabase {
             }
         }
         return events
+    }
+
+    /// Tasks a thread has worked on (it saved or updated them), not archived, newest first.
+    public func tasks(forThread threadID: String) -> [Memory] {
+        (try? reader.withLock { connection in
+            try Writer.readMemories(connection, where: """
+                task_state IS NOT NULL AND status != 'archived'
+                AND id IN (SELECT memory_id FROM memory_sources WHERE thread_id = ?1)
+                """, [.text(threadID)], order: "updated_at DESC")
+        }) ?? []
     }
 
     /// How many active memories each scope has.
@@ -259,6 +270,10 @@ extension HarnessDatabase {
         memory.description = old.description
         memory.body = old.body
         memory.status = old.status
+        if memory.isTask {
+            memory.taskState = old.taskState
+            memory.steps = old.steps
+        }
         memory.updatedAt = .now
         saveMemory(memory, actor: actor)
     }
@@ -322,17 +337,19 @@ extension Writer {
         let old = try Self.readMemories(connection, where: "id = ?1", [.text(memory.id)], order: "id", details: false).first
         try connection.run("""
             INSERT INTO memories(id, scope, kind, title, body, status, created_at, updated_at, rev, description, pinned, origin,
-                                 recall_count, surfaced_count, last_recalled_at, merged_into)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                 recall_count, surfaced_count, last_recalled_at, merged_into, task_state, task_steps)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET scope = excluded.scope, kind = excluded.kind, title = excluded.title,
                 body = excluded.body, status = excluded.status, updated_at = excluded.updated_at, rev = excluded.rev,
                 description = excluded.description, pinned = excluded.pinned, origin = coalesce(memories.origin, excluded.origin),
                 recall_count = excluded.recall_count, surfaced_count = excluded.surfaced_count,
-                last_recalled_at = excluded.last_recalled_at, merged_into = excluded.merged_into
+                last_recalled_at = excluded.last_recalled_at, merged_into = excluded.merged_into,
+                task_state = excluded.task_state, task_steps = excluded.task_steps
             """, [.text(memory.id), .text(memory.scope), .text(memory.kind), .text(memory.title), .text(memory.body),
                   .text(memory.status.rawValue), .of(memory.createdAt), .of(memory.updatedAt), .int(Int64(nextRev())),
                   .text(memory.description), .of(memory.pinned), .of(memory.origin), .of(memory.recallCount),
-                  .of(memory.surfacedCount), .of(memory.lastRecalledAt), .of(memory.mergedInto)])
+                  .of(memory.surfacedCount), .of(memory.lastRecalledAt), .of(memory.mergedInto),
+                  .of(memory.taskState?.rawValue), .of(Self.encodeSteps(memory.steps))])
         try connection.run("DELETE FROM memory_sources WHERE memory_id = ?", [.text(memory.id)])
         for source in memory.sources {
             try connection.run("INSERT OR REPLACE INTO memory_sources(memory_id, thread_id, entry_id, quote) VALUES (?, ?, ?, ?)",
@@ -340,20 +357,30 @@ extension Writer {
         }
         if links { try replaceLinks(memory.id, memory.links) }
 
+        // Ticking a step, moving a task along or adding to its log is progress, not a rewrite.
         let changed = old.map {
-            $0.title != memory.title || $0.description != memory.description || $0.body != memory.body
+            $0.title != memory.title || $0.description != memory.description || ($0.body != memory.body && !memory.isTask)
                 || $0.kind != memory.kind || $0.status != memory.status
         } ?? true
-        if changed {
+        let progressed = old.map {
+            $0.taskState != memory.taskState || $0.steps != memory.steps || ($0.body != memory.body && memory.isTask)
+        } ?? false
+        if changed || progressed {
             let version = (try connection.scalar("SELECT max(version) FROM memory_versions WHERE memory_id = ?", [.text(memory.id)])?.int ?? 0) + 1
             try connection.run("""
-                INSERT INTO memory_versions(memory_id, version, kind, title, description, body, status, saved_at, actor, thread_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO memory_versions(memory_id, version, kind, title, description, body, status, saved_at, actor, thread_id,
+                                            task_state, task_steps)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, [.text(memory.id), .int(Int64(version)), .text(memory.kind), .text(memory.title), .text(memory.description),
-                      .text(memory.body), .text(memory.status.rawValue), .of(Date.now), .text(actor.kind), .of(actor.threadID)])
+                      .text(memory.body), .text(memory.status.rawValue), .of(Date.now), .text(actor.kind), .of(actor.threadID),
+                      .of(memory.taskState?.rawValue), .of(Self.encodeSteps(memory.steps))])
         }
-        if changed || event != nil {
-            try logEvent(scope: memory.scope, memory: memory, kind: event ?? (old == nil ? .created : .updated), actor: actor, detail: detail)
+        if changed || progressed || event != nil {
+            let kind = event ?? (old == nil ? .created : changed ? .updated : .progressed)
+            let progress = memory.taskState.map { state in
+                "\(state.rawValue)" + (memory.steps.isEmpty ? "" : " \(memory.stepsDone)/\(memory.steps.count)")
+            }
+            try logEvent(scope: memory.scope, memory: memory, kind: kind, actor: actor, detail: detail ?? (kind == .progressed ? progress : nil))
         }
     }
 
@@ -377,12 +404,20 @@ extension Writer {
                   .of(Date.now), .of(query), .of(count), .of(detail)])
     }
 
+    static func encodeSteps(_ steps: [HarnessDatabase.TaskStep]) -> String? {
+        steps.isEmpty ? nil : (try? JSONEncoder().encode(steps)).map { String(decoding: $0, as: UTF8.self) }
+    }
+
+    static func decodeSteps(_ json: String?) -> [HarnessDatabase.TaskStep] {
+        json.flatMap { try? JSONDecoder().decode([HarnessDatabase.TaskStep].self, from: Data($0.utf8)) } ?? []
+    }
+
     static func readMemories(_ connection: SQLiteConnection, where condition: String, _ values: [SQLiteValue],
                              order: String, limit: Int = -1, details: Bool = true) throws -> [HarnessDatabase.Memory] {
         var memories: [HarnessDatabase.Memory] = []
         try connection.query("""
             SELECT id, scope, kind, title, body, status, created_at, updated_at, description, pinned, origin, recall_count,
-                   surfaced_count, last_recalled_at, merged_into
+                   surfaced_count, last_recalled_at, merged_into, task_state, task_steps
             FROM memories WHERE \(condition) ORDER BY \(order) LIMIT \(limit)
             """, values) { row in
             guard let id = row.text(0) else { return }
@@ -392,7 +427,8 @@ extension Writer {
                                   pinned: (row.int(9) ?? 0) != 0, origin: row.text(10),
                                   createdAt: row.date(6) ?? .now, updatedAt: row.date(7) ?? .now,
                                   recallCount: row.int(11) ?? 0, surfacedCount: row.int(12) ?? 0,
-                                  lastRecalledAt: row.date(13), mergedInto: row.text(14)))
+                                  lastRecalledAt: row.date(13), mergedInto: row.text(14),
+                                  taskState: row.text(15).flatMap(HarnessDatabase.TaskState.init), steps: decodeSteps(row.text(16))))
         }
         guard details, !memories.isEmpty else { return memories }
         for index in memories.indices {

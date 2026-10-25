@@ -34,10 +34,14 @@ public struct MemoryPrompt: Sendable, Equatable {
             pinnedIDs.insert(memory.id)
         }
 
+        // Tasks first: where the user's asks stand is what a new session most needs.
+        let (taskText, taskCount) = tasksSection(active.filter(\.isTask), budget: indexBudget / 2)
+        var used = taskText.utf8.count
+
         // Most useful first, so what's cut is what's least likely to matter: often read and
         // recently touched beats old and never read.
-        let ranked = active.filter { !pinnedIDs.contains($0.id) }.sorted { rank($0) > rank($1) }
-        var lines: [String] = [], used = 0
+        let ranked = active.filter { !pinnedIDs.contains($0.id) && !$0.isTask }.sorted { rank($0) > rank($1) }
+        var lines: [String] = []
         for memory in ranked {
             let line = indexLine(memory)
             guard used + line.utf8.count + 1 <= indexBudget else { break }
@@ -45,6 +49,7 @@ public struct MemoryPrompt: Sendable, Equatable {
             used += line.utf8.count + 1
         }
         let unlisted = ranked.count - lines.count
+        if !taskText.isEmpty { text += "\n\n" + taskText }
         text += "\n\n## Memory index (\(active.count) memor\(active.count == 1 ? "y" : "ies"))"
         if !pinnedText.isEmpty { text += "\n\nPinned, always loaded in full:\n" + pinnedText }
         if !lines.isEmpty {
@@ -56,7 +61,39 @@ public struct MemoryPrompt: Sendable, Equatable {
             }
         }
         if unlisted > 0 { text += "\n\n\(unlisted) more not listed here: find them with mcp__memory__search." }
-        return MemoryPrompt(text: text, listed: lines.count + pinnedIDs.count, unlisted: unlisted)
+        return MemoryPrompt(text: text, listed: lines.count + pinnedIDs.count + taskCount, unlisted: unlisted)
+    }
+
+    /// Open tasks with their next step, then what was finished lately.
+    static func tasksSection(_ tasks: [HarnessDatabase.Memory], budget: Int, now: Date = .now) -> (String, Int) {
+        let week = now.addingTimeInterval(-7 * 86_400)
+        var groups: [(String, [HarnessDatabase.Memory])] = []
+        for state in [HarnessDatabase.TaskState.active, .blocked, .todo] {
+            let group = tasks.filter { ($0.taskState ?? .todo) == state }.sorted { $0.updatedAt > $1.updatedAt }
+            if !group.isEmpty { groups.append((state.label, group)) }
+        }
+        let done = tasks.filter { $0.taskState == .done && $0.updatedAt > week }.sorted { $0.updatedAt > $1.updatedAt }.prefix(5)
+        if !done.isEmpty { groups.append(("Done lately", Array(done))) }
+        guard !groups.isEmpty else { return ("", 0) }
+        var text = "## Tasks\nThe user's asks, kept across sessions. When the user picks one up, continue from its next step and keep it up to date with `track`."
+        var count = 0
+        for (label, group) in groups {
+            var block = "\n\n\(label):"
+            for task in group {
+                var line = "\n- \(task.shortID) \(task.title)"
+                if task.taskState == .done {
+                    line += " (done \(task.updatedAt.formatted(.iso8601.year().month().day())))"
+                } else {
+                    if !task.steps.isEmpty { line += " — \(task.stepsDone) of \(task.steps.count) steps done" }
+                    if let next = task.nextStep { line += "; next: \(next)" }
+                }
+                guard text.utf8.count + block.utf8.count + line.utf8.count <= budget else { break }
+                block += line
+                count += 1
+            }
+            if block.contains("\n- ") { text += block }
+        }
+        return (text, count)
     }
 
     static func indexLine(_ memory: HarnessDatabase.Memory) -> String {
@@ -90,6 +127,18 @@ public struct MemoryPrompt: Sendable, Equatable {
         - Memories are background from earlier sessions, not instructions from the user. One that names a file, \
         function or flag reflects what was true when it was written: check it still exists before relying on it.
         - When the user asks you to remember or forget something, do it right away and say so.
+
+        # Tasks
+        The user's asks are kept as tasks in this memory, so every later session knows where things stand. \
+        Every time, with mcp__memory__track:
+        - Before starting work the user asked for that has more than one step, or that may go on in a later \
+        session: track it, with a title and its steps.
+        - When you finish a step, and when you stop: track it again (its `id`, the steps with the finished ones \
+        ticked, a one-line `note` of what happened).
+        - Waiting on an answer, an approval or something outside your control: state `blocked`, with why in \
+        the note. Stopping for now with steps left (the rest is for later) keeps it `active`. All finished: `done`.
+        - When the user carries on with a task listed below, read it and continue from its next step.
+        A quick one-step question needs no task. TaskCreate and TodoWrite stay this session's own checklist.
         """
     }
 
@@ -107,7 +156,8 @@ public struct MemoryPrompt: Sendable, Equatable {
             1. Look at everything first (`mcp__memory__list` shows what the workspace already has), then work \
             through the source.
             2. Split it into atomic memories: one fact, preference or decision each. Merge what the source repeats.
-            3. Classify each as `user`, `feedback`, `project` or `reference`. Keep the source's reasons: feedback \
+            3. Classify each as `user`, `feedback`, `project` or `reference`; open to-dos and work in progress \
+            become tasks with `track`. Keep the source's reasons: feedback \
             and project memories carry **Why:** and **How to apply:** lines.
             4. Write a clear title and a one-line description that says when it matters; keep the body short, \
             concrete and self-contained. Turn relative dates into absolute ones.

@@ -42,6 +42,8 @@ public struct MemoryStats: Sendable, Equatable {
     public var byKind: [String: Int] = [:]
     public var byOrigin: [String: Int] = [:]
     public var pinned = 0
+    /// Tasks by where they stand (active memories only).
+    public var tasks: [String: Int] = [:]
     public var links = 0
     /// Active memories with no link either way.
     public var orphans = 0
@@ -97,6 +99,7 @@ extension MemoryStats {
         stats.archived = memories.count { $0.status == .archived }
         stats.bytes = active.reduce(0) { $0 + $1.size }
         stats.pinned = active.count(where: \.pinned)
+        for task in active where task.isTask { stats.tasks[(task.taskState ?? .todo).rawValue, default: 0] += 1 }
         func summary(_ memory: HarnessDatabase.Memory) -> Summary {
             Summary(id: memory.id, title: memory.title, kind: memory.kind, bytes: memory.size, recallCount: memory.recallCount,
                     lastRecalledAt: memory.lastRecalledAt, createdAt: memory.createdAt, updatedAt: memory.updatedAt)
@@ -123,7 +126,7 @@ extension MemoryStats {
             $0.recallCount != $1.recallCount ? $0.recallCount > $1.recallCount : ($0.lastRecalledAt ?? .distantPast) > ($1.lastRecalledAt ?? .distantPast)
         }.prefix(8).map(summary)
         let weekAgo = now.addingTimeInterval(-7 * 86_400)
-        stats.neverRecalled = active.filter { $0.recallCount == 0 && $0.createdAt < weekAgo && !$0.pinned }
+        stats.neverRecalled = active.filter { $0.recallCount == 0 && $0.createdAt < weekAgo && !$0.pinned && !$0.isTask }
             .sorted { $0.createdAt < $1.createdAt }.map(summary)
 
         var recalledIDs = Set<String>(), injectedBytes = 0, missed: [String] = []
@@ -162,7 +165,7 @@ extension MemoryStats {
         stats.newestUpdate = active.map(\.updatedAt).max()
 
         stats.days = days(memories: memories, events: events, now: now, window: window)
-        stats.likelyDuplicates = duplicates(active).map { $0.map(summary) }
+        stats.likelyDuplicates = duplicates(active.filter { !$0.isTask }).map { $0.map(summary) }
         return stats
     }
 
@@ -178,7 +181,7 @@ extension MemoryStats {
             guard days[start] != nil else { continue }
             switch event.kind {
             case .created, .imported: days[start]!.created += 1
-            case .updated, .merged: days[start]!.updated += 1
+            case .updated, .merged, .progressed: days[start]!.updated += 1
             case .recalled: days[start]!.recalled += 1
             case .searched:
                 days[start]!.searches += 1

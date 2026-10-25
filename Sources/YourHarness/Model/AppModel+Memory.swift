@@ -36,6 +36,19 @@ extension AppModel {
         for thread in threads { thread.restartSession() }
     }
 
+    /// The model the specialists start with; the open ones that haven't started switch too.
+    func setMemoryAgentModel(_ model: String?) {
+        memoryAgentModel = model
+        save()
+        for agent in memoryAgents.values where agent.entries.isEmpty { agent.setModel(model) }
+    }
+
+    func setMemoryAgentEffort(_ effort: String?) {
+        memoryAgentEffort = effort
+        save()
+        for agent in memoryAgents.values where agent.entries.isEmpty { agent.setEffort(effort) }
+    }
+
     func setClaudeCodeMemoryOff(_ off: Bool) {
         claudeCodeMemoryOff = off
         save()
@@ -87,6 +100,8 @@ extension AppModel {
         let key = memoryAgentKey(role, projectID)
         if let existing = memoryAgents[key] { return existing }
         let thread = ThreadModel(memoryRole: role, projectID: projectID, app: self)
+        if let model = memoryAgentModel { thread.setModel(model) }
+        if let effort = memoryAgentEffort { thread.setEffort(effort) }
         memoryAgents[key] = thread
         return thread
     }
@@ -282,11 +297,12 @@ struct MemoryImportReport: Identifiable {
 @MainActor @Observable
 final class MemoryLibrary {
     enum Tab: String, CaseIterable, Identifiable {
-        case memories, insights, activity, graph
+        case memories, tasks, insights, activity, graph
         var id: String { rawValue }
         var label: String {
             switch self {
             case .memories: "Memories"
+            case .tasks: "Tasks"
             case .insights: "Insights"
             case .activity: "Activity"
             case .graph: "Graph"
@@ -377,6 +393,9 @@ final class MemoryLibrary {
     func save(_ memory: Memory) {
         var memory = memory
         memory.updatedAt = .now
+        // A memory turned into a task starts in progress; one turned back is a plain memory.
+        if memory.isTask, memory.taskState == nil { memory.taskState = .active }
+        if !memory.isTask { memory.taskState = nil; memory.steps = [] }
         // Shown at once; the database follows.
         if let index = memories.firstIndex(where: { $0.id == memory.id }) { memories[index] = memory } else { memories.insert(memory, at: 0) }
         let saved = memory

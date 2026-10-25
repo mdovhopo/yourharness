@@ -30,6 +30,7 @@ struct MemoryView: View {
                 } else {
                     switch library.tab {
                     case .memories: MemoriesTab(project: project, library: library)
+                    case .tasks: MemoryTasksView(library: library)
                     case .insights: MemoryInsightsView(project: project, library: library)
                     case .activity: MemoryActivityView(library: library)
                     case .graph: MemoryGraphView(library: library)
@@ -40,22 +41,10 @@ struct MemoryView: View {
             // A tab change shows the other tab at once.
             .transaction(value: library.tab) { $0.animation = nil }
         }
-        .navigationTitle("Memory")
-        .navigationSubtitle(project.name)
         .task(id: app.memoryRevision(for: project.id)) {
             library.refresh(revision: app.memoryRevision(for: project.id))
         }
         .toolbar {
-            ToolbarItem(placement: .principal) {
-                Picker("View", selection: $library.tab) {
-                    ForEach(MemoryLibrary.Tab.allCases) { tab in
-                        Text(tab.label).tag(tab)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .disabled(library.memories.isEmpty)
-            }
             ToolbarItemGroup {
                 MemoryImportMenu(project: project)
                 Menu("Export", systemImage: "square.and.arrow.up") {
@@ -147,6 +136,16 @@ private struct MemoryHeader: View {
                     .contentTransition(.opacity)
             }
             Spacer()
+            if !library.memories.isEmpty {
+                Picker("View", selection: Bindable(library).tab) {
+                    ForEach(MemoryLibrary.Tab.allCases) { tab in
+                        Text(tab.label).tag(tab)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
+            }
             if !app.memoryEnabled {
                 Label("Off for agents", systemImage: "pause.circle")
                     .font(.callout)
@@ -332,6 +331,14 @@ private struct MemoryRow: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
+                if memory.isTask {
+                    HStack(spacing: 6) {
+                        Chip(memory.taskState?.label ?? "In Progress", tint: (memory.taskState ?? .active).color)
+                        if !memory.steps.isEmpty {
+                            Text("\(memory.stepsDone) of \(memory.steps.count) steps").font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
                 HStack(spacing: 8) {
                     Label("\(memory.recallCount)", systemImage: "eye")
                         .help(memory.recallCount == 1 ? "Read by an agent once" : "Read by agents \(memory.recallCount) times")
@@ -406,6 +413,7 @@ private struct MemoryDetail: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 titleBlock
+                if memory.isTask { TaskSection(task: memory, library: library) }
                 bodyBlock
                 MemoryUsageCard(memory: memory)
                 links
@@ -810,6 +818,7 @@ extension MemoryKind {
         case .feedback: .orange
         case .project: .purple
         case .reference: .teal
+        case .task: .pink
         }
     }
 
@@ -819,6 +828,7 @@ extension MemoryKind {
         case .feedback: "bubble.left.and.exclamationmark.bubble.right"
         case .project: "hammer"
         case .reference: "link"
+        case .task: "checklist"
         }
     }
 }

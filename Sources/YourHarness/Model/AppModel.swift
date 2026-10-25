@@ -25,7 +25,6 @@ final class AppModel {
     var selectedThreadID: UUID? {
         didSet {
             overviewProjectID = nil
-            memoryProjectID = nil
             selectedThread?.markRead()
             if let selectedThreadID { notifier.clear(thread: selectedThreadID) }
             noteViewed()
@@ -46,8 +45,29 @@ final class AppModel {
         for thread in threads where stale.contains(thread.id) { thread.unloadTranscript() }
         viewed = Array(viewed.prefix(Self.loadedTranscripts))
     }
-    /// When set, the detail pane shows this project's repos and PRs instead of a thread.
+    /// When set, the detail pane shows this project's page instead of a thread: its repos and
+    /// PRs, or its memory (`projectTab`).
     private(set) var overviewProjectID: UUID?
+
+    /// The project page's two halves.
+    enum ProjectTab: String, CaseIterable, Identifiable {
+        case workspace, memory
+        var id: String { rawValue }
+        var label: String {
+            switch self {
+            case .workspace: "Pull Requests"
+            case .memory: "Memory"
+            }
+        }
+        var symbol: String {
+            switch self {
+            case .workspace: "arrow.triangle.pull"
+            case .memory: "brain"
+            }
+        }
+    }
+
+    var projectTab = ProjectTab.workspace
     private(set) var collapsedProjectIDs: Set<UUID> = []
     /// Last usage report from the CLI. Persisted, so limits show right after launch.
     private(set) var rateLimit: RateLimitInfo?
@@ -91,15 +111,18 @@ final class AppModel {
     var memoryEnabled: Bool
     /// While memory is on, Claude Code's own memory files are off.
     var claudeCodeMemoryOff: Bool
+    /// What the Importer and Reconciler run on, unless picked in their window; nil: the threads' default.
+    var memoryAgentModel: String?
+    var memoryAgentEffort: String?
     /// Removed projects' IDs by folder, so adding one back brings back its memory.
     @ObservationIgnored var removedProjectIDs: [String: UUID] = [:]
-    /// When set, the detail pane shows this project's memory.
-    var memoryProjectID: UUID?
     /// Bumped whenever a scope's memory changes, so what shows it reloads.
     var memoryRevisions: [String: Int] = [:]
     /// The importer and reconciler conversations, by project and role: they outlive their window.
     var memoryAgents: [String: ThreadModel] = [:]
     @ObservationIgnored var memoryLibraries: [UUID: MemoryLibrary] = [:]
+    /// ⌘K.
+    @ObservationIgnored let spotlight = Spotlight()
     /// What the last direct import did, until dismissed.
     var importReport: MemoryImportReport?
 
@@ -157,14 +180,17 @@ final class AppModel {
         memoryEnabled = state.memoryEnabled
         claudeCodeMemoryOff = state.claudeCodeMemoryOff
         removedProjectIDs = state.removedProjectIDs
+        memoryAgentModel = state.memoryAgentModel
+        memoryAgentEffort = state.memoryAgentEffort
 
         threads = state.threads.map { ThreadModel(meta: $0, app: self) }
         selectedThreadID = state.selectedThreadID
         if selectedThread == nil { newThreadInCurrentProject() }
-        if let id = state.overviewProjectID, let project = project(id: id), !isHome(project) {
+        if let id = state.memoryProjectID, project(id: id) != nil {
             overviewProjectID = id
-        } else if let id = state.memoryProjectID, project(id: id) != nil {
-            memoryProjectID = id
+            projectTab = .memory
+        } else if let id = state.overviewProjectID, let project = project(id: id), !isHome(project) {
+            overviewProjectID = id
         }
         bootstrap = Task {
             await loadEnvironment()
@@ -268,7 +294,7 @@ final class AppModel {
     }
 
     /// A thread is showing, so the right sidebar has something to show.
-    var inspectorHasThread: Bool { overviewProject == nil && memoryProject == nil && selectedThread != nil }
+    var inspectorHasThread: Bool { overviewProject == nil && selectedThread != nil }
 
     func showInspector(_ panel: InspectorPanel) {
         inspectorPanel = panel
@@ -289,17 +315,29 @@ final class AppModel {
 
     /// The thread on screen right now; nil while a project overview is showing.
     var visibleThreadID: UUID? {
-        overviewProjectID == nil && memoryProjectID == nil ? selectedThreadID : nil
+        overviewProjectID == nil ? selectedThreadID : nil
     }
 
     var overviewProject: Project? {
         overviewProjectID.flatMap(project(id:))
     }
 
+    /// Opens a project's page: on its pull requests unless told otherwise. Home has no
+    /// workspace, so its page is its memory.
+    func showProject(_ project: Project, tab: ProjectTab? = nil) {
+        overviewProjectID = project.id
+        projectTab = isHome(project) ? .memory : tab ?? .workspace
+        save()
+        if projectTab == .workspace, let workspace = workspace(for: project) {
+            let tools = workspaceTools
+            Task { await workspace.refresh(tools: tools, pullsMaxAge: 60) }
+        }
+    }
+
     func showOverview(of project: Project) {
         guard !isHome(project) else { return }
         overviewProjectID = project.id
-        memoryProjectID = nil
+        projectTab = .workspace
         save()
         if let workspace = workspace(for: project) {
             let tools = workspaceTools
@@ -307,15 +345,16 @@ final class AppModel {
         }
     }
 
+    /// The project whose memory is on screen.
+    var memoryProjectID: UUID? { projectTab == .memory ? overviewProjectID : nil }
+
     var memoryProject: Project? {
         memoryProjectID.flatMap(project(id:))
     }
 
-    /// Shows a project's memory in the detail pane.
+    /// Shows a project's memory in the detail pane: its page, on the Memory tab.
     func showMemory(of project: Project) {
-        overviewProjectID = nil
-        memoryProjectID = project.id
-        save()
+        showProject(project, tab: .memory)
     }
 
     var selectedProject: Project {
@@ -518,7 +557,6 @@ final class AppModel {
         projects.removeAll { $0.id == project.id }
         workspaceModels[project.id] = nil
         if overviewProjectID == project.id { overviewProjectID = nil }
-        if memoryProjectID == project.id { memoryProjectID = nil }
         for role in MemoryRole.allCases { closeMemoryAgent(role, projectID: project.id) }
         removedProjectIDs[project.path] = project.id
         save()
@@ -1669,6 +1707,8 @@ final class AppModel {
         state.memoryEnabled = memoryEnabled
         state.claudeCodeMemoryOff = claudeCodeMemoryOff
         state.removedProjectIDs = removedProjectIDs
+        state.memoryAgentModel = memoryAgentModel
+        state.memoryAgentEffort = memoryAgentEffort
         store.saveState(state)
     }
 

@@ -19,11 +19,8 @@ struct RootView: View {
         } detail: {
             ZStack {
                 // Switching is instant, as in Mail or Messages: no crossfade to wait through.
-                if let project = app.overviewProject, let workspace = app.workspace(for: project) {
-                    WorkspaceView(project: project, workspace: workspace)
-                        .id(project.id)
-                } else if let project = app.memoryProject {
-                    MemoryView(project: project, library: app.memoryLibrary(for: project))
+                if let project = app.overviewProject {
+                    ProjectPage(project: project)
                         .id(project.id)
                 } else if let thread = app.selectedThread {
                     // Not keyed on the thread: it keeps its composer and toolbar, and only its
@@ -38,7 +35,7 @@ struct RootView: View {
             .canvasBackground()
             .transaction(value: app.selectedThreadID) { $0.animation = nil }
             .transaction(value: app.overviewProjectID) { $0.animation = nil }
-            .transaction(value: app.memoryProjectID) { $0.animation = nil }
+            .transaction(value: app.projectTab) { $0.animation = nil }
             // Everything in the right sidebar belongs to a thread: on a project's overview it has
             // nothing to show, so it steps aside, and comes back as it was with a thread.
             .inspector(isPresented: Binding(get: { isOnScreen && app.showsInspector && app.inspectorHasThread },
@@ -47,6 +44,20 @@ struct RootView: View {
                     .inspectorColumnWidth(min: 300, ideal: 380, max: 960)
             }
         }
+        .overlay {
+            if app.spotlight.isOpen {
+                ZStack(alignment: .top) {
+                    // A click outside closes it, as with Spotlight.
+                    Color.black.opacity(0.08)
+                        .ignoresSafeArea()
+                        .onTapGesture { app.spotlight.close() }
+                    SpotlightView(spotlight: app.spotlight)
+                        .padding(.top, 70)
+                }
+                .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.12), value: app.spotlight.isOpen)
         .sheet(isPresented: Bindable(app).isResumingSession) {
             ResumeSessionSheet()
         }
@@ -56,6 +67,10 @@ struct RootView: View {
             fitOnScreen()
             // Development: open the resume sheet filled in, for checking it without clicking.
             if ProcessInfo.processInfo.environment["YH_RESUME_SESSION"] != nil { app.isResumingSession = true }
+            // Development: open ⌘K with a query, for checking it without typing.
+            if let query = ProcessInfo.processInfo.environment["YH_SPOTLIGHT"] {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { app.spotlight.open(app, query: query) }
+            }
             // Development: open Settings, for checking it without a shortcut.
             if ProcessInfo.processInfo.environment["YH_OPEN_SETTINGS"] != nil { openSettings() }
             // Development: open the selected thread's browser in its own window.
