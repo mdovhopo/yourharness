@@ -24,6 +24,9 @@ struct RootView: View {
                 if let project = app.overviewProject {
                     ProjectPage(project: project)
                         .id(project.id)
+                        // Narrower than it would like, it's cut at the column's edge rather
+                        // than drawn over the sidebar.
+                        .clipped()
                 } else if let thread = app.selectedThread {
                     // Not keyed on the thread: it keeps its composer and toolbar, and only its
                     // transcript is made anew.
@@ -32,7 +35,10 @@ struct RootView: View {
                     EmptyDetailView()
                 }
             }
-            .frame(maxWidth: .infinity)
+            // As narrow as the window lets it be, down to a floor of its own: a page's content
+            // would set the window's smallest width otherwise (Memory's made it 1,300 pt, past
+            // the edge of a narrow screen).
+            .frame(minWidth: 280, maxWidth: .infinity)
             .takesWindowHeight()
             // One surface under every view, so switching swaps content, not the canvas.
             .canvasBackground()

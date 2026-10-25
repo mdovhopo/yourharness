@@ -123,17 +123,24 @@ struct TaskSection: View {
     let library: MemoryLibrary
     @State private var newStep = ""
 
+    private var statePicker: some View {
+        Picker("State", selection: Binding(get: { task.taskState ?? .active }, set: { state in change { task, value in task.taskState = value }(state) })) {
+            ForEach(HarnessDatabase.TaskState.allCases, id: \.self) { Text($0.label).tag($0) }
+        }
+        .labelsHidden()
+        .fixedSize()
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 SectionLabel("Progress")
                 Spacer()
-                Picker("State", selection: Binding(get: { task.taskState ?? .active }, set: { state in change { task, value in task.taskState = value }(state) })) {
-                    ForEach(HarnessDatabase.TaskState.allCases, id: \.self) { Text($0.label).tag($0) }
+                // A menu when there's no room for the segments.
+                ViewThatFits(in: .horizontal) {
+                    statePicker.pickerStyle(.segmented)
+                    statePicker.pickerStyle(.menu)
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .fixedSize()
             }
             VStack(alignment: .leading, spacing: 0) {
                 if !task.steps.isEmpty {

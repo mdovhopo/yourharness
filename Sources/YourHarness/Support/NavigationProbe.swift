@@ -21,11 +21,11 @@ enum NavigationProbe {
             }
             let threads = app.visibleThreadIDs.compactMap { id in app.threads.first { $0.id == id } }
             let talked = threads.filter { !$0.entries.isEmpty || $0.sessionID != nil }
-            guard let first = talked.first, let project = app.project(id: first.projectID) else {
-                log("needs a thread with a conversation")
+            guard let first = talked.first ?? threads.first, let project = app.project(id: first.projectID) else {
+                log("needs a thread")
                 return
             }
-            let second = talked.dropFirst().first ?? first
+            let second = talked.dropFirst().first ?? threads.dropFirst().first ?? first
             let home = app.homeProject
             var steps: [(String, () -> Void)] = [
                 ("thread", { app.selectedThreadID = first.id }),

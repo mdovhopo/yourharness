@@ -124,6 +124,21 @@ private struct MemoryHeader: View {
     }
 
     var body: some View {
+        // Too narrow for one row, the tabs go under the title.
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 14) {
+                title
+                Spacer()
+                controls
+            }
+            VStack(alignment: .leading, spacing: 10) {
+                title
+                HStack(spacing: 14) { controls }
+            }
+        }
+    }
+
+    private var title: some View {
         HStack(spacing: 14) {
             Image(systemName: "brain")
                 .font(.system(size: 22, weight: .medium))
@@ -133,29 +148,32 @@ private struct MemoryHeader: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text("\(project.name) Memory")
                     .font(.title2.weight(.semibold))
+                    .lineLimit(1)
                 Text(summary)
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .contentTransition(.opacity)
             }
-            Spacer()
-            OneMemoryChip(project: project)
-            if !library.memories.isEmpty {
-                Picker("View", selection: Bindable(library).tab) {
-                    ForEach(MemoryLibrary.Tab.allCases) { tab in
-                        Text(tab.label).tag(tab)
-                    }
+        }
+    }
+
+    @ViewBuilder private var controls: some View {
+        OneMemoryChip(project: project)
+        if !library.memories.isEmpty {
+            Picker("View", selection: Bindable(library).tab) {
+                ForEach(MemoryLibrary.Tab.allCases) { tab in
+                    Text(tab.label).tag(tab)
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .fixedSize()
             }
-            if !app.memoryEnabled {
-                Label("Off for agents", systemImage: "pause.circle")
-                    .font(.callout)
-                    .foregroundStyle(.orange)
-                    .help("Agents don't get memory. Turn it on in Settings → General → Memory.")
-            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
+        }
+        if !app.memoryEnabled {
+            Label("Off for agents", systemImage: "pause.circle")
+                .font(.callout)
+                .foregroundStyle(.orange)
+                .help("Agents don't get memory. Turn it on in Settings → General → Memory.")
         }
     }
 }
@@ -204,7 +222,8 @@ private struct MemoriesTab: View {
     var body: some View {
         HStack(spacing: 0) {
             MemoryList(library: library)
-                .frame(width: 330)
+                // Narrower when the window is: the memory beside it needs the room more.
+                .frame(minWidth: 220, idealWidth: 330, maxWidth: 330)
             Divider()
             Group {
                 if let id = library.selection, let memory = library.byID[id] {

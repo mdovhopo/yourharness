@@ -8,6 +8,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ### Fixed
 - **The window keeps the size you give it.** Opening a project's Memory page (with its "Two memories" note) made the window as tall as it could go, past the bottom of the screen, and it stayed that tall: a short thread then sat below the screen's edge and looked blank. No page can make the window bigger any more, and a window saved too big fits the screen again.
+- **Memory opens without resizing the window.** With memories in it, a project's Memory page (from the brain in the sidebar) widened the window to about 1,300 pt, past the edge of a narrow screen. No page can make the window wider now, and Memory fits a narrow window: the tabs go under the title, the list narrows, and a task's state becomes a menu.
 - Opening the right sidebar on a narrow window still widens it to make room, but never past the screen, and closing the sidebar gives the width back (unless you resized the window meanwhile).
 
 ## [0.0.7] - 2026-10-25
