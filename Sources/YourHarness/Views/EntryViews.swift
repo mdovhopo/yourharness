@@ -185,7 +185,8 @@ private struct ThinkingView: View {
             .buttonStyle(.plain)
 
             if expanded {
-                Text(entry.text)
+                // Claude's thinking ends in blank lines, which drew as a gap under it.
+                Text(entry.text.trimmingCharacters(in: .whitespacesAndNewlines))
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
