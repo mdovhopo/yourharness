@@ -146,6 +146,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             CookieImport.importIfRequested(app: AppModel.shared)
             BrowserProbe.runIfRequested(app: AppModel.shared)
             SwitchProbe.runIfRequested(app: AppModel.shared)
+            NavigationProbe.runIfRequested(app: AppModel.shared)
             SearchProbe.runIfRequested(app: AppModel.shared)
             MemoryProbe.runIfRequested(app: AppModel.shared)
             StackProbe.runIfRequested(app: AppModel.shared)

@@ -11,10 +11,12 @@ struct RootView: View {
     /// AppKit then collapses while its toggle still says it's shown; so it opens once the
     /// window is on screen.
     @State private var isOnScreen = false
+    @State private var inspectorRoom = InspectorRoom()
 
     var body: some View {
         NavigationSplitView {
             SidebarView()
+                .takesWindowHeight()
                 .navigationSplitViewColumnWidth(min: 220, ideal: 270, max: 380)
         } detail: {
             ZStack {
@@ -30,7 +32,8 @@ struct RootView: View {
                     EmptyDetailView()
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .frame(maxWidth: .infinity)
+            .takesWindowHeight()
             // One surface under every view, so switching swaps content, not the canvas.
             .canvasBackground()
             .transaction(value: app.selectedThreadID) { $0.animation = nil }
@@ -38,9 +41,10 @@ struct RootView: View {
             .transaction(value: app.projectTab) { $0.animation = nil }
             // Everything in the right sidebar belongs to a thread: on a project's overview it has
             // nothing to show, so it steps aside, and comes back as it was with a thread.
-            .inspector(isPresented: Binding(get: { isOnScreen && app.showsInspector && app.inspectorHasThread },
+            .inspector(isPresented: Binding(get: { showsInspector },
                                             set: { if app.inspectorHasThread { app.setShowsInspector($0) } })) {
                 ThreadInspector(thread: app.inspectorHasThread ? app.selectedThread : nil)
+                    .takesWindowHeight()
                     .inspectorColumnWidth(min: 300, ideal: 380, max: 960)
             }
         }
@@ -61,10 +65,15 @@ struct RootView: View {
         .sheet(isPresented: Bindable(app).isResumingSession) {
             ResumeSessionSheet()
         }
+        .background(WindowReader { inspectorRoom.window = $0 })
+        .onChange(of: showsInspector) { _, shown in inspectorRoom.shownChanged(shown) }
+        .onChange(of: app.showsInspector) { _, shown in if !shown { inspectorRoom.closed() } }
         .onChange(of: undoManager, initial: true) { app.undoManager = undoManager }
         .onAppear {
             isOnScreen = true
-            fitOnScreen()
+            DispatchQueue.main.async {
+                for window in NSApp.windows where window.isVisible { window.fitOnScreen() }
+            }
             // Development: open the resume sheet filled in, for checking it without clicking.
             if ProcessInfo.processInfo.environment["YH_RESUME_SESSION"] != nil { app.isResumingSession = true }
             // Development: open ⌘K with a query, for checking it without typing.
@@ -89,23 +98,89 @@ struct RootView: View {
             }
         }
     }
+
+    private var showsInspector: Bool {
+        isOnScreen && app.showsInspector && app.inspectorHasThread
+    }
 }
 
-/// A window saved taller or wider than its screen (0.0.2 and 0.0.3 could grow one past the
-/// bottom, from the Browser tab) comes back fitted to it.
+extension View {
+    /// Takes the height the window gives it, whatever its content would like. Otherwise the
+    /// content's smallest height becomes the window's: text that may not wrap shorter, measured
+    /// at the narrowest width, comes out a word a line and thousands of points tall, and the
+    /// window grew past the screen and stayed there (the Browser tab in 0.0.3, Memory in 0.0.7).
+    func takesWindowHeight() -> some View {
+        frame(minHeight: 0, maxHeight: .infinity)
+    }
+}
+
+extension NSWindow {
+    /// A window taller or wider than its screen comes back fitted to it (0.0.2, 0.0.3 and
+    /// 0.0.7 could grow one past the bottom, and saved it so).
+    func fitOnScreen() {
+        guard !styleMask.contains(.fullScreen), let visible = (screen ?? NSScreen.main)?.visibleFrame else { return }
+        guard frame.height > visible.height + 1 || frame.width > visible.width + 1 else { return }
+        let size = NSSize(width: min(frame.width, visible.width), height: min(frame.height, visible.height))
+        let origin = NSPoint(x: min(max(frame.minX, visible.minX), visible.maxX - size.width),
+                             y: min(max(frame.minY, visible.minY), visible.maxY - size.height))
+        setFrame(NSRect(origin: origin, size: size), display: true)
+    }
+}
+
+/// Opening the right sidebar on a window too narrow for it, AppKit widens the window. Closing
+/// it gives that width back, unless you've resized the window since; and the window never ends
+/// up wider than its screen. Stepping aside for a project's page keeps the width, so going
+/// between pages doesn't make the window jump.
 @MainActor
-private func fitOnScreen() {
-    DispatchQueue.main.async {
-        for window in NSApp.windows where window.isVisible && !window.styleMask.contains(.fullScreen) {
-            guard let visible = (window.screen ?? NSScreen.main)?.visibleFrame else { continue }
-            let frame = window.frame
-            guard frame.height > visible.height + 1 || frame.width > visible.width + 1 else { continue }
-            let size = NSSize(width: min(frame.width, visible.width), height: min(frame.height, visible.height))
-            let origin = NSPoint(x: min(max(frame.minX, visible.minX), visible.maxX - size.width),
-                                 y: min(max(frame.minY, visible.minY), visible.maxY - size.height))
-            window.setFrame(NSRect(origin: origin, size: size), display: true)
+private final class InspectorRoom {
+    weak var window: NSWindow? {
+        didSet {
+            guard window !== oldValue else { return }
+            resizing = window.map { window in
+                NotificationCenter.default.addObserver(forName: NSWindow.willStartLiveResizeNotification, object: window, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.before = nil }
+                }
+            }
         }
     }
+    private var resizing: NSObjectProtocol?
+    /// The window's frame before the sidebar opened.
+    private var before: NSRect?
+
+    /// The sidebar showing or not, for any reason.
+    func shownChanged(_ shown: Bool) {
+        guard shown, let window, !window.styleMask.contains(.fullScreen) else { return }
+        if before == nil { before = window.frame }
+        // Once AppKit has made room.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { window.fitOnScreen() }
+    }
+
+    /// You closed the sidebar.
+    func closed() {
+        guard let before else { return }
+        self.before = nil
+        // Once the column has gone: until then the window can't be that narrow.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak window] in
+            guard let window, !window.styleMask.contains(.fullScreen), window.frame.width > before.width + 1 else { return }
+            // Its left edge stays where it is: you may have moved it since.
+            var frame = window.frame
+            frame.size.width = before.width
+            window.setFrame(frame, display: true, animate: true)
+        }
+    }
+}
+
+/// Hands over the window a view is in, once it's in one.
+private struct WindowReader: NSViewRepresentable {
+    let found: (NSWindow) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async { if let window = view.window { found(window) } }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
 }
 
 private struct EmptyDetailView: View {
