@@ -6,6 +6,8 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+## [0.0.7] - 2026-10-25
+
 ### Added
 - **Memory, per project.** Agents now remember what's worth knowing next time (who you are, how you like to work, decisions, where things live) and every new thread in the project starts with it: an index of a line a memory (about 2,000 tokens at most), with the rest a search away. Claude Code's own memory files are turned off so there's one memory (Settings → General → Memory).
 - **The Memory view** (⇧⌘M, or the brain on a project in the sidebar): search, edit, pin, link and archive memories, see where each was learned and every version (restore any of them). **Insights** tells you in plain words how memory is working (what it costs each session, what agents read, what they never read, what looks duplicated, what they searched for and didn't find) with charts; **Activity** lists every save, read, search and session; **Graph** draws how memories link.
