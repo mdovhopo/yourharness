@@ -200,8 +200,8 @@ enum BrowserProfiles {
 final class BrowserParking {
     static let shared = BrowserParking()
     private lazy var window: NSWindow = {
-        let window = NSPanel(contentRect: NSRect(x: -30_000, y: -30_000, width: 2600, height: 2000),
-                             styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        let window = ParkingPanel(contentRect: NSRect(origin: ParkingPanel.origin, size: NSSize(width: 2600, height: 2000)),
+                                  styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         // Panels hide when the app goes to the background; this one's pages must not.
         window.hidesOnDeactivate = false
         window.isReleasedWhenClosed = false
@@ -231,6 +231,25 @@ final class BrowserParking {
         } else {
             page.setFrameOrigin(.zero)
         }
+    }
+}
+
+/// Stays off screen. AppKit brings windows back onto a screen when the screens change, as
+/// going full screen does, and this one, opaque and screen-sized, then covered the app's
+/// window from the sidebar's edge on.
+private final class ParkingPanel: NSPanel {
+    static let origin = NSPoint(x: -30_000, y: -30_000)
+
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
+        NSRect(origin: Self.origin, size: frameRect.size)
+    }
+
+    override func setFrame(_ frameRect: NSRect, display flag: Bool) {
+        super.setFrame(NSRect(origin: Self.origin, size: frameRect.size), display: flag)
+    }
+
+    override func setFrameOrigin(_ point: NSPoint) {
+        super.setFrameOrigin(Self.origin)
     }
 }
 
