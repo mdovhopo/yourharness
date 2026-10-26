@@ -18,16 +18,18 @@ struct ClaudeMark: View {
     }
 }
 
-/// The mark, slowly turning: Claude is working.
+/// The mark, slowly turning: Claude is working. Turned from the clock rather than a repeating
+/// animation, for the same reason as `pulsing`, and still while no window can be seen.
 struct SpinningClaudeMark: View {
     var size: CGFloat = 11
-    @State private var turning = false
+    /// Seconds a turn takes.
+    private let period = 2.4
 
     var body: some View {
-        ClaudeMark(size: size)
-            .rotationEffect(.degrees(turning ? 360 : 0))
-            .animation(.linear(duration: 2.4).repeatForever(autoreverses: false), value: turning)
-            .onAppear { turning = true }
+        TimelineView(.animation(minimumInterval: nil, paused: !WindowPresence.shared.isVisible)) { context in
+            ClaudeMark(size: size)
+                .rotationEffect(.degrees(context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: period) / period * 360))
+        }
     }
 }
 

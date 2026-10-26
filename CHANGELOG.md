@@ -6,6 +6,13 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+### Changed
+- **Threads working while you're elsewhere cost far less.** With the window minimized, hidden, covered, or on another Space, the app used to redraw every streamed word as if you were watching. Now it catches up once a second, and at once when you come back; anything that needs you (an approval, a finished turn) still arrives right away. With 24 busy threads, the app's CPU while you're away went from about three quarters of a core to under a third.
+
+### Fixed
+- **Full screen works after you've used the browser.** Once the built-in browser had opened a page, going full screen left everything but the sidebar blank: the off-screen window where pages wait while no panel shows them was moved onto the screen and covered the app. It stays off screen now.
+- **No more long freezes after hours of busy threads.** The turning Claude mark and the pulsing "Working…" were animations that never end, and every later animation of the same view could queue up behind them: with several threads working for hours, the app froze for minutes. They now follow the clock instead, and look the same.
+
 ## [0.0.8] - 2026-10-26
 
 ### Fixed

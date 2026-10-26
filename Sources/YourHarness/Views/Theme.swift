@@ -40,6 +40,29 @@ extension View {
     func canvasBackground() -> some View {
         background(.canvas)
     }
+
+    /// Fades down to `low` and back up every `period` seconds, for as long as it's shown and
+    /// a window can be seen.
+    func pulsing(low: Double, period: Double) -> some View {
+        modifier(Pulsing(low: low, period: period))
+    }
+}
+
+/// Worked out from the clock on every frame, never a repeating animation: one of those never
+/// finishes, so SwiftUI stacks every later animation of the view behind it (each new row moves
+/// the typing indicator), and after hours of a busy thread a single frame took minutes.
+private struct Pulsing: ViewModifier {
+    let low: Double
+    let period: Double
+
+    func body(content: Content) -> some View {
+        TimelineView(.animation(minimumInterval: nil, paused: !WindowPresence.shared.isVisible)) { context in
+            let phase = context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: period) / period
+            // 0 → 1 → 0, eased at both ends.
+            let depth = (1 - cos(phase * 2 * .pi)) / 2
+            content.opacity(1 - (1 - low) * depth)
+        }
+    }
 }
 
 /// A small capsule label: an agent type, a question's topic, a status.

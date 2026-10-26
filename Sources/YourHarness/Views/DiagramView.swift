@@ -208,8 +208,6 @@ struct MermaidBlockView: View {
 /// Shown while the diagram's code block is still streaming in: a half-written graph
 /// would re-lay itself out on every token.
 struct DiagramPlaceholder: View {
-    @State private var dimmed = false
-
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: "point.3.connected.trianglepath.dotted")
@@ -217,15 +215,13 @@ struct DiagramPlaceholder: View {
         }
         .font(.callout)
         .foregroundStyle(.secondary)
-        .opacity(dimmed ? 0.45 : 1)
-        .animation(.easeInOut(duration: 1).repeatForever(), value: dimmed)
+        .pulsing(low: 0.45, period: 2)
         .frame(maxWidth: .infinity, minHeight: 64)
         .background(Color.primary.opacity(0.025), in: .rect(cornerRadius: 12, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .strokeBorder(.separator.opacity(0.6), style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
         }
-        .onAppear { dimmed = true }
     }
 }
 

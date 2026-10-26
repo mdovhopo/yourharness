@@ -731,9 +731,31 @@ final class ThreadModel: Identifiable {
         Task { [weak self] in
             for await event in session.events {
                 guard let self else { break }
-                self.apply(event, generation: generation)
+                self.receive(event, generation: generation)
             }
         }
+    }
+
+    /// Events held while no window can be seen (see `WindowPresence`).
+    @ObservationIgnored private var heldEvents: [(event: AgentEvent, generation: Int)] = []
+
+    /// Applies an event now or, while no window can be seen, holds it to apply with the rest
+    /// in a batch. What needs you or ends the turn applies at once, after what came before it.
+    private func receive(_ event: AgentEvent, generation: Int) {
+        if WindowPresence.shared.isVisible || !event.canWait {
+            applyHeld()
+            apply(event, generation: generation)
+        } else {
+            if heldEvents.isEmpty { WindowPresence.shared.whenSeen { [weak self] in self?.applyHeld() } }
+            heldEvents.append((event, generation))
+        }
+    }
+
+    private func applyHeld() {
+        guard !heldEvents.isEmpty else { return }
+        let held = heldEvents
+        heldEvents = []
+        for item in held { apply(item.event, generation: item.generation) }
     }
 
     // MARK: - Reducer
@@ -1393,5 +1415,19 @@ final class ThreadModel: Identifiable {
 
     func appendForStress(_ entry: TranscriptEntry) {
         entries.append(entry)
+    }
+}
+
+private extension AgentEvent {
+    /// Whether it can wait for a batch while no window can be seen: the stream of a turn can,
+    /// what needs you, ends the turn or answers a request can't.
+    var canWait: Bool {
+        switch self {
+        case .status, .blockStarted, .textDelta, .thinkingDelta, .toolInputDelta, .assistantMessage, .toolResults,
+             .subagentStarted, .subagentProgress, .subagentFinished, .commandOutput, .rateLimit, .contextUsage:
+            true
+        default:
+            false
+        }
     }
 }

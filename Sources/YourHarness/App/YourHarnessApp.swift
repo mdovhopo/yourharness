@@ -120,7 +120,10 @@ struct YourHarnessApp: App {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
-        MainActor.assumeIsolated { AppModel.shared.applyAppearance() }
+        MainActor.assumeIsolated {
+            AppModel.shared.applyAppearance()
+            WindowPresence.shared.start()
+        }
         // Needed when running the bare executable (`swift run`) rather than the .app bundle.
         NSApp.setActivationPolicy(.regular)
         NSApp.activate()
@@ -174,6 +177,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        MainActor.assumeIsolated { AppModel.shared.shutdown() }
+        MainActor.assumeIsolated {
+            // Into the threads before they're saved.
+            WindowPresence.shared.flush()
+            AppModel.shared.shutdown()
+        }
     }
 }

@@ -1216,15 +1216,11 @@ struct ThreadChips: View {
 
 /// Pulses while a thread here is working.
 private struct WorkingDot: View {
-    @State private var dim = false
-
     var body: some View {
         Circle()
             .fill(.tint)
             .frame(width: 6, height: 6)
-            .opacity(dim ? 0.35 : 1)
-            .animation(.easeInOut(duration: 0.8).repeatForever(), value: dim)
-            .onAppear { dim = true }
+            .pulsing(low: 0.35, period: 1.6)
             .help("Working now")
     }
 }

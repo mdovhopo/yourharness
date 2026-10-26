@@ -470,15 +470,13 @@ struct TypingIndicator: View {
     var text = "Working…"
     /// When the turn started: shows how long it's been going.
     var since: Date?
-    @State private var dimmed = false
 
     var body: some View {
         HStack(spacing: 8) {
             SpinningClaudeMark(size: 14)
             Text(text)
                 .foregroundStyle(.secondary)
-                .opacity(dimmed ? 0.45 : 1)
-                .animation(.easeInOut(duration: 1.1).repeatForever(), value: dimmed)
+                .pulsing(low: 0.45, period: 2.2)
             if let since {
                 TimelineView(.periodic(from: .now, by: 1)) { context in
                     Text(TurnDuration.format(context.date.timeIntervalSince(since)))
@@ -489,7 +487,6 @@ struct TypingIndicator: View {
             }
         }
         .font(.callout)
-        .onAppear { dimmed = true }
     }
 }
 
