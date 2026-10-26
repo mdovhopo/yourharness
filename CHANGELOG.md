@@ -6,6 +6,8 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+## [0.0.9] - 2026-10-26
+
 ### Changed
 - **Threads working while you're elsewhere cost far less.** With the window minimized, hidden, covered, or on another Space, the app used to redraw every streamed word as if you were watching. Now it catches up once a second, and at once when you come back; anything that needs you (an approval, a finished turn) still arrives right away. With 24 busy threads, the app's CPU while you're away went from about three quarters of a core to under a third.
 
