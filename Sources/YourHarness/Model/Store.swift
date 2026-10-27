@@ -93,6 +93,9 @@ struct ThreadMeta: Codable {
     /// Set by un-settling: the thread sorts as fresh, and isn't auto-settled again until
     /// you send something new.
     var reactivatedAt: Date?
+    /// You named it (or asked Claude to): generated titles don't replace it until you ask
+    /// for one with Regenerate Title.
+    var titleChosen: Bool?
     /// Claude was working when this was saved. Still set at launch, the app closed
     /// mid-turn without saying so (a crash), and the turn is marked as cut off.
     var turnInProgress: Bool?
@@ -138,6 +141,11 @@ struct PersistedState: Codable {
     var autoSettleDays = 3
     /// Who names new threads. Claude Code's Haiku unless changed.
     var titleGeneration = TitleGenerationSettings()
+    /// Your rules for titles in place of the built-in ones (`ThreadTitlePrompt.defaultRules`).
+    var titlePrompt: String?
+    /// A thread's agent may have its title rewritten when the subject changes. On unless
+    /// turned off.
+    var agentUpdatesTitles = true
     /// The right sidebar was open at quit.
     var showsInspector = false
     /// Each project's slash commands and skills as the CLI last listed them, keyed by
@@ -195,6 +203,8 @@ struct PersistedState: Codable {
         diagramInstructions = try container.decodeIfPresent(Bool.self, forKey: .diagramInstructions) ?? true
         autoSettleDays = try container.decodeIfPresent(Int.self, forKey: .autoSettleDays) ?? 3
         titleGeneration = try container.decodeIfPresent(TitleGenerationSettings.self, forKey: .titleGeneration) ?? TitleGenerationSettings()
+        titlePrompt = try container.decodeIfPresent(String.self, forKey: .titlePrompt)
+        agentUpdatesTitles = try container.decodeIfPresent(Bool.self, forKey: .agentUpdatesTitles) ?? true
         showsInspector = try container.decodeIfPresent(Bool.self, forKey: .showsInspector) ?? false
         slashCommands = try container.decodeIfPresent([String: [SlashCommand]].self, forKey: .slashCommands) ?? [:]
         skills = try container.decodeIfPresent([String: [String]].self, forKey: .skills) ?? [:]

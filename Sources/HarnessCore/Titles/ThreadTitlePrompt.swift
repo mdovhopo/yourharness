@@ -20,12 +20,17 @@ public enum ThreadTitlePrompt {
     /// What both providers are asked to return.
     public static let outputSchema = #"{"type":"object","properties":{"title":{"type":"string"},"needsRefinement":{"type":"boolean"}},"required":["title","needsRefinement"],"additionalProperties":false}"#
 
-    // Keep the shared editorial rules in these two prompts in sync.
-    static let initialInstructions = """
+    /// What a first title is asked for, whatever the rules: Settings can't change this part.
+    static let initialFrame = """
         Generate a title that will help the user recognize this YourHarness thread weeks later.
         Return JSON with keys title and needsRefinement.
         Set needsRefinement to true only if the subject is still unknown, such as an unresolved link, "fix this", or an unexplained attachment. Otherwise set it to false.
+        """
 
+    /// What makes a good title: the part of the prompt Settings → Thread Titles lets you
+    /// rewrite (`rules` below). Keep the shared editorial rules in sync with
+    /// `regenerateRules`.
+    public static let defaultRules = """
         Before answering, silently reduce the request to:
         - Subject: What system, feature, or problem is this really about?
         - Outcome: What does the user ultimately want to understand or change?
@@ -48,7 +53,10 @@ public enum ThreadTitlePrompt {
         - If a linked PR or issue cannot be read, fall back to the user's stated action plus its number, such as "Take Over PR 8588". This is the one case where a PR or issue number belongs in the title.
         """
 
-    static func regenerateInstructions(previousTitle: String) -> String {
+    static let initialInstructions = initialFrame + "\n\n" + defaultRules
+
+    /// What a fresh title for a whole conversation is asked for, whatever the rules.
+    static func regenerateFrame(previousTitle: String) -> String {
         """
         Regenerate the title for an existing YourHarness thread so the user can recognize it weeks later.
         The previous title was \(jsonString(previousTitle)).
@@ -59,7 +67,11 @@ public enum ThreadTitlePrompt {
         2. Use ASSISTANT messages to resolve vague links, unnamed code, and discovered product nouns. Do not promote one assistant finding into the thread subject unless the user adopts it as a new goal.
         3. Compare that subject with the previous title. Preserve accurate scope words, especially when earlier content is truncated. Replace the previous title when it is generic, artifact-based, a completion update, or contradicted by the thread.
         4. Title the durable subject and desired outcome, not the current workflow state.
+        """
+    }
 
+    /// The built-in rules for a regenerated title. Custom rules replace them.
+    static let regenerateRules = """
         Editorial rules:
         - 3-8 words, fewer than 40 characters.
         - Use a compact noun phrase or clear action phrase.
@@ -82,16 +94,34 @@ public enum ThreadTitlePrompt {
         - A vague failing-test request later identified as a lazy feed mismatch becomes "Fix Lazy Thread Feed Test," not "Prevent Mobile Feed Regressions."
         - A QR-sharing overhaul that ends with CI and merge work remains about QR sharing, not the PR lifecycle.
         """
+
+    static func regenerateInstructions(previousTitle: String, rules: String? = nil) -> String {
+        guard let rules = custom(rules) else { return regenerateFrame(previousTitle: previousTitle) + "\n\n" + regenerateRules }
+        return regenerateFrame(previousTitle: previousTitle) + "\n\n" + rules
+            + "\n\nKeep the previous title unchanged if it is already accurate. Otherwise return a meaningfully improved title, not a cosmetic paraphrase."
     }
 
-    /// The prompt for a thread's first message.
-    public static func initial(message: String, linkedContext: String? = nil) -> String {
-        "\(initialInstructions)\n\nUser message:\n\(limit(message, to: 8_000))\(suffix(linkedContext))"
+    /// The prompt for a thread's first message. `rules`, from Settings, replace `defaultRules`.
+    public static func initial(message: String, linkedContext: String? = nil, rules: String? = nil) -> String {
+        let instructions = custom(rules).map { initialFrame + "\n\n" + $0 } ?? initialInstructions
+        return "\(instructions)\n\nUser message:\n\(limit(message, to: 8_000))\(suffix(linkedContext))"
     }
 
-    /// The prompt for a fresh title from the whole conversation; `contents` comes from `context(for:)`.
-    public static func regenerate(contents: String, previousTitle: String, linkedContext: String? = nil) -> String {
-        "\(regenerateInstructions(previousTitle: previousTitle))\n\nThread contents:\n\(preservingEnd(contents))\(suffix(linkedContext))"
+    /// The prompt for a fresh title from the whole conversation; `contents` comes from
+    /// `context(for:)`. `hint` is the thread's agent saying what the subject is now.
+    public static func regenerate(contents: String, previousTitle: String, linkedContext: String? = nil,
+                                  rules: String? = nil, hint: String? = nil) -> String {
+        var prompt = "\(regenerateInstructions(previousTitle: previousTitle, rules: rules))\n\nThread contents:\n\(preservingEnd(contents))"
+        if let hint = hint?.trimmingCharacters(in: .whitespacesAndNewlines), !hint.isEmpty {
+            prompt += "\n\nThe agent working in this thread says its subject is now: \(limit(hint, to: 300))\nTreat that as a hint, not the title: check it against the user's messages."
+        }
+        return prompt + suffix(linkedContext)
+    }
+
+    /// Rules from Settings, unless they're empty: then the built-in ones.
+    private static func custom(_ rules: String?) -> String? {
+        guard let rules = rules?.trimmingCharacters(in: .whitespacesAndNewlines), !rules.isEmpty else { return nil }
+        return rules
     }
 
     private static func suffix(_ linkedContext: String?) -> String {

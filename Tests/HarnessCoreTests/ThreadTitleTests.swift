@@ -37,6 +37,32 @@ struct ThreadTitleTests {
         #expect(prompt.hasSuffix("Thread contents:\nUSER:\nhi"))
     }
 
+    @Test func customRulesReplaceTheBuiltInOnesButNotTheFrame() {
+        let rules = "Start every title with the ticket number, like ABC-12."
+        let initial = ThreadTitlePrompt.initial(message: "ABC-7: login loops", rules: rules)
+        #expect(initial.hasPrefix(ThreadTitlePrompt.initialFrame + "\n\n" + rules))
+        #expect(!initial.contains("Editorial rules"))
+        #expect(initial.contains("User message:\nABC-7: login loops"))
+
+        let regenerated = ThreadTitlePrompt.regenerate(contents: "USER:\nhi", previousTitle: "Old", rules: rules)
+        #expect(regenerated.contains(#"The previous title was "Old""#))
+        #expect(regenerated.contains("Determine the title in this order:"))
+        #expect(regenerated.contains(rules))
+        #expect(!regenerated.contains("Editorial rules"))
+        #expect(regenerated.contains("Keep the previous title unchanged if it is already accurate."))
+
+        // Nothing written means the built-in rules.
+        #expect(ThreadTitlePrompt.initial(message: "x", rules: "  \n") == ThreadTitlePrompt.initial(message: "x"))
+        #expect(ThreadTitlePrompt.initial(message: "x", rules: ThreadTitlePrompt.defaultRules) == ThreadTitlePrompt.initial(message: "x"))
+    }
+
+    @Test func theAgentsHintGoesWithTheConversation() {
+        let prompt = ThreadTitlePrompt.regenerate(contents: "USER:\nhi", previousTitle: "Old", linkedContext: "ctx", hint: "Settings window redesign")
+        #expect(prompt.contains("Thread contents:\nUSER:\nhi\n\nThe agent working in this thread says its subject is now: Settings window redesign"))
+        #expect(prompt.hasSuffix("Do not repeat source control lookups or infer the subject from local git history."))
+        #expect(!ThreadTitlePrompt.regenerate(contents: "USER:\nhi", previousTitle: "Old", hint: " ").contains("says its subject"))
+    }
+
     @Test func longMessagesKeepTheirStartAndEnd() {
         let text = "START" + String(repeating: "x", count: 10_000) + "END"
         let limited = ThreadTitlePrompt.limit(text, to: 100)

@@ -27,6 +27,12 @@ struct MCPToolServerTests {
         #expect(tool["name"] == "reverse")
         #expect(tool["inputSchema"]?["required"] == ["text"])
         #expect(tool["annotations"]?["readOnlyHint"] == true)
+        #expect(tool["_meta"] == nil)
+    }
+
+    @Test func aToolCanAskNotToBeDeferred() {
+        let tool = MCPTool(name: "now", description: "", inputSchema: MCPTool.schema([:]), alwaysLoad: true)
+        #expect(MCPServerEndpoint.definition(tool)["_meta"]?["anthropic/alwaysLoad"] == true)
     }
 
     @Test func callsCarryTheirToolUse() async throws {

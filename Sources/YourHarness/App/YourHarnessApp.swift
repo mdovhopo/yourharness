@@ -87,6 +87,10 @@ struct YourHarnessApp: App {
                     if let thread = app.selectedThread { StressTest.simulateStreaming(into: thread) }
                 }
                 .disabled(app.selectedThread == nil)
+                Divider()
+                // For the transcript showing nothing until you scroll: choose it while it's empty.
+                Button("Capture Transcript State") { TranscriptDiagnostics.capture(app: app) }
+                    .disabled(app.selectedThread == nil)
             }
         }
 
@@ -136,7 +140,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // streaming without clicking through the Debug menu.
         if let message = ProcessInfo.processInfo.environment["YH_SEND_MESSAGE"], !message.isEmpty {
             MainActor.assumeIsolated {
-                AppModel.shared.newThreadInCurrentProject()
+                // YH_SEND_IN_SELECTED=1: into the selected thread, as its next message.
+                if ProcessInfo.processInfo.environment["YH_SEND_IN_SELECTED"] == "1" {
+                    AppModel.shared.selectedThread?.loadTranscriptIfNeeded()
+                } else {
+                    AppModel.shared.newThreadInCurrentProject()
+                }
                 let images = (ProcessInfo.processInfo.environment["YH_SEND_IMAGES"] ?? "")
                     .split(separator: ":").compactMap { ImageAttachment.prepare(contentsOf: URL(fileURLWithPath: String($0))) }
                 AppModel.shared.selectedThread?.send(message, images: images)
@@ -156,6 +165,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ThreadToolsProbe.runIfRequested(app: AppModel.shared)
             StateTransfer.runIfRequested(app: AppModel.shared)
             SwitchProbe.runIfRequested(app: AppModel.shared)
+            TranscriptDiagnostics.runIfRequested(app: AppModel.shared)
             NavigationProbe.runIfRequested(app: AppModel.shared)
             SearchProbe.runIfRequested(app: AppModel.shared)
             MemoryProbe.runIfRequested(app: AppModel.shared)

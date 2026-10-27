@@ -8,7 +8,11 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ### Added
 - **Claude can look after your threads.** Ask a thread to find an earlier conversation, read what it worked out, rename or settle threads, pin one, or bring in a session you ran with Claude Code in a terminal, and it does it without taking you anywhere. It can't delete threads. A thread in Home reaches all your projects; a thread in a project only that project's threads, and only Claude Code sessions run in its folder. It changes threads only when you ask, and checks with you before changing more than two.
+- **Titles keep up with the conversation.** When a thread turns to something else, Claude has its title rewritten, by the same title model and in the same style as the first one. A name you gave the thread yourself stays. Turn it off in Settings → General → Thread Titles, where you can now also edit the prompt titles are written by.
 - **Export State and Import State.** File → Export State… puts everything YourHarness has into one file: your projects, threads, memories, settings and images, the window layout, and which app version, Mac and tools it came from. Your browser sign-ins go in only if you tick the box. Import State brings a file back. It first shows what's in the file next to what you have now and warns that everything will be replaced. It saves a copy of your current state unless you say not to, then restarts. Use it to move to another Mac, or to send someone the exact state a bug happens in.
+
+### Fixed
+- **The PRs sidebar stays still.** Coming back to the app (from Mission Control or another window) refreshes your repos, and with a stack or PRs in several repos, the cards could swap places each time: a PR's place depended on whether the latest refresh had found it through its branch, and a repo's list holds only its 20 most recently updated PRs, so a quiet one drifted in and out. PRs now keep the order they came into the thread, and a failed `git status` no longer makes a repo forget its branch until the next refresh.
 
 ## [0.0.9] - 2026-10-26
 

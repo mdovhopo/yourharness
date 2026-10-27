@@ -18,7 +18,10 @@ enum WindowSnapshot {
     static func write(to path: String) -> Bool {
         // `YH_SNAPSHOT_WINDOW=<title>` draws the window with that title instead (a memory agent's, say).
         let title = ProcessInfo.processInfo.environment["YH_SNAPSHOT_WINDOW"]
-        guard let window = NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil && $0.frame.width > 600
+        // The main window unless another is named: the browser's parking panel is big and
+        // visible too, off screen.
+        let main = title == nil ? NSApp.windows.first(where: { $0.frameAutosaveName == "main" && $0.isVisible }) : nil
+        guard let window = main ?? NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil && $0.frame.width > 600
                 && (title == nil || $0.title.contains(title!)) }),
               let view = window.contentView?.superview ?? window.contentView
         else {

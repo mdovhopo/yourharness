@@ -18,12 +18,16 @@ public struct MCPTool: Sendable, Equatable {
     public var inputSchema: JSONValue
     /// Doesn't change anything: shown to the client as `readOnlyHint`.
     public var readOnly: Bool
+    /// Always in the agent's tool list, never deferred behind Claude Code's tool search: for a
+    /// small tool it should reach for without looking it up first.
+    public var alwaysLoad: Bool
 
-    public init(name: String, description: String, inputSchema: JSONValue, readOnly: Bool = false) {
+    public init(name: String, description: String, inputSchema: JSONValue, readOnly: Bool = false, alwaysLoad: Bool = false) {
         self.name = name
         self.description = description
         self.inputSchema = inputSchema
         self.readOnly = readOnly
+        self.alwaysLoad = alwaysLoad
     }
 
     /// An object schema from its properties; `required` lists the ones that must be there.
@@ -89,12 +93,15 @@ public struct MCPServerEndpoint: Sendable {
     }
 
     static func definition(_ tool: MCPTool) -> JSONValue {
-        [
+        var definition: [String: JSONValue] = [
             "name": .string(tool.name),
             "description": .string(tool.description),
             "inputSchema": tool.inputSchema,
             "annotations": ["readOnlyHint": .bool(tool.readOnly)],
         ]
+        // Claude Code's own key for "don't defer this one".
+        if tool.alwaysLoad { definition["_meta"] = ["anthropic/alwaysLoad": true] }
+        return .object(definition)
     }
 
     static func encode(_ result: MCPToolResult) -> JSONValue {

@@ -330,7 +330,9 @@ final class WorkspaceModel {
         let cloned = repos.filter(\.isCloned)
         let results = await Self.map(cloned) { repo in (repo.id, await git.status(of: repo.url)) }
         var statuses: [String: RepoStatus] = [:]
-        for (id, status) in results { statuses[id] = status }
+        // A status that didn't come back (git busy, slow) keeps the last one: dropped, the
+        // repo's branch and its PRs would vanish until the next refresh.
+        for (id, status) in results { statuses[id] = status ?? self.statuses[id] }
         if statuses != self.statuses { self.statuses = statuses }
 
         // Worktrees: each repo's list, the status of each one, and which branches are merged.
@@ -355,7 +357,7 @@ final class WorkspaceModel {
             (worktree.path, await git.status(of: worktree.url))
         }
         var worktreeStatuses: [String: RepoStatus] = [:]
-        for (path, status) in checked { worktreeStatuses[path] = status }
+        for (path, status) in checked { worktreeStatuses[path] = status ?? self.worktreeStatuses[path] }
         let detached = worktrees.flatMap { id, list in list.filter { $0.isDetached && !$0.isMissing }.map { (id, $0) } }
         let reach = await Self.map(detached) { id, worktree in
             (worktree.path, await worktree.headOID.asyncMap { await git.isReachable($0, in: cloned.first { $0.id == id }!.url) } ?? false)

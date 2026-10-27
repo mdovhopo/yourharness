@@ -5,11 +5,17 @@ import HarnessCore
 /// them (rename, settle, pin) and brings in Claude Code sessions, the way you would from the
 /// sidebar and the Resume sheet. It can't delete anything. A thread in Home reaches every
 /// project; a thread anywhere else only its own project's threads, and only sessions that ran
-/// in that project's folder.
+/// in that project's folder. With title updates on (Settings → Thread Titles), it can also
+/// have its own thread's title rewritten by the title model when the subject changes.
 struct ThreadToolServer: MCPToolServer {
     let name = "threads"
-    let tools = ThreadTools.definitions
+    let tools: [MCPTool]
     let threads: ThreadTools
+
+    init(threads: ThreadTools, updatesTitle: Bool) {
+        self.threads = threads
+        tools = ThreadTools.definitions + (updatesTitle ? [ThreadTools.updateTitle] : [])
+    }
 
     func call(_ tool: String, arguments: JSONValue, toolUseID: String?) async -> MCPToolResult {
         await threads.call(tool, arguments)
@@ -97,6 +103,16 @@ final class ThreadTools {
         ]
     }()
 
+    nonisolated static let updateTitle = MCPTool(
+        name: "update_title",
+        description: "Have this thread's title rewritten because what the thread is about has changed: the user turned to a different task, or a vague start turned out to be about something specific. YourHarness's title model writes it from the conversation, in the background, and keeps the current title if it's still accurate. Not for progress on the same subject, and not for other threads.",
+        inputSchema: MCPTool.schema([
+            "hint": ["type": "string", "description": "What the thread is about now, in a few words: a hint for the title model, not the title itself."],
+        ]),
+        // Called on the spot when a message changes the subject: having to look it up first
+        // was enough for an agent to skip it.
+        alwaysLoad: true)
+
     func call(_ tool: String, _ args: JSONValue) async -> MCPToolResult {
         guard let caller, let scope = scope(of: caller) else { return .error("This thread is gone.") }
         do {
@@ -109,6 +125,7 @@ final class ThreadTools {
             case "pin_thread": return try pin(args, scope: scope)
             case "list_claude_code_sessions": return await sessions(args, scope: scope)
             case "import_claude_code_session": return try await importSession(args, scope: scope)
+            case "update_title": return try updateTitle(args, of: caller)
             default: return .error("No tool named \(tool).")
             }
         } catch {
@@ -239,6 +256,23 @@ final class ThreadTools {
         let old = thread.title
         thread.rename(title)
         return .text("Renamed “\(old)” to “\(thread.title)”.")
+    }
+
+    /// The caller's own title, written by the title model with Settings' prompt.
+    private func updateTitle(_ args: JSONValue, of thread: ThreadModel) throws(Failure) -> MCPToolResult {
+        guard app.agentTitleUpdatesOn else { throw Failure(message: "Title updates are turned off in Settings → General → Thread Titles.") }
+        if thread.titleChosen {
+            return .text("The user chose this thread's title, “\(thread.title)”, so it stays. Rename it only if they ask.")
+        }
+        guard !thread.isGeneratingTitle else { return .text("The title is already being rewritten.") }
+        let sent = thread.sentMessageCount
+        guard thread.agentTitleRequestedAt != sent else {
+            return .text("The title was already updated since the user's last message; once per change of subject is enough.")
+        }
+        thread.agentTitleRequestedAt = sent
+        let hint = args["hint"]?.string.map { Self.oneLine($0, max: 300) }
+        app.generateTitle(for: thread, from: .agentRequest(hint: hint))
+        return .text("The title (“\(thread.title)” now) is being rewritten from the conversation; it stays as it is if it's still accurate. No need to mention it to the user.")
     }
 
     private func settle(_ args: JSONValue, scope: Scope) throws(Failure) -> MCPToolResult {

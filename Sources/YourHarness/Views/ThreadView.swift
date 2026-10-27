@@ -208,15 +208,27 @@ private struct TranscriptView: View {
             // very bottom, offset + container + top inset equals it (measured both ways).
             ScrollState(offset: geometry.contentOffset.y, contentHeight: geometry.contentSize.height,
                         containerHeight: geometry.containerSize.height,
+                        insets: [geometry.contentInsets.top, geometry.contentInsets.bottom],
                         isAtBottom: geometry.contentOffset.y + geometry.containerSize.height + geometry.contentInsets.top >= geometry.contentSize.height - 40,
                         isAtTop: geometry.contentOffset.y + geometry.contentInsets.top <= 40)
         } action: { old, new in
+            if SwitchProbe.isOn { SwitchProbe.geometry[thread.id] = (new.offset, new.contentHeight, new.containerHeight) }
             isAtBottom = new.isAtBottom
             isAtTop = new.isAtTop
             isShort = new.contentHeight <= new.containerHeight + 0.5
             // Moved while the content stayed the same size: that's scrolling, by any means
             // (a scroll bar drag may report no phase), so follow only if it ended at the bottom.
             if new.contentHeight == old.contentHeight, new.offset != old.offset { followsBottom = new.isAtBottom }
+            var diagnostics = TranscriptDiagnostics.scroll[thread.id] ?? .init()
+            diagnostics.offset = new.offset
+            diagnostics.contentHeight = new.contentHeight
+            diagnostics.containerHeight = new.containerHeight
+            diagnostics.insetTop = new.insets[0]
+            diagnostics.insetBottom = new.insets[1]
+            diagnostics.followsBottom = followsBottom
+            diagnostics.isShort = isShort
+            diagnostics.updated = .now
+            TranscriptDiagnostics.scroll[thread.id] = diagnostics
         }
         .onScrollPhaseChange { old, phase in
             if phase != .idle {
@@ -251,7 +263,14 @@ private struct TranscriptView: View {
                 withAnimation(.smooth(duration: 0.25)) { position.scrollTo(id: id, anchor: .center) }
             }
         }
-        .onScrollTargetVisibilityChange(idType: String.self, threshold: 0.3) { visibleRowIDs = $0 }
+        .onScrollTargetVisibilityChange(idType: String.self, threshold: 0.3) { ids in
+            visibleRowIDs = ids
+            TranscriptDiagnostics.scroll[thread.id, default: .init()].visibleRows = ids
+            if SwitchProbe.isOn { SwitchProbe.visibleRows[thread.id] = ids.count }
+        }
+        .onScrollTargetVisibilityChange(idType: String.self, threshold: 0.01) { ids in
+            TranscriptDiagnostics.scroll[thread.id, default: .init()].touchedRows = ids
+        }
         .onChange(of: thread.messageJump) { _, jump in
             if let jump { self.jump(jump.direction) }
         }
@@ -462,6 +481,7 @@ private struct ScrollState: Equatable {
     var offset: CGFloat
     var contentHeight: CGFloat
     var containerHeight: CGFloat
+    var insets: [CGFloat]
     var isAtBottom: Bool
     var isAtTop: Bool
 }

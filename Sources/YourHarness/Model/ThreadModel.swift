@@ -95,6 +95,11 @@ final class ThreadModel: Identifiable {
     var draftImages: [ImageAttachment] = []
     /// A generated title is on its way; the current one is a placeholder.
     private(set) var isGeneratingTitle = false
+    /// You named the thread (or had Claude rename it): the agent leaves the title alone.
+    private(set) var titleChosen = false
+    /// How many messages you'd sent when the agent last asked for a new title: once per
+    /// message is plenty.
+    @ObservationIgnored var agentTitleRequestedAt: Int?
     /// What the agent is doing when it isn't writing, e.g. compacting the conversation.
     private(set) var activity: String?
     /// Sent while Claude works, waiting for its current step to finish. Each joins the
@@ -259,6 +264,7 @@ final class ThreadModel: Identifiable {
         self.app = app
         isEphemeral = false
         title = meta.title
+        titleChosen = meta.titleChosen ?? false
         createdAt = meta.createdAt
         updatedAt = meta.updatedAt
         sessionID = meta.sessionID
@@ -290,6 +296,7 @@ final class ThreadModel: Identifiable {
                    contextTokens: contextTokens, contextWindow: contextWindow,
                    isPinned: isPinned ? true : nil, settledAt: settledAt,
                    autoSettle: autoSettle ? nil : false, reactivatedAt: reactivatedAt,
+                   titleChosen: titleChosen ? true : nil,
                    turnInProgress: phase == .running || wasCutOff ? true : nil,
                    draft: draft.isEmpty ? nil : draft,
                    browserTabs: Self.nilIfEmpty(browser?.savedURLs ?? savedBrowserTabs),
@@ -1377,10 +1384,14 @@ final class ThreadModel: Identifiable {
         titleRequest = nil
         titleNeedsRefinement = false
         isGeneratingTitle = false
-        guard newTitle != title else { return }
+        titleChosen = true
+        guard newTitle != title else { return app.save() }
         title = newTitle
         app.save()
     }
+
+    /// Messages you've sent, for keeping the agent's title requests to one each.
+    var sentMessageCount: Int { entries.lazy.filter { $0.kind == .user }.count }
 
     /// User and assistant messages, oldest first; what a regenerated title reads.
     var titleMessages: [ThreadTitlePrompt.Message] {
@@ -1406,7 +1417,10 @@ final class ThreadModel: Identifiable {
         guard titleRequest == request else { return }
         titleRequest = nil
         isGeneratingTitle = false
-        guard let generated, generated.title != ThreadTitlePrompt.fallback, generated.title != title else { return }
+        guard let generated, generated.title != ThreadTitlePrompt.fallback else { return }
+        // A generated title you asked for (or kept) is no longer one you chose.
+        titleChosen = false
+        guard generated.title != title else { return app.save() }
         title = generated.title
         if !regenerating, generated.needsRefinement { titleNeedsRefinement = true }
         app.save()

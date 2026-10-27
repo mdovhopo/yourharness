@@ -91,6 +91,9 @@ final class AppModel {
     private(set) var titleGeneration: TitleGenerationSettings
     /// Why the last generated title didn't arrive, for Settings; cleared by the next success.
     private(set) var titleGenerationError: String?
+    /// Settings' rules for titles; nil uses the built-in ones.
+    private(set) var titlePrompt: String?
+    private(set) var agentUpdatesTitles: Bool
     @ObservationIgnored private var contextWindows: [String: Int]
 
     /// Whether to notify you when a turn finishes or Claude needs you.
@@ -187,6 +190,8 @@ final class AppModel {
         diagramInstructions = state.diagramInstructions
         autoSettleDays = state.autoSettleDays
         titleGeneration = state.titleGeneration
+        titlePrompt = state.titlePrompt
+        agentUpdatesTitles = state.agentUpdatesTitles
         showsInspector = state.showsInspector
         appearance = state.appearance
         notifications = state.notifications
@@ -820,7 +825,11 @@ final class AppModel {
     private(set) var pullsSyncedAtObserved: [UUID: Date] = [:]
 
     /// Open PRs from the branches it works on, and every PR linked in it, whatever their
-    /// state now: one merged since keeps showing, as merged.
+    /// state now: one merged since keeps showing, as merged. In the order they came into the
+    /// thread, newest first, however each was found this time: a repo's open list is only its
+    /// 20 most recently updated PRs, so a quiet one drifts in and out of it as others change,
+    /// and ordered by how it was found, it jumped about (and its card with it) at every
+    /// refresh, as when the app comes back to the front.
     func pullRequests(for thread: ThreadModel) -> [ThreadPullRequest] {
         var result: [ThreadPullRequest] = [], seen = Set<String>()
         let openPulls = workspaceModels.values.flatMap(\.pullRequests)
@@ -835,7 +844,13 @@ final class AppModel {
             result.append(ThreadPullRequest(id: link.id, number: link.number, repo: link.remote.name, url: link.url, pull: pull, branch: nil,
                                             isWorkedOn: worked.contains(link.id)))
         }
-        return result
+        // A branch's PR not linked yet (it is at the next sync) stays first, as found.
+        let linkOrder = Dictionary(thread.pullRequestLinks.reversed().enumerated().compactMap { index, url in
+            PullRequestLink.find(in: url).first.map { ($0.id, index) }
+        }, uniquingKeysWith: { first, _ in first })
+        return result.enumerated()
+            .sorted { (linkOrder[$0.element.id] ?? -1, $0.offset) < (linkOrder[$1.element.id] ?? -1, $1.offset) }
+            .map(\.element)
     }
 
     /// Only the PRs the thread worked on: what its toolbar counts and what settles it.
@@ -1088,7 +1103,7 @@ final class AppModel {
             // The thread tools touch only the app's own list and delete nothing; the
             // instructions keep changes to what you ask for.
             options.allowedTools.append("mcp__threads")
-            let threads = AgentInstructions.threads(project: isHome(project) ? nil : project.name)
+            let threads = AgentInstructions.threads(project: isHome(project) ? nil : project.name, updatesTitle: agentTitleUpdatesOn)
             options.appendSystemPrompt = [options.appendSystemPrompt, threads].compactMap(\.self).joined(separator: "\n\n")
         }
         await checkStacksInstalled()
@@ -1330,7 +1345,7 @@ final class AppModel {
             return servers
         }
         var servers: [any MCPToolServer] = [HarnessToolServer(media: MediaTool(thread: thread, app: self)),
-                                            ThreadToolServer(threads: ThreadTools(thread: thread, app: self))]
+                                            ThreadToolServer(threads: ThreadTools(thread: thread, app: self), updatesTitle: agentTitleUpdatesOn)]
         if browserTools { servers.append(BrowserToolServer(browser: BrowserTools(thread: thread, app: self, readOnly: false))) }
         if memoryEnabled { servers.append(memoryServer(for: thread, access: .agent, actor: .init("agent", threadID: thread.id.uuidString))) }
         return servers
@@ -1386,12 +1401,31 @@ final class AppModel {
         case firstMessage(String)
         /// The whole conversation, replacing the current title only if it's improved.
         case conversation
+        /// The thread's agent says the subject has changed, and what it is now.
+        case agentRequest(hint: String?)
     }
+
+    /// Whether a thread's agent gets `update_title`: on, and titles are generated.
+    var agentTitleUpdatesOn: Bool { agentUpdatesTitles && titleGeneration.provider != nil }
 
     func setTitleGeneration(_ settings: TitleGenerationSettings) {
         titleGeneration = settings
         titleGenerationError = nil
         save()
+    }
+
+    /// Nil, empty or the built-in rules all mean the built-in ones.
+    func setTitlePrompt(_ rules: String?) {
+        let rules = rules?.trimmingCharacters(in: .whitespacesAndNewlines)
+        titlePrompt = rules.flatMap { $0.isEmpty || $0 == ThreadTitlePrompt.defaultRules ? nil : $0 }
+        save()
+    }
+
+    /// Sessions pick it up when they next start: it changes their tools.
+    func setAgentUpdatesTitles(_ enabled: Bool) {
+        agentUpdatesTitles = enabled
+        save()
+        for thread in threads { thread.restartSession() }
     }
 
     func canGenerateTitles(with provider: TitleGenerationSettings.Provider) -> Bool {
@@ -1404,15 +1438,18 @@ final class AppModel {
         guard !thread.isEphemeral, let provider = titleGeneration.provider, let model = titleGeneration.effectiveModel else { return }
         let regenerating: Bool
         let messages: [ThreadTitlePrompt.Message]
+        var hint: String?
         switch source {
         case .firstMessage(let text):
             regenerating = false
             messages = [ThreadTitlePrompt.Message(role: .user, text: text)]
-        case .conversation:
+        case .conversation, .agentRequest:
             regenerating = true
             messages = thread.titleMessages
             guard messages.contains(where: { $0.role == .user }) else { return }
+            if case .agentRequest(let given) = source { hint = given }
         }
+        let rules = titlePrompt
         let previousTitle = thread.title
         let request = thread.beginTitleGeneration()
         Task {
@@ -1427,8 +1464,8 @@ final class AppModel {
             let linked = await TitleLinkedContext.resolve(message: text, gh: toolStatuses["gh"].flatMap { $0.isReady ? $0.path : nil },
                 environment: environment)
             let prompt = regenerating
-                ? ThreadTitlePrompt.regenerate(contents: text, previousTitle: previousTitle, linkedContext: linked)
-                : ThreadTitlePrompt.initial(message: text, linkedContext: linked)
+                ? ThreadTitlePrompt.regenerate(contents: text, previousTitle: previousTitle, linkedContext: linked, rules: rules, hint: hint)
+                : ThreadTitlePrompt.initial(message: text, linkedContext: linked, rules: rules)
 
             var result = await TitleGenerator.generate(
                 prompt: prompt, provider: provider, model: model, executable: executable, environment: environment)
@@ -1565,6 +1602,8 @@ final class AppModel {
             reactivatedAt: .now
         )
         if let folder, folder != Self.standardized(project.path) { meta.workingDirectory = folder }
+        // A name given in Claude Code (/rename) is yours: an agent doesn't replace it.
+        if archive.hasCustomTitle { meta.titleChosen = true }
         let thread = ThreadModel(meta: meta, app: self)
         thread.importTranscript(archive.items.map(TranscriptEntry.init(item:)))
         threads.append(thread)
@@ -1729,6 +1768,8 @@ final class AppModel {
         state.diagramInstructions = diagramInstructions
         state.autoSettleDays = autoSettleDays
         state.titleGeneration = titleGeneration
+        state.titlePrompt = titlePrompt
+        state.agentUpdatesTitles = agentUpdatesTitles
         state.showsInspector = showsInspector
         state.appearance = appearance
         state.notifications = notifications

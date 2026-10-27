@@ -610,6 +610,7 @@ private struct NotificationsSection: View {
 /// Which CLI and model name new threads.
 private struct TitleGenerationSection: View {
     @Environment(AppModel.self) private var app
+    @State private var editingPrompt = false
 
     /// Codex models offered for titles; the first is T3 Code's pick for short text.
     private static let codexModels = ["gpt-6-luna", "gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra"]
@@ -649,6 +650,20 @@ private struct TitleGenerationSection: View {
                 } label: {
                     Label("Model", systemImage: "cpu")
                 }
+
+                LabeledContent {
+                    HStack {
+                        Text(app.titlePrompt == nil ? "Default" : "Custom")
+                            .foregroundStyle(.secondary)
+                        Button("Edit…") { editingPrompt = true }
+                    }
+                } label: {
+                    Label("Title prompt", systemImage: "text.quote")
+                }
+
+                Toggle(isOn: Binding(get: { app.agentUpdatesTitles }, set: { app.setAgentUpdatesTitles($0) })) {
+                    Label("Update titles when the subject changes", systemImage: "arrow.triangle.2.circlepath")
+                }
             }
         } header: {
             Text("Thread Titles")
@@ -656,13 +671,18 @@ private struct TitleGenerationSection: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(settings.provider == nil
                      ? "Threads are named after the first words of their first message. Rename one from its menu."
-                     : "After your first message, a short request with no tools or project access names the thread. Regenerate or rename it from the thread's menu.")
+                     : "After your first message, a short request with no tools or project access names the thread. " +
+                       (app.agentUpdatesTitles ? "When the conversation turns to something else, Claude has it named again, the same way; a name you give a thread yourself stays. " : "") +
+                       "Regenerate or rename it from the thread's menu.")
                 if let error = app.titleGenerationError, settings.provider != nil {
                     Label("Last title failed: \(error)", systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange)
                 }
             }
             .foregroundStyle(.secondary)
+        }
+        .sheet(isPresented: $editingPrompt) {
+            TitlePromptEditor(rules: app.titlePrompt ?? ThreadTitlePrompt.defaultRules)
         }
     }
 
@@ -683,5 +703,55 @@ private struct TitleGenerationSection: View {
         case .codex:
             return value
         }
+    }
+}
+
+/// The rules titles are written by: the built-in ones until you change them. What to return
+/// and the conversation itself are added whatever they say.
+private struct TitlePromptEditor: View {
+    @Environment(AppModel.self) private var app
+    @Environment(\.dismiss) private var dismiss
+    @State private var rules: String
+
+    init(rules: String) {
+        _rules = State(initialValue: rules)
+    }
+
+    private var isDefault: Bool {
+        let trimmed = rules.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty || trimmed == ThreadTitlePrompt.defaultRules
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Title Prompt")
+                    .font(.headline)
+                Text("How the title model should name threads. YourHarness adds the conversation, the current title and the answer format, so these rules only need to say what a good title is. Left empty, the default rules are used.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            TextEditor(text: $rules)
+                .font(.callout.monospaced())
+                .scrollContentBackground(.hidden)
+                .padding(8)
+                .card(radius: Theme.innerRadius)
+                .frame(minHeight: 340)
+            HStack {
+                Button("Reset to Default") { rules = ThreadTitlePrompt.defaultRules }
+                    .disabled(rules == ThreadTitlePrompt.defaultRules)
+                Spacer()
+                Button("Cancel", role: .cancel) { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button("Save") {
+                    app.setTitlePrompt(isDefault ? nil : rules)
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 600)
     }
 }

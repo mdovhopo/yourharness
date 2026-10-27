@@ -24,6 +24,7 @@ struct PullRequestsPanel: View {
         let done = pulls.filter { $0.state != .open && !inLiveStack($0) }
             .sorted { ($0.mergedAt ?? $0.updatedAt ?? .distantPast) > ($1.mergedAt ?? $1.updatedAt ?? .distantPast) }
         let unknown = worked.filter { $0.pull == nil }
+        let _ = PanelLog.note(thread: thread, items: items)
         Group {
             if items.isEmpty {
                 ContentUnavailableView {
@@ -66,7 +67,9 @@ struct PullRequestsPanel: View {
                         }
                     }
                     .padding(12)
-                    .animation(.smooth(duration: 0.35), value: items.compactMap(\.pull))
+                    // A PR coming, going or changing state moves the cards; its checks or
+                    // review changing only redraws its row.
+                    .animation(.smooth(duration: 0.35), value: items.map { "\($0.id) \($0.pull.map { "\($0.state)" } ?? "?")" })
                 }
             }
         }
@@ -422,5 +425,22 @@ private struct CardUnless: ViewModifier {
 
     func body(content: Content) -> some View {
         if inCard { content } else { content.card() }
+    }
+}
+
+/// Development: `YH_PR_PANEL_LOG=1` prints each time the panel's list changes what it shows
+/// (empty or not, which PRs, in what state), with the time: for telling a flicker.
+@MainActor
+enum PanelLog {
+    private static let isOn = ProcessInfo.processInfo.environment["YH_PR_PANEL_LOG"] == "1"
+    private static var last: [UUID: String] = [:]
+    private static let start = Date.now
+
+    static func note(thread: ThreadModel, items: [AppModel.ThreadPullRequest]) {
+        guard isOn else { return }
+        let shown = items.isEmpty ? "EMPTY" : items.map { "#\($0.number)\($0.isWorkedOn ? "w" : "m"):\($0.pull.map { "\($0.state)" } ?? "?")" }.joined(separator: " ")
+        guard last[thread.id] != shown else { return }
+        last[thread.id] = shown
+        FileHandle.standardError.write(Data(String(format: "panel %6.1fs %@\n", Date.now.timeIntervalSince(start), shown).utf8))
     }
 }
