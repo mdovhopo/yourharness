@@ -17,6 +17,9 @@ cd "$ROOT"
 # build of a later commit sorts after the last.
 VERSION="$(<"$ROOT/VERSION")"
 BUILD="$(git rev-list --count HEAD 2>/dev/null || echo 1)"
+# The commit, for telling exactly what a state file (Export State) was made with.
+COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+[[ -n "$(git status --porcelain 2>/dev/null)" ]] && COMMIT="$COMMIT-dirty"
 
 swift build -c "$CONFIG" --arch arm64
 BIN="$(swift build -c "$CONFIG" --arch arm64 --show-bin-path)/YourHarness"
@@ -37,6 +40,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>$VERSION</string>
     <key>CFBundleVersion</key><string>$BUILD</string>
+    <key>YHGitCommit</key><string>$COMMIT</string>
     <key>LSMinimumSystemVersion</key><string>26.0</string>
     <key>LSArchitecturePriority</key><array><string>arm64</string></array>
     <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>

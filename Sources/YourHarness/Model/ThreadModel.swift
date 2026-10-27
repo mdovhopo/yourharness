@@ -347,6 +347,15 @@ final class ThreadModel: Identifiable {
 
     @ObservationIgnored private var transcriptLoad: Task<Void, Never>?
 
+    /// The transcript for another thread's agent to read: what's in memory when it's loaded
+    /// (newer than what's saved while Claude works), else read from the database without
+    /// loading it here.
+    func transcriptForReading() async -> [EntrySnapshot] {
+        if transcriptLoaded { return entries.map(\.snapshot) }
+        let store = app.store, id = id
+        return await Task.detached(priority: .userInitiated) { store.loadTranscript(id) }.value
+    }
+
     private func apply(_ snapshots: [EntrySnapshot]) {
         transcriptLoaded = true
         let loaded = snapshots
@@ -1131,6 +1140,12 @@ final class ThreadModel: Identifiable {
         expandedTurns.removeAll()
         rebuildPlan()
         app.store.forgetTranscript(id)
+    }
+
+    /// Saved now, not in a moment: an export reads the database.
+    func saveForExport() {
+        persist()
+        sideChat?.saveForExport()
     }
 
     /// At most one save every couple of seconds while Claude streams.

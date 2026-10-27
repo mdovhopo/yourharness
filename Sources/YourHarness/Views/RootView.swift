@@ -71,6 +71,9 @@ struct RootView: View {
         .sheet(isPresented: Bindable(app).isResumingSession) {
             ResumeSessionSheet()
         }
+        .sheet(item: Bindable(app.stateTransfer).pending) { pending in
+            StateImportSheet(pending: pending)
+        }
         .background(WindowReader { inspectorRoom.window = $0 })
         .onChange(of: showsInspector) { _, shown in inspectorRoom.shownChanged(shown) }
         .onChange(of: app.showsInspector) { _, shown in if !shown { inspectorRoom.closed() } }

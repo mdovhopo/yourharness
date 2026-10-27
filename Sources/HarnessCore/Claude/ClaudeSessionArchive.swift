@@ -61,6 +61,50 @@ public struct ClaudeSessionArchive: Sendable, Equatable {
             .first { FileManager.default.fileExists(atPath: $0.path) }
     }
 
+    /// A session's file in Claude Code's history, before it's read.
+    public struct SessionFile: Sendable, Equatable {
+        public var sessionID: String
+        public var url: URL
+        /// The directory it's in under `projects/`: Claude Code's name for the session's folder.
+        public var folderName: String
+        public var modified: Date
+    }
+
+    /// Every session file, newest first. Only names and dates are read.
+    public static func sessionFiles(configDirectory: URL) -> [SessionFile] {
+        let projects = configDirectory.appendingPathComponent("projects", isDirectory: true)
+        let fileManager = FileManager.default
+        guard let folders = try? fileManager.contentsOfDirectory(
+            at: projects, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else { return [] }
+        var files: [SessionFile] = []
+        for folder in folders {
+            guard let names = try? fileManager.contentsOfDirectory(
+                at: folder, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles]) else { continue }
+            for url in names where url.pathExtension == "jsonl" {
+                // Subagents' side files are named otherwise; a session's file is its ID.
+                let name = url.deletingPathExtension().lastPathComponent
+                guard let sessionID = Self.sessionID(in: name), sessionID == name.lowercased() else { continue }
+                let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+                files.append(SessionFile(sessionID: sessionID, url: url, folderName: folder.lastPathComponent, modified: modified))
+            }
+        }
+        return files.sorted { $0.modified > $1.modified }
+    }
+
+    /// How Claude Code names a folder's directory under `projects/`: everything but letters
+    /// and digits becomes `-`. Lossy, so it only narrows a search; the session's own `cwd`
+    /// says for sure.
+    public static func folderName(for path: String) -> String {
+        String(path.map { $0.isASCII && ($0.isLetter || $0.isNumber) ? $0 : "-" })
+    }
+
+    /// Whether a session in `folderName` may have run in `path` or a folder inside it.
+    /// Very long names are shortened by Claude Code, so those can't be ruled out.
+    public static func folderName(_ folderName: String, mayBeInside path: String) -> Bool {
+        let encoded = Self.folderName(for: path)
+        return folderName == encoded || folderName.hasPrefix(encoded + "-") || folderName.count >= 200
+    }
+
     // MARK: - Reading
 
     public enum LoadError: Error, Equatable {

@@ -551,10 +551,27 @@ private struct GeneralSettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Section("Data") {
+            Section {
                 LabeledContent("Threads and settings") {
                     Button("Show in Finder") { app.store.revealInFinder() }
                 }
+                LabeledContent("Everything, as one file") {
+                    HStack {
+                        if let busy = app.stateTransfer.busy {
+                            ProgressView().controlSize(.small)
+                            Text(busy).foregroundStyle(.secondary)
+                        }
+                        Button("Export State…") { app.stateTransfer.presentExport(app: app) }
+                        Button("Import State…") { app.stateTransfer.presentImport(app: app) }
+                            .disabled(app.stateTransfer.pending != nil)
+                    }
+                    .disabled(app.stateTransfer.busy != nil)
+                }
+            } header: {
+                Text("Data")
+            } footer: {
+                Text("Export State writes every project, thread, memory and setting, with details of this Mac and app, into one file: for another Mac, or for reproducing a bug exactly. Import State replaces everything you have with a file's, after asking.")
+                    .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)

@@ -255,6 +255,15 @@ public final class HarnessDatabase: Sendable {
         queue.sync { drain() }
     }
 
+    /// Everything as one compact file, as of now: what's waiting is written first, and
+    /// nothing else is written while it's copied. For exporting the state.
+    public func snapshot(to file: URL) throws {
+        try queue.sync {
+            drain()
+            try writer.withLock { try $0.connection.run("VACUUM INTO ?", [.text(file.path)]) }
+        }
+    }
+
     // MARK: - Change feed and search
 
     /// Transcript rows written after `rev`, oldest change first: for an indexer to follow.

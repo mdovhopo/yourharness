@@ -61,6 +61,26 @@ enum AgentInstructions {
     snapshot, screenshot, console and network. You can't click or type there; that's for the main thread.
     """
 
+    /// The thread tools. `project` names the one project a thread outside Home reaches.
+    static func threads(project: String?) -> String {
+        let reach = project.map {
+            "From this thread you reach only the threads of the project \($0), and only Claude Code sessions that ran in "
+                + "its folder; for anything wider, the user can ask from a thread in Home."
+        } ?? "This thread is in Home, so you reach every project's threads and every Claude Code session."
+        return """
+        The user's conversations in YourHarness are threads, grouped by project in the sidebar. The mcp__threads__ \
+        tools work with them: list_threads, read_thread and search_threads find and read them; rename_thread, \
+        settle_thread and pin_thread tidy them; list_claude_code_sessions and import_claude_code_session bring in \
+        sessions from Claude Code run in a terminal or an editor. \(reach)
+        Reading and searching are fine whenever they help, like picking up what an earlier thread worked out. \
+        Changing threads is the user's call: rename, settle, pin or import only what the user asked for, or a list \
+        they agreed to. Before changing more than two threads, list exactly what you'll change and wait for a yes. \
+        Leave threads that are working or waiting for the user alone unless the user named them. You can't delete \
+        threads; if asked, tell the user to do it from the sidebar. Other threads can hold private details or \
+        secrets: bring into this conversation only what the task needs. When you're done, say what you changed.
+        """
+    }
+
     /// The side chat's view of the workspace's memory.
     static let memoryReadOnly = """
     This workspace has a memory kept by YourHarness: mcp__memory__search finds what earlier sessions learned \

@@ -26,6 +26,11 @@ struct YourHarnessApp: App {
                 Divider()
                 Button("Resume Claude Code Session…") { app.isResumingSession = true }
                     .keyboardShortcut("o", modifiers: [.command, .shift])
+                Divider()
+                Button("Export State…") { app.stateTransfer.presentExport(app: app) }
+                    .disabled(app.stateTransfer.busy != nil)
+                Button("Import State…") { app.stateTransfer.presentImport(app: app) }
+                    .disabled(app.stateTransfer.busy != nil || app.stateTransfer.pending != nil)
             }
             CommandGroup(after: .textEditing) {
                 Divider()
@@ -148,6 +153,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             AppModel.shared.updater.start()
             CookieImport.importIfRequested(app: AppModel.shared)
             BrowserProbe.runIfRequested(app: AppModel.shared)
+            ThreadToolsProbe.runIfRequested(app: AppModel.shared)
+            StateTransfer.runIfRequested(app: AppModel.shared)
             SwitchProbe.runIfRequested(app: AppModel.shared)
             NavigationProbe.runIfRequested(app: AppModel.shared)
             SearchProbe.runIfRequested(app: AppModel.shared)

@@ -301,6 +301,8 @@ final class Store: Sendable {
     /// A development run against `YH_DATA_DIR`: it must never wander into your real folders.
     let isScratch: Bool
     let database: HarnessDatabase
+    /// The state Import State brought in at this launch, with what's left to apply.
+    let importedState: StateArchive.Applied?
     /// Attachments and screenshots, and turning the state into rows.
     private let queue = DispatchQueue(label: "yourharness.store", qos: .utility)
     /// Rows this version can't read (a newer one's), saved back as they were so they aren't lost.
@@ -319,6 +321,17 @@ final class Store: Sendable {
             let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             root = base.appending(path: "YourHarness", directoryHint: .isDirectory)
         }
+        // Development: start from a state file, without asking. Only ever a scratch state.
+        if isScratch, let path = ProcessInfo.processInfo.environment["YH_STATE_IMPORT"], !path.isEmpty {
+            do {
+                try StateArchive.stage(try StateArchive.open(URL(fileURLWithPath: path)), in: root)
+            } catch {
+                FileHandle.standardError.write(Data("YH_STATE_IMPORT didn't import: \((error as? StateArchive.Problem)?.description ?? "\(error)")\n".utf8))
+            }
+        }
+        // Before anything is read: an import replaces it all.
+        importedState = StateArchive.applyPending(in: root)
+        if let defaults = importedState?.extras.defaults { StateTransfer.applyDefaults(defaults) }
         database = HarnessDatabase(directory: root)
         try? FileManager.default.createDirectory(at: attachmentsDirectory, withIntermediateDirectories: true)
     }

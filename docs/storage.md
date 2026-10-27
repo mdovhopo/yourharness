@@ -66,6 +66,41 @@ setting it can't read costs that setting.
 If the database can't be opened (damaged), it's moved aside as `harness.sqlite.unreadable-<time>`
 and the app starts again from the JSON files.
 
+## Export and import
+
+File → Export State… (or Settings → General → Data) writes everything the app keeps to one
+`.yhstate` file, a zip (`StateArchive` in `Sources/HarnessCore/Storage/`, the app's
+`Model/StateTransfer.swift`):
+
+| In the file | What it is |
+|---|---|
+| `manifest.json` | `format: "yourharness-state"` and `formatVersion` (1), when it was exported, the app (name, bundle ID, version, build, commit), the Mac (macOS, model, chip, memory, locale, time zone), every CLI and tool with its path and version or why it didn't run, the database's schema version, the data folder it came from, and what's inside (project names, counts, size). |
+| `data/` | The app's items in its data folder (`StateArchive.items`): `harness.sqlite` as a snapshot (`VACUUM INTO`, after everything waiting is written, so it's consistent and has no WAL), `attachments/`, `memory-imports/`, and the old `state.json` and `threads/` when they're there. |
+| `defaults.plist` | The app's macOS defaults (window sizes and places, split views, the Settings tab), without `lastRunVersion`. |
+| `browser-cookies.json` | Each project's browser cookies, by project ID, only when you ticked "Include browser sign-ins". Cookies only, not the browser's other storage. |
+
+Import State… unpacks and checks the file (it's a state, its format is one this version
+reads, its database passes `PRAGMA quick_check`), then asks: what's in the file next to what
+you have, the projects it holds, threads that are working (they're stopped), and a newer
+schema if it's from a newer app. Saying yes saves a copy of the current state into
+`backups/` in the data folder first, with sign-ins (untick to skip), moves the unpacked file
+into `pending-import/` and restarts. At launch, before the database opens,
+`StateArchive.applyPending` moves the app's items (and the old WAL) aside, writes a marker,
+moves the file's in, and the app applies the defaults; after the window is up, each of the
+file's projects gets exactly the file's cookies (when it has them; otherwise the browser is
+left as it is), and `pending-import/` goes. Each step can run again after a crash. Nothing
+else in the data folder is touched: not `worktrees/` (checkouts with your work in them), not
+`backups/`, not a development run's project folders and logs. A Home folder that doesn't
+exist on this Mac goes back to your home folder.
+
+When the app starts keeping something new in its data folder, add it to `StateArchive.items`.
+When the layout changes so an older app can't read it, raise `StateArchive.formatVersion`: an
+older app refuses a newer file instead of importing part of it. A newer database schema
+alone doesn't need that (a newer database opens).
+
+To look inside one, `ditto -x -k <file> <folder>` (or `unzip`): `data/` is a data folder a Dev
+copy can run on. To reproduce a bug with someone's state, see CLAUDE.md (`YH_STATE_IMPORT`).
+
 ## Changing the schema
 
 Add a step to `Schema.steps` (never edit an old one): each step runs once, in order, in a
@@ -76,6 +111,9 @@ newer version (higher `user_version`) still opens; what it added is left alone.
 
 - `swift test --filter "HarnessDatabaseTests|StoreMigrationTests"`: round trips, row-level
   saves, blobs, search, the change feed, memories, moving the old files in, a damaged database.
+- `swift test --filter StateArchiveTests`: export then import over another state brings back
+  exactly what was exported and leaves worktrees and logs alone; a swap cut off partway
+  finishes; files that aren't states, or are from a newer format, are refused.
 - `YH_MIGRATION_SOURCE=<data folder> swift test --filter RealDataMigration` moves a copy of a
   real data folder in and checks every thread and row came through.
 - `scripts/preset.sh legacy-0.0.6` (or `legacy-big`) then `scripts/dev-run.sh <folder>

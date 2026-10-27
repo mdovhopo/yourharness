@@ -1,7 +1,7 @@
 import Foundation
 
 /// A cookie read from another browser's store, to bring a login into the app's browser.
-public struct ImportedCookie: Sendable, Equatable {
+public struct ImportedCookie: Sendable, Equatable, Codable {
     public var domain: String
     public var name: String
     public var value: String

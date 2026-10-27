@@ -126,6 +126,7 @@ final class AppModel {
     @ObservationIgnored var memoryLibraries: [UUID: MemoryLibrary] = [:]
     /// ⌘K.
     @ObservationIgnored let spotlight = Spotlight()
+    @ObservationIgnored let stateTransfer = StateTransfer()
     /// What the last direct import did, until dismissed.
     var importReport: MemoryImportReport?
 
@@ -154,6 +155,20 @@ final class AppModel {
             if store.isScratch { try? FileManager.default.createDirectory(at: store.root.appending(path: "home"), withIntermediateDirectories: true) }
             projects.insert(home, at: 0)
             homeProjectID = home.id
+        }
+        if let imported = store.importedState, let index = projects.firstIndex(where: { $0.id == (state.homeProjectID ?? projects.first?.id) }) {
+            // Someone else's state: their home folder isn't here. A development run's Home is
+            // always its own folder, whatever the file says.
+            let scratchHome = store.root.appending(path: "home")
+            if store.isScratch {
+                try? FileManager.default.createDirectory(at: scratchHome, withIntermediateDirectories: true)
+                projects[index].path = scratchHome.path
+            } else if !FileManager.default.fileExists(atPath: projects[index].path) {
+                projects[index].path = NSHomeDirectory()
+                projects[index].name = "Home"
+            }
+            FileHandle.standardError.write(Data("Imported the state exported \(imported.manifest.exportedAt.formatted()) from \(imported.manifest.app.name) \(imported.manifest.app.version ?? "?"): \(StateTransfer.summary(imported.manifest.contents)); Home runs in \(projects[index].path)\n".utf8))
+            Task { [projects] in await StateTransfer.finish(imported, projects: projects) }
         }
         self.projects = projects
         cliPathOverrides = state.cliPathOverrides
@@ -1070,6 +1085,11 @@ final class AppModel {
             // Showing you a file changes nothing: it doesn't ask.
             options.allowedTools.append("mcp__harness")
             options.appendSystemPrompt = [options.appendSystemPrompt, AgentInstructions.media].compactMap(\.self).joined(separator: "\n\n")
+            // The thread tools touch only the app's own list and delete nothing; the
+            // instructions keep changes to what you ask for.
+            options.allowedTools.append("mcp__threads")
+            let threads = AgentInstructions.threads(project: isHome(project) ? nil : project.name)
+            options.appendSystemPrompt = [options.appendSystemPrompt, threads].compactMap(\.self).joined(separator: "\n\n")
         }
         await checkStacksInstalled()
         if stacksInstalled == true, !thread.isSideChat {
@@ -1309,7 +1329,8 @@ final class AppModel {
             if memoryEnabled { servers.append(memoryServer(for: thread, access: .readOnly, actor: .init("agent", threadID: thread.parentThread?.id.uuidString))) }
             return servers
         }
-        var servers: [any MCPToolServer] = [HarnessToolServer(media: MediaTool(thread: thread, app: self))]
+        var servers: [any MCPToolServer] = [HarnessToolServer(media: MediaTool(thread: thread, app: self)),
+                                            ThreadToolServer(threads: ThreadTools(thread: thread, app: self))]
         if browserTools { servers.append(BrowserToolServer(browser: BrowserTools(thread: thread, app: self, readOnly: false))) }
         if memoryEnabled { servers.append(memoryServer(for: thread, access: .agent, actor: .init("agent", threadID: thread.id.uuidString))) }
         return servers
@@ -1478,6 +1499,12 @@ final class AppModel {
         threads.first { $0.sessionID?.lowercased() == sessionID.lowercased() }
     }
 
+    /// Claude Code's history folder, once the environment is known.
+    func claudeConfigDirectory() async -> URL {
+        await bootstrap?.value
+        return ClaudeSessionArchive.configDirectory(environment: environment)
+    }
+
     /// Finds and reads a session from Claude Code's history, off the main thread.
     func loadClaudeSession(_ sessionID: String) async -> Result<ClaudeSessionArchive, SessionImportError> {
         await bootstrap?.value
@@ -1515,9 +1542,11 @@ final class AppModel {
     /// Opens a thread that shows the session's history and continues it with `--resume`.
     /// It goes in `destination`, or the project for the folder it ran in (added if you don't
     /// have one yet). Either way it runs in that folder: `--resume` only finds it from there.
+    /// `opens` false, for an agent's import: it's added without taking you to it.
     @discardableResult
-    func resumeClaudeSession(_ archive: ClaudeSessionArchive, into destination: Project? = nil) throws(SessionImportError) -> ThreadModel {
+    func resumeClaudeSession(_ archive: ClaudeSessionArchive, into destination: Project? = nil, opens: Bool = true) throws(SessionImportError) -> ThreadModel {
         if let existing = thread(forSession: archive.sessionID) {
+            guard opens else { return existing }
             if existing.isSettled { setSettled(false, existing) }
             selectedThreadID = existing.id
             return existing
@@ -1525,7 +1554,7 @@ final class AppModel {
         let folder = try sessionFolder(archive.cwd)
         let project: Project
         if let destination { project = destination } else { project = try self.project(forSessionFolder: archive.cwd) }
-        if isCollapsed(project) { setCollapsed(false, for: project) }
+        if opens, isCollapsed(project) { setCollapsed(false, for: project) }
 
         var meta = ThreadMeta(
             id: UUID(), projectID: project.id,
@@ -1539,7 +1568,7 @@ final class AppModel {
         let thread = ThreadModel(meta: meta, app: self)
         thread.importTranscript(archive.items.map(TranscriptEntry.init(item:)))
         threads.append(thread)
-        selectedThreadID = thread.id
+        if opens { selectedThreadID = thread.id }
         save()
         // Claude Code titles a session from its first message and rarely revisits it; a
         // name you gave it with /rename is kept as is.
