@@ -32,6 +32,9 @@ public enum AgentEvent: Sendable, Equatable {
     case rateLimit(RateLimitInfo)
     /// Tokens in the context window after the latest top-level assistant message.
     case contextUsage(tokens: Int)
+    /// One API response's tokens, top-level or a sub-agent's. Sent more than once for a
+    /// response as it grows (same key): the largest counts wait for the last.
+    case messageUsage(MessageUsage)
     /// Reply to `initialize`: models, effort levels, CLI version.
     case catalog(ClaudeCatalog)
     case controlFailed(requestID: String, message: String)

@@ -9,6 +9,8 @@ public struct ClaudeStreamParser: Sendable {
     private var currentMessageID = ""
     /// While compacting, the CLI replays the messages it kept; they're already shown.
     private var compacting = false
+    /// Each streaming message's model, from its start, for its usage at the end.
+    private var streamingModels: [String: String] = [:]
 
     public init() {}
 
@@ -40,7 +42,12 @@ public struct ClaudeStreamParser: Sendable {
                 return text.isEmpty ? [] : [.commandOutput(text)]
             }
             guard let id = message["id"] as? String else { return [] }
-            return [.assistantMessage(messageID: id, blocks: blocks, parentToolUseID: parent)]
+            var events: [AgentEvent] = [.assistantMessage(messageID: id, blocks: blocks, parentToolUseID: parent)]
+            if let model = message["model"] as? String, let usage = message["usage"] as? [String: Any],
+               let spent = MessageUsage(messageID: id, requestID: nil, model: model, usage: usage, date: .now) {
+                events.append(.messageUsage(spent))
+            }
+            return events
         case "user":
             guard let message = object["message"] as? [String: Any],
                   let content = message["content"] as? [[String: Any]]
@@ -129,8 +136,10 @@ public struct ClaudeStreamParser: Sendable {
     private mutating func parseStreamEvent(_ event: [String: Any], messageID: String?, parent: String?) -> [AgentEvent] {
         switch event["type"] as? String {
         case "message_start":
-            if let id = (event["message"] as? [String: Any])?["id"] as? String {
+            let message = event["message"] as? [String: Any]
+            if let id = message?["id"] as? String {
                 currentMessageID = id
+                if let model = message?["model"] as? String { streamingModels[id] = model }
             }
             return []
         case "content_block_start":
@@ -167,11 +176,19 @@ public struct ClaudeStreamParser: Sendable {
             }
         case "message_delta":
             // Final usage for the message: everything the model saw plus what it wrote.
-            guard parent == nil, let usage = event["usage"] as? [String: Any] else { return [] }
+            guard let usage = event["usage"] as? [String: Any] else { return [] }
+            let id = messageID ?? currentMessageID
+            var events: [AgentEvent] = []
+            if let model = streamingModels.removeValue(forKey: id),
+               let spent = MessageUsage(messageID: id, requestID: nil, model: model, usage: usage, date: .now) {
+                events.append(.messageUsage(spent))
+            }
+            guard parent == nil else { return events }
             let tokens = ["input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens"]
                 .compactMap { usage[$0] as? Int }
                 .reduce(0, +)
-            return tokens > 0 ? [.contextUsage(tokens: tokens)] : []
+            if tokens > 0 { events.append(.contextUsage(tokens: tokens)) }
+            return events
         default:
             return []
         }

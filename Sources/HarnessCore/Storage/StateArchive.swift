@@ -5,7 +5,7 @@ import Foundation
 ///
 ///     manifest.json          what made it, on what Mac, and what's inside (`Manifest`)
 ///     data/                  the app's items in its data folder (`items`): harness.sqlite
-///                            (a snapshot), attachments/, …
+///                            and usage.sqlite (snapshots), attachments/, …
 ///     defaults.plist         what macOS keeps for the app: window sizes and places (optional)
 ///     browser-cookies.json   each project's browser sign-ins, by project ID (optional)
 ///
@@ -24,9 +24,14 @@ public enum StateArchive {
 
     /// What the app keeps in its data folder, and so what an export takes and an import
     /// replaces. Add here whatever it starts keeping there.
-    public static let items = ["harness.sqlite", "attachments", "memory-imports", "state.json", "threads"]
-    /// Written with the database, never copied: the snapshot has what they hold.
-    static let databaseCompanions = ["harness.sqlite-wal", "harness.sqlite-shm"]
+    /// `usage.sqlite` is the usage view's: mostly an index of Claude Code's session files, but
+    /// side chats' and memory agents' usage is only there.
+    public static let items = ["harness.sqlite", "usage.sqlite", "attachments", "memory-imports", "state.json", "threads"]
+    /// The databases, snapshotted rather than copied.
+    static let databases: Set<String> = ["harness.sqlite", "usage.sqlite"]
+    /// Written with the databases, never copied: the snapshots have what they hold. An import
+    /// moves them aside too, so an old WAL is never played over a new database.
+    static let databaseCompanions = ["harness.sqlite-wal", "harness.sqlite-shm", "usage.sqlite-wal", "usage.sqlite-shm"]
     /// The database schema this version of the app writes: a file's higher one is from a
     /// newer app.
     public static var appSchemaVersion: Int { Schema.steps.count }
@@ -175,10 +180,12 @@ public enum StateArchive {
 
     // MARK: - Export
 
-    /// Writes everything in `dataFolder` the app keeps, with `database` as of now, to `file`.
-    /// `manifest` says what made it; what's inside is filled in. Blocks: off the main thread.
+    /// Writes everything in `dataFolder` the app keeps, with `database` and `usage` as of now,
+    /// to `file`. `manifest` says what made it; what's inside is filled in. Blocks: off the
+    /// main thread.
     @discardableResult
-    public static func export(_ database: HarnessDatabase, dataFolder: URL, extras: Extras, manifest: Manifest, to file: URL) throws -> Manifest {
+    public static func export(_ database: HarnessDatabase, usage: UsageStore? = nil, dataFolder: URL, extras: Extras,
+                              manifest: Manifest, to file: URL) throws -> Manifest {
         let fileManager = FileManager.default
         let work = fileManager.temporaryDirectory.appending(path: "yourharness-export-\(UUID().uuidString)", directoryHint: .isDirectory)
         defer { try? fileManager.removeItem(at: work) }
@@ -186,7 +193,10 @@ public enum StateArchive {
         try fileManager.createDirectory(at: data, withIntermediateDirectories: true)
 
         try database.snapshot(to: data.appending(path: "harness.sqlite"))
-        for name in items where name != "harness.sqlite" {
+        if let usage, FileManager.default.fileExists(atPath: usage.url.path) {
+            try usage.snapshot(to: data.appending(path: "usage.sqlite"))
+        }
+        for name in items where !databases.contains(name) {
             let source = dataFolder.appending(path: name)
             guard fileManager.fileExists(atPath: source.path) else { continue }
             // A clone on APFS: instant, and no more space until one of them changes.

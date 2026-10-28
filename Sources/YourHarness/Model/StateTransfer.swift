@@ -71,10 +71,12 @@ final class StateTransfer {
                                          cookies: includingSignIns ? await Self.browserCookies(app.projects) : nil)
         let manifest = StateArchive.Manifest(app: .current, system: .current, tools: Self.tools(app))
         let store = app.store
+        await app.tokenUsage.flush()
+        let usage = app.tokenUsage.store
         return try await Task.detached(priority: .userInitiated) {
             // What saveNow handed over, on disk before the snapshot.
             store.flush()
-            return try StateArchive.export(store.database, dataFolder: store.root, extras: extras, manifest: manifest, to: file)
+            return try StateArchive.export(store.database, usage: usage, dataFolder: store.root, extras: extras, manifest: manifest, to: file)
         }.value
     }
 

@@ -579,7 +579,8 @@ private struct ThreadStatus: View {
 
 // MARK: - Footer
 
-/// Usage limits, this app's memory, a refresh, and Settings. Details live in tooltips.
+/// Usage limits, this app's memory, a refresh, and Settings. Details live in tooltips;
+/// clicking the box opens the usage view.
 private struct UsageFooter: View {
     @Environment(AppModel.self) private var app
 
@@ -593,6 +594,8 @@ private struct UsageFooter: View {
             + extra.map { ($0.name, $0) }
     }
 
+    @State private var isHovered = false
+
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
             UpdateBanner()
@@ -603,6 +606,10 @@ private struct UsageFooter: View {
                     }
                 }
             }
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isButton)
+            .accessibilityHint("Shows usage")
+            .accessibilityAction { app.tokenUsage.open() }
             HStack(spacing: 10) {
                 TimelineView(.periodic(from: .now, by: 2)) { _ in
                     Label(MemoryFootprint.formatted, systemImage: "memorychip")
@@ -624,6 +631,12 @@ private struct UsageFooter: View {
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
+        // Its buttons keep their clicks; anywhere else opens the usage view.
+        .contentShape(.rect(cornerRadius: 14))
+        .onTapGesture { app.tokenUsage.open() }
+        .onHover { isHovered = $0 }
+        .background(.fill.quaternary.opacity(isHovered ? 1 : 0), in: .rect(cornerRadius: 14))
+        .animation(.easeOut(duration: 0.12), value: isHovered)
         .animation(.smooth(duration: 0.35), value: app.updater.phase.bannerKind)
         .animation(.smooth(duration: 0.35), value: app.updater.announcesUpToDate)
         .animation(.smooth(duration: 0.35), value: app.updater.updatedFrom)
@@ -690,7 +703,7 @@ private struct RefreshLimitsButton: View {
 }
 
 /// `5h ━━━━━━──────── 6%  2h 14m`: used, and how long until it resets.
-private struct LimitMeter: View {
+struct LimitMeter: View {
     let name: String
     let window: RateLimitInfo.Window?
     let now: Date
@@ -712,7 +725,9 @@ private struct LimitMeter: View {
         }
     }
 
-    private var title: String {
+    private var title: String { Self.title(name) }
+
+    static func title(_ name: String) -> String {
         switch name {
         case "five_hour": "5-hour limit"
         case "seven_day": "Weekly limit"
@@ -722,15 +737,20 @@ private struct LimitMeter: View {
         }
     }
 
-    private var tint: Color {
-        switch utilization ?? 0 {
+    private var tint: Color { Self.tint(utilization ?? 0) }
+
+    static func tint(_ utilization: Double) -> Color {
+        switch utilization {
         case ..<0.7: .accentColor
         case ..<0.9: .orange
         default: .red
         }
     }
 
-    private var help: String {
+    /// Here rather than on the box: a tooltip there would be every button's in it too.
+    private var help: String { reading + "\nClick for usage (⇧⌘U)" }
+
+    private var reading: String {
         guard let window else { return "\(title): no reading yet. Refresh to check." }
         if hasReset { return "\(title): reset since the last reading. Refresh to update." }
         guard let resetsAt = window.resetsAt else { return title }

@@ -148,6 +148,8 @@ struct PersistedState: Codable {
     var agentUpdatesTitles = true
     /// The right sidebar was open at quit.
     var showsInspector = false
+    /// The usage view's range of days (`UsageModel.Range`).
+    var usageRange: String?
     /// Each project's slash commands and skills as the CLI last listed them, keyed by
     /// project ID, so the "/" menu fills instantly.
     var slashCommands: [String: [SlashCommand]] = [:]
@@ -206,6 +208,7 @@ struct PersistedState: Codable {
         titlePrompt = try container.decodeIfPresent(String.self, forKey: .titlePrompt)
         agentUpdatesTitles = try container.decodeIfPresent(Bool.self, forKey: .agentUpdatesTitles) ?? true
         showsInspector = try container.decodeIfPresent(Bool.self, forKey: .showsInspector) ?? false
+        usageRange = try container.decodeIfPresent(String.self, forKey: .usageRange)
         slashCommands = try container.decodeIfPresent([String: [SlashCommand]].self, forKey: .slashCommands) ?? [:]
         skills = try container.decodeIfPresent([String: [String]].self, forKey: .skills) ?? [:]
         appearance = try container.decodeIfPresent(Appearance.self, forKey: .appearance) ?? .system

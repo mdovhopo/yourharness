@@ -68,6 +68,14 @@ struct RootView: View {
             }
         }
         .animation(.easeOut(duration: 0.12), value: app.spotlight.isOpen)
+        // The sidebar's usage box, opened up over the window.
+        .overlay {
+            if app.tokenUsage.isOpen {
+                UsageOverlay()
+                    .transition(.opacity.combined(with: .scale(scale: 0.98)))
+            }
+        }
+        .animation(.smooth(duration: 0.2), value: app.tokenUsage.isOpen)
         .sheet(isPresented: Bindable(app).isResumingSession) {
             ResumeSessionSheet()
         }
@@ -89,6 +97,12 @@ struct RootView: View {
             if let query = ProcessInfo.processInfo.environment["YH_SPOTLIGHT"] {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1) { app.spotlight.open(app, query: query) }
             }
+            // Development: open the usage view (`YH_USAGE_RANGE`: week, month, quarter,
+            // halfYear or year), for checking it without clicking.
+            if let range = ProcessInfo.processInfo.environment["YH_USAGE_RANGE"].flatMap(UsageModel.Range.init(rawValue:)) {
+                app.tokenUsage.range = range
+            }
+            if ProcessInfo.processInfo.environment["YH_OPEN_USAGE"] != nil { app.tokenUsage.open() }
             // Development: open Settings, for checking it without a shortcut.
             if ProcessInfo.processInfo.environment["YH_OPEN_SETTINGS"] != nil { openSettings() }
             // Development: open the selected thread's browser in its own window.

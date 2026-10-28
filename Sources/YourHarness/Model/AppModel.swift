@@ -129,6 +129,8 @@ final class AppModel {
     @ObservationIgnored var memoryLibraries: [UUID: MemoryLibrary] = [:]
     /// ⌘K.
     @ObservationIgnored let spotlight = Spotlight()
+    /// The usage view the sidebar's usage box opens.
+    @ObservationIgnored let tokenUsage = UsageModel()
     @ObservationIgnored let stateTransfer = StateTransfer()
     /// What the last direct import did, until dismissed.
     var importReport: MemoryImportReport?
@@ -193,6 +195,8 @@ final class AppModel {
         titlePrompt = state.titlePrompt
         agentUpdatesTitles = state.agentUpdatesTitles
         showsInspector = state.showsInspector
+        tokenUsage.attach(directory: store.root)
+        if let range = state.usageRange.flatMap(UsageModel.Range.init(rawValue:)) { tokenUsage.range = range }
         appearance = state.appearance
         notifications = state.notifications
         planChecklist = state.planChecklist
@@ -216,6 +220,11 @@ final class AppModel {
             projectTab = .memory
         } else if let id = state.overviewProjectID, let project = project(id: id), !isHome(project) {
             overviewProjectID = id
+        }
+        tokenUsage.onRangeChange = { [weak self] in self?.save() }
+        tokenUsage.configDirectory = { [weak self] in
+            await self?.bootstrap?.value
+            return self?.claudeConfigDirectory ?? ClaudeSessionArchive.configDirectory(environment: ProcessInfo.processInfo.environment)
         }
         bootstrap = Task {
             await loadEnvironment()
@@ -1771,6 +1780,7 @@ final class AppModel {
         state.titlePrompt = titlePrompt
         state.agentUpdatesTitles = agentUpdatesTitles
         state.showsInspector = showsInspector
+        state.usageRange = tokenUsage.range.rawValue
         state.appearance = appearance
         state.notifications = notifications
         state.planChecklist = planChecklist

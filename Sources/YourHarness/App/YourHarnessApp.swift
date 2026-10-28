@@ -49,6 +49,8 @@ struct YourHarnessApp: App {
             CommandGroup(after: .sidebar) {
                 Button("Memory") { app.showMemory(of: app.memoryProject ?? app.overviewProject ?? app.selectedProject) }
                     .keyboardShortcut("m", modifiers: [.command, .shift])
+                Button(app.tokenUsage.isOpen ? "Hide Usage" : "Usage") { app.tokenUsage.toggle() }
+                    .keyboardShortcut("u", modifiers: [.command, .shift])
                 Divider()
                 Button(app.showsInspector ? "Hide Right Sidebar" : "Show Right Sidebar") { app.setShowsInspector(!app.showsInspector) }
                     .keyboardShortcut("0", modifiers: [.command, .option])
@@ -165,6 +167,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ThreadToolsProbe.runIfRequested(app: AppModel.shared)
             StateTransfer.runIfRequested(app: AppModel.shared)
             SwitchProbe.runIfRequested(app: AppModel.shared)
+            UsageProbe.runIfRequested(app: AppModel.shared)
             TranscriptDiagnostics.runIfRequested(app: AppModel.shared)
             NavigationProbe.runIfRequested(app: AppModel.shared)
             SearchProbe.runIfRequested(app: AppModel.shared)

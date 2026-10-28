@@ -966,6 +966,11 @@ final class ThreadModel: Identifiable {
         case .contextUsage(let tokens):
             contextTokens = tokens
 
+        case .messageUsage(let usage):
+            // Threads' sessions are in Claude Code's files, which the usage view reads; side
+            // chats and memory agents leave none, so the app keeps theirs.
+            if isAside { app.tokenUsage.record(usage) }
+
         case .catalog(let catalog):
             app.updateCatalog(catalog, projectID: isAside ? nil : projectID)
 

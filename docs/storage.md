@@ -5,6 +5,13 @@ Everything the app keeps is in one SQLite file, `harness.sqlite`, in its data fo
 (`attachments/`). The code is `Sources/HarnessCore/Storage/` (`HarnessDatabase`, no UI imports)
 and the app's `Model/Store.swift`, which turns its state into rows and back.
 
+The usage view has a database of its own beside it, `usage.sqlite` (`HarnessCore/Usage/UsageStore.swift`):
+an index of the usage in Claude Code's session files (which files were read and how far, and
+each response's tokens by its message and request IDs), sums by fifteen minutes kept up to date
+by triggers, and the tokens of side chats and memory agents, which leave no session file.
+Export State takes a snapshot of it too (`VACUUM INTO`), and Import State replaces it, WAL and
+all: the session files' part could be read again, side chats' and memory agents' couldn't.
+
 ## Tables
 
 | Table | What's in it |
@@ -75,7 +82,7 @@ File → Export State… (or Settings → General → Data) writes everything th
 | In the file | What it is |
 |---|---|
 | `manifest.json` | `format: "yourharness-state"` and `formatVersion` (1), when it was exported, the app (name, bundle ID, version, build, commit), the Mac (macOS, model, chip, memory, locale, time zone), every CLI and tool with its path and version or why it didn't run, the database's schema version, the data folder it came from, and what's inside (project names, counts, size). |
-| `data/` | The app's items in its data folder (`StateArchive.items`): `harness.sqlite` as a snapshot (`VACUUM INTO`, after everything waiting is written, so it's consistent and has no WAL), `attachments/`, `memory-imports/`, and the old `state.json` and `threads/` when they're there. |
+| `data/` | The app's items in its data folder (`StateArchive.items`): `harness.sqlite` and `usage.sqlite` as snapshots (`VACUUM INTO`, after everything waiting is written, so they're consistent and have no WAL), `attachments/`, `memory-imports/`, and the old `state.json` and `threads/` when they're there. |
 | `defaults.plist` | The app's macOS defaults (window sizes and places, split views, the Settings tab), without `lastRunVersion`. |
 | `browser-cookies.json` | Each project's browser cookies, by project ID, only when you ticked "Include browser sign-ins". Cookies only, not the browser's other storage. |
 

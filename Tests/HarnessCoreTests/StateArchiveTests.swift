@@ -55,6 +55,34 @@ struct StateArchiveTests {
         #expect(StateArchive.applyPending(in: target) == nil)
     }
 
+    @Test func usageTravelsWithTheStateAndReplacesTheTargets() throws {
+        let now = Date.now
+        func usage(_ key: Int64, _ model: String) -> MessageUsage {
+            MessageUsage(key: key, date: now.addingTimeInterval(-60), model: model, tokens: TokenCounts(input: 100, output: 10))
+        }
+        let source = try folder("source", project: "Mine", thread: "T1", says: "Hi", memory: "Mine")
+        let file = scratch.appending(path: "state.yhstate")
+        do {
+            // Still open, with what it wrote in its WAL: the snapshot has it all the same.
+            let store = UsageStore(directory: source)
+            store.record([usage(1, "claude-opus-5-5"), usage(2, "claude-opus-5-5")])
+            try StateArchive.export(HarnessDatabase(directory: source), usage: store, dataFolder: source, extras: .init(),
+                                    manifest: manifest(), to: file)
+        }
+        let target = try folder("target", project: "Theirs", thread: "T9", says: "Else", memory: "Theirs")
+        do {
+            let store = UsageStore(directory: target)
+            store.record([usage(3, "claude-haiku-5-5")])
+            #expect(FileManager.default.fileExists(atPath: target.appending(path: "usage.sqlite-wal").path))
+        }
+        try StateArchive.stage(try StateArchive.open(file), in: target)
+        try #require(StateArchive.applyPending(in: target)).finish()
+
+        let report = UsageStore(directory: target).report(days: 1, now: now)
+        #expect(report.total.messages == 2)
+        #expect(report.models.map(\.model) == ["claude-opus-5-5"])
+    }
+
     @Test func aSwapCutOffPartwayFinishesAtTheNextLaunch() throws {
         let source = try folder("source", project: "Mine", thread: "T1", says: "Imported", memory: "Imported memory")
         try write("image", to: source.appending(path: "attachments/T1-a.png"))
