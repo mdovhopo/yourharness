@@ -30,6 +30,10 @@ struct ComposerView: View {
                 .textFieldStyle(.plain)
                 .font(.body)
                 .lineLimit(1...12)
+                // Cut off at the top: scrolled to the end of a long draft, the text being edited
+                // draws a few points past the field, and the bottoms of the line above showed
+                // over the first whole one. Not below, where descenders hang past it.
+                .mask { Rectangle().padding(.bottom, -8) }
                 .focused($focused)
                 .onSubmit { send() }
                 .onKeyPress(.return, phases: .down) { press in

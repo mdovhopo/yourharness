@@ -160,6 +160,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 thread.attach(paths.split(separator: ":").map { .file(URL(fileURLWithPath: String($0))) })
             }
         }
+        // `YH_DRAFT=<text>` (`\n` for new lines): typed into the selected thread's composer,
+        // not sent, the cursor at its end as after typing, for checking how a long draft shows.
+        if let draft = ProcessInfo.processInfo.environment["YH_DRAFT"] {
+            MainActor.assumeIsolated {
+                AppModel.shared.selectedThread?.draft = draft.replacingOccurrences(of: "\\n", with: "\n")
+                Task { @MainActor in
+                    try? await Task.sleep(for: .seconds(1))
+                    guard let editor = NSApp.windows.lazy.compactMap({ $0.firstResponder as? NSTextView }).first else { return }
+                    // `YH_DRAFT_CURSOR=start` leaves it at the top instead.
+                    let atStart = ProcessInfo.processInfo.environment["YH_DRAFT_CURSOR"] == "start"
+                    editor.setSelectedRange(NSRange(location: atStart ? 0 : (editor.string as NSString).length, length: 0))
+                    editor.scrollRangeToVisible(editor.selectedRange())
+                }
+            }
+        }
         MainActor.assumeIsolated {
             AppModel.shared.updater.start()
             CookieImport.importIfRequested(app: AppModel.shared)
@@ -168,6 +183,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             StateTransfer.runIfRequested(app: AppModel.shared)
             SwitchProbe.runIfRequested(app: AppModel.shared)
             UsageProbe.runIfRequested(app: AppModel.shared)
+            FollowProbe.runIfRequested(app: AppModel.shared)
             TranscriptDiagnostics.runIfRequested(app: AppModel.shared)
             NavigationProbe.runIfRequested(app: AppModel.shared)
             SearchProbe.runIfRequested(app: AppModel.shared)

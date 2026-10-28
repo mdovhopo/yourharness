@@ -18,18 +18,64 @@ struct ClaudeMark: View {
     }
 }
 
-/// The mark, slowly turning: Claude is working. Turned from the clock rather than a repeating
-/// animation, for the same reason as `pulsing`, and still while no window can be seen.
+/// The mark, slowly turning: Claude is working. Core Animation turns it, in the render
+/// server: a repeating SwiftUI animation never finishes, so SwiftUI stacks every later
+/// animation of the view behind it, and turning it from the clock (a `TimelineView`) laid the
+/// whole window out on every frame, half the main thread for as long as any thread worked.
 struct SpinningClaudeMark: View {
     var size: CGFloat = 11
-    /// Seconds a turn takes.
-    private let period = 2.4
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: nil, paused: !WindowPresence.shared.isVisible)) { context in
-            ClaudeMark(size: size)
-                .rotationEffect(.degrees(context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: period) / period * 360))
-        }
+        SpinningMark()
+            .frame(width: size, height: size)
+            .accessibilityElement()
+            .accessibilityLabel("Claude")
+    }
+}
+
+private struct SpinningMark: NSViewRepresentable {
+    func makeNSView(context: Context) -> SpinningMarkView { SpinningMarkView() }
+    func updateNSView(_ view: SpinningMarkView, context: Context) {}
+}
+
+final class SpinningMarkView: NSView {
+    /// Seconds a turn takes.
+    private static let period = 2.4
+    private let mark = CAShapeLayer()
+
+    override var isFlipped: Bool { true }
+
+    init() {
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.addSublayer(mark)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        mark.frame = bounds
+        mark.path = StarburstShape().path(in: bounds).cgPath
+        mark.fillColor = NSColor(Color.claude).cgColor
+        CATransaction.commit()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        // A layer leaving its window loses its animations.
+        guard window != nil, mark.animation(forKey: "spin") == nil else { return }
+        let spin = CABasicAnimation(keyPath: "transform.rotation.z")
+        spin.fromValue = 0
+        spin.toValue = 2 * Double.pi
+        spin.duration = Self.period
+        spin.repeatCount = .infinity
+        spin.isRemovedOnCompletion = false
+        // Every mark at the same angle, wherever it is.
+        spin.timeOffset = CACurrentMediaTime().truncatingRemainder(dividingBy: Self.period)
+        mark.add(spin, forKey: "spin")
     }
 }
 

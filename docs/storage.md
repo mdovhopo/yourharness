@@ -19,7 +19,7 @@ all: the session files' part could be read again, side chats' and memory agents'
 | `settings` | One row per top-level setting or cache (`appearance`, `defaults`, `slashCommands`, …), its value as JSON. A change writes one row. |
 | `projects` | One row per project, in sidebar order: its JSON. |
 | `threads` | One row per thread: its metadata as JSON, plus `project_id`, `updated_at` and `session_id` to query by. |
-| `entries` | Transcript rows, `(thread_id, seq)` in order, with real columns for what queries need (kind, text, tool name, input, result, dates). A sub-agent's run is JSON in `subagent`. Every write takes the next `rev`. |
+| `entries` | Transcript rows, `(thread_id, seq)` in order, with real columns for what queries need (kind, text, tool name, input, result, dates). A sub-agent's run is JSON in `subagent`. On the message that started a turn, `changed_files` (JSON, schema step 4) lists the files the turn changed as git saw them (`Git.snapshot`/`changes(since:)`: tracked files through a copy of the index, untracked ones by size and time), for the work summary's "edited N files". Every write takes the next `rev`. |
 | `transcripts` | Per thread: when its transcript was last saved, and how many rows. |
 | `blobs` | Tool inputs, results and sub-agent runs over 32 KB, by SHA-256, LZFSE-compressed, stored once however many rows point at them. A big result also keeps its first 20,000 characters in the row: that's what's loaded (`toolResultRef` names the whole one, `fullToolResult` reads it). |
 | `entries_fts` | FTS5 index over what was said, tool names and inputs, and the start of tool output. Its rowid is the entry's. |

@@ -107,8 +107,14 @@ struct WorkSummaryRow: View {
             } else {
                 tools += 1
             }
-            if Self.editTools.contains(entry.toolName), let path = Self.filePath(entry.toolInput) { files.insert(path) }
+            // As git names it, symlinks resolved (`/tmp` is `/private/tmp`), so a file isn't counted twice.
+            if Self.editTools.contains(entry.toolName), let path = Self.filePath(entry.toolInput) {
+                let folder = (path as NSString).deletingLastPathComponent
+                files.insert((WorkspaceModel.realPath(folder) as NSString).appendingPathComponent((path as NSString).lastPathComponent))
+            }
         }
+        // What git saw change, however it was changed: shell commands and scripts too.
+        files.formUnion(work.changedFiles ?? [])
         var parts: [String] = []
         if tools > 0 { parts.append(tools == 1 ? "1 tool call" : "\(tools) tool calls") }
         if !files.isEmpty { parts.append(files.count == 1 ? "edited 1 file" : "edited \(files.count) files") }

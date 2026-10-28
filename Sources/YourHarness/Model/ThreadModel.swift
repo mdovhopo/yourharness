@@ -520,6 +520,7 @@ final class ThreadModel: Identifiable {
             entry.attachments = attachments
             if working { entry.delivery = .interrupted }
             entries.append(entry)
+            beginTurnChanges(for: entry)
         }
         if isFirstMessage { app.generateTitle(for: self, from: .firstMessage(subject)) }
         phase = .running
@@ -1080,6 +1081,70 @@ final class ThreadModel: Identifiable {
         guard let start = entries.last(where: \.startsTurn), start.turnEndedAt == nil else { return }
         start.turnEndedAt = .now
         rowsChanged()
+        finishTurnChanges(start)
+    }
+
+    // MARK: - What a turn changed
+
+    /// Where the working folder stood when each turn you started began, by the message that
+    /// started it: "edited 3 files" counts what git says changed, however it was changed (a
+    /// shell command, a script, a commit), not only Claude's edit tools.
+    @ObservationIgnored private var turnBaselines: [String: TurnBaseline] = [:]
+
+    private struct TurnBaseline {
+        let snapshot: Task<(git: Git, start: WorkingTreeSnapshot)?, Never>
+        let folder: String
+        let startedAt: Date
+        /// Other threads working in the same folder when it began.
+        let others: Set<UUID>
+    }
+
+    private func beginTurnChanges(for entry: TranscriptEntry) {
+        guard !isAside, !isEphemeral else { return }
+        let folder = WorkspaceModel.realPath(effectiveDirectory)
+        // Taken while Claude reads your message: its first edit is seconds away. Right after
+        // launch git may still be being found.
+        let snapshot = Task { [app] () -> (git: Git, start: WorkingTreeSnapshot)? in
+            var git = app.workspaceTools.git
+            for _ in 0..<30 where git == nil {
+                try? await Task.sleep(for: .milliseconds(100))
+                git = app.workspaceTools.git
+            }
+            guard let git, let start = await git.snapshot(of: URL(fileURLWithPath: folder)) else { return nil }
+            return (git, start)
+        }
+        turnBaselines[entry.id] = TurnBaseline(snapshot: snapshot, folder: folder, startedAt: .now, others: threadsWorking(in: folder))
+    }
+
+    private func finishTurnChanges(_ start: TranscriptEntry) {
+        guard let baseline = turnBaselines.removeValue(forKey: start.id) else { return }
+        // Another thread worked in the same folder meanwhile: git can't tell whose a change
+        // was, so only files this turn's tool calls name count.
+        let shared = !baseline.others.isEmpty || !threadsWorking(in: baseline.folder, since: baseline.startedAt).isEmpty
+        let named: String? = shared ? entries.drop { $0 !== start }.filter { $0.kind == .tool }.map(\.toolInput).joined(separator: "\n") : nil
+        Task { [weak self] in
+            guard let (git, snapshot) = await baseline.snapshot.value, var changed = await git.changes(since: snapshot) else { return }
+            if let named {
+                changed = changed.filter { path in
+                    let relative = path.hasPrefix(baseline.folder + "/") ? String(path.dropFirst(baseline.folder.count + 1)) : path
+                    return named.contains(path) || named.contains(relative) || named.contains((path as NSString).lastPathComponent)
+                }
+            }
+            guard let self else { return }
+            start.changedFiles = changed
+            self.rowsChanged()
+            self.persist()
+        }
+    }
+
+    /// Other threads working in `folder` (or a folder inside it, or one it's inside) now, or
+    /// that have been active there since `since`.
+    private func threadsWorking(in folder: String, since: Date? = nil) -> Set<UUID> {
+        let overlaps = { (other: String) in other == folder || other.hasPrefix(folder + "/") || folder.hasPrefix(other + "/") }
+        return Set(app.threads.filter { other in
+            other !== self && !other.isAside && overlaps(WorkspaceModel.realPath(other.effectiveDirectory))
+                && (other.isWorking || since.map { other.updatedAt > $0 } ?? false)
+        }.map(\.id))
     }
 
     func jumpToMessage(_ direction: MessageJump.Direction) {
@@ -1449,6 +1514,17 @@ final class ThreadModel: Identifiable {
 
     func appendForStress(_ entry: TranscriptEntry) {
         entries.append(entry)
+    }
+
+    /// Your message and a turn starting, with no session behind it: `FollowProbe` plays
+    /// Claude's side in with `applyForProbe`.
+    func beginProbeTurn(_ text: String) {
+        entries.append(TranscriptEntry(kind: .user, text: text))
+        phase = .running
+    }
+
+    func applyForProbe(_ event: AgentEvent) {
+        apply(event, generation: sessionGeneration)
     }
 }
 

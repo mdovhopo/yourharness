@@ -17,7 +17,8 @@ enum SwitchProbe {
     static var geometry: [UUID: (offset: CGFloat, content: CGFloat, container: CGFloat)] = [:]
     private static var blanks = 0
 
-    /// After a switch has settled: the thread has rows but none is in view, or another of
+    /// After a switch has settled: the thread has rows but none is in view (any part of one:
+    /// a diagram can be taller than the screen), or another of
     /// the app's windows is on screen over the main one. Either is the empty main area.
     static func checkBlank(_ thread: ThreadModel, label: String) {
         let rows = thread.transcriptDisplayRows.count
@@ -76,7 +77,15 @@ enum SwitchProbe {
         else { return nil }
         view.cacheDisplay(in: view.bounds, to: bitmap)
         let width = bitmap.pixelsWide, height = bitmap.pixelsHigh
+        // Straight from the bytes when they're 8-bit RGB(A): `colorAt` per pixel took 400 ms a
+        // check, which buried the switch itself in Time Profiler.
+        let bytes = bitmap.bitmapData, direct = bitmap.bitsPerSample == 8 && bitmap.samplesPerPixel >= 3 && !bitmap.isPlanar
+            && !bitmap.bitmapFormat.contains(.alphaFirst)
         func luminance(_ x: Int, _ y: Int) -> CGFloat? {
+            if direct, let bytes {
+                let pixel = bytes + y * bitmap.bytesPerRow + x * bitmap.samplesPerPixel
+                return (0.3 * CGFloat(pixel[0]) + 0.59 * CGFloat(pixel[1]) + 0.11 * CGFloat(pixel[2])) / 255
+            }
             guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { return nil }
             return 0.3 * color.redComponent + 0.59 * color.greenComponent + 0.11 * color.blueComponent
         }

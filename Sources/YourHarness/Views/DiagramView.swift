@@ -316,7 +316,7 @@ private struct FillsScreenOnAppear: NSViewRepresentable {
 @MainActor
 enum DiagramExport {
     static func image(_ entry: DiagramCache.Entry) -> NSImage? {
-        let content = DiagramCanvas(entry: entry)
+        let content = DiagramCanvas(entry: entry, drawsAsynchronously: false)
             .padding(DiagramStyle.padding)
             .background(Color(nsColor: .windowBackgroundColor))
         let renderer = ImageRenderer(content: content)
@@ -346,6 +346,8 @@ enum DiagramExport {
 
 struct DiagramCanvas: View {
     let entry: DiagramCache.Entry
+    /// Off for an image made from it, which is drawn once, right then.
+    var drawsAsynchronously = true
 
     static func title(of entry: DiagramCache.Entry) -> String {
         switch entry {
@@ -365,7 +367,10 @@ struct DiagramCanvas: View {
 
     var body: some View {
         let size = Self.size(of: entry)
-        Canvas { context, _ in
+        // Drawn off the main thread: a big diagram is thousands of points of paths and text,
+        // painted whole when it comes on screen (switching to a thread that ends in a few
+        // of them spent a tenth of a second here).
+        Canvas(rendersAsynchronously: drawsAsynchronously) { context, _ in
             switch entry {
             case .flowchart(let geometry, _): FlowchartPainter.draw(geometry, in: &context)
             case .sequence(let geometry, _): SequencePainter.draw(geometry, in: &context)

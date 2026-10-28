@@ -103,11 +103,13 @@ public struct Git: Sendable {
     }
 
     /// `writes`: a command that changes the repo (worktree add/remove) takes git's locks as usual.
-    func run(_ arguments: [String], in repo: URL, outputLimit: Int = 256 * 1024, writes: Bool = false) async -> CommandOutput {
+    /// `adding`: variables on top of the usual ones (`GIT_INDEX_FILE`, say).
+    func run(_ arguments: [String], in repo: URL, outputLimit: Int = 256 * 1024, writes: Bool = false,
+             adding extra: [String: String] = [:]) async -> CommandOutput {
         await CommandRunner.run(
             executable,
             arguments: (writes ? [] : ["--no-optional-locks"]) + ["-C", repo.path] + arguments,
-            environment: environment,
+            environment: environment.merging(extra) { _, new in new },
             timeout: 15,
             outputLimit: outputLimit
         )

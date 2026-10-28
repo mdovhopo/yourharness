@@ -38,11 +38,13 @@ struct TurnWork: Equatable {
     let startedAt: Date?
     let endedAt: Date?
     let isExpanded: Bool
+    /// The files the turn changed, as git saw them; nil outside a repo or until it's known.
+    var changedFiles: [String]? = nil
 
     var id: String { "work-" + turnID }
 
     static func == (a: Self, b: Self) -> Bool {
-        a.turnID == b.turnID && a.isExpanded == b.isExpanded && a.endedAt == b.endedAt
+        a.turnID == b.turnID && a.isExpanded == b.isExpanded && a.endedAt == b.endedAt && a.changedFiles == b.changedFiles
             && a.entries.count == b.entries.count && a.entries.last === b.entries.last
     }
 
@@ -131,7 +133,8 @@ extension ThreadModel {
         guard !hidden.isEmpty else { return turn.map(TranscriptRow.entry) }
         // Development: `YH_EXPAND_WORK=1` opens every turn's work, for checking how it looks.
         let isExpanded = expanded.contains(first.id) || expandsAll
-        let work = TurnWork(turnID: first.id, entries: hidden, startedAt: first.date, endedAt: first.turnEndedAt, isExpanded: isExpanded)
+        let work = TurnWork(turnID: first.id, entries: hidden, startedAt: first.date, endedAt: first.turnEndedAt, isExpanded: isExpanded,
+                            changedFiles: first.changedFiles)
         // Opened, the work shows inside its own row, as one group.
         var rows: [TranscriptRow] = [.entry(first), .work(work)]
         for entry in turn.dropFirst() where shows(entry) {

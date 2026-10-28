@@ -22,6 +22,9 @@ final class TranscriptEntry: Identifiable {
     @ObservationIgnored var date: Date?
     /// On the message that starts a turn: when Claude finished it.
     var turnEndedAt: Date?
+    /// On the message that starts a turn: the files it changed, as git saw them, however
+    /// they were changed (absolute paths). Nil outside a repo, or before it's worked out.
+    var changedFiles: [String]?
 
     // Tool calls
     @ObservationIgnored var toolName = ""
@@ -79,13 +82,15 @@ extension TranscriptEntry {
             date: date,
             turnEndedAt: turnEndedAt,
             toolResultRef: toolResultRef,
-            toolResultLength: toolResultLength
+            toolResultLength: toolResultLength,
+            changedFiles: changedFiles
         )
     }
 
     convenience init(snapshot: EntrySnapshot) {
         self.init(id: snapshot.id, kind: snapshot.kind, text: snapshot.text, date: snapshot.date)
         turnEndedAt = snapshot.turnEndedAt
+        changedFiles = snapshot.changedFiles
         toolName = snapshot.toolName ?? ""
         toolInput = snapshot.toolInput ?? ""
         toolResult = snapshot.toolResult

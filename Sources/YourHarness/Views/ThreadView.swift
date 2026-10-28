@@ -142,10 +142,17 @@ private struct TranscriptView: View {
     /// a reply streams. Your own scrolling turns it off; stopping at the bottom turns it
     /// back on.
     @State private var followsBottom = true
+    @State private var scrollPhase = ScrollPhase.idle
     @State private var isAtBottom = true
     @State private var isAtTop = false
     /// Rows on screen now, for jumping between your messages from where you are.
     @State private var visibleRowIDs: [String] = []
+    /// Any part of them on screen.
+    @State private var touchedRowIDs: [String] = []
+    /// What's on screen for jumping and coming back: rows mostly in view, or, when one row
+    /// is taller than the screen (a diagram, a long answer) and nothing is mostly in view,
+    /// whatever shows.
+    private var rowsInView: [String] { visibleRowIDs.isEmpty ? touchedRowIDs : visibleRowIDs }
     private static let typingID = "typing-indicator"
 
     /// Claude is working and nothing is streaming in. Between two of its steps (text ending,
@@ -216,9 +223,37 @@ private struct TranscriptView: View {
             isAtBottom = new.isAtBottom
             isAtTop = new.isAtTop
             isShort = new.contentHeight <= new.containerHeight + 0.5
-            // Moved while the content stayed the same size: that's scrolling, by any means
-            // (a scroll bar drag may report no phase), so follow only if it ended at the bottom.
-            if new.contentHeight == old.contentHeight, new.offset != old.offset { followsBottom = new.isAtBottom }
+            let wasFollowing = followsBottom
+            defer {
+                if FollowLog.isOn {
+                    FollowLog.write(String(format: "geo off %.0f→%.0f content %.0f→%.0f box %.0f→%.0f insets %.0f,%.0f→%.0f,%.0f bottom %@ follow %@→%@", old.offset, new.offset,
+                                           old.contentHeight, new.contentHeight, old.containerHeight, new.containerHeight,
+                                           old.insets[0], old.insets[1], new.insets[0], new.insets[1], new.isAtBottom ? "y" : "n", wasFollowing ? "y" : "n", followsBottom ? "y" : "n"))
+                }
+            }
+            if old.offset - new.offset > 4, !new.isAtBottom, new.contentHeight >= old.contentHeight {
+                // Up and away from the end, by any means (a scroll bar drag or a mouse wheel
+                // may report no phase), the content no shorter: that's you scrolling. The
+                // transcript's own scrolling goes to the end; what moves it up on its own
+                // stays at the end (rows re-measured nudge it, a transcript just shown
+                // settles with its composer inset, and the last row held at the bottom sits a
+                // little above the content's end) or comes with the content shrinking (the
+                // work folding away pulls the end up, landing short while rows are measured).
+                followsBottom = false
+            } else if new.offset > old.offset, new.isAtBottom {
+                // Down to the end, however it got there.
+                followsBottom = true
+            } else if followsBottom, !new.isAtBottom, scrollPhase == .idle, let last = lastRowID {
+                // Following, and the end went out of view without you: a reply streaming past
+                // the bottom, output arriving in one piece, rows re-measured. Back to it; a new
+                // row alone isn't enough to know. Not while the transcript's own scrolling
+                // animates there. Never animated itself: this runs as the content moves, and
+                // an animation started on each move stacks onto the last (SwiftUI combines
+                // them) until a frame takes seconds.
+                var still = Transaction()
+                still.disablesAnimations = true
+                withTransaction(still) { position.scrollTo(id: last, anchor: .bottom) }
+            }
             var diagnostics = TranscriptDiagnostics.scroll[thread.id] ?? .init()
             diagnostics.offset = new.offset
             diagnostics.contentHeight = new.contentHeight
@@ -230,17 +265,27 @@ private struct TranscriptView: View {
             diagnostics.updated = .now
             TranscriptDiagnostics.scroll[thread.id] = diagnostics
         }
+        // Only your own scrolling stops following. `.animating` is the transcript's own
+        // scrolling (to a new row, to a message): counted as yours, rows arriving meanwhile
+        // went unfollowed, and following stayed off unless the animation ended exactly at
+        // the end, which the content growing under it made unlikely.
         .onScrollPhaseChange { old, phase in
-            if phase != .idle {
+            if FollowLog.isOn { FollowLog.write("phase \(old) → \(phase)") }
+            scrollPhase = phase
+            switch phase {
+            case .tracking, .interacting, .decelerating:
                 followsBottom = false
-            } else if old != .idle {
+            case .idle where old != .animating:
                 followsBottom = isAtBottom
+            default:
+                break
             }
         }
         // A new row: show it if you're following. Sending a message always takes you to it.
         .onChange(of: lastRowID) { _, id in
             guard let id else { return }
             if thread.entries.last?.id == id, thread.entries.last?.kind == .user { followsBottom = true }
+            if FollowLog.isOn { FollowLog.write("new last row, follow \(followsBottom)") }
             if followsBottom { position.scrollTo(id: id, anchor: .bottom) }
         }
         .modifier(ScrollProbe(position: $position))
@@ -266,10 +311,11 @@ private struct TranscriptView: View {
         .onScrollTargetVisibilityChange(idType: String.self, threshold: 0.3) { ids in
             visibleRowIDs = ids
             TranscriptDiagnostics.scroll[thread.id, default: .init()].visibleRows = ids
-            if SwitchProbe.isOn { SwitchProbe.visibleRows[thread.id] = ids.count }
         }
         .onScrollTargetVisibilityChange(idType: String.self, threshold: 0.01) { ids in
+            touchedRowIDs = ids
             TranscriptDiagnostics.scroll[thread.id, default: .init()].touchedRows = ids
+            if SwitchProbe.isOn { SwitchProbe.visibleRows[thread.id] = ids.count }
         }
         .onChange(of: thread.messageJump) { _, jump in
             if let jump { self.jump(jump.direction) }
@@ -339,7 +385,7 @@ private struct TranscriptView: View {
             return
         }
         let order = Dictionary(thread.transcriptDisplayRows.enumerated().map { ($1.id, $0) }, uniquingKeysWith: { first, _ in first })
-        thread.scrollAnchor = visibleRowIDs.max { (order[$0] ?? -1) < (order[$1] ?? -1) }
+        thread.scrollAnchor = rowsInView.max { (order[$0] ?? -1) < (order[$1] ?? -1) }
     }
 
     /// Turns not shown yet, above the first one that is.
@@ -350,7 +396,7 @@ private struct TranscriptView: View {
     /// One of your messages above the top of the screen, shown or not yet.
     private var hasMessageAbove: Bool {
         let rows = thread.transcriptDisplayRows
-        let visible = Set(visibleRowIDs)
+        let visible = Set(rowsInView)
         guard let top = rows.firstIndex(where: { visible.contains($0.id) }) else { return false }
         return rows[..<top].contains { row in
             if case .earlier = row { return true }
@@ -364,7 +410,7 @@ private struct TranscriptView: View {
         let rows = thread.transcriptDisplayRows
         guard !rows.isEmpty else { return }
         let index = Dictionary(rows.enumerated().map { ($1.id, $0) }, uniquingKeysWith: { first, _ in first })
-        let top = visibleRowIDs.compactMap { index[$0] }.min() ?? rows.count - 1
+        let top = rowsInView.compactMap { index[$0] }.min() ?? rows.count - 1
         let isMessage: (TranscriptRow) -> Bool = { $0.entry?.kind == .user }
         switch direction {
         case .previous:

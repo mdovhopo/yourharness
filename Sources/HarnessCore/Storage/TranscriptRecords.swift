@@ -44,11 +44,14 @@ public struct EntrySnapshot: Codable, Sendable, Equatable {
     public var toolResultRef: String?
     /// The whole result's length in characters, when `toolResult` is its head.
     public var toolResultLength: Int?
+    /// On the message that started a turn: the files the turn changed, as git saw them.
+    public var changedFiles: [String]?
 
     public init(id: String, kind: EntryKind, text: String, toolName: String? = nil, toolInput: String? = nil,
                 toolResult: String? = nil, toolIsError: Bool? = nil, noticeStyle: NoticeStyle? = nil,
                 attachments: [String]? = nil, subagent: SubagentSnapshot? = nil, delivery: MessageDelivery? = nil,
-                date: Date? = nil, turnEndedAt: Date? = nil, toolResultRef: String? = nil, toolResultLength: Int? = nil) {
+                date: Date? = nil, turnEndedAt: Date? = nil, toolResultRef: String? = nil, toolResultLength: Int? = nil,
+                changedFiles: [String]? = nil) {
         self.id = id
         self.kind = kind
         self.text = text
@@ -64,6 +67,7 @@ public struct EntrySnapshot: Codable, Sendable, Equatable {
         self.turnEndedAt = turnEndedAt
         self.toolResultRef = toolResultRef
         self.toolResultLength = toolResultLength
+        self.changedFiles = changedFiles
     }
 }
 

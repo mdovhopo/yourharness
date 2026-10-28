@@ -41,27 +41,79 @@ extension View {
         background(.canvas)
     }
 
-    /// Fades down to `low` and back up every `period` seconds, for as long as it's shown and
-    /// a window can be seen.
+    /// Fades down to `low` and back up every `period` seconds, for as long as it's shown.
     func pulsing(low: Double, period: Double) -> some View {
-        modifier(Pulsing(low: low, period: period))
+        PulsingHost(content: self, low: low, period: period)
     }
 }
 
-/// Worked out from the clock on every frame, never a repeating animation: one of those never
-/// finishes, so SwiftUI stacks every later animation of the view behind it (each new row moves
-/// the typing indicator), and after hours of a busy thread a single frame took minutes.
-private struct Pulsing: ViewModifier {
+/// Faded by Core Animation, in the render server, with the content in a hosting view of its
+/// own. Never a repeating SwiftUI animation: one of those never finishes, so SwiftUI stacks
+/// every later animation of the view behind it (each new row moves the typing indicator), and
+/// after hours of a busy thread a single frame took minutes. Nor worked out from the clock: a
+/// `TimelineView` lays the whole window out on every frame.
+private struct PulsingHost<Content: View>: NSViewRepresentable {
+    let content: Content
     let low: Double
     let period: Double
 
-    func body(content: Content) -> some View {
-        TimelineView(.animation(minimumInterval: nil, paused: !WindowPresence.shared.isVisible)) { context in
-            let phase = context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: period) / period
-            // 0 → 1 → 0, eased at both ends.
-            let depth = (1 - cos(phase * 2 * .pi)) / 2
-            content.opacity(1 - (1 - low) * depth)
-        }
+    func makeNSView(context: Context) -> PulsingView { PulsingView() }
+
+    func updateNSView(_ view: PulsingView, context: Context) {
+        // The font, colors and tint it was given, which a hosting view doesn't inherit.
+        view.hosting.rootView = AnyView(content.environment(\.self, context.environment))
+        view.pulse(low: low, period: period)
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView view: PulsingView, context: Context) -> CGSize? {
+        view.hosting.sizeThatFits(in: proposal.replacingUnspecifiedDimensions(by: CGSize(width: 10_000, height: 10_000)))
+    }
+}
+
+final class PulsingView: NSView {
+    let hosting = NSHostingController(rootView: AnyView(EmptyView()))
+    private var shape: (low: Double, period: Double)?
+
+    init() {
+        super.init(frame: .zero)
+        wantsLayer = true
+        hosting.sizingOptions = []
+        addSubview(hosting.view)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func layout() {
+        super.layout()
+        hosting.view.frame = bounds
+    }
+
+    func pulse(low: Double, period: Double) {
+        guard shape?.low != low || shape?.period != period else { return }
+        shape = (low, period)
+        layer?.removeAnimation(forKey: "pulse")
+        start()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        // A layer leaving its window loses its animations.
+        start()
+    }
+
+    private func start() {
+        guard window != nil, let shape, let layer, layer.animation(forKey: "pulse") == nil else { return }
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 1
+        fade.toValue = shape.low
+        fade.duration = shape.period / 2
+        fade.autoreverses = true
+        fade.repeatCount = .infinity
+        fade.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        fade.isRemovedOnCompletion = false
+        // In step with every other pulse of the same period.
+        fade.timeOffset = CACurrentMediaTime().truncatingRemainder(dividingBy: shape.period)
+        layer.add(fade, forKey: "pulse")
     }
 }
 

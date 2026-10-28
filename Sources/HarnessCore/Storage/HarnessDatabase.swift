@@ -95,7 +95,7 @@ public final class HarnessDatabase: Sendable {
     public static let resultHeadLength = 20_000
     /// Results kept whole in memory however big: a sub-agent's report is read from its result.
     public static let wholeResultTools = SubagentReport.toolNames
-    static let schemaVersion = 3
+    static let schemaVersion = 4
     private static let indexBatch = 500
 
     // MARK: - Setup
@@ -642,6 +642,10 @@ enum Schema {
         ALTER TABLE memory_versions ADD COLUMN task_steps TEXT;
         CREATE INDEX memories_tasks ON memories(scope, task_state) WHERE task_state IS NOT NULL;
         """,
+        // 4: on the message that started a turn, the files the turn changed, as git saw them.
+        """
+        ALTER TABLE entries ADD COLUMN changed_files TEXT;
+        """,
     ]
 
     static func migrate(_ connection: SQLiteConnection) throws {
@@ -805,23 +809,24 @@ final class Writer: @unchecked Sendable {
         }
 
         let attachments = try entry.attachments.map { String(decoding: try JSONEncoder().encode($0), as: UTF8.self) }
+        let changedFiles = try entry.changedFiles.map { String(decoding: try JSONEncoder().encode($0), as: UTF8.self) }
         try connection.run("""
             INSERT INTO entries(thread_id, seq, id, kind, text, tool_name, tool_input, tool_input_blob, tool_result,
                                 tool_result_blob, tool_result_length, tool_is_error, notice_style, attachments, delivery,
-                                date, turn_ended_at, subagent, subagent_blob, rev)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                date, turn_ended_at, subagent, subagent_blob, rev, changed_files)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(thread_id, seq) DO UPDATE SET id = excluded.id, kind = excluded.kind, text = excluded.text,
                 tool_name = excluded.tool_name, tool_input = excluded.tool_input, tool_input_blob = excluded.tool_input_blob,
                 tool_result = excluded.tool_result, tool_result_blob = excluded.tool_result_blob,
                 tool_result_length = excluded.tool_result_length, tool_is_error = excluded.tool_is_error,
                 notice_style = excluded.notice_style, attachments = excluded.attachments, delivery = excluded.delivery,
                 date = excluded.date, turn_ended_at = excluded.turn_ended_at, subagent = excluded.subagent,
-                subagent_blob = excluded.subagent_blob, rev = excluded.rev
+                subagent_blob = excluded.subagent_blob, rev = excluded.rev, changed_files = excluded.changed_files
             """, [
                 .text(thread), .int(Int64(seq)), .text(entry.id), .text(entry.kind.rawValue), .text(entry.text),
                 .of(entry.toolName), .of(input), .of(inputBlob), .of(result), .of(resultBlob), .of(resultLength),
                 .of(entry.toolIsError), .of(entry.noticeStyle?.rawValue), .of(attachments), .of(entry.delivery?.rawValue),
-                .of(entry.date), .of(entry.turnEndedAt), .of(subagent), .of(subagentBlob), .int(Int64(nextRev())),
+                .of(entry.date), .of(entry.turnEndedAt), .of(subagent), .of(subagentBlob), .int(Int64(nextRev())), .of(changedFiles),
             ])
     }
 
@@ -829,7 +834,7 @@ final class Writer: @unchecked Sendable {
         var entries: [EntrySnapshot] = []
         try connection.query("""
             SELECT id, kind, text, tool_name, tool_input, tool_input_blob, tool_result, tool_result_blob, tool_result_length,
-                   tool_is_error, notice_style, attachments, delivery, date, turn_ended_at, subagent, subagent_blob
+                   tool_is_error, notice_style, attachments, delivery, date, turn_ended_at, subagent, subagent_blob, changed_files
             FROM entries WHERE thread_id = ? AND seq >= ? ORDER BY seq LIMIT ?
             """, [.text(thread), .int(Int64(from)), .int(Int64(limit))]) { row in
             // A kind from a newer app is skipped, not misread.
@@ -855,6 +860,7 @@ final class Writer: @unchecked Sendable {
             if let json = try row.data(15) ?? row.text(16).flatMap({ try blob(connection, $0) }) {
                 entry.subagent = try? decoder.decode(SubagentSnapshot.self, from: json)
             }
+            entry.changedFiles = row.text(17).flatMap { try? JSONDecoder().decode([String].self, from: Data($0.utf8)) }
             entries.append(entry)
         }
         return entries
