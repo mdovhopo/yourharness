@@ -6,6 +6,8 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+## [0.0.10] - 2026-10-29
+
 ### Added
 - **See what you've spent.** Click the usage box at the bottom of the sidebar (or View → Usage, ⇧⌘U) for a big usage view: your 5-hour and weekly limits with when they reset, then the tokens you used over the past week, month, 90 days, 180 days or year (input, output, cache reads and writes), what they would have cost at Anthropic's API prices, the share each model took, a chart per day in tokens or dollars (stacked, or a row per model), and a day-by-day list. The numbers come from Claude Code's own history on this Mac, read in the background, so sessions you ran in a terminal count too, plus this app's side chats and memory agents. History stays in the view after Claude Code deletes old sessions. The range you pick is remembered. Esc closes it.
 - **Claude can look after your threads.** Ask a thread to find an earlier conversation, read what it worked out, rename or settle threads, pin one, or bring in a session you ran with Claude Code in a terminal, and it does it without taking you anywhere. It can't delete threads. A thread in Home reaches all your projects; a thread in a project only that project's threads, and only Claude Code sessions run in its folder. It changes threads only when you ask, and checks with you before changing more than two.
