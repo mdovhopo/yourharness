@@ -32,7 +32,7 @@ struct ThreadView: View {
         ZStack {
             ForEach(keptThreads) { kept in
                 let shown = kept.id == thread.id
-                TranscriptView(thread: kept)
+                TranscriptView(thread: kept, isShown: shown)
                     .environment(\.issueLinker, app.issueLinker(for: kept))
                     .environment(kept)
                     .opacity(shown ? 1 : 0)
@@ -125,9 +125,12 @@ struct ThreadView: View {
 private struct TranscriptView: View {
     @Environment(AppModel.self) private var app
     let thread: ThreadModel
+    /// On screen, rather than kept hidden for coming back to.
+    let isShown: Bool
 
-    init(thread: ThreadModel) {
+    init(thread: ThreadModel, isShown: Bool) {
         self.thread = thread
+        self.isShown = isShown
         // Where you were, from the first frame: no landing at the end and jumping back.
         _position = State(initialValue: thread.scrollAnchor.map { ScrollPosition(id: $0, anchor: .bottom) }
             ?? ScrollPosition(idType: String.self, edge: .bottom))
@@ -188,6 +191,28 @@ private struct TranscriptView: View {
                 thread.computeFootprintIfNeeded()
                 await restorePlace()
             }
+            .task(id: isShown) {
+                guard isShown, hasBeenShown else {
+                    hasBeenShown = hasBeenShown || isShown
+                    return
+                }
+                // Kept hidden meanwhile, its transcript may have been let go (only the last
+                // few threads you looked at stay in memory).
+                await thread.loadTranscriptSoon()
+            }
+            // When the rows on screen can go stale: a turn ending (its work folds away), the
+            // thread shown again, the window seen again.
+            .task(id: EndCheck(isShown: isShown, windowSeen: WindowPresence.shared.isVisible,
+                               phase: thread.phase, lastRowID: lastRowID)) {
+                guard isShown, WindowPresence.shared.isVisible else { return }
+                // Rows in view are reported a moment after they move: blank twice, a second
+                // apart, it is.
+                for _ in 0..<2 {
+                    try? await Task.sleep(for: .milliseconds(600))
+                    guard !Task.isCancelled, looksBlank else { return }
+                }
+                foundBlank()
+            }
             .onDisappear { rememberPlace() }
     }
 
@@ -195,9 +220,10 @@ private struct TranscriptView: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 18) { rows }
                 .scrollTargetLayout()
-                // Keyed on count, so streaming text doesn't animate, only new rows.
-                .animation(.smooth(duration: 0.32), value: thread.entries.count)
-                .animation(.smooth(duration: 0.25), value: showsTypingIndicator)
+                // New rows and the typing indicator come in without animating: rows animated in
+                // or out during a turn left the lazy stack laying out rows that were gone, and when
+                // the turn's work folded away it showed nothing, through going to other threads
+                // and back, until something scrolled it.
                 .frame(maxWidth: 820)
                 .frame(maxWidth: .infinity)
                 .padding(.horizontal, 28)
@@ -375,6 +401,34 @@ private struct TranscriptView: View {
             followsBottom = true
             if let last = lastRowID { position.scrollTo(id: last, anchor: .bottom) }
         }
+    }
+
+    @State private var hasBeenShown = false
+
+    private struct EndCheck: Equatable {
+        var isShown: Bool
+        var windowSeen: Bool
+        var phase: ThreadModel.Phase
+        var lastRowID: String?
+    }
+
+    /// Blank: rows, and none of them in view, or at the end with the last row not among those
+    /// laid out (rows that went away still there, as when rows animated during a turn). Captured
+    /// for Debug (once a launch, in `diagnostics/`), and sent to the end.
+    private var looksBlank: Bool {
+        guard let last = lastRowID, !thread.transcriptDisplayRows.isEmpty else { return false }
+        let lost = touchedRowIDs.isEmpty && !isShort
+        let stale = followsBottom && isAtBottom && !touchedRowIDs.isEmpty && !touchedRowIDs.contains(last)
+        return lost || stale
+    }
+
+    private func foundBlank() {
+        guard let last = lastRowID else { return }
+        TranscriptDiagnostics.lostPlace(app: app)
+        followsBottom = true
+        var still = Transaction()
+        still.disablesAnimations = true
+        withTransaction(still) { position.scrollTo(id: last, anchor: .bottom) }
     }
 
     private func rememberPlace() {

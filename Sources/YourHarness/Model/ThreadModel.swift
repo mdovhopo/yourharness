@@ -368,7 +368,7 @@ final class ThreadModel: Identifiable {
         let loaded = snapshots
             .filter { !($0.kind == .thinking && $0.text.isEmpty) }
             .map(TranscriptEntry.init(snapshot:))
-        // History should just be there; only new messages animate in.
+        // History should just be there, whatever animation is going on around it.
         var transaction = Transaction()
         transaction.disablesAnimations = true
         withTransaction(transaction) { entries = loaded }

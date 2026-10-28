@@ -90,6 +90,18 @@ enum TranscriptDiagnostics {
         FileHandle.standardError.write(Data("captured \(base.path).json\n".utf8))
     }
 
+    /// A transcript found blank (its rows laid out somewhere else than in view) goes to its end:
+    /// what it looked like is captured first, quietly and once a launch, being the blank
+    /// transcript caught in the act.
+    private static var caughtLostPlace = false
+
+    static func lostPlace(app: AppModel) {
+        FileHandle.standardError.write(Data("transcript lost its rows in view: going to the end\n".utf8))
+        guard !caughtLostPlace else { return }
+        caughtLostPlace = true
+        capture(app: app, reveal: false)
+    }
+
     /// Development: `YH_CAPTURE_TRANSCRIPT=<seconds>` captures that long after launch, without
     /// showing it in Finder.
     static func runIfRequested(app: AppModel) {

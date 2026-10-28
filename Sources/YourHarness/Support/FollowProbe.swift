@@ -179,9 +179,30 @@ enum FollowProbe {
         }
 
         await work(steps - steps / 2)
+        // `YH_FOLLOW_PROBE_AWAY=1`: the turn ends while you're in another thread (this one's
+        // transcript kept, hidden), and you come back to it after.
+        let away = ProcessInfo.processInfo.environment["YH_FOLLOW_PROBE_AWAY"] == "1"
+        if away, let project = app.project(id: thread.projectID) {
+            expectsEnd = false
+            app.newThread(in: project)
+            log("away in another thread")
+            await pause(800)
+        }
         await reply("All \(step) steps are done.\n\n" + longText(step + 1), chunks: 20)
         play(["type": "result", "subtype": "success", "is_error": false, "duration_ms": Int(Date.now.timeIntervalSince(start) * 1000)])
         await pause(2500)
+        // `YH_FOLLOW_PROBE_UNLOAD=1` too: meanwhile its transcript is let go, as happens to a
+        // thread you haven't looked at in a while.
+        if away, ProcessInfo.processInfo.environment["YH_FOLLOW_PROBE_UNLOAD"] == "1" {
+            thread.saveForExport()
+            thread.unloadTranscript()
+            log("unloaded: \(thread.entries.count) entries")
+        }
+        if away {
+            app.selectedThreadID = thread.id
+            log("back in the thread")
+            await pause(1500)
+        }
         watch.cancel()
 
         // The turn folded away: its answer at the bottom, in view.
