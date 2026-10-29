@@ -6,6 +6,8 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+## [0.0.11] - 2026-10-29
+
 ### Added
 - **See what Claude is waiting on.** When Claude leaves something running in the background (a build, a dev server, a loop sampling a metric, a watch on a log), a strip above the composer says "Claude is waiting on" with each job, how long it's been going and the last line it printed. Open a job to see the end of its output as it comes, or stop it. The thread shows an hourglass in the sidebar until Claude is back, and you get one "finished" notification when it's really done, not one each time it checks in. When a job ends, the thread says how ("failed with exit code 1 after 35s"). A long command Claude waits on in the turn shows its running time and latest output line instead of only a spinner.
 - **Background jobs keep running.** A thread with a job running is no longer put to sleep after 10 idle minutes, settled or unloaded, which stopped the job. Quitting with jobs running asks first, and the thread notes which jobs quitting stopped.
