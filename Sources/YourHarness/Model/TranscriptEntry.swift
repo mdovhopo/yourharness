@@ -37,6 +37,8 @@ final class TranscriptEntry: Identifiable {
     var toolIsError = false
     /// For an Agent tool call: the sub-agent it started.
     var subagent: SubagentRun?
+    /// For a command or watch that went on running: the job, while the session lasts.
+    var job: BackgroundJob?
 
     var noticeStyle = NoticeStyle.info
     /// Images sent with a user message: file names in the store's attachments folder.

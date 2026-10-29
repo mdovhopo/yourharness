@@ -6,6 +6,10 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+### Added
+- **See what Claude is waiting on.** When Claude leaves something running in the background (a build, a dev server, a loop sampling a metric, a watch on a log), a strip above the composer says "Claude is waiting on" with each job, how long it's been going and the last line it printed. Open a job to see the end of its output as it comes, or stop it. The thread shows an hourglass in the sidebar until Claude is back, and you get one "finished" notification when it's really done, not one each time it checks in. When a job ends, the thread says how ("failed with exit code 1 after 35s"). A long command Claude waits on in the turn shows its running time and latest output line instead of only a spinner.
+- **Background jobs keep running.** A thread with a job running is no longer put to sleep after 10 idle minutes, settled or unloaded, which stopped the job. Quitting with jobs running asks first, and the thread notes which jobs quitting stopped.
+
 ### Fixed
 - **Threads with many PR links are fast again.** Each PR link a thread mentioned was looked up again (its pattern rebuilt from scratch) every time the toolbar or the right sidebar redrew, and every few minutes for every thread at once. A thread with a hundred links took a second to switch to and made the whole app hitch. Switching to one now takes about a third of that, and the check every few minutes no longer makes the app hitch.
 - **A thread no longer stays blank after a turn in a big window.** 0.0.10 fixed this for a normal-sized window; with the window filling the screen, a turn's work folding away could still leave nothing but the composer until you sent a message. A thread found that way now rebuilds its view within about a second, at its end.

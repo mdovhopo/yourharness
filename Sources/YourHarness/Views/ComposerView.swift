@@ -20,6 +20,9 @@ struct ComposerView: View {
             if thread.isWorking, !thread.plan.items.isEmpty, !thread.plan.isFinished {
                 PlanStrip(plan: thread.plan)
             }
+            if thread.liveJobs.contains(where: \.isBackground) {
+                JobsStrip(thread: thread)
+            }
             if !thread.queuedMessages.isEmpty {
                 QueuedMessages(thread: thread)
             }
@@ -96,6 +99,7 @@ struct ComposerView: View {
         .glassEffect(.regular, in: .rect(cornerRadius: 22))
         .animation(.snappy, value: thread.draftImages.isEmpty)
         .animation(.snappy, value: thread.queuedMessages.map(\.id))
+        .animation(.snappy, value: thread.liveJobs.map(\.id))
         .animation(.snappy, value: isSteering && canSend)
         .onAppear {
             focused = true

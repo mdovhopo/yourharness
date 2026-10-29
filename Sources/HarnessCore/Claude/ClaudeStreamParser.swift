@@ -11,6 +11,8 @@ public struct ClaudeStreamParser: Sendable {
     private var compacting = false
     /// Each streaming message's model, from its start, for its usage at the end.
     private var streamingModels: [String: String] = [:]
+    /// Tasks that are jobs rather than sub-agents: their end says only which task it was.
+    private var jobTaskIDs: Set<String> = []
 
     public init() {}
 
@@ -49,9 +51,12 @@ public struct ClaudeStreamParser: Sendable {
             }
             return events
         case "user":
-            guard let message = object["message"] as? [String: Any],
-                  let content = message["content"] as? [[String: Any]]
-            else { return [] }
+            guard let message = object["message"] as? [String: Any] else { return [] }
+            // What wakes Claude for a job, replayed: never a message of yours.
+            if let text = message["content"] as? String {
+                return Self.jobEvent(in: text).map { [.jobEvent(taskID: $0.taskID, text: $0.text)] } ?? []
+            }
+            guard let content = message["content"] as? [[String: Any]] else { return [] }
             let results = content.compactMap(Self.toolResult)
             return results.isEmpty ? [] : [.toolResults(results, parentToolUseID: parent)]
         case "control_request":
@@ -104,8 +109,13 @@ public struct ClaudeStreamParser: Sendable {
         case "session_title_changed":
             return (object["title"] as? String).map { [.titleChanged($0)] } ?? []
         case "task_started":
-            guard object["task_type"] as? String ?? "local_agent" == "local_agent",
-                  let toolUseID = object["tool_use_id"] as? String,
+            if let type = object["task_type"] as? String, type != "local_agent", let taskID = object["task_id"] as? String {
+                jobTaskIDs.insert(taskID)
+                return [.jobStarted(JobStart(taskID: taskID, toolUseID: object["tool_use_id"] as? String,
+                                             description: object["description"] as? String ?? "",
+                                             isBackground: object["is_backgrounded"] as? Bool ?? false))]
+            }
+            guard let toolUseID = object["tool_use_id"] as? String,
                   let taskID = object["task_id"] as? String
             else { return [] }
             return [.subagentStarted(SubagentStart(
@@ -121,6 +131,11 @@ public struct ClaudeStreamParser: Sendable {
             return [.subagentProgress(toolUseID: toolUseID, activity: object["description"] as? String,
                                       usage: SubagentUsage(object["usage"]))]
         case "task_notification":
+            if let taskID = object["task_id"] as? String, jobTaskIDs.remove(taskID) != nil {
+                return [.jobFinished(JobEnd(taskID: taskID, toolUseID: object["tool_use_id"] as? String,
+                                            status: object["status"] as? String ?? "completed",
+                                            summary: object["summary"] as? String, outputFile: object["output_file"] as? String))]
+            }
             guard let toolUseID = object["tool_use_id"] as? String else { return [] }
             return [.subagentFinished(SubagentEnd(
                 toolUseID: toolUseID,
@@ -128,9 +143,22 @@ public struct ClaudeStreamParser: Sendable {
                 summary: object["summary"] as? String,
                 usage: SubagentUsage(object["usage"])
             ))]
+        case "background_tasks_changed":
+            guard let tasks = object["tasks"] as? [[String: Any]] else { return [] }
+            return [.jobsRunning(tasks.filter { $0["task_type"] as? String != "local_agent" }.compactMap { $0["task_id"] as? String })]
         default:
             return []
         }
+    }
+
+    /// `<task-notification><task-id>b1</task-id>…<event>sample 3: 2.64</event></task-notification>`
+    static func jobEvent(in text: String) -> (taskID: String, text: String)? {
+        guard text.hasPrefix("<task-notification>"),
+              let id = text.range(of: "<task-id>"), let idEnd = text.range(of: "</task-id>", range: id.upperBound..<text.endIndex),
+              let event = text.range(of: "<event>"), let eventEnd = text.range(of: "</event>", options: .backwards),
+              event.upperBound <= eventEnd.lowerBound
+        else { return nil }
+        return (String(text[id.upperBound..<idEnd.lowerBound]), String(text[event.upperBound..<eventEnd.lowerBound]))
     }
 
     private mutating func parseStreamEvent(_ event: [String: Any], messageID: String?, parent: String?) -> [AgentEvent] {

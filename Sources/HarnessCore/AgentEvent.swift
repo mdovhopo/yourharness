@@ -18,6 +18,16 @@ public enum AgentEvent: Sendable, Equatable {
     case subagentStarted(SubagentStart)
     case subagentProgress(toolUseID: String, activity: String?, usage: SubagentUsage)
     case subagentFinished(SubagentEnd)
+    /// A job Claude left running: a command in the background, a foreground one that's been
+    /// going a while, or a watch (Monitor). Claude is woken when one ends or a watch fires,
+    /// in a turn of its own, after the one that started it may have ended.
+    case jobStarted(JobStart)
+    case jobFinished(JobEnd)
+    /// What a watch saw: woken by it, Claude reads it next.
+    case jobEvent(taskID: String, text: String)
+    /// Every job still running, sent whenever that changes: the list to trust over the
+    /// starts and ends.
+    case jobsRunning([String])
     case permissionRequest(PermissionRequest)
     /// What a built-in command printed (`/context`, `/usage`, ...): markdown, not a reply.
     case commandOutput(String)
@@ -120,6 +130,32 @@ public struct SubagentEnd: Sendable, Equatable {
     /// Its final report.
     public var summary: String?
     public var usage: SubagentUsage
+}
+
+public struct JobStart: Sendable, Equatable {
+    /// What `stop_task` takes.
+    public var taskID: String
+    /// The tool call that started it (Bash, Monitor).
+    public var toolUseID: String?
+    public var description: String
+    /// Started in the background; otherwise the turn waits on it.
+    public var isBackground: Bool
+}
+
+public struct JobEnd: Sendable, Equatable {
+    public var taskID: String
+    public var toolUseID: String?
+    /// "completed", "failed", "killed", "stopped", ...
+    public var status: String
+    /// e.g. `Background command "Build" failed with exit code 1`.
+    public var summary: String?
+    /// Everything it printed.
+    public var outputFile: String?
+
+    public var exitCode: Int? {
+        guard let summary, let range = summary.range(of: "exit code ") else { return nil }
+        return Int(summary[range.upperBound...].prefix { $0.isNumber || $0 == "-" })
+    }
 }
 
 public enum MessageState: String, Sendable, Equatable {

@@ -43,6 +43,8 @@ final class ThreadModel: Identifiable {
     }
     /// Sub-agents still at work. Background ones outlive the turn that started them.
     private(set) var liveSubagents: [SubagentRun] = []
+    /// Commands and watches Claude left running, oldest first.
+    private(set) var liveJobs: [BackgroundJob] = []
     /// The sub-agent the inspector follows; nil follows the latest.
     var inspectedSubagentID: String?
     /// A reply finished while you were looking at another thread.
@@ -185,6 +187,10 @@ final class ThreadModel: Identifiable {
     /// report after the turn that started them has ended.
     @ObservationIgnored private var subagents: [String: SubagentRun] = [:]
     @ObservationIgnored private var idleReaper: Task<Void, Never>?
+    /// By task ID, for the session's life: a job ends turns after the one that started it.
+    @ObservationIgnored private var jobs: [String: BackgroundJob] = [:]
+    /// Where the session's jobs write their output, once one has said.
+    @ObservationIgnored private var jobsFolder: String?
     /// The title request whose answer still counts; renaming or a newer request voids it.
     @ObservationIgnored private var titleRequest: UUID?
     /// The first message didn't say what this is about; retitle once a turn has.
@@ -315,6 +321,20 @@ final class ThreadModel: Identifiable {
 
     /// A turn is running, or a sub-agent is still at work after one.
     var isWorking: Bool { phase == .running || !liveSubagents.isEmpty }
+
+    /// Jobs started since your latest message: Claude ended its turn but will be back when
+    /// they report. Older ones (a dev server from earlier) just run.
+    var waitingJobs: [BackgroundJob] {
+        guard !liveJobs.isEmpty else { return [] }
+        let turn = entries.last(where: \.startsTurn)?.id
+        return liveJobs.filter { $0.turnID == turn }
+    }
+
+    /// Claude's turn is over, and it's waiting on jobs it started.
+    var isWaitingOnJobs: Bool { phase == .idle && !waitingJobs.isEmpty }
+
+    /// The `claude` process has to stay: ending it would end the jobs it runs.
+    var keepsSession: Bool { isWorking || !liveJobs.isEmpty }
 
     /// Every sub-agent in the transcript, oldest first.
     var subagentRuns: [SubagentRun] { entries.compactMap(\.subagent) }
@@ -619,6 +639,12 @@ final class ThreadModel: Identifiable {
         Task { try? await start.value.stopTask(taskID) }
     }
 
+    /// Its end comes back like any other, and wakes Claude to hear of it.
+    func stopJob(_ job: BackgroundJob) {
+        guard job.isRunning, let start = sessionStart else { return }
+        Task { try? await start.value.stopTask(job.id) }
+    }
+
     /// Stops Claude. Anything queued is taken back into the composer first, so stopping
     /// never sends it.
     func stop() {
@@ -701,7 +727,7 @@ final class ThreadModel: Identifiable {
 
     /// Restart the process (keeping the conversation) so new launch options take effect.
     func restartSession() {
-        if isWorking { restartWhenIdle = true } else { endSession() }
+        if isWorking || !waitingJobs.isEmpty { restartWhenIdle = true } else { endSession() }
     }
 
     func endSession() {
@@ -715,6 +741,7 @@ final class ThreadModel: Identifiable {
             liveSubagents.removeAll()
             persist()
         }
+        cutOffJobs("was stopped")
         Task {
             if let session = try? await start.value { await session.terminate() }
         }
@@ -924,6 +951,15 @@ final class ThreadModel: Identifiable {
                 entry.toolResult = result.content
                 entry.toolIsError = result.isError
                 entry.isStreaming = false
+                if let file = BackgroundJob.outputFile(inResult: result.content) {
+                    jobsFolder = (file as NSString).deletingLastPathComponent
+                    entry.job?.outputFile = file
+                }
+                // A foreground command is done when its call is; a background one has only started.
+                if let job = entry.job, !job.isBackground, job.isRunning {
+                    job.finish(failed: result.isError)
+                    liveJobs.removeAll { $0 === job }
+                }
                 if TaskPlan.isPlanTool(name: entry.toolName, inputJSON: entry.toolInput) { plansChanged = true }
                 if entry.toolName == "Bash" {
                     ranCommand = true
@@ -955,6 +991,31 @@ final class ThreadModel: Identifiable {
             if phase == .idle {
                 persist()
                 if liveSubagents.isEmpty { scheduleIdleReap() }
+            }
+
+        case .jobStarted(let start):
+            let entry = start.toolUseID.flatMap { tools[$0] }
+            let job = BackgroundJob(start, toolName: entry?.toolName, turnID: entries.last(where: \.startsTurn)?.id)
+            job.outputFile = jobOutputFolder.map { "\($0)/\(start.taskID).output" }
+            entry?.job = job
+            jobs[job.id] = job
+            liveJobs.append(job)
+
+        case .jobFinished(let end):
+            guard let job = jobs[end.taskID], job.isRunning else { return }
+            job.finish(end)
+            jobEnded(job)
+
+        case .jobEvent(let taskID, let text):
+            guard let job = jobs[taskID] else { return }
+            job.lastLine = text.split(whereSeparator: \.isNewline).last.map(String.init) ?? job.lastLine
+
+        case .jobsRunning(let running):
+            // Ended without word (the list is what the CLI trusts). Foreground commands
+            // aren't on it: they end with their call.
+            for job in liveJobs where job.isBackground && !running.contains(job.id) {
+                job.abandon()
+                jobEnded(job)
             }
 
         case .permissionRequest(let request):
@@ -998,8 +1059,9 @@ final class ThreadModel: Identifiable {
                     entries.append(.notice(message, style: .error))
                 }
             }
-            // You stopped it yourself: you're there, nothing to tell.
-            if !interruptRequested, !interruptingForMessage {
+            // You stopped it yourself: you're there, nothing to tell. Waiting on its jobs:
+            // Claude isn't done, and is back when they report.
+            if !interruptRequested, !interruptingForMessage, waitingJobs.isEmpty {
                 app.notify(.finished, about: self, result.isError ? (result.resultText ?? "Claude stopped with an error.") : lastReply)
             }
             interruptRequested = false
@@ -1010,7 +1072,7 @@ final class ThreadModel: Identifiable {
                 app.generateTitle(for: self, from: .conversation)
             }
             scheduleIdleReap()
-            if restartWhenIdle, liveSubagents.isEmpty {
+            if restartWhenIdle, liveSubagents.isEmpty, waitingJobs.isEmpty {
                 restartWhenIdle = false
                 endSession()
             }
@@ -1021,6 +1083,7 @@ final class ThreadModel: Identifiable {
             let wasRunning = phase == .running
             for run in liveSubagents { run.abandon() }
             liveSubagents.removeAll()
+            cutOffJobs("stopped when Claude exited")
             // Whatever was still waiting never reached Claude: back to the composer.
             for message in queuedMessages { restore(message) }
             queuedMessages.removeAll()
@@ -1076,9 +1139,10 @@ final class ThreadModel: Identifiable {
         persist()
     }
 
-    /// How long the turn took goes on the message that started it.
+    /// How long the turn took goes on the message that started it. Claude woken by a job
+    /// carries the turn on: it ends again later.
     private func noteTurnEnded() {
-        guard let start = entries.last(where: \.startsTurn), start.turnEndedAt == nil else { return }
+        guard let start = entries.last(where: \.startsTurn) else { return }
         start.turnEndedAt = .now
         rowsChanged()
         finishTurnChanges(start)
@@ -1170,6 +1234,43 @@ final class ThreadModel: Identifiable {
         return run
     }
 
+    /// Where the CLI will write a new job's output: beside an earlier job's, or where it
+    /// keeps them for this session (`/tmp/claude-<uid>/<folder, dashed>/<session>/tasks`).
+    private var jobOutputFolder: String? {
+        if let jobsFolder { return jobsFolder }
+        guard let sessionID else { return nil }
+        let folder = WorkspaceModel.realPath(effectiveDirectory)
+        let dashed = String(folder.map { $0.isASCII && ($0.isLetter || $0.isNumber) ? $0 : "-" })
+        return "/private/tmp/claude-\(getuid())/\(dashed)/\(sessionID)/tasks"
+    }
+
+    private func jobEnded(_ job: BackgroundJob) {
+        liveJobs.removeAll { $0 === job }
+        // A foreground command shows how it went in its own call.
+        if job.isBackground {
+            let what = job.isWatch ? "Watch" : "Background command"
+            let took = job.endedAt.map { " after \(TurnDuration.format($0.timeIntervalSince(job.startedAt)))" } ?? ""
+            entries.append(.notice("\(what) “\(job.description)” \(job.outcome)\(took)", style: job.status == .failed ? .error : .info))
+        }
+        if phase == .idle {
+            persist()
+            scheduleIdleReap()
+        }
+    }
+
+    /// The process its jobs ran in is going: they go with it.
+    private func cutOffJobs(_ outcome: String) {
+        guard !liveJobs.isEmpty else { return }
+        for job in liveJobs {
+            job.abandon()
+            if job.isBackground {
+                entries.append(.notice("\(job.isWatch ? "Watch" : "Background command") “\(job.description)” \(outcome)"))
+            }
+        }
+        liveJobs.removeAll()
+        persist()
+    }
+
     private func fail(_ message: String) {
         if phase == .running { noteTurnEnded() }
         phase = .idle
@@ -1187,7 +1288,7 @@ final class ThreadModel: Identifiable {
         if isAside { return }
         idleReaper = Task { [weak self] in
             try? await Task.sleep(for: Self.idleTimeout)
-            guard !Task.isCancelled, let self, !self.isWorking else { return }
+            guard !Task.isCancelled, let self, !self.keepsSession else { return }
             self.endSession()
         }
     }
@@ -1208,7 +1309,7 @@ final class ThreadModel: Identifiable {
     /// Lets go of the transcript to save memory; opening the thread reads it back. Only a
     /// thread that's idle, with nothing waiting to be saved or sent.
     func unloadTranscript() {
-        guard transcriptLoaded, !isEphemeral, !isSideChat, !isWorking, pendingSave == nil,
+        guard transcriptLoaded, !isEphemeral, !isSideChat, !keepsSession, pendingSave == nil,
               pendingPermissions.isEmpty, queuedMessages.isEmpty, sideChat == nil else { return }
         transcriptLoad?.cancel()
         transcriptLoad = nil
@@ -1246,6 +1347,7 @@ final class ThreadModel: Identifiable {
         } else if pendingSave != nil {
             persist()
         }
+        cutOffJobs("stopped when YourHarness quit")
         // Stopped now: the app is about to exit, and an orphaned `claude` would carry on
         // with the turn. Asking the session to end needs a moment there isn't.
         if let processID, sessionStart != nil { kill(processID, SIGTERM) }

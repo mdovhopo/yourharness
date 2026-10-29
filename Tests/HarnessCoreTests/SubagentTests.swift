@@ -84,10 +84,10 @@ struct SubagentParsingTests {
         #expect(!report.contains("hand-back"))
     }
 
-    @Test func otherBackgroundTasksAreNotSubagents() {
+    @Test func otherBackgroundTasksAreJobsNotSubagents() {
         var parser = ClaudeStreamParser()
-        let line = #"{"type":"system","subtype":"task_started","task_id":"b1","tool_use_id":"toolu_1","task_type":"local_bash","description":"npm run dev"}"#
-        #expect(parser.parse(line: Data(line.utf8)).isEmpty)
+        let line = #"{"type":"system","subtype":"task_started","task_id":"b1","tool_use_id":"toolu_1","task_type":"local_bash","description":"npm run dev","is_backgrounded":true}"#
+        #expect(parser.parse(line: Data(line.utf8)) == [.jobStarted(JobStart(taskID: "b1", toolUseID: "toolu_1", description: "npm run dev", isBackground: true))])
     }
 }
 

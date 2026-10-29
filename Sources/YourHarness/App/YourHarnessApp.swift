@@ -212,6 +212,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         true
     }
 
+    /// Jobs Claude left running (a build, a dev server) end with the app: asked first, as
+    /// Terminal does for a running process.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        MainActor.assumeIsolated {
+            let jobs = AppModel.shared.threads.flatMap(\.liveJobs).filter(\.isBackground)
+            guard !jobs.isEmpty else { return .terminateNow }
+            let alert = NSAlert()
+            alert.messageText = jobs.count == 1 ? "A background job is running" : "\(jobs.count) background jobs are running"
+            alert.informativeText = (jobs.count == 1 ? "“\(jobs[0].description)” stops" : "They stop") + " if you quit YourHarness."
+            alert.addButton(withTitle: "Quit")
+            alert.addButton(withTitle: "Cancel")
+            return alert.runModal() == .alertFirstButtonReturn ? .terminateNow : .terminateCancel
+        }
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         MainActor.assumeIsolated {
             // Into the threads before they're saved.

@@ -525,17 +525,19 @@ private struct SettledShelfToggle: View {
     }
 }
 
-/// Working: a turning Claude mark. Waiting on you: a pulsing hand. Unread: a blue dot.
+/// Working: a turning Claude mark. Waiting on you: a pulsing hand. Waiting on a job
+/// Claude started: an hourglass. Unread: a blue dot.
 private struct ThreadStatus: View {
     let thread: ThreadModel
 
     private enum State: Equatable {
-        case idle, running, needsApproval, unread
+        case idle, running, needsApproval, waitingOnJobs, unread
     }
 
     private var state: State {
         if !thread.pendingPermissions.isEmpty { return .needsApproval }
         if thread.isWorking { return .running }
+        if thread.isWaitingOnJobs { return .waitingOnJobs }
         if thread.hasUnread { return .unread }
         return .idle
     }
@@ -551,6 +553,11 @@ private struct ThreadStatus: View {
                     .font(.system(size: 10))
                     .foregroundStyle(.orange)
                     .symbolEffect(.pulse)
+                    .transition(.scale.combined(with: .opacity))
+            case .waitingOnJobs:
+                Image(systemName: "hourglass")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
                     .transition(.scale.combined(with: .opacity))
             case .unread:
                 Circle()
@@ -571,6 +578,7 @@ private struct ThreadStatus: View {
         switch state {
         case .running: "Working…"
         case .needsApproval: "Waiting for your approval"
+        case .waitingOnJobs: thread.waitingJobs.count == 1 ? "Claude is waiting on a background job" : "Claude is waiting on \(thread.waitingJobs.count) background jobs"
         case .unread: "New reply"
         case .idle: ""
         }

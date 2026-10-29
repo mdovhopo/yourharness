@@ -73,6 +73,17 @@ struct ToolCallView: View {
             }
             .buttonStyle(.plain)
 
+            // A command that's taking a while: what it printed last, as it goes.
+            if let job = entry.job, job.isRunning, !job.isBackground, !expanded, let line = job.lastLine, !line.isEmpty {
+                Text(line)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .padding(.leading, 40)
+                    .padding([.trailing, .bottom], 12)
+                    .padding(.top, -4)
+            }
             if entry.toolName == BrowserCall.prefix + "screenshot", !entry.toolIsError, !expanded {
                 BrowserShotThumbnail(toolUseID: entry.id)
                     .padding([.horizontal, .bottom], 12)
@@ -84,6 +95,7 @@ struct ToolCallView: View {
             }
         }
         .card(border: entry.toolIsError ? AnyShapeStyle(.red.opacity(0.5)) : nil)
+        .modifier(FollowsForegroundJob(job: entry.job))
     }
 
     private func header(_ presentation: ToolPresentation) -> some View {
@@ -99,7 +111,13 @@ struct ToolCallView: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer(minLength: 8)
-            if entry.isStreaming {
+            if let job = entry.job {
+                JobStatusLabel(job: job)
+                if job.isRunning {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+            } else if entry.isStreaming {
                 ProgressView()
                     .controlSize(.small)
             } else if entry.toolIsError {
@@ -127,7 +145,10 @@ struct ToolCallView: View {
             } else if !entry.toolInput.isEmpty {
                 CodeBox(text: Self.prettyJSON(entry.toolInput))
             }
-            if let result = entry.toolResult, !result.isEmpty {
+            if let job = entry.job, job.isRunning || job.isBackground {
+                // A background command's result only says it started.
+                JobOutput(job: job)
+            } else if let result = entry.toolResult, !result.isEmpty {
                 CodeBox(text: Self.clipped(result, length: entry.toolResultLength), tint: entry.toolIsError ? .red : nil)
             }
             if entry.toolName == BrowserCall.prefix + "screenshot", !entry.toolIsError {
@@ -152,6 +173,19 @@ struct ToolCallView: View {
               let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
         else { return json }
         return String(decoding: data, as: UTF8.self)
+    }
+}
+
+/// A foreground command's last line, kept up while it runs (the strip does background ones).
+private struct FollowsForegroundJob: ViewModifier {
+    let job: BackgroundJob?
+
+    func body(content: Content) -> some View {
+        if let job, !job.isBackground {
+            content.modifier(FollowsJobOutput(job: job))
+        } else {
+            content
+        }
     }
 }
 

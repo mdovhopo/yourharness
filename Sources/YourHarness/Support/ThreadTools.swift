@@ -401,6 +401,11 @@ final class ThreadTools {
         var states: [String] = []
         if thread === caller { states.append("this thread") }
         if thread.isWorking { states.append("working") }
+        if thread.isWaitingOnJobs {
+            states.append("waiting on \(thread.waitingJobs.count == 1 ? "a background job" : "\(thread.waitingJobs.count) background jobs")")
+        } else if !thread.liveJobs.isEmpty {
+            states.append(thread.liveJobs.count == 1 ? "a background job running" : "\(thread.liveJobs.count) background jobs running")
+        }
         if !thread.pendingPermissions.isEmpty { states.append("waiting for the user") }
         if thread.hasUnread { states.append("unread") }
         if thread.isPinned { states.append("pinned") }

@@ -433,7 +433,7 @@ final class AppModel {
             if visibleThreadID == thread.id { selectNeighbour(of: thread) }
             thread.settledAt = .now
             thread.isPinned = false
-            if !thread.isWorking {
+            if !thread.keepsSession {
                 thread.endSession()
                 thread.closeBrowser()
             }
@@ -473,7 +473,7 @@ final class AppModel {
         var changed = false
         for thread in threads {
             guard !thread.isSettled, !thread.isEphemeral, thread.autoSettle, thread.reactivatedAt == nil,
-                  !thread.isWorking, thread.pendingPermissions.isEmpty,
+                  !thread.keepsSession, thread.pendingPermissions.isEmpty,
                   // Not the one on screen, and not an untouched blank.
                   visibleThreadID != thread.id, thread.sessionID != nil || thread.title != ThreadModel.untitled,
                   thread.updatedAt < cutoff
@@ -493,7 +493,7 @@ final class AppModel {
         var changed = false
         for thread in threads {
             guard !thread.isSettled, !thread.isEphemeral, !thread.isSideChat, thread.autoSettle, thread.reactivatedAt == nil,
-                  !thread.isWorking, thread.pendingPermissions.isEmpty, visibleThreadID != thread.id
+                  !thread.keepsSession, thread.pendingPermissions.isEmpty, visibleThreadID != thread.id
             else { continue }
             let pulls = workedPullRequests(for: thread)
             guard !pulls.isEmpty else { continue }
@@ -1324,7 +1324,7 @@ final class AppModel {
     /// Each idle page is a web content process: tens of MB for nothing. Closed, its tabs'
     /// addresses wait to reopen when the browser is next used.
     func closeIdleBrowsers() {
-        for thread in threads where thread.browser?.isIdle == true && !thread.isWorking && visibleThreadID != thread.id {
+        for thread in threads where thread.browser?.isIdle == true && !thread.keepsSession && visibleThreadID != thread.id {
             thread.closeBrowser()
         }
     }
