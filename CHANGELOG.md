@@ -6,6 +6,8 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+## [0.0.12] - 2026-10-29
+
 ### Added
 - **Attach any file, not just images.** Drop, paste or pick (the paperclip) PDFs, logs, CSVs, spreadsheets, Word files, code, whole folders: anything Claude Code can work with. Images still go to Claude inline; other files are kept with the thread and Claude is told where they are, then opens them with its Read tool (text, PDFs, notebooks) or a command for other formats, as it does with a path dragged into Claude Code in the terminal. Reading them never asks for approval. Folders, and files over 200 MB, are read where they are. In the message they show as a chip with the file's icon, name and kind; click to open it, or Show in Finder.
 
