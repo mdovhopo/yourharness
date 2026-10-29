@@ -146,6 +146,9 @@ private struct TranscriptView: View {
     /// back on.
     @State private var followsBottom = true
     @State private var scrollPhase = ScrollPhase.idle
+    /// When the transcript last went to a new row by itself. Kept in a box: setting it
+    /// redraws nothing.
+    @State private var ownScroll = OwnScroll()
     @State private var isAtBottom = true
     @State private var isAtTop = false
     /// Rows on screen now, for jumping between your messages from where you are.
@@ -206,7 +209,8 @@ private struct TranscriptView: View {
                                phase: thread.phase, lastRowID: lastRowID)) {
                 guard isShown, WindowPresence.shared.isVisible else { return }
                 // Rows in view are reported a moment after they move: blank twice, a second
-                // apart, it is.
+                // apart, it is. Checked sooner, a thread just shown again (it reports late)
+                // looked blank when it wasn't, and was sent to its end, away from your place.
                 for _ in 0..<2 {
                     try? await Task.sleep(for: .milliseconds(600))
                     guard !Task.isCancelled, looksBlank else { return }
@@ -230,6 +234,9 @@ private struct TranscriptView: View {
                 .padding(.vertical, 24)
                 .frame(minHeight: isShort ? visibleHeight : nil, alignment: .bottom)
         }
+        // Made anew when found blank: nothing else gets a lazy stack that lost its rows to lay
+        // them out again (going to the end, nudging it, going to other threads and back).
+        .id(layoutGeneration)
         // Your place is a row, not an offset. The lazy stack keeps revising its height
         // estimates for rows off screen; held by offset, the view jumped every time, and
         // pinning to the bottom pulled you back down. Held by the row at the bottom edge,
@@ -257,7 +264,8 @@ private struct TranscriptView: View {
                                            old.insets[0], old.insets[1], new.insets[0], new.insets[1], new.isAtBottom ? "y" : "n", wasFollowing ? "y" : "n", followsBottom ? "y" : "n"))
                 }
             }
-            if old.offset - new.offset > 4, !new.isAtBottom, new.contentHeight >= old.contentHeight {
+            if old.offset - new.offset > 4, !new.isAtBottom, new.contentHeight >= old.contentHeight,
+               scrollPhase != .idle || !ownScroll.isRecent {
                 // Up and away from the end, by any means (a scroll bar drag or a mouse wheel
                 // may report no phase), the content no shorter: that's you scrolling. The
                 // transcript's own scrolling goes to the end; what moves it up on its own
@@ -265,6 +273,9 @@ private struct TranscriptView: View {
                 // settles with its composer inset, and the last row held at the bottom sits a
                 // little above the content's end) or comes with the content shrinking (the
                 // work folding away pulls the end up, landing short while rows are measured).
+                // Nor right after going to a new row by itself: in a long thread the rows above
+                // are estimates until measured, so it lands short, and taken for you scrolling,
+                // the reply to the message you just sent streamed in out of sight.
                 followsBottom = false
             } else if new.offset > old.offset, new.isAtBottom {
                 // Down to the end, however it got there.
@@ -312,7 +323,10 @@ private struct TranscriptView: View {
             guard let id else { return }
             if thread.entries.last?.id == id, thread.entries.last?.kind == .user { followsBottom = true }
             if FollowLog.isOn { FollowLog.write("new last row, follow \(followsBottom)") }
-            if followsBottom { position.scrollTo(id: id, anchor: .bottom) }
+            if followsBottom {
+                ownScroll.at = .now
+                position.scrollTo(id: id, anchor: .bottom)
+            }
         }
         .modifier(ScrollProbe(position: $position))
         // ⌘F: searched a moment after you stop typing, and again as the thread grows.
@@ -404,6 +418,12 @@ private struct TranscriptView: View {
     }
 
     @State private var hasBeenShown = false
+    @State private var layoutGeneration = 0
+
+    private final class OwnScroll {
+        var at: ContinuousClock.Instant?
+        var isRecent: Bool { at.map { ContinuousClock.now - $0 < .milliseconds(250) } ?? false }
+    }
 
     private struct EndCheck: Equatable {
         var isShown: Bool
@@ -413,22 +433,25 @@ private struct TranscriptView: View {
     }
 
     /// Blank: rows, and none of them in view, or at the end with the last row not among those
-    /// laid out (rows that went away still there, as when rows animated during a turn). Captured
-    /// for Debug (once a launch, in `diagnostics/`), and sent to the end.
+    /// laid out (rows that went away still there, as when the turn's work folded away in a big
+    /// window). Both reports must say so: one of them can go a while without updating, and
+    /// the other still has the last row. Captured for Debug (once a launch, in
+    /// `diagnostics/`), and the transcript made anew at its end.
     private var looksBlank: Bool {
-        guard let last = lastRowID, !thread.transcriptDisplayRows.isEmpty else { return false }
-        let lost = touchedRowIDs.isEmpty && !isShort
-        let stale = followsBottom && isAtBottom && !touchedRowIDs.isEmpty && !touchedRowIDs.contains(last)
-        return lost || stale
+        guard let last = lastRowID, !thread.transcriptDisplayRows.isEmpty, !isShort else { return false }
+        if touchedRowIDs.isEmpty && visibleRowIDs.isEmpty { return true }
+        return followsBottom && isAtBottom && !touchedRowIDs.contains(last) && !visibleRowIDs.contains(last)
     }
 
     private func foundBlank() {
         guard let last = lastRowID else { return }
         TranscriptDiagnostics.lostPlace(app: app)
+        if ProcessInfo.processInfo.environment["YH_BLANK_HEAL"] == "0" { return }
         followsBottom = true
-        var still = Transaction()
-        still.disablesAnimations = true
-        withTransaction(still) { position.scrollTo(id: last, anchor: .bottom) }
+        // The new scroll view settling isn't you scrolling.
+        ownScroll.at = .now
+        position = ScrollPosition(id: last, anchor: .bottom)
+        layoutGeneration += 1
     }
 
     private func rememberPlace() {

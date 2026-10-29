@@ -16,15 +16,21 @@ public struct PullRequestLink: Sendable, Hashable, Identifiable {
     }
 
     /// GitHub's `…/owner/repo/pull/12` and GitLab's `…/group/repo/-/merge_requests/12`.
-    private static var pattern: Regex<(Substring, Substring, Substring, Substring)> { /https?:\/\/([A-Za-z0-9.\-]+)\/((?:[A-Za-z0-9_.\-]+\/)+?[A-Za-z0-9_.\-]+)\/(?:pull|-\/merge_requests)\/(\d+)/ }
+    /// Made once: compiling it took most of the time, and the thread's toolbar and sidebar
+    /// look up every link it has on each redraw. (Swift's `Regex` can't be shared: it
+    /// isn't `Sendable`.)
+    private static let pattern = try! NSRegularExpression(
+        pattern: #"https?://([A-Za-z0-9.\-]+)/((?:[A-Za-z0-9_.\-]+/)+?[A-Za-z0-9_.\-]+)/(?:pull|-/merge_requests)/(\d+)"#)
 
     public static func find(in text: String) -> [PullRequestLink] {
         guard text.contains("/pull/") || text.contains("/merge_requests/") else { return [] }
         var seen = Set<String>(), links: [PullRequestLink] = []
-        for match in text.matches(of: pattern) {
-            let host = String(match.output.1).lowercased(), path = String(match.output.2)
-            guard let number = Int(match.output.3), let url = URL(string: String(match.output.0)) else { continue }
-            let forge: Forge = String(match.output.0).contains("/merge_requests/") ? .gitlab : .github
+        let source = text as NSString
+        for match in pattern.matches(in: text, range: NSRange(location: 0, length: source.length)) {
+            let whole = source.substring(with: match.range)
+            let host = source.substring(with: match.range(at: 1)).lowercased(), path = source.substring(with: match.range(at: 2))
+            guard let number = Int(source.substring(with: match.range(at: 3))), let url = URL(string: whole) else { continue }
+            let forge: Forge = whole.contains("/merge_requests/") ? .gitlab : .github
             let link = PullRequestLink(remote: GitRemote(host: host, path: path, forge: forge), number: number, url: url)
             if seen.insert(link.id).inserted { links.append(link) }
         }

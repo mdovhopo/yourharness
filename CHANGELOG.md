@@ -6,6 +6,11 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+### Fixed
+- **Threads with many PR links are fast again.** Each PR link a thread mentioned was looked up again (its pattern rebuilt from scratch) every time the toolbar or the right sidebar redrew, and every few minutes for every thread at once. A thread with a hundred links took a second to switch to and made the whole app hitch. Switching to one now takes about a third of that, and the check every few minutes no longer makes the app hitch.
+- **A thread no longer stays blank after a turn in a big window.** 0.0.10 fixed this for a normal-sized window; with the window filling the screen, a turn's work folding away could still leave nothing but the composer until you sent a message. A thread found that way now rebuilds its view within about a second, at its end.
+- **Sending a message in a long thread keeps you with the reply.** Going to your new message could land a little short while the rows above were still being measured, and that was taken for you scrolling up: the reply then streamed in below the screen.
+
 ## [0.0.10] - 2026-10-29
 
 ### Added

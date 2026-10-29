@@ -12,8 +12,11 @@ public struct IssueReference: Equatable, Sendable {
     public var number: Int
     public var isMergeRequest: Bool
 
+    /// Made once: it runs on every paragraph rendered.
+    private static let pattern = try! NSRegularExpression(pattern: #"(?<![\w/#&.-])(?:([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)|([A-Za-z0-9_.-]+))?([#!])(\d{1,7})\b"#)
+
     public static func find(in text: String) -> [IssueReference] {
-        guard let regex = try? NSRegularExpression(pattern: #"(?<![\w/#&.-])(?:([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)|([A-Za-z0-9_.-]+))?([#!])(\d{1,7})\b"#) else { return [] }
+        let regex = pattern
         let ns = text as NSString
         return regex.matches(in: text, range: NSRange(location: 0, length: ns.length)).compactMap { match in
             func group(_ index: Int) -> String? {
