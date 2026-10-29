@@ -1105,6 +1105,8 @@ final class AppModel {
         // Claude Code keeps its task tools from current models unless asked; they're what
         // the plan checklist shows, and cost nothing until used (they load on demand).
         if planChecklist, !thread.isSideChat { options.environment["CLAUDE_CODE_ENABLE_TODO_TOOLS"] = "1" }
+        // Files you attach are kept there: reading them doesn't ask.
+        options.addDirectories.append(store.attachmentURL("").path)
         if !thread.isSideChat {
             // Showing you a file changes nothing: it doesn't ask.
             options.allowedTools.append("mcp__harness")

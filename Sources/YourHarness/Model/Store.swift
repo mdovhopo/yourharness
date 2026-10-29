@@ -349,10 +349,40 @@ final class Store: Sendable {
         try? FileManager.default.createDirectory(at: attachmentsDirectory, withIntermediateDirectories: true)
     }
 
-    /// Images you sent, one file each, named `<thread id>-<image id>.<ext>`.
+    /// Images you sent, one file each, named `<thread id>-<image id>.<ext>`, and other files
+    /// under `<thread id>-files/`.
     private var attachmentsDirectory: URL { root.appending(path: "attachments", directoryHint: .isDirectory) }
 
-    func attachmentURL(_ name: String) -> URL { attachmentsDirectory.appending(path: name) }
+    /// A name from `attachmentName`: a file kept here, or the full path of one left where it was.
+    func attachmentURL(_ name: String) -> URL {
+        name.hasPrefix("/") ? URL(fileURLWithPath: name) : attachmentsDirectory.appending(path: name)
+    }
+
+    /// Files you sent are copied, so Claude can read them for as long as the thread lasts:
+    /// `<thread id>-files/<file id>/<its name>`, its name kept for Claude to go by (a copy on
+    /// the same disk takes no space). Folders, and files too big to copy, are referred to
+    /// where they are (a folder's path ends in `/`).
+    func attachmentName(for file: FileAttachment, thread: UUID) -> String {
+        file.isCopied ? "\(thread.uuidString)-files/\(file.id.uuidString)/\(file.name)" : file.url.path + (file.isDirectory ? "/" : "")
+    }
+
+    /// Done before the message goes to Claude. One that can't be copied is read where it is.
+    func copyAttachment(_ file: FileAttachment, as name: String) async -> String {
+        guard !name.hasPrefix("/") else { return file.url.path }
+        let destination = attachmentURL(name)
+        return await withCheckedContinuation { continuation in
+            queue.async {
+                let manager = FileManager.default
+                do {
+                    try manager.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    if !manager.fileExists(atPath: destination.path) { try manager.copyItem(at: file.url, to: destination) }
+                    continuation.resume(returning: destination.path)
+                } catch {
+                    continuation.resume(returning: file.url.path)
+                }
+            }
+        }
+    }
 
     /// A browser screenshot the agent took, kept for its row in the transcript. Named like
     /// attachments, so deleting the thread deletes it.

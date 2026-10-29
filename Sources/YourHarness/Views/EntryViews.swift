@@ -1,3 +1,4 @@
+import UniformTypeIdentifiers
 import AppKit
 import HarnessCore
 import SwiftUI
@@ -69,13 +70,23 @@ struct UserMessageView: View {
                     HStack(spacing: 6) {
                         ForEach(attachments, id: \.self) { name in
                             let url = app.store.attachmentURL(name)
+                            // Images are kept flat; other files in a folder of their own, by their name.
+                            let isImage = !name.contains("/") && UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) == true
                             Button {
                                 NSWorkspace.shared.open(url)
                             } label: {
-                                AttachmentThumbnail(content: .file(url), maxSize: CGSize(width: 220, height: 160))
+                                if isImage {
+                                    AttachmentThumbnail(content: .file(url), maxSize: CGSize(width: 220, height: 160))
+                                } else {
+                                    FileChip(url: url, isDirectory: name.hasSuffix("/"), size: nil)
+                                        .frame(height: 48)
+                                }
                             }
                             .buttonStyle(.plain)
-                            .help("Open in Preview")
+                            .help(isImage ? "Open in Preview" : "Open \(url.lastPathComponent)")
+                            .contextMenu {
+                                Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+                            }
                         }
                     }
                 }

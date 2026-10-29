@@ -7,7 +7,7 @@ struct ComposerView: View {
     @State private var pasteMonitor = ImagePasteMonitor()
 
     private var canSend: Bool {
-        !thread.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !thread.draftImages.isEmpty
+        !thread.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !thread.draftImages.isEmpty || !thread.draftFiles.isEmpty
     }
 
     /// Claude is working: ↩ steers (after its current step), ⌘↩ interrupts and sends.
@@ -26,7 +26,7 @@ struct ComposerView: View {
             if !thread.queuedMessages.isEmpty {
                 QueuedMessages(thread: thread)
             }
-            if !thread.draftImages.isEmpty {
+            if !thread.draftImages.isEmpty || !thread.draftFiles.isEmpty {
                 DraftAttachments(thread: thread)
             }
             TextField(isSteering ? "Steer Claude… ↩ after its current step, ⌘↩ right now" : "Ask Claude…", text: $thread.draft, axis: .vertical)
@@ -50,14 +50,14 @@ struct ComposerView: View {
                 .padding(.horizontal, 4)
 
             HStack(spacing: 4) {
-                Button("Attach Images", systemImage: "paperclip") {
-                    thread.attach(ImageIntake.choose())
+                Button("Attach Files", systemImage: "paperclip") {
+                    thread.attach(AttachmentIntake.choose())
                 }
                 .labelStyle(.iconOnly)
                 .buttonStyle(.borderless)
                 .foregroundStyle(.secondary)
                 .padding(.trailing, 2)
-                .help("Attach images (or paste and drop them)")
+                .help("Attach files, folders or images (or paste and drop them)")
                 ModelChip(thread: thread)
                 EffortChip(thread: thread)
                 PermissionChip(thread: thread)
@@ -97,7 +97,7 @@ struct ComposerView: View {
         .padding(.top, 14)
         .padding(.bottom, 10)
         .glassEffect(.regular, in: .rect(cornerRadius: 22))
-        .animation(.snappy, value: thread.draftImages.isEmpty)
+        .animation(.snappy, value: thread.draftImages.isEmpty && thread.draftFiles.isEmpty)
         .animation(.snappy, value: thread.queuedMessages.map(\.id))
         .animation(.snappy, value: thread.liveJobs.map(\.id))
         .animation(.snappy, value: isSteering && canSend)
@@ -111,9 +111,10 @@ struct ComposerView: View {
 
     private func send(interrupting: Bool = false) {
         guard canSend else { return }
-        thread.send(thread.draft, images: thread.draftImages, interrupting: interrupting)
+        thread.send(thread.draft, images: thread.draftImages, files: thread.draftFiles, interrupting: interrupting)
         thread.draft = ""
         thread.draftImages = []
+        thread.draftFiles = []
     }
 }
 
@@ -130,7 +131,7 @@ private struct QueuedMessages: View {
                         .foregroundStyle(.secondary)
                         .frame(width: 16)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(message.text.isEmpty ? "Image" : message.text)
+                        Text(!message.text.isEmpty ? message.text : message.files.first.map(\.name) ?? "Image")
                             .lineLimit(2)
                         Text(status(message))
                             .font(.caption)

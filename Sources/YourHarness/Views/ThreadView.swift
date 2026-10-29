@@ -69,7 +69,7 @@ struct ThreadView: View {
             }
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { areaHeight = $0 }
             .onDrop(of: [.fileURL, .image], isTargeted: $dropTargeted) { providers in
-                Task { thread.attach(await ImageIntake.sources(from: providers)) }
+                Task { thread.attach(await AttachmentIntake.sources(from: providers)) }
                 return true
             }
             .overlay {
@@ -77,7 +77,7 @@ struct ThreadView: View {
                     RoundedRectangle(cornerRadius: 16)
                         .strokeBorder(.tint, style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
                         .background(.tint.opacity(0.05), in: .rect(cornerRadius: 16))
-                        .overlay { Label("Drop images to attach", systemImage: "photo.badge.plus").font(.title3) }
+                        .overlay { Label("Drop files to attach", systemImage: "paperclip").font(.title3) }
                         .padding(8)
                         .allowsHitTesting(false)
                         .transition(.opacity)

@@ -95,6 +95,8 @@ final class ThreadModel: Identifiable {
     var draft = ""
     /// Images waiting to go with the next message.
     var draftImages: [ImageAttachment] = []
+    /// Other files and folders for the next message: Claude is told where they are.
+    var draftFiles: [FileAttachment] = []
     /// A generated title is on its way; the current one is a placeholder.
     private(set) var isGeneratingTitle = false
     /// You named the thread (or had Claude rename it): the agent leaves the title alone.
@@ -112,6 +114,7 @@ final class ThreadModel: Identifiable {
         let id: String
         let text: String
         let images: [ImageAttachment]
+        let files: [FileAttachment]
         let attachments: [String]
         /// You asked for it to go now (Claude is being stopped), or to take it back.
         var pending: Pending?
@@ -507,11 +510,11 @@ final class ThreadModel: Identifiable {
 
     /// While Claude works, a message steers by default: it waits for the current step and
     /// joins the turn. `interrupting` stops Claude so it goes in right away.
-    func send(_ text: String, images: [ImageAttachment] = [], interrupting: Bool = false) {
+    func send(_ text: String, images: [ImageAttachment] = [], files: [FileAttachment] = [], interrupting: Bool = false) {
         var text = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty || !images.isEmpty else { return }
+        guard !text.isEmpty || !images.isEmpty || !files.isEmpty else { return }
         noteLinks(in: text)
-        if images.isEmpty, let command = SlashCommand.parse(text) {
+        if images.isEmpty, files.isEmpty, let command = SlashCommand.parse(text) {
             if isSideChat, command.name == "btw" {
                 // Already on the side: the question is all that's left.
                 text = command.arguments
@@ -527,14 +530,18 @@ final class ThreadModel: Identifiable {
         if isSettled { app.setSettled(false, self) }
         reactivatedAt = nil
         let isFirstMessage = title == Self.untitled && !entries.contains { $0.kind == .user }
-        let subject = text.isEmpty ? (images.count == 1 ? "Attached image" : "Attached images") : text
+        // The title is written from this: it should know what came with it.
+        let attached = files.isEmpty ? nil : "Attached " + files.map(\.name).joined(separator: ", ")
+        let subject = !text.isEmpty ? [text, attached.map { "(\($0))" }].compactMap(\.self).joined(separator: " ")
+            : attached ?? (images.count == 1 ? "Attached image" : "Attached images")
         if isFirstMessage { title = ThreadTitlePrompt.seed(from: subject) }
         let messageID = UUID().uuidString.lowercased()
-        let attachments = isEphemeral ? [] : images.compactMap { app.store.saveAttachment($0, thread: id) }
+        let fileNames = files.map { isEphemeral ? $0.url.path : app.store.attachmentName(for: $0, thread: id) }
+        let attachments = (isEphemeral ? [] : images.compactMap { app.store.saveAttachment($0, thread: id) }) + fileNames
         let working = phase == .running && sessionStart != nil
         if working, !interrupting {
             // Steering: shown above the composer until Claude picks it up.
-            queuedMessages.append(QueuedMessage(id: messageID, text: text, images: images, attachments: attachments))
+            queuedMessages.append(QueuedMessage(id: messageID, text: text, images: images, files: files, attachments: attachments))
         } else {
             let entry = TranscriptEntry(id: messageID, kind: .user, text: text)
             entry.attachments = attachments
@@ -552,8 +559,14 @@ final class ThreadModel: Identifiable {
         let stopFirst = working && interrupting
         if stopFirst { interruptingForMessage = true }
         let forAgent = isSideChat ? text : app.messageForAgent(text, projectID: projectID)
-        Task {
+        Task { [store = app.store] in
             do {
+                var paths: [(path: String, isDirectory: Bool)] = []
+                for (file, name) in zip(files, fileNames) {
+                    paths.append((await store.copyAttachment(file, as: name), file.isDirectory))
+                }
+                let note = FileAttachment.note(for: paths)
+                let forAgent = note.isEmpty ? forAgent : forAgent.isEmpty ? note : forAgent + "\n\n" + note
                 let session = try await ensureSession()
                 if stopFirst { try await session.interrupt() }
                 try await session.send(text: forAgent, images: images, id: messageID, priority: stopFirst ? .now : nil)
@@ -588,6 +601,7 @@ final class ThreadModel: Identifiable {
     private func restore(_ message: QueuedMessage) {
         draft = draft.isEmpty ? message.text : draft + "\n" + message.text
         draftImages += message.images
+        draftFiles += message.files
     }
 
     /// Commands the app does itself, so its own state stays true: `/btw` opens the side

@@ -230,11 +230,15 @@ public struct ClaudeSessionArchive: Sendable, Equatable {
             switch message["content"] {
             case let string as String:
                 texts.append(string)
+                if string.contains("<\(FileAttachment.tag)>") { hasImage = true }
             case let blocks as [[String: Any]]:
                 for block in blocks {
                     switch block["type"] as? String {
                     case "text":
-                        if let text = block["text"] as? String { texts.append(text) }
+                        guard let text = block["text"] as? String else { continue }
+                        texts.append(text)
+                        // Files sent with it count as an image does: a message, text or not.
+                        if text.contains("<\(FileAttachment.tag)>") { hasImage = true }
                     case "image":
                         hasImage = true
                     case "tool_result":
@@ -263,7 +267,7 @@ public struct ClaudeSessionArchive: Sendable, Equatable {
     /// Strips what the CLI wraps around a prompt (`<system-reminder>`, local command output).
     private static func visibleText(_ text: String) -> String {
         var text = text
-        for tag in ["system-reminder", "local-command-stdout", "local-command-stderr", "local-command-caveat", "bash-stdout", "bash-stderr"] {
+        for tag in ["system-reminder", FileAttachment.tag, "local-command-stdout", "local-command-stderr", "local-command-caveat", "bash-stdout", "bash-stderr"] {
             text = text.replacingOccurrences(of: "<\(tag)>[\\s\\S]*?</\(tag)>", with: "", options: .regularExpression)
         }
         if let range = text.range(of: "<bash-input>([\\s\\S]*?)</bash-input>", options: .regularExpression) {
