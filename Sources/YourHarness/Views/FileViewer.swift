@@ -111,6 +111,15 @@ struct FileDocumentView: View {
         switch snapshot.kind {
         case .text:
             VStack(spacing: 0) {
+                if snapshot.hasCutLines {
+                    Label("Lines over \(FileReader.lineLimit.formatted()) characters are cut", systemImage: "scissors")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                    Divider()
+                }
                 if snapshot.isTruncated {
                     Label("Showing the first \(ByteCountFormatter.string(fromByteCount: Int64(FileReader.textLimit), countStyle: .file)) of \(ByteCountFormatter.string(fromByteCount: snapshot.size, countStyle: .file))",
                           systemImage: "scissors")
@@ -394,7 +403,9 @@ final class FileScrollView: NSView {
         }
         textView.marked = range
         gutter.marked = markedLines.map { $0.line...$0.endLine }
-        layout.ensureLayout(forCharacterRange: range)
+        // With what's above it too: laid out later, as it scrolls into view, it would move the line.
+        let above = snapshot.range(ofLines: max((markedLines?.line ?? 1) - 80, 1)).location
+        layout.ensureLayout(forCharacterRange: NSRange(location: above, length: NSMaxRange(range) - above))
         let glyphs = layout.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
         let rect = layout.boundingRect(forGlyphRange: glyphs, in: container).offsetBy(dx: 0, dy: textView.textContainerOrigin.y)
         // A third of the way down, so what leads up to it shows too.
@@ -470,6 +481,7 @@ final class LineNumberGutter: NSView {
 
     private static let font = NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .regular)
     private static let advance = ("8" as NSString).size(withAttributes: [.font: font]).width
+    private static let lineHeight = ("8" as NSString).size(withAttributes: [.font: font]).height
 
     init(textView: NSTextView) {
         self.textView = textView
@@ -511,10 +523,11 @@ final class LineNumberGutter: NSView {
             let y = fragment.minY + origin.y - visible.minY
             if y > bounds.maxY { break }
             if y + fragment.height >= dirtyRect.minY {
+                // Digits are all one width: nothing to measure, on every step of a scroll.
                 let number = String(line + 1) as NSString
                 let attributes = marked?.contains(line + 1) == true ? strong : normal
-                let size = number.size(withAttributes: attributes)
-                number.draw(at: NSPoint(x: bounds.maxX - 8 - size.width, y: y + (fragment.height - size.height) / 2), withAttributes: attributes)
+                let width = CGFloat(number.length) * Self.advance
+                number.draw(at: NSPoint(x: bounds.maxX - 8 - width, y: y + (fragment.height - Self.lineHeight) / 2), withAttributes: attributes)
             }
             line += 1
         }

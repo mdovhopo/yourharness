@@ -19,6 +19,8 @@ public struct FileSnapshot: Sendable {
     public var lineStarts: [Int] = [0]
     /// Only the start of a big file is shown.
     public var isTruncated = false
+    /// Lines past `FileReader.lineLimit` end early: a minified file's one line.
+    public var hasCutLines = false
     public var size: Int64 = 0
     public var modified: Date?
     /// For `SyntaxHighlighter`; empty when it's plain text.
@@ -54,6 +56,9 @@ public enum FileReader {
     /// Past this, the text is shown plain: highlighting would cost more than it shows.
     public static let highlightLimit = 1024 * 1024
     public static let highlightLineLimit = 20_000
+    /// Past this a line is cut: AppKit lays out a line whole, however little of it shows, and
+    /// a 2 MB line held the main thread for a second.
+    public static let lineLimit = 5_000
 
     public static func read(_ url: URL, limit: Int = textLimit) -> FileSnapshot {
         let keys: Set<URLResourceKey> = [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey]
@@ -88,7 +93,8 @@ public enum FileReader {
             shown = data.prefix(upTo: cut)
             snapshot.isTruncated = true
         }
-        snapshot.text = String(data: shown, encoding: .utf8) ?? String(data: shown, encoding: .isoLatin1) ?? ""
+        let decoded = String(data: shown, encoding: .utf8) ?? String(data: shown, encoding: .isoLatin1) ?? ""
+        snapshot.text = cuttingLongLines(decoded, wasCut: &snapshot.hasCutLines)
         var starts = [0]
         var offset = 0
         for unit in snapshot.text.utf16 {
@@ -100,6 +106,39 @@ public enum FileReader {
         snapshot.lineStarts = starts
         snapshot.language = language(for: url.lastPathComponent)
         return snapshot
+    }
+
+    /// The text with each line past the limit ended by "…". Most files have none, and come
+    /// back as they are.
+    static func cuttingLongLines(_ text: String, limit: Int = lineLimit, wasCut: inout Bool) -> String {
+        var isLong = false
+        var run = 0
+        for byte in text.utf8 {
+            if byte == 10 {
+                run = 0
+            } else {
+                run += 1
+                // Bytes are at least characters' worth; the second pass counts exactly.
+                if run > limit { isLong = true; break }
+            }
+        }
+        guard isLong else { return text }
+        var result = ""
+        result.reserveCapacity(text.utf8.count / 2)
+        var didCut = false
+        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            if !result.isEmpty || line.startIndex != text.startIndex { result.append("\n") }
+            if line.utf16.count > limit {
+                let end = line.index(line.startIndex, offsetBy: limit, limitedBy: line.endIndex) ?? line.endIndex
+                result.append(contentsOf: line[..<end])
+                result.append("…")
+                didCut = true
+            } else {
+                result.append(contentsOf: line)
+            }
+        }
+        wasCut = didCut
+        return didCut ? result : text
     }
 
     /// The highlighter's language for a file name: its extension, or what the name says.

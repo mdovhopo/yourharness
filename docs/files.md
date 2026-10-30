@@ -51,8 +51,9 @@ side chat panel, not on the whole right sidebar, which updates on every switch e
   starts. The tree reads a folder when it's opened, never the whole tree. Only the selected
   tab has its text in memory; the others are a path and, while the app runs, a scroll position.
   A tab's text goes when you switch threads (the sidebar's panels are made per thread).
-- **Limits.** Text over 8 MB shows its first 8 MB (cut at a line). Highlighting stops at
-  1 MB or 20,000 lines. A NUL in the first 8 KB is a binary file; pictures are decoded at up
+- **Limits.** Text over 8 MB shows its first 8 MB (cut at a line). A line over 5,000 characters
+  is cut, with a note above the text: AppKit lays out a line whole, and a minified file's 2 MB
+  line held the main thread for a second. Highlighting stops at 1 MB or 20,000 lines. A NUL in the first 8 KB is a binary file; pictures are decoded at up
   to 3,000 px. Tabs past 24 close oldest first.
 - **Watching.** The open file is watched with a dispatch source on its descriptor; a change
   reloads it after 120 ms and keeps your place (a save that replaces the file is a change, and
@@ -64,6 +65,13 @@ about 60 ms from the click, with the main thread held at most about 20 ms; files
 first show in 15–40 ms; scrolling through it holds the main thread under 20 ms a step. The
 first file in a thread costs about 50 ms more (making the tab and the viewer), in line with
 the first show of any sidebar tab.
+
+Real input (`YH_FILES_PROBE_INPUT=1`), main thread per step: the wheel over that file 7 ms
+(worst about 22), over a 3,000-row tree 4 ms, the divider 5 ms, a key in Go to File about 20 ms.
+The file's cost is AppKit's: about a quarter of it is `usedRectForTextContainer`, but answering
+that from the line count didn't help (7.4 to 7.0 ms) and got the height wrong, so it's left to
+AppKit. Resizing the window costs about 95 ms a step whichever tab shows (about 80 with the
+sidebar closed), in SwiftUI's layout of the whole window.
 
 ## Checking it
 

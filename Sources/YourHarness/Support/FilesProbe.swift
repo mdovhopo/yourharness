@@ -9,7 +9,9 @@ import HarnessCore
 ///   how long each took to show, the main thread's CPU and its longest stall (a watchdog on
 ///   another thread), and the memory footprint before and after. PASS is every stall under
 ///   50 ms. `YH_FILES_PROBE_QUIT=1` quits after; `YH_FILES_PROBE_WAIT=<seconds>` waits before
-///   starting, for attaching Time Profiler.
+///   starting, for attaching Time Profiler; `YH_FILES_PROBE_INPUT=1` also sends real wheel, mouse
+///   and typing events (the file, the tree, the divider, resizing, Go to File, a minified file)
+///   and prints each one's main thread CPU a step against a frame.
 @MainActor
 enum FilesProbe {
     static let isOn = ProcessInfo.processInfo.environment["YH_FILES_PROBE"] != nil
@@ -139,6 +141,109 @@ enum FilesProbe {
             }
         }
         await phase("scroll")
+        if ProcessInfo.processInfo.environment["YH_FILES_PROBE_INPUT"] == "1", let view = fileScrollView(), let window = view.window {
+            // Real events handed to the window, as a mouse and keyboard send them: nothing on
+            // screen moves. Each step's main thread CPU against a frame, and the stall.
+            func act(_ name: String, steps: Int, _ step: (Int) -> Void) async {
+                var worst = 0.0
+                let start = Watchdog.threadCPU()
+                for index in 0..<steps {
+                    let before = Watchdog.threadCPU()
+                    step(index)
+                    try? await Task.sleep(for: .milliseconds(16))
+                    worst = max(worst, Watchdog.threadCPU() - before)
+                }
+                try? await Task.sleep(for: .milliseconds(100))
+                await phase(name)
+                log(String(format: "input %@: %d steps, %.1f ms a step, at most %.1f, stall %@", name, steps, (Watchdog.threadCPU() - start) / Double(steps), worst, stalls.last ?? ""))
+            }
+            func wheel(_ pixels: Int, over target: NSView, sideways: Bool = false) {
+                let point = target.window?.convertPoint(toScreen: target.convert(CGPoint(x: target.bounds.midX, y: target.bounds.midY), to: nil)) ?? .zero
+                guard let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: sideways ? 0 : Int32(pixels), wheel2: sideways ? Int32(pixels) : 0, wheel3: 0) else { return }
+                event.location = CGPoint(x: point.x, y: (NSScreen.screens.first?.frame.height ?? 0) - point.y)
+                if let event = NSEvent(cgEvent: event) { window.sendEvent(event) }
+            }
+            func mouse(_ type: NSEvent.EventType, at point: NSPoint) {
+                if let event = NSEvent.mouseEvent(with: type, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                                                  context: nil, eventNumber: 0, clickCount: 1, pressure: type == .mouseMoved ? 0 : 1) { window.sendEvent(event) }
+            }
+            window.acceptsMouseMovedEvents = true
+            func resize(_ name: String) async {
+                let original = window.frame
+                await act("resizing the window, " + name, steps: 60) { index in
+                    var size = original.size
+                    size.width -= Double(index < 30 ? index : 60 - index) * 4
+                    window.setFrame(NSRect(origin: original.origin, size: size), display: true)
+                }
+                window.setFrame(original, display: true)
+                try? await Task.sleep(for: .milliseconds(200))
+            }
+            // Open the biggest folder in the tree, and come back to the big file.
+            let current = thread.files?.selectedPath
+            let folders = Dictionary(grouping: candidates, by: { ($0.path as NSString).deletingLastPathComponent })
+            if let folder = folders.max(by: { $0.value.count < $1.value.count })?.value.first?.path {
+                thread.openFile(atPath: root.appending(path: folder).path)
+                try? await Task.sleep(for: .milliseconds(800))
+            }
+            if let current { thread.openFile(atPath: root.appending(path: current).path) }
+            try? await Task.sleep(for: .milliseconds(500))
+            await act("wheel over a big file", steps: 150) { wheel($0 < 75 ? -40 : 40, over: view.scrollView) }
+            await act("wheel sideways over it", steps: 60) { wheel($0 < 30 ? -30 : 30, over: view.scrollView, sideways: true) }
+            if let tree: NSOutlineView = findView(), let scroller = tree.enclosingScrollView {
+                log("tree has \(tree.numberOfRows) rows")
+                await act("wheel over the tree", steps: 150) { wheel($0 < 75 ? -40 : 40, over: scroller) }
+                let frame = scroller.convert(scroller.bounds, to: nil)
+                await act("pointer over the tree", steps: 100) { mouse(.mouseMoved, at: NSPoint(x: frame.midX, y: frame.minY + frame.height * Double($0 % 50) / 50)) }
+                // What a drag does: synthetic events don't reach its gesture.
+                await act("dragging the divider", steps: 100) { UserDefaults.standard.set(220 + Double($0 < 50 ? $0 : 100 - $0) * 2, forKey: "filesTreeHeight") }
+                UserDefaults.standard.removeObject(forKey: "filesTreeHeight")
+            }
+            await resize("big file")
+            if let field: NSTextField = findView(where: { $0.placeholderString == "Go to File" }) {
+                window.makeFirstResponder(field)
+                try? await Task.sleep(for: .milliseconds(100))
+                await act("typing in Go to File", steps: 12) { index in
+                    (window.firstResponder as? NSText)?.insertText(String("catalogcatal".dropFirst(index).prefix(1)))
+                }
+                (window.firstResponder as? NSText)?.string = ""
+                window.makeFirstResponder(nil)
+                thread.files?.selectedPath.map { thread.files?.select($0) }
+            }
+            // A minified file: one enormous line.
+            if let minified = candidates.first(where: { $0.path.hasSuffix(".min.js") }) {
+                let started = ContinuousClock.now
+                let shown = await withCheckedContinuation { continuation in
+                    waiting = (minified.path, continuation)
+                    thread.openFile(atPath: root.appending(path: minified.path).path)
+                    Task {
+                        try? await Task.sleep(for: .seconds(10))
+                        if let waiting, waiting.path == minified.path {
+                            self.waiting = nil
+                            waiting.continuation.resume(returning: false)
+                        }
+                    }
+                }
+                log(String(format: "%@ %@ (%@) in %.0f ms", shown ? "shown" : "NOT SHOWN", minified.path, minified.size.formatted(.byteCount(style: .file)), (ContinuousClock.now - started) / .milliseconds(1)))
+                try? await Task.sleep(for: .milliseconds(300))
+                await phase("open minified")
+                if let view = fileScrollView() {
+                    await act("wheel over minified", steps: 60) { wheel($0 < 30 ? -30 : 30, over: view.scrollView, sideways: true) }
+                }
+            }
+            if let small = candidates.filter({ $0.size < 2_000 }).first(where: { $0.path.hasSuffix(".ts") }) {
+                thread.openFile(atPath: root.appending(path: small.path).path)
+                try? await Task.sleep(for: .milliseconds(400))
+                await resize("small file")
+            }
+            app.showInspector(.sideChat)
+            try? await Task.sleep(for: .milliseconds(400))
+            await resize("Side Chat tab")
+            app.setShowsInspector(false)
+            try? await Task.sleep(for: .milliseconds(400))
+            await resize("sidebar closed")
+            app.showInspector(.files)
+            try? await Task.sleep(for: .milliseconds(400))
+        }
         let opened = MemoryFootprint.current()
         thread.files?.tabs.map(\.path).forEach { thread.files?.close($0) }
         try? await Task.sleep(for: .seconds(1))
@@ -158,9 +263,9 @@ enum FilesProbe {
         findView()
     }
 
-    private static func findView<V: NSView>() -> V? {
+    private static func findView<V: NSView>(where matches: @escaping (V) -> Bool = { _ in true }) -> V? {
         func find(_ view: NSView) -> V? {
-            if let found = view as? V { return found }
+            if let found = view as? V, matches(found) { return found }
             for subview in view.subviews { if let found = find(subview) { return found } }
             return nil
         }

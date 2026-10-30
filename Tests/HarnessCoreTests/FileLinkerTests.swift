@@ -133,6 +133,23 @@ struct FileReaderTests {
         #expect(snapshot.language == "")
     }
 
+    @Test func veryLongLinesAreCut() throws {
+        let long = String(repeating: "é", count: FileReader.lineLimit + 500)
+        let snapshot = FileReader.read(try file(Data("first\n\(long)\nlast\n".utf8), name: "app.min.js"))
+        #expect(snapshot.hasCutLines)
+        #expect(snapshot.lineCount == 3)
+        let lines = snapshot.text.split(separator: "\n", omittingEmptySubsequences: false)
+        #expect(lines[0] == "first")
+        #expect(lines[1].count == FileReader.lineLimit + 1)
+        #expect(lines[1].hasSuffix("…"))
+        #expect(lines[2] == "last")
+        // Long in bytes, not in characters: left alone.
+        let wide = String(repeating: "é", count: FileReader.lineLimit - 10)
+        let whole = FileReader.read(try file(Data(wide.utf8), name: "wide.txt"))
+        #expect(!whole.hasCutLines)
+        #expect(whole.text == wide)
+    }
+
     @Test func languages() {
         #expect(FileReader.language(for: "Dockerfile") == "dockerfile")
         #expect(FileReader.language(for: "index.TS") == "ts")

@@ -52,6 +52,10 @@ png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 
 open(sys.argv[1], "wb").write(png)
 open(sys.argv[2], "wb").write(bytes(range(256)) * 4)
 PY
+# A folder of 3,000 files, and a minified file: 2 MB on one line.
+mkdir -p "$SHOP/src/many"
+for i in {1..3000}; do print "export const n = $i;" > "$SHOP/src/many/file$i.ts"; done
+python3 -I -c 'import sys; open(sys.argv[1], "w").write("var a=1;function f(x){return x+1};" * 60000)' "$SHOP/src/data/app.min.js"
 git -C "$SHOP" init -q
 git -C "$SHOP" add -A
 git -C "$SHOP" -c user.name=Preset -c user.email=preset@example.com commit -qm "Shop"

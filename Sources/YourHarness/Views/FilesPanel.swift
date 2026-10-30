@@ -32,38 +32,19 @@ private struct FilesContent: View {
     let files: FilesModel
     let thread: ThreadModel
     @State private var query = ""
-    @AppStorage("filesTreeHeight") private var treeHeight = 220.0
 
     var body: some View {
         VStack(spacing: 0) {
             header
             Divider()
-            // The tree keeps its place whatever else shows, so it's never made again (read
-            // again, its folders reopened) because a file opened or you searched. A plain
-            // stack and a handle rather than a split view: that one hosts each pane on its own,
-            // and measuring them made opening the tab twice as slow.
-            GeometryReader { proxy in
-                VStack(spacing: 0) {
-                    let showsTree = files.showsTree || files.tabs.isEmpty
-                    if showsTree {
-                        tree
-                            .frame(height: files.tabs.isEmpty ? proxy.size.height : min(max(treeHeight, 80), max(proxy.size.height - 160, 80)))
-                    }
-                    if !files.tabs.isEmpty {
-                        if showsTree {
-                            ResizeHandle(height: $treeHeight, limit: max(proxy.size.height - 160, 80))
-                        }
-                        document
-                            .frame(maxHeight: .infinity)
+            // A view of its own, so typing in Go to File doesn't update the tree and the file.
+            FilesPanes(files: files, thread: thread)
+                .overlay {
+                    if !query.isEmpty {
+                        GoToFileList(files: files, thread: thread, query: $query)
+                            .background(.background)
                     }
                 }
-            }
-            .overlay {
-                if !query.isEmpty {
-                    GoToFileList(files: files, thread: thread, query: $query)
-                        .background(.background)
-                }
-            }
         }
     }
 
@@ -82,6 +63,37 @@ private struct FilesContent: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
+    }
+
+}
+
+private struct FilesPanes: View {
+    @Environment(AppModel.self) private var app
+    let files: FilesModel
+    let thread: ThreadModel
+    @AppStorage("filesTreeHeight") private var treeHeight = 220.0
+
+    var body: some View {
+        // The tree keeps its place whatever else shows, so it's never made again (read
+        // again, its folders reopened) because a file opened or you searched. A plain
+        // stack and a handle rather than a split view: that one hosts each pane on its own,
+        // and measuring them made opening the tab twice as slow.
+        GeometryReader { proxy in
+            VStack(spacing: 0) {
+                let showsTree = files.showsTree || files.tabs.isEmpty
+                if showsTree {
+                    tree
+                        .frame(height: files.tabs.isEmpty ? proxy.size.height : min(max(treeHeight, 80), max(proxy.size.height - 160, 80)))
+                }
+                if !files.tabs.isEmpty {
+                    if showsTree {
+                        ResizeHandle(height: $treeHeight, limit: max(proxy.size.height - 160, 80))
+                    }
+                    document
+                        .frame(maxHeight: .infinity)
+                }
+            }
+        }
     }
 
     private var tree: some View {
@@ -268,7 +280,8 @@ private struct GoToFileField: View {
             .onSubmit {
                 let typed = query
                 Task {
-                    guard let index = await app.fileIndex(root: files.root), let first = index.matches(typed, limit: 1).first else { return }
+                    guard let index = await app.fileIndex(root: files.root) else { return }
+                    guard let first = await Task.detached(priority: .userInitiated, operation: { index.matches(typed, limit: 1).first }).value else { return }
                     query = ""
                     if first.hasSuffix("/") { files.open(first) } else { files.open(first, keep: true) }
                 }
@@ -285,25 +298,31 @@ private struct GoToFileList: View {
     @State private var matches: [String] = []
 
     var body: some View {
-        List(matches, id: \.self) { path in
-            Button {
-                open(path)
-            } label: {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text((path.hasSuffix("/") ? String(path.dropLast()) : path).split(separator: "/").last.map(String.init) ?? path)
-                    Text(path)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.head)
+        // Plain rows rather than a List: they're made anew with each key typed.
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                ForEach(matches, id: \.self) { path in
+                    Button {
+                        open(path)
+                    } label: {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text((path.hasSuffix("/") ? String(path.dropLast()) : path).split(separator: "/").last.map(String.init) ?? path)
+                                .lineLimit(1)
+                            Text(path)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.head)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 5)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(.rect)
+                    }
+                    .buttonStyle(.plain)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(.rect)
             }
-            .buttonStyle(.plain)
         }
-        .listStyle(.sidebar)
-        .scrollContentBackground(.hidden)
         .overlay {
             if matches.isEmpty {
                 Text("No Matches")
@@ -312,7 +331,10 @@ private struct GoToFileList: View {
         }
         .task(id: query) {
             guard let index = await app.fileIndex(root: files.root), !Task.isCancelled else { return }
-            matches = index.matches(query, limit: 40)
+            // Off the main thread: a big project has tens of thousands of paths to rank.
+            let typed = query
+            let found = await Task.detached(priority: .userInitiated) { index.matches(typed, limit: 40) }.value
+            if !Task.isCancelled { matches = found }
         }
     }
 
