@@ -45,13 +45,18 @@ struct ThreadInspector: View {
             // Hidden, the sidebar leaves only its toggle in the toolbar.
             if thread != nil, app.showsInspector {
                 ToolbarItem {
+                    // Icons: five names don't fit a narrow sidebar.
                     Picker("Panel", selection: Binding(get: { app.inspectorPanel }, set: { app.pickPanel($0) })) {
                         ForEach(AppModel.InspectorPanel.allCases) { panel in
-                            Text(panel.label).tag(panel)
+                            Image(systemName: panel.symbol)
+                                .accessibilityLabel(panel.label)
+                                .help(panel.label)
+                                .tag(panel)
                         }
                     }
                     .pickerStyle(.segmented)
                     .labelsHidden()
+                    .help(app.inspectorPanel.label)
                 }
             }
             // The same items whichever tab shows: a toolbar that changes with the tab is rebuilt,
@@ -71,8 +76,17 @@ struct ThreadInspector: View {
     private func panel(_ panel: AppModel.InspectorPanel, for thread: ThreadModel, shown: Bool) -> some View {
         switch panel {
         case .pullRequests: PullRequestsPanel(thread: thread, isShown: shown)
-        case .sideChat: SideChatPanel(thread: thread)
+        case .sideChat:
+            // File links in the side chat open in the thread's Files tab. Set here rather than
+            // on the whole sidebar: it's updated on every switch, even hidden, and an action
+            // made anew each time counted as a change to everything in it.
+            SideChatPanel(thread: thread)
+                .environment(\.fileLinker, app.fileLinker(for: thread))
+                .environment(\.openURL, OpenURLAction { url in
+                    FileLinkAction.open(url, in: thread) ? .handled : .systemAction
+                })
         case .subagents: SubagentInspector(thread: thread)
+        case .files: FilesPanel(thread: thread)
         case .browser: EmptyView()
         }
     }

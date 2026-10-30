@@ -34,6 +34,7 @@ struct ThreadView: View {
                 let shown = kept.id == thread.id
                 TranscriptView(thread: kept, isShown: shown)
                     .environment(\.issueLinker, app.issueLinker(for: kept))
+                    .environment(\.fileLinker, app.fileLinker(for: kept))
                     .environment(kept)
                     .opacity(shown ? 1 : 0)
                     .allowsHitTesting(shown)
@@ -86,12 +87,15 @@ struct ThreadView: View {
             .animation(.easeOut(duration: 0.15), value: dropTargeted)
             .environment(thread)
             // Links to this Mac (the app being built) open in the thread's browser; ⌘-click
-            // for your default browser.
+            // for your default browser. Files open in the Files tab; ⌘-click in their app.
             .environment(\.openURL, OpenURLAction { url in
+                if FileLinkAction.open(url, in: thread) { return .handled }
                 guard app.browserTools, LocalServers.isLocal(url), !NSEvent.modifierFlags.contains(.command) else { return .systemAction }
                 thread.openInBrowser(url)
                 return .handled
             })
+            // Lists the thread's files once, off the main thread, for linking paths.
+            .task(id: thread.fileRoot?.path) { await app.loadFileLinker(for: thread) }
             .navigationTitle(thread.title)
             .navigationSubtitle(subtitle)
             .task(id: "\(thread.id)-\(app.memoryRevision(for: thread.projectID))") { await ThreadTasksButton.load(thread, app: app) }

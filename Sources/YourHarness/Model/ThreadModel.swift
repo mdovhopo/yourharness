@@ -154,6 +154,10 @@ final class ThreadModel: Identifiable {
     @ObservationIgnored private(set) weak var parentThread: ThreadModel?
     /// The thread's browser, made when it's first used.
     private(set) var browser: BrowserSession?
+    /// The Files tab, made when it's first shown or a file link is clicked.
+    private(set) var files: FilesModel?
+    /// The Files tab as left at the last quit, until it's made.
+    @ObservationIgnored private var savedFiles: SavedFiles?
     /// Folders its tool calls touched, newest last: the repos and worktrees it works in.
     private(set) var footprint: [String] = []
     /// False for a thread saved before footprints were kept, until it's worked out.
@@ -288,6 +292,7 @@ final class ThreadModel: Identifiable {
         wasCutOff = meta.turnInProgress == true
         draft = meta.draft ?? ""
         savedBrowserTabs = meta.browserTabs ?? []
+        savedFiles = meta.files
         footprint = meta.footprint ?? []
         footprintKnown = meta.footprint != nil
         pullRequestLinks = meta.pullRequests ?? []
@@ -313,7 +318,8 @@ final class ThreadModel: Identifiable {
                    workingDirectory: workingDirectory,
                    pullRequests: linksKnown ? pullRequestLinks : nil,
                    writtenFootprint: workKnown ? writtenFootprint : nil,
-                   workedPullRequests: workKnown ? workedPullRequestLinks : nil)
+                   workedPullRequests: workKnown ? workedPullRequestLinks : nil,
+                   files: (files?.saved ?? savedFiles).flatMap { $0.isEmpty ? nil : $0 })
     }
 
     private static func nilIfEmpty(_ urls: [String]) -> [String]? {
@@ -1081,6 +1087,8 @@ final class ThreadModel: Identifiable {
             interruptRequested = false
             settle()
             if !isAside { app.turnFinished(in: projectID) }
+            // Files it made link as soon as the turn's over.
+            app.refreshFileLinker(for: self)
             if titleNeedsRefinement, !result.isError {
                 titleNeedsRefinement = false
                 app.generateTitle(for: self, from: .conversation)
@@ -1544,6 +1552,40 @@ final class ThreadModel: Identifiable {
             browser.newTab(url: url.absoluteString, byAgent: false)
         }
         app.showInspector(.browser)
+    }
+
+    // MARK: - Files
+
+    /// The folder the Files tab shows and file links resolve in: the one `claude` runs in.
+    /// None for the Home project: a home folder isn't a project to browse, and its Desktop,
+    /// Documents and Downloads would each ask for access.
+    var fileRoot: URL? {
+        if let parentThread { return parentThread.fileRoot }
+        let path = effectiveDirectory
+        guard (path as NSString).standardizingPath != NSHomeDirectory() else { return nil }
+        return URL(fileURLWithPath: path, isDirectory: true)
+    }
+
+    /// The Files tab, made on first use; made again when the thread moves to another folder.
+    func ensureFiles() -> FilesModel? {
+        if let parentThread { return parentThread.ensureFiles() }
+        guard let root = fileRoot?.standardizedFileURL else { return nil }
+        if let files, files.root == root { return files }
+        let restoring = files == nil ? savedFiles : nil
+        let made = FilesModel(root: root, restoring: restoring)
+        made.onChange = { [weak self] in self?.app.save() }
+        files = made
+        return made
+    }
+
+    /// A file link clicked in the thread (or its side chat): it opens in the Files tab.
+    func openFile(atPath path: String, line: Int? = nil, endLine: Int? = nil, text: String? = nil, keep: Bool = false) {
+        guard let files = ensureFiles() else { return }
+        let relative = path.hasPrefix("/") ? files.relativePath(forAbsolute: path) : path
+        guard let relative, !relative.isEmpty else { return }
+        let isFolder = (try? files.url(for: relative).resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true
+        files.open(isFolder && !relative.hasSuffix("/") ? relative + "/" : relative, line: line, endLine: endLine, text: text, keep: keep)
+        app.showInspector(.files)
     }
 
     func closeBrowser() {

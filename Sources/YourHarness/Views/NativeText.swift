@@ -99,7 +99,8 @@ struct RichText: NSViewRepresentable {
     let blocks: [MarkdownBlock]
     /// The last block is still streaming in.
     let isTail: Bool
-    @Environment(\.issueLinker) private var linker
+    @Environment(\.issueLinker) private var issues
+    @Environment(\.fileLinker) private var files
     @Environment(\.findHighlight) private var find
     @Environment(\.openURL) private var openURL
 
@@ -111,7 +112,7 @@ struct RichText: NSViewRepresentable {
 
     func updateNSView(_ view: RichTextView, context: Context) {
         view.open = { openURL($0) }
-        view.show(pieces, linker: linker)
+        view.show(pieces, linker: TextLinkers(issues: issues, files: files))
     }
 
 
@@ -124,7 +125,7 @@ struct RichText: NSViewRepresentable {
     }
 
     private var pieces: [ProsePiece] {
-        let linkerKey = "\(linker.repos.count)|\(linker.openPullRequests.count)"
+        let linkerKey = "\(issues.repos.count)|\(issues.openPullRequests.count)|\(files.revision)"
         return blocks.indices.map { index in
             let isLast = index == blocks.count - 1
             return ProsePiece(block: blocks[index], isFirst: index == 0, isLast: isLast, isTail: isTail && isLast,
@@ -155,7 +156,7 @@ final class RichTextView: TranscriptTextView {
         super.init(wraps: true)
     }
 
-    func show(_ new: [ProsePiece], linker: IssueLinker) {
+    func show(_ new: [ProsePiece], linker: TextLinkers) {
         guard new != pieces, let storage = textStorage else { return }
         var kept = 0
         while kept < min(pieces.count, new.count), pieces[kept] == new[kept] { kept += 1 }
@@ -510,7 +511,7 @@ enum ProseText {
 
     /// A block's text, ending in the line break to the next one. Built once (tables each
     /// time they're shown): a streaming reply rebuilds only its tail.
-    static func text(for piece: ProsePiece, linker: IssueLinker) -> NSAttributedString {
+    static func text(for piece: ProsePiece, linker: TextLinkers) -> NSAttributedString {
         if let known = cache[piece] { return known }
         let text = build(piece, linker: linker)
         // A table's text carries its AppKit table: two tables sharing one would lay out as one.
@@ -522,7 +523,7 @@ enum ProseText {
         return text
     }
 
-    private static func build(_ piece: ProsePiece, linker: IssueLinker) -> NSAttributedString {
+    private static func build(_ piece: ProsePiece, linker: TextLinkers) -> NSAttributedString {
         let result = NSMutableAttributedString()
         let after = piece.isLast ? 0 : blockSpacing
         let tail = piece.isTail
@@ -584,7 +585,7 @@ enum ProseText {
     }
 
     /// A native text table: its cells wrap and select as text. The card behind it is drawn by the view.
-    private static func table(_ table: MarkdownTable, linker: IssueLinker, after: CGFloat) -> NSAttributedString {
+    private static func table(_ table: MarkdownTable, linker: TextLinkers, after: CGFloat) -> NSAttributedString {
         let result = NSMutableAttributedString()
         let textTable = NSTextTable()
         textTable.numberOfColumns = table.columnCount
@@ -678,7 +679,7 @@ enum ProseText {
     }
 
     /// Inline markdown (bold, italic, code, links, `#12`) in a font, as AppKit attributes.
-    private static func inline(_ source: String, tail: Bool, linker: IssueLinker, font: NSFont, paragraph: NSParagraphStyle,
+    private static func inline(_ source: String, tail: Bool, linker: TextLinkers, font: NSFont, paragraph: NSParagraphStyle,
                                color: NSColor = .labelColor, strike: Bool = false) -> NSAttributedString {
         let rendered = InlineMarkdown.render(tail ? MarkdownInline.closingUnterminated(source) : source, linker: linker)
         let result = NSMutableAttributedString()

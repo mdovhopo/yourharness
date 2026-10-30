@@ -62,16 +62,16 @@ struct ToolCallView: View {
     let entry: TranscriptEntry
     @State private var expanded = false
     @Environment(\.findHighlight) private var findHighlight
+    @Environment(ThreadModel.self) private var thread: ThreadModel?
 
     var body: some View {
         let presentation = ToolPresentation(name: entry.toolName, inputJSON: entry.toolInput, result: entry.isStreaming ? nil : entry.toolResult)
         VStack(alignment: .leading, spacing: 0) {
-            Button {
-                withAnimation(.snappy) { expanded.toggle() }
-            } label: {
-                header(presentation)
-            }
-            .buttonStyle(.plain)
+            // A tap rather than a button, so the file's path in it can be a button of its own.
+            header(presentation)
+                .onTapGesture { withAnimation(.snappy) { expanded.toggle() } }
+                .accessibilityAddTraits(.isButton)
+                .accessibilityAction { withAnimation(.snappy) { expanded.toggle() } }
 
             // A command that's taking a while: what it printed last, as it goes.
             if let job = entry.job, job.isRunning, !job.isBackground, !expanded, let line = job.lastLine, !line.isEmpty {
@@ -105,11 +105,29 @@ struct ToolCallView: View {
                 .frame(width: 18)
             Text(presentation.verb)
                 .fontWeight(.medium)
-            Text(AttributedString(presentation.detail).highlighted(findHighlight))
-                .font(.callout.monospaced())
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
+            if let file = fileTarget(presentation) {
+                // Opens in the Files tab: where the edit went, or where the read started.
+                Button {
+                    thread?.openFile(atPath: file.path, line: file.line, text: file.text)
+                } label: {
+                    Text(AttributedString(presentation.detail).highlighted(findHighlight))
+                        .font(.callout.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .underline(hoveringPath)
+                }
+                .buttonStyle(.plain)
+                .pointerStyle(.link)
+                .onHover { hoveringPath = $0 }
+                .help("Show in Files")
+            } else {
+                Text(AttributedString(presentation.detail).highlighted(findHighlight))
+                    .font(.callout.monospaced())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
             Spacer(minLength: 8)
             if let job = entry.job {
                 JobStatusLabel(job: job)
@@ -132,6 +150,20 @@ struct ToolCallView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 9)
         .contentShape(.rect)
+    }
+
+    @State private var hoveringPath = false
+
+    /// The file a Read, Write or Edit worked on, when it's in the thread's folder.
+    private func fileTarget(_ presentation: ToolPresentation) -> (path: String, line: Int?, text: String?)? {
+        let input = presentation.input
+        guard ["Read", "Write", "Edit", "MultiEdit", "NotebookEdit"].contains(entry.toolName),
+              let path = input["file_path"] as? String ?? input["notebook_path"] as? String,
+              let root = thread?.fileRoot?.standardizedFileURL.path,
+              (path as NSString).standardizingPath.hasPrefix(root + "/") else { return nil }
+        let edits = input["edits"] as? [[String: Any]]
+        let written = input["new_string"] as? String ?? edits?.first?["new_string"] as? String
+        return (path, input["offset"] as? Int, written.flatMap { $0.isEmpty ? nil : $0 })
     }
 
     @ViewBuilder

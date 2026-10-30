@@ -136,8 +136,12 @@ final class AppModel {
     var importReport: MemoryImportReport?
 
     /// Each project's files for `@` mentions, and when they were listed.
-    @ObservationIgnored private var fileIndexes: [UUID: (index: FileIndex, listedAt: Date)] = [:]
-    @ObservationIgnored private var fileListings: [UUID: Task<FileIndex, Never>] = [:]
+    @ObservationIgnored private var fileIndexes: [String: (index: FileIndex, listedAt: Date)] = [:]
+    @ObservationIgnored private var fileListings: [String: Task<FileIndex, Never>] = [:]
+    /// What turns paths in a thread's text into links, by the folder they're relative to.
+    /// Replaced only when the files change, since text linked against it is built again then.
+    private(set) var fileLinkers: [String: FileLinker] = [:]
+    @ObservationIgnored private var fileLinkerLoads: Set<String> = []
 
     @ObservationIgnored let store = Store()
     @ObservationIgnored let updater = Updater()
@@ -278,13 +282,14 @@ final class AppModel {
     private(set) var showsInspector = false
 
     enum InspectorPanel: String, CaseIterable, Identifiable {
-        case pullRequests, sideChat, subagents, browser
+        case pullRequests, sideChat, subagents, files, browser
         var id: String { rawValue }
         var label: String {
             switch self {
             case .pullRequests: "PRs"
             case .sideChat: "Side Chat"
             case .subagents: "Sub-agents"
+            case .files: "Files"
             case .browser: "Browser"
             }
         }
@@ -293,6 +298,7 @@ final class AppModel {
             case .pullRequests: "arrow.triangle.pull"
             case .sideChat: "bubble.left.and.text.bubble.right"
             case .subagents: "person.2"
+            case .files: "folder"
             case .browser: "safari"
             }
         }
@@ -1520,14 +1526,22 @@ final class AppModel {
     /// so typing a mention never waits on the disk. In a git repo, what git sees (nothing
     /// ignored), plus the files of repos cloned inside it; otherwise a walk of the folder.
     func fileIndex(for projectID: UUID) async -> FileIndex? {
-        if let cached = fileIndexes[projectID], cached.listedAt.timeIntervalSinceNow > -30 { return cached.index }
+        guard let project = project(id: projectID) else { return nil }
+        return await fileIndex(root: project.url)
+    }
+
+    /// The files of any folder a thread works in: the project's own (with its nested
+    /// repos) or a worktree's.
+    func fileIndex(root: URL, fresh: Bool = false) async -> FileIndex? {
+        let key = root.standardizedFileURL.path
+        if !fresh, let cached = fileIndexes[key], cached.listedAt.timeIntervalSinceNow > -30 { return cached.index }
         // Your whole home folder isn't a project to pick files from.
-        guard let project = project(id: projectID), project.url.standardizedFileURL.path != NSHomeDirectory() else { return nil }
-        if let listing = fileListings[projectID] { return await listing.value }
+        guard key != NSHomeDirectory() else { return nil }
+        if let listing = fileListings[key] { return await listing.value }
         await bootstrap?.value
         let git = workspaceTools.git
-        let root = project.url
-        let nested = workspace(for: project)?.repos.filter { !$0.isRoot && $0.isCloned } ?? []
+        let project = projects.first { $0.url.standardizedFileURL.path == key }
+        let nested = project.flatMap { workspace(for: $0) }?.repos.filter { !$0.isRoot && $0.isCloned } ?? []
         let listing = Task.detached(priority: .userInitiated) { () -> FileIndex in
             guard let git, var files = await git.files(in: root) else { return FileIndex(files: FileIndex.walk(root)) }
             for repo in nested {
@@ -1535,11 +1549,33 @@ final class AppModel {
             }
             return FileIndex(files: files)
         }
-        fileListings[projectID] = listing
+        fileListings[key] = listing
         let index = await listing.value
-        fileListings[projectID] = nil
-        fileIndexes[projectID] = (index, .now)
+        fileListings[key] = nil
+        fileIndexes[key] = (index, .now)
         return index
+    }
+
+    /// The linker for the folder a thread works in; empty until it's loaded.
+    func fileLinker(for thread: ThreadModel) -> FileLinker {
+        thread.fileRoot.flatMap { fileLinkers[$0.standardizedFileURL.path] } ?? .empty
+    }
+
+    /// Lists the thread's folder off the main thread, once, and keeps its linker.
+    func loadFileLinker(for thread: ThreadModel, fresh: Bool = false) async {
+        guard let root = thread.fileRoot?.standardizedFileURL else { return }
+        let key = root.path
+        guard fresh || fileLinkers[key] == nil, fileLinkerLoads.insert(key).inserted else { return }
+        defer { fileLinkerLoads.remove(key) }
+        guard let index = await fileIndex(root: root, fresh: fresh) else { return }
+        let linker = await Task.detached(priority: .userInitiated) { FileLinker(root: key, index: index) }.value
+        if linker.revision != fileLinkers[key]?.revision { fileLinkers[key] = linker }
+    }
+
+    /// After a turn: files it made or removed. Only for folders whose links are in use.
+    func refreshFileLinker(for thread: ThreadModel) {
+        guard let root = thread.fileRoot, fileLinkers[root.standardizedFileURL.path] != nil else { return }
+        Task { await loadFileLinker(for: thread, fresh: true) }
     }
 
     /// The thread that already continues this session, if any.

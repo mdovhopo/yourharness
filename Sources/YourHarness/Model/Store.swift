@@ -115,6 +115,37 @@ struct ThreadMeta: Codable {
     var writtenFootprint: [String]?
     /// The PRs it worked on, as opposed to ones it only mentioned. Nil until worked out.
     var workedPullRequests: [String]?
+    /// The Files tab: its open files and folders, as left.
+    var files: SavedFiles?
+}
+
+/// A thread's Files tab as it was left: paths relative to the thread's folder.
+struct SavedFiles: Codable, Equatable {
+    var tabs: [String] = []
+    /// The tab that the next file clicked replaces, unless you keep it.
+    var preview: String?
+    var selected: String?
+    var expanded: [String] = []
+    var hidesTree: Bool?
+
+    init(tabs: [String] = [], preview: String? = nil, selected: String? = nil, expanded: [String] = [], hidesTree: Bool? = nil) {
+        self.tabs = tabs
+        self.preview = preview
+        self.selected = selected
+        self.expanded = expanded
+        self.hidesTree = hidesTree
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        tabs = try container.decodeIfPresent([String].self, forKey: .tabs) ?? []
+        preview = try container.decodeIfPresent(String.self, forKey: .preview)
+        selected = try container.decodeIfPresent(String.self, forKey: .selected)
+        expanded = try container.decodeIfPresent([String].self, forKey: .expanded) ?? []
+        hidesTree = try container.decodeIfPresent(Bool.self, forKey: .hidesTree)
+    }
+
+    var isEmpty: Bool { tabs.isEmpty && expanded.isEmpty && hidesTree != true }
 }
 
 struct PersistedState: Codable {

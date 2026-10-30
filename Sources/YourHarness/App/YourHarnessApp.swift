@@ -196,6 +196,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             SearchProbe.runIfRequested(app: AppModel.shared)
             MemoryProbe.runIfRequested(app: AppModel.shared)
             StackProbe.runIfRequested(app: AppModel.shared)
+            FilesProbe.runIfRequested(app: AppModel.shared)
             WindowSnapshot.runIfRequested()
             if let panel = ProcessInfo.processInfo.environment["YH_INSPECTOR_PANEL"].flatMap(AppModel.InspectorPanel.init(rawValue:)) {
                 AppModel.shared.showInspector(panel)

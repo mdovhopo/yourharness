@@ -44,6 +44,7 @@ enum NavigationProbe {
                 ("home memory", { app.showMemory(of: home) }),
                 ("thread", { app.selectedThreadID = first.id }),
                 ("inspector", { app.setShowsInspector(true) }),
+                ("inspector files", { app.showInspector(.files) }),
                 ("pull requests", { app.showProject(project) }),
                 ("thread", { app.selectedThreadID = first.id }),
                 ("memory", { app.showMemory(of: project) }),

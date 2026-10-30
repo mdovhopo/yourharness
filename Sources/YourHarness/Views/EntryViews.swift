@@ -56,6 +56,7 @@ struct UserMessageView: View {
     @Environment(AppModel.self) private var app
     @Environment(ThreadModel.self) private var thread: ThreadModel?
     @Environment(\.findHighlight) private var findHighlight
+    @Environment(\.fileLinker) private var files
     let text: String
     let attachments: [String]
     var delivery = TranscriptEntry.Delivery.normal
@@ -131,9 +132,16 @@ struct UserMessageView: View {
 extension UserMessageView {
     /// A command reads as one: its name in monospace, then what you passed it.
     var message: Text {
-        guard let command = SlashCommand.parse(text) else { return Text(chained(AttributedString(text).highlighted(findHighlight), in: text)) }
+        guard let command = SlashCommand.parse(text) else { return Text(linked(chained(AttributedString(text).highlighted(findHighlight), in: text))) }
         let name = Text("/\(command.name)").font(.body.monospaced().weight(.semibold))
-        return command.arguments.isEmpty ? name : Text("\(name) \(chained(AttributedString(command.arguments), in: command.arguments))")
+        return command.arguments.isEmpty ? name : Text("\(name) \(linked(chained(AttributedString(command.arguments), in: command.arguments)))")
+    }
+
+    /// `@mentions` and other paths of the thread's files, as links.
+    private func linked(_ attributed: AttributedString) -> AttributedString {
+        var result = attributed
+        InlineMarkdown.linkFiles(&result, files: files)
+        return result
     }
 
     /// Skills chained later in the message (`then /review`) read as commands too.

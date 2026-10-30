@@ -10,6 +10,14 @@ enum MarkdownMetrics {
 extension EnvironmentValues {
     /// Turns `#12` and friends into PR/issue links for the thread being shown.
     @Entry var issueLinker = IssueLinker(repos: [], openPullRequests: [])
+    /// Turns paths into links to the thread's files.
+    @Entry var fileLinker = FileLinker.empty
+}
+
+/// What text is linked with: PR and issue references, and the thread's files.
+struct TextLinkers {
+    var issues: IssueLinker
+    var files: FileLinker
 }
 
 /// Assistant text. While a reply streams in, text is revealed at a steady pace, a word at
@@ -120,25 +128,27 @@ struct MarkdownGroup: Identifiable {
     }
 }
 
-/// Inline markdown via `AttributedString`, plus bare URLs as links and `#12`-style
-/// references linked to their PR or issue.
+/// Inline markdown via `AttributedString`, plus bare URLs as links, `#12`-style
+/// references linked to their PR or issue, and paths to the thread's files.
 @MainActor
 enum InlineMarkdown {
-    static func render(_ source: String, linker: IssueLinker) -> AttributedString {
+    static func render(_ source: String, linker: TextLinkers) -> AttributedString {
         let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
         var text = (try? AttributedString(markdown: source, options: options)) ?? AttributedString(source)
 
         let plain = String(text.characters)
-        guard plain.contains("://") || plain.contains("#") || plain.contains("!") else { return text }
+        let mayLinkFiles = !linker.files.isEmpty && FileLinker.mightMention(plain)
+        guard mayLinkFiles || plain.contains("://") || plain.contains("#") || plain.contains("!") else { return text }
 
-        func link(_ offsets: Range<Int>, to url: URL) {
+        func link(_ offsets: Range<Int>, to url: URL, inCode: Bool = false) {
             let characters = text.characters
             guard offsets.upperBound <= characters.count else { return }
             let start = characters.index(characters.startIndex, offsetBy: offsets.lowerBound)
             let end = characters.index(start, offsetBy: offsets.count)
             let range = start..<end
-            // Leave code spans and links the author already made alone.
-            guard !text[range].runs.contains(where: { $0.link != nil || $0.inlinePresentationIntent?.contains(.code) == true }) else { return }
+            // Leave links the author already made alone, and code spans, except for paths:
+            // `Sources/App.swift:12` is how files get named.
+            guard !text[range].runs.contains(where: { $0.link != nil || (!inCode && $0.inlinePresentationIntent?.contains(.code) == true) }) else { return }
             text[range].link = url
         }
 
@@ -146,11 +156,32 @@ enum InlineMarkdown {
             link(offsets, to: url)
         }
         for reference in IssueReference.find(in: plain) {
-            if let url = linker.url(for: reference, context: plain) {
+            if let url = linker.issues.url(for: reference, context: plain) {
                 link(reference.range, to: url)
             }
         }
+        if mayLinkFiles {
+            for reference in linker.files.references(in: plain) {
+                if let url = FileLink.url(path: linker.files.absolute(reference.path), line: reference.line, endLine: reference.endLine) {
+                    link(reference.range, to: url, inCode: true)
+                }
+            }
+        }
         return text
+    }
+
+    /// File links in plain text, like your own messages.
+    static func linkFiles(_ text: inout AttributedString, files: FileLinker) {
+        guard !files.isEmpty else { return }
+        let plain = String(text.characters)
+        for reference in files.references(in: plain) {
+            guard let url = FileLink.url(path: files.absolute(reference.path), line: reference.line, endLine: reference.endLine) else { continue }
+            let characters = text.characters
+            guard reference.range.upperBound <= characters.count else { continue }
+            let start = characters.index(characters.startIndex, offsetBy: reference.range.lowerBound)
+            let end = characters.index(start, offsetBy: reference.range.count)
+            text[start..<end].link = url
+        }
     }
 
     private static let urlPattern = try? NSRegularExpression(pattern: #"https?://[^\s<>()\[\]`]+[^\s<>()\[\]`.,;:!?'"]"#)

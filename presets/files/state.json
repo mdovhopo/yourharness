@@ -1,0 +1,17 @@
+{
+ "projects": [
+  {"id": "AAAAAAAA-0000-4000-8000-0000000000F1", "name": "Home", "path": "{{ROOT}}/home", "permissionMode": "auto"},
+  {"id": "AAAAAAAA-0000-4000-8000-0000000000F2", "name": "Shop", "path": "{{ROOT}}/shop", "permissionMode": "auto"}
+ ],
+ "homeProjectID": "AAAAAAAA-0000-4000-8000-0000000000F1",
+ "threads": [
+  {"id": "BBBBBBBB-0000-4000-8000-0000000000F1", "projectID": "AAAAAAAA-0000-4000-8000-0000000000F2",
+   "title": "Checkout totals", "createdAt": "2026-10-29T10:00:00Z", "updatedAt": "2026-10-29T10:05:00Z", "model": "haiku"},
+  {"id": "BBBBBBBB-0000-4000-8000-0000000000F2", "projectID": "AAAAAAAA-0000-4000-8000-0000000000F2",
+   "title": "New Thread", "createdAt": "2026-10-29T09:00:00Z", "updatedAt": "2026-10-29T09:00:00Z", "model": "haiku"}
+ ],
+ "selectedThreadID": "BBBBBBBB-0000-4000-8000-0000000000F1",
+ "showsInspector": true,
+ "defaults": {"model": "haiku"},
+ "titleGeneration": {"provider": "claude", "model": "haiku"}
+}

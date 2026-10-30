@@ -115,8 +115,8 @@ enum UsageProbe {
 }
 
 /// Pings the main thread from another every few milliseconds and keeps the longest it took
-/// to answer.
-private final class Watchdog: Sendable {
+/// to answer. The probes' measure of a stall.
+final class Watchdog: Sendable {
     private let state = Mutex((running: true, done: false, longest: 0.0))
 
     init() {
@@ -142,6 +142,11 @@ private final class Watchdog: Sendable {
         state.withLock { $0.running = false }
         while !state.withLock({ $0.done }) { try? await Task.sleep(for: .milliseconds(5)) }
         return state.withLock { $0.longest }
+    }
+
+    /// CPU time the calling thread has used, in milliseconds.
+    static func threadCPU() -> Double {
+        mainThreadCPU()
     }
 }
 
