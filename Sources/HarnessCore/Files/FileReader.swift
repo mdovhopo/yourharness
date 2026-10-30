@@ -61,6 +61,9 @@ public enum FileReader {
     public static let lineLimit = 5_000
 
     public static func read(_ url: URL, limit: Int = textLimit) -> FileSnapshot {
+        // A URL keeps what it was told: ask the disk.
+        var url = url
+        url.removeAllCachedResourceValues()
         let keys: Set<URLResourceKey> = [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey]
         guard let values = try? url.resourceValues(forKeys: keys) else { return FileSnapshot(kind: .missing) }
         var snapshot = FileSnapshot(kind: .text)

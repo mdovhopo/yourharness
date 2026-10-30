@@ -198,6 +198,67 @@ enum FilesProbe {
                 await act("dragging the divider", steps: 100) { UserDefaults.standard.set(220 + Double($0 < 50 ? $0 : 100 - $0) * 2, forKey: "filesTreeHeight") }
                 UserDefaults.standard.removeObject(forKey: "filesTreeHeight")
             }
+            // Between tabs, timed until the file shows, and whether a scrolled file comes back
+            // where it was. Through the model: synthetic clicks don't reach SwiftUI's tap gestures.
+            if let files = thread.files, let big = biggest?.path {
+                for path in files.tabs.map(\.path) { files.close(path) }
+                let small = candidates.filter { $0.size < 2_000 }.prefix(2).map(\.path)
+                for path in small + [big] {
+                    thread.openFile(atPath: root.appending(path: path).path, keep: true)
+                    try? await Task.sleep(for: .milliseconds(300))
+                }
+                func timed(_ path: String, _ action: () -> Void) async -> Double? {
+                    let started = ContinuousClock.now
+                    var timeout: Task<Void, Never>?
+                    let shown = await withCheckedContinuation { continuation in
+                        waiting = (path, continuation)
+                        action()
+                        timeout = Task {
+                            try? await Task.sleep(for: .seconds(2))
+                            if !Task.isCancelled, let waiting, waiting.path == path {
+                                self.waiting = nil
+                                waiting.continuation.resume(returning: false)
+                            }
+                        }
+                    }
+                    timeout?.cancel()
+                    return shown ? (ContinuousClock.now - started) / .milliseconds(1) : nil
+                }
+                func format(_ times: [Double?]) -> String {
+                    times.map { $0.map { String(format: "%.0f", $0) } ?? "none" }.joined(separator: ", ") + " ms"
+                }
+                if small.count == 2 {
+                    var direct: [Double?] = []
+                    for index in 0..<6 {
+                        let path = small[index % 2]
+                        if files.selectedPath == path { files.select(small[(index + 1) % 2]); try? await Task.sleep(for: .milliseconds(200)) }
+                        direct.append(await timed(path) { files.select(path) })
+                        try? await Task.sleep(for: .milliseconds(200))
+                    }
+                    log("switch small files, no click: \(format(direct))")
+                    var large: [Double?] = []
+                    for index in 0..<6 {
+                        let path = index % 2 == 0 ? big : small[0]
+                        large.append(await timed(path) { files.select(path) })
+                        try? await Task.sleep(for: .milliseconds(200))
+                    }
+                    log("switch to and from the big file, no click: \(format(large))")
+                    await phase("switching tabs")
+                    log("switching stall \(stalls.last ?? "")")
+                    files.select(big)
+                    try? await Task.sleep(for: .milliseconds(300))
+                    if let view = fileScrollView() {
+                        view.scroll(to: NSPoint(x: 0, y: 500_000))
+                        try? await Task.sleep(for: .milliseconds(200))
+                        let before = view.scrollView.contentView.bounds.origin.y
+                        files.select(small[0])
+                        try? await Task.sleep(for: .milliseconds(300))
+                        files.select(big)
+                        try? await Task.sleep(for: .milliseconds(500))
+                        log("scrolled to \(Int(before)), back at \(Int(view.scrollView.contentView.bounds.origin.y))")
+                    }
+                }
+            }
             await resize("big file")
             if let field: NSTextField = findView(where: { $0.placeholderString == "Go to File" }) {
                 window.makeFirstResponder(field)

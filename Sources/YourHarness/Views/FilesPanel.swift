@@ -259,8 +259,13 @@ private struct FileTabButton: View {
         .background(isSelected ? AnyShapeStyle(.quaternary) : AnyShapeStyle(.clear), in: .capsule)
         .contentShape(.capsule)
         .onHover { hovering = $0 }
-        .onTapGesture(count: 2) { files.keep(tab.path) }
-        .onTapGesture { files.select(tab.path) }
+        // One gesture that looks at the click count: with a double-tap gesture beside it,
+        // SwiftUI holds every single click until a double click can't come any more, and
+        // switching tabs felt half a second late.
+        .onTapGesture {
+            files.select(tab.path)
+            if NSApp.currentEvent?.clickCount == 2 { files.keep(tab.path) }
+        }
         .help(tab.isPreview ? "\(tab.path)\nDouble-click to keep it open" : tab.path)
         .contextMenu {
             Button("Keep Open") { files.keep(tab.path) }

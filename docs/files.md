@@ -48,9 +48,11 @@ side chat panel, not on the whole right sidebar, which updates on every switch e
   whole (`replaceTextStorage`). Folders are listed off the main thread too.
 - **Only what's seen exists.** The text view lays out non-contiguously (only what's on
   screen); the line numbers are drawn only for visible lines, by binary search in the line
-  starts. The tree reads a folder when it's opened, never the whole tree. Only the selected
-  tab has its text in memory; the others are a path and, while the app runs, a scroll position.
-  A tab's text goes when you switch threads (the sidebar's panels are made per thread).
+  starts. The tree reads a folder when it's opened, never the whole tree. Of the tabs, only
+  the last four seen hold their text (32 MB at most, `RecentFiles`), so going between them
+  shows the file in the same frame and only checks its date, off the main thread; the others
+  are a path and, while the app runs, a scroll position. That text goes when you switch
+  threads (the sidebar's panels are made per thread).
 - **Limits.** Text over 8 MB shows its first 8 MB (cut at a line). A line over 5,000 characters
   is cut, with a note above the text: AppKit lays out a line whole, and a minified file's 2 MB
   line held the main thread for a second. Highlighting stops at 1 MB or 20,000 lines. A NUL in the first 8 KB is a binary file; pictures are decoded at up
@@ -65,6 +67,10 @@ about 60 ms from the click, with the main thread held at most about 20 ms; files
 first show in 15–40 ms; scrolling through it holds the main thread under 20 ms a step. The
 first file in a thread costs about 50 ms more (making the tab and the viewer), in line with
 the first show of any sidebar tab.
+
+A tab selects on the click itself, by the event's click count: a double-tap gesture beside a
+tap gesture makes SwiftUI hold every single click until a double click can't come any more.
+Synthetic clicks don't reach those gestures, so the probes can't see this; check by hand.
 
 Real input (`YH_FILES_PROBE_INPUT=1`), main thread per step: the wheel over that file 7 ms
 (worst about 22), over a 3,000-row tree 4 ms, the divider 5 ms, a key in Go to File about 20 ms.

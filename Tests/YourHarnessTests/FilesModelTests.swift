@@ -89,3 +89,43 @@ struct FilesModelTests {
         #expect(files.relativePath(forAbsolute: "/work/application/a.swift") == nil)
     }
 }
+
+/// The files kept ready for going between tabs.
+struct RecentFilesTests {
+    private func loaded(_ name: String, bytes: Int = 10) throws -> (file: LoadedFile, url: URL) {
+        let folder = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let url = folder.appending(path: name)
+        try Data(repeating: 97, count: bytes).write(to: url)
+        return (LoadedFile.load(url, path: name), url)
+    }
+
+    @Test func oldestGoPastTheLimits() throws {
+        let recent = RecentFiles(limit: 2, textLimit: 100)
+        recent.keep(try loaded("a").file)
+        recent.keep(try loaded("b").file)
+        recent.keep(try loaded("c").file)
+        #expect(recent["a"] == nil)
+        #expect(recent["b"] != nil)
+        // A big one pushes the rest out, but stays itself.
+        recent.keep(try loaded("big", bytes: 500).file)
+        #expect(recent["big"] != nil)
+        #expect(recent["c"] == nil)
+    }
+
+    @Test func closedTabsGo() throws {
+        let recent = RecentFiles()
+        recent.keep(try loaded("a").file)
+        recent.keep(try loaded("b").file)
+        recent.keepOnly(["b"])
+        #expect(recent["a"] == nil)
+        #expect(recent["b"] != nil)
+    }
+
+    @Test func aChangedFileIsNoLongerCurrent() throws {
+        let (file, url) = try loaded("a")
+        #expect(file.isCurrent(at: url))
+        try Data(repeating: 98, count: 11).write(to: url)
+        #expect(!file.isCurrent(at: url))
+    }
+}

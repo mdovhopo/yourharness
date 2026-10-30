@@ -22,6 +22,18 @@ final class LoadedFile: @unchecked Sendable {
 
     nonisolated(unsafe) static let font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
 
+    /// How much text it holds, for keeping recent files within a budget.
+    nonisolated var textLength: Int { snapshot.text.utf8.count }
+
+    /// Whether the file on disk is still what was read: call off the main thread.
+    nonisolated func isCurrent(at url: URL) -> Bool {
+        // A URL keeps what it was told: ask the disk.
+        var url = url
+        url.removeAllCachedResourceValues()
+        let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+        return values?.contentModificationDate == snapshot.modified && Int64(values?.fileSize ?? -1) == snapshot.size
+    }
+
     /// Reads and builds it: call off the main thread.
     nonisolated static func load(_ url: URL, path: String) -> LoadedFile {
         let snapshot = FileReader.read(url)
@@ -67,6 +79,35 @@ final class LoadedFile: @unchecked Sendable {
     }
 }
 
+/// The files shown last, ready to swap back in: going between tabs doesn't wait for the disk.
+/// Gone with the view, so with the thread; bounded, so a thread's tabs stay cheap.
+final class RecentFiles {
+    private var files: [LoadedFile] = []
+    private let limit: Int
+    private let textLimit: Int
+
+    init(limit: Int = 4, textLimit: Int = 32 * 1024 * 1024) {
+        self.limit = limit
+        self.textLimit = textLimit
+    }
+
+    subscript(path: String) -> LoadedFile? { files.first { $0.path == path } }
+
+    /// Newest first; what's past the limits goes, oldest first, but never the newest.
+    func keep(_ file: LoadedFile) {
+        files.removeAll { $0.path == file.path }
+        files.insert(file, at: 0)
+        while files.count > 1, files.count > limit || files.reduce(0, { $0 + $1.textLength }) > textLimit {
+            files.removeLast()
+        }
+    }
+
+    /// Closed tabs aren't worth keeping.
+    func keepOnly(_ paths: Set<String>) {
+        files.removeAll { !paths.contains($0.path) }
+    }
+}
+
 /// The selected tab's file: loaded when it's picked, and again whenever it changes on disk
 /// (Claude editing it while you read), keeping your place.
 struct FileDocumentView: View {
@@ -74,6 +115,7 @@ struct FileDocumentView: View {
     let path: String
     @AppStorage("filesWrapLines") private var wraps = false
     @State private var loaded: LoadedFile?
+    @State private var recent = RecentFiles()
     /// Goes up each time the file changes on disk.
     @State private var version = 0
 
@@ -84,8 +126,10 @@ struct FileDocumentView: View {
 
     var body: some View {
         Group {
-            if let loaded {
-                content(loaded)
+            // A file seen lately shows in this very frame; another waits for its read, with the
+            // last one still up rather than a blank.
+            if let file = recent[path] ?? loaded {
+                content(file)
             } else {
                 Color.clear
             }
@@ -93,10 +137,22 @@ struct FileDocumentView: View {
         .task(id: LoadKey(path: path, version: version)) {
             let url = files.url(for: path)
             let path = path
-            let file = await Task.detached(priority: .userInitiated) { LoadedFile.load(url, path: path) }.value
+            recent.keepOnly(Set(files.tabs.map(\.path)).union([path]))
+            let known = recent[path]
+            // Changed since it was read? (While it's on screen the watch below says so.)
+            let isCurrent = await Task.detached(priority: .userInitiated) { known?.isCurrent(at: url) ?? false }.value
             guard !Task.isCancelled else { return }
-            loaded = file
-            FilesProbe.shown(file)
+            if let known, isCurrent {
+                recent.keep(known)
+                loaded = known
+                FilesProbe.shown(known)
+            } else {
+                let file = await Task.detached(priority: .userInitiated) { LoadedFile.load(url, path: path) }.value
+                guard !Task.isCancelled else { return }
+                recent.keep(file)
+                loaded = file
+                FilesProbe.shown(file)
+            }
             // Then wait for it to change, and load it again.
             guard await FileChangeWatch.next(url) else { return }
             try? await Task.sleep(for: .milliseconds(120))
@@ -268,8 +324,11 @@ final class FileScrollView: NSView {
     var revealSerial = -1
     var onLeave: ((String, CGPoint) -> Void)?
     private var wraps = false
-    /// The lines last revealed, kept marked through reloads.
-    private var markedLines: (line: Int, endLine: Int)?
+    /// The lines last revealed, kept marked through reloads and going between tabs.
+    private var markedLines: (line: Int, endLine: Int)? {
+        didSet { if let path = shown?.path { markedByPath[path] = markedLines.map { ClosedRange(uncheckedBounds: ($0.line, $0.endLine)) } } }
+    }
+    private var markedByPath: [String: ClosedRange<Int>] = [:]
 
     private var contentView: NSClipView { scrollView.contentView }
 
@@ -359,8 +418,8 @@ final class FileScrollView: NSView {
         let samePath = shown?.path == file.path
         let previous = contentView.bounds.origin
         if let shown, !samePath { onLeave?(shown.path, previous) }
-        if !samePath { markedLines = nil }
         shown = file
+        if !samePath { markedLines = markedByPath[file.path].map { ($0.lowerBound, $0.upperBound) } }
         guard let storage = file.storage, let layout = textView.layoutManager else { return }
         textView.setSelectedRange(NSRange(location: 0, length: 0))
         layout.replaceTextStorage(storage)
