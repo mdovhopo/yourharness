@@ -86,7 +86,8 @@ final class FileTreeController: NSObject, NSOutlineViewDataSource, NSOutlineView
         outline.outlineTableColumn = column
         outline.headerView = nil
         outline.style = .sourceList
-        outline.rowSizeStyle = .small
+        outline.rowSizeStyle = .custom
+        outline.rowHeight = 24
         outline.indentationPerLevel = 12
         outline.autoresizesOutlineColumn = false
         outline.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
@@ -129,7 +130,7 @@ final class FileTreeController: NSObject, NSOutlineViewDataSource, NSOutlineView
         outline.enumerateAvailableRowViews { _, row in
             guard let node = self.outline.item(atRow: row) as? FileNode,
                   let cell = self.outline.view(atColumn: 0, row: row, makeIfNecessary: false) as? NSTableCellView else { return }
-            cell.textField?.textColor = self.isIgnored(node) ? .tertiaryLabelColor : .labelColor
+            self.style(cell, for: node)
         }
     }
 
@@ -309,9 +310,16 @@ final class FileTreeController: NSObject, NSOutlineViewDataSource, NSOutlineView
         guard let node = item as? FileNode else { return nil }
         let cell = outlineView.makeView(withIdentifier: Self.cellID, owner: nil) as? NSTableCellView ?? makeCell()
         cell.textField?.stringValue = node.name
-        cell.textField?.textColor = isIgnored(node) ? .tertiaryLabelColor : .labelColor
         cell.imageView?.image = icon(for: node)
+        style(cell, for: node)
         return cell
+    }
+
+    /// Ignored files recede, icon and all.
+    private func style(_ cell: NSTableCellView, for node: FileNode) {
+        let ignored = isIgnored(node)
+        cell.textField?.textColor = ignored ? .tertiaryLabelColor : .labelColor
+        cell.imageView?.contentTintColor = ignored ? .tertiaryLabelColor : .secondaryLabelColor
     }
 
     private func makeCell() -> NSTableCellView {
@@ -323,7 +331,7 @@ final class FileTreeController: NSObject, NSOutlineViewDataSource, NSOutlineView
         let text = NSTextField(labelWithString: "")
         text.translatesAutoresizingMaskIntoConstraints = false
         text.lineBreakMode = .byTruncatingMiddle
-        text.font = .systemFont(ofSize: NSFont.smallSystemFontSize + 1)
+        text.font = .systemFont(ofSize: 12)
         cell.addSubview(image)
         cell.addSubview(text)
         cell.imageView = image
@@ -332,7 +340,7 @@ final class FileTreeController: NSObject, NSOutlineViewDataSource, NSOutlineView
             image.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 2),
             image.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
             image.widthAnchor.constraint(equalToConstant: 16),
-            image.heightAnchor.constraint(equalToConstant: 16),
+            image.heightAnchor.constraint(equalToConstant: 14),
             text.leadingAnchor.constraint(equalTo: image.trailingAnchor, constant: 5),
             text.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -2),
             text.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
@@ -340,13 +348,13 @@ final class FileTreeController: NSObject, NSOutlineViewDataSource, NSOutlineView
         return cell
     }
 
-    /// Finder's icon for the kind of file, by its extension: never read from the file itself.
+    /// A symbol for the kind of file, by its name: never read from the file itself.
     private func icon(for node: FileNode) -> NSImage? {
-        let key = node.isFolder ? "/" : (node.name as NSString).pathExtension.lowercased()
-        if let known = icons[key] { return known }
-        let type: UTType = node.isFolder ? .folder : (UTType(filenameExtension: key) ?? .data)
-        let image = NSWorkspace.shared.icon(for: type)
-        icons[key] = image
+        let symbol = FileSymbol.name(for: node.name, isFolder: node.isFolder)
+        if let known = icons[symbol] { return known }
+        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 12, weight: .regular))
+        icons[symbol] = image
         return image
     }
 
@@ -395,6 +403,28 @@ final class ClosureMenuItem: NSMenuItem {
     required init(coder: NSCoder) { fatalError() }
 
     @objc private func runClosure() { run() }
+}
+
+/// The SF Symbol for a file, in the window's one color: the tree and Go to File.
+enum FileSymbol {
+    static func name(for file: String, isFolder: Bool) -> String {
+        if isFolder { return "folder.fill" }
+        switch (file as NSString).pathExtension.lowercased() {
+        case "swift": return "swift"
+        case "md", "markdown", "txt", "rtf", "log": return "doc.text"
+        case "json", "jsonc", "js", "jsx", "mjs", "cjs", "ts", "tsx", "c", "h", "cpp", "hpp", "cc", "m", "mm", "go", "rs", "java", "kt", "cs", "css", "scss", "less", "lua", "php":
+            return "curlybraces"
+        case "html", "htm", "xml", "svg", "plist", "vue", "svelte": return "chevron.left.forwardslash.chevron.right"
+        case "py", "rb", "sh", "zsh", "bash", "fish", "pl": return "terminal"
+        case "yml", "yaml", "toml", "ini", "cfg", "conf", "env", "lock", "resolved": return "slider.horizontal.3"
+        case "png", "jpg", "jpeg", "gif", "heic", "webp", "tiff", "bmp", "ico": return "photo"
+        case "mp4", "mov", "m4v", "webm", "mp3", "wav", "m4a": return "play.rectangle"
+        case "zip", "gz", "tar", "tgz", "xz", "bz2", "dmg": return "archivebox"
+        case "pdf": return "doc.richtext"
+        case "sql", "sqlite", "db": return "cylinder.split.1x2"
+        default: return "doc"
+        }
+    }
 }
 
 enum FileActions {

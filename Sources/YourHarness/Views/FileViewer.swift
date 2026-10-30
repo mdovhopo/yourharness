@@ -296,7 +296,7 @@ final class FileScrollView: NSView {
         textView.usesFindBar = true
         textView.isIncrementalSearchingEnabled = true
         textView.isAutomaticLinkDetectionEnabled = false
-        textView.textContainerInset = NSSize(width: 2, height: 6)
+        textView.textContainerInset = NSSize(width: 2, height: 8)
         textView.minSize = .zero
         textView.maxSize = CGSize(width: CGFloat.greatestFiniteMagnitude, height: .greatestFiniteMagnitude)
         textView.isVerticallyResizable = true
@@ -466,7 +466,7 @@ final class LineNumberGutter: NSView {
     var lineStarts: [Int] = [0] {
         didSet {
             let digits = max(3, String(lineStarts.count).count)
-            let width = ceil(CGFloat(digits) * Self.advance + 16)
+            let width = ceil(CGFloat(digits) * Self.advance + 12)
             if width != thickness {
                 thickness = width
                 superview?.needsLayout = true
@@ -474,7 +474,7 @@ final class LineNumberGutter: NSView {
             needsDisplay = true
         }
     }
-    private(set) var thickness = ceil(3 * LineNumberGutter.advance + 16)
+    private(set) var thickness = ceil(3 * LineNumberGutter.advance + 12)
     var marked: ClosedRange<Int>? {
         didSet { if marked != oldValue { needsDisplay = true } }
     }
@@ -486,7 +486,6 @@ final class LineNumberGutter: NSView {
     init(textView: NSTextView) {
         self.textView = textView
         super.init(frame: .zero)
-        // Views don't clip on their own any more: its line would run up the whole sidebar.
         clipsToBounds = true
         setAccessibilityElement(false)
     }
@@ -499,8 +498,6 @@ final class LineNumberGutter: NSView {
     override func draw(_ dirtyRect: NSRect) {
         guard let textView, let layout = textView.layoutManager, let container = textView.textContainer,
               let length = textView.textStorage?.length else { return }
-        NSColor.separatorColor.setFill()
-        CGRect(x: bounds.maxX - 1, y: 0, width: 1, height: bounds.height).intersection(dirtyRect).fill()
         let visible = textView.visibleRect
         let glyphs = layout.glyphRange(forBoundingRectWithoutAdditionalLayout: visible, in: container)
         let characters = layout.characterRange(forGlyphRange: glyphs, actualGlyphRange: nil)
@@ -527,7 +524,7 @@ final class LineNumberGutter: NSView {
                 let number = String(line + 1) as NSString
                 let attributes = marked?.contains(line + 1) == true ? strong : normal
                 let width = CGFloat(number.length) * Self.advance
-                number.draw(at: NSPoint(x: bounds.maxX - 8 - width, y: y + (fragment.height - Self.lineHeight) / 2), withAttributes: attributes)
+                number.draw(at: NSPoint(x: bounds.maxX - 2 - width, y: y + (fragment.height - Self.lineHeight) / 2), withAttributes: attributes)
             }
             line += 1
         }

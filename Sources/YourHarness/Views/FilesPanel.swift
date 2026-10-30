@@ -31,40 +31,101 @@ private struct FilesContent: View {
     @Environment(AppModel.self) private var app
     let files: FilesModel
     let thread: ThreadModel
-    @State private var query = ""
+    @AppStorage("filesWrapLines") private var wraps = false
+    // `YH_FILES_QUERY=<words>`: typed at launch, for looking at the results.
+    @State private var query = ProcessInfo.processInfo.environment["YH_FILES_QUERY"] ?? ""
+    @State private var matches: [String] = []
+    @State private var highlighted = 0
 
     var body: some View {
         VStack(spacing: 0) {
-            header
-            Divider()
+            // As the browser's address bar: everything that acts on the tab in one capsule.
+            topBar
+                .padding(.horizontal, 10)
+                .padding(.top, 8)
+                .padding(.bottom, 6)
             // A view of its own, so typing in Go to File doesn't update the tree and the file.
             FilesPanes(files: files, thread: thread)
-                .overlay {
+                .overlay(alignment: .top) {
                     if !query.isEmpty {
-                        GoToFileList(files: files, thread: thread, query: $query)
-                            .background(.background)
+                        GoToFileResults(matches: matches, highlighted: highlighted, open: open)
+                            .padding(.horizontal, 10)
                     }
                 }
         }
+        .task(id: query) { await search() }
     }
 
-    private var header: some View {
-        HStack(spacing: 6) {
-            Button {
-                files.showsTree.toggle()
-            } label: {
-                Image(systemName: "list.bullet.indent")
+    private var topBar: some View {
+        HStack(spacing: 4) {
+            Button(files.showsTree ? "Hide Folder" : "Show Folder", systemImage: "list.bullet.indent") { files.showsTree.toggle() }
+                .foregroundStyle(files.showsTree ? AnyShapeStyle(.primary) : AnyShapeStyle(.tint))
+                .disabled(files.tabs.isEmpty)
+                .help(files.showsTree ? "Hide the folder" : "Show the folder")
+            HStack(spacing: 4) {
+                Image(systemName: "magnifyingglass")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                TextField("Go to File", text: $query)
+                    .textFieldStyle(.plain)
+                    .onSubmit { openHighlighted() }
+                    .onKeyPress(.downArrow) { move(1) }
+                    .onKeyPress(.upArrow) { move(-1) }
+                    .onExitCommand { query = "" }
             }
-            .buttonStyle(.borderless)
-            .foregroundStyle(files.showsTree ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
-            .disabled(files.tabs.isEmpty)
-            .help(files.showsTree ? "Hide the folder" : "Show the folder")
-            GoToFileField(query: $query, files: files, thread: thread)
+            .padding(.horizontal, 4)
+            Button(wraps ? "Don't Wrap Lines" : "Wrap Lines", systemImage: "text.word.spacing") { wraps.toggle() }
+                .foregroundStyle(wraps ? AnyShapeStyle(.tint) : AnyShapeStyle(.primary))
+                .disabled(files.selectedPath == nil)
+                .help(wraps ? "Don't wrap lines" : "Wrap lines")
+            Menu {
+                if let path = files.selectedPath {
+                    FileMenuItems(files: files, path: path)
+                }
+            } label: {
+                Label("More", systemImage: "ellipsis")
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .disabled(files.selectedPath == nil)
+            .help("More")
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
+        .labelStyle(.iconOnly)
+        .buttonStyle(.borderless)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 4)
+        .glassEffect(.regular, in: .capsule)
     }
 
+    /// Best first, from the index: nothing is read. Off the main thread: a big project has
+    /// tens of thousands of paths to rank.
+    private func search() async {
+        highlighted = 0
+        guard !query.isEmpty else {
+            matches = []
+            return
+        }
+        guard let index = await app.fileIndex(root: files.root), !Task.isCancelled else { return }
+        let typed = query
+        let found = await Task.detached(priority: .userInitiated) { index.matches(typed, limit: 40) }.value
+        if !Task.isCancelled { matches = found }
+    }
+
+    private func move(_ step: Int) -> KeyPress.Result {
+        guard !matches.isEmpty else { return .ignored }
+        highlighted = min(max(highlighted + step, 0), matches.count - 1)
+        return .handled
+    }
+
+    private func openHighlighted() {
+        if matches.indices.contains(highlighted) { open(matches[highlighted]) }
+    }
+
+    private func open(_ path: String) {
+        query = ""
+        if path.hasSuffix("/") { files.open(path) } else { files.open(path, keep: true) }
+    }
 }
 
 private struct FilesPanes: View {
@@ -101,18 +162,21 @@ private struct FilesPanes: View {
     }
 
     private var document: some View {
-        VStack(spacing: 0) {
-            if !files.tabs.isEmpty {
-                FileTabsBar(files: files)
-                Divider()
-            }
+        VStack(spacing: 6) {
+            FileTabStrip(files: files)
             if let path = files.selectedPath {
-                FilePathBar(files: files, path: path)
-                Divider()
-                FileDocumentView(files: files, path: path)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                VStack(spacing: 0) {
+                    FilePath(path: path)
+                    Divider()
+                    FileDocumentView(files: files, path: path)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+                .clipShape(.rect(cornerRadius: Theme.cardRadius, style: .continuous))
+                .card()
+                .padding([.horizontal, .bottom], 10)
             }
         }
+        .padding(.top, 6)
     }
 }
 
@@ -124,9 +188,10 @@ private struct ResizeHandle: View {
 
     var body: some View {
         Divider()
+            .padding(.horizontal, 10)
             .overlay {
                 Color.clear
-                    .frame(height: 7)
+                    .frame(height: 9)
                     .contentShape(.rect)
                     .pointerStyle(.rowResize)
                     .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .global)
@@ -143,22 +208,22 @@ private struct ResizeHandle: View {
 
 // MARK: - Tabs
 
-private struct FileTabsBar: View {
+/// As the browser's tabs: capsules, the one you're on filled. In italics until you keep it.
+private struct FileTabStrip: View {
     let files: FilesModel
 
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView(.horizontal) {
-                HStack(spacing: 2) {
+                HStack(spacing: 4) {
                     ForEach(files.tabs) { tab in
                         FileTabButton(files: files, tab: tab, isSelected: tab.path == files.selectedPath)
                             .id(tab.path)
                     }
                 }
-                .padding(.horizontal, 6)
-                .padding(.vertical, 4)
+                .padding(.horizontal, 10)
             }
-            .scrollIndicators(.never)
+            .scrollIndicators(.hidden)
             .onChange(of: files.selectedPath) { _, path in
                 guard let path else { return }
                 withAnimation(.snappy) { proxy.scrollTo(path) }
@@ -178,29 +243,25 @@ private struct FileTabButton: View {
             Text(tab.name)
                 .italic(tab.isPreview)
                 .lineLimit(1)
+                .frame(maxWidth: 140)
                 .foregroundStyle(isSelected ? .primary : .secondary)
-            Button {
-                files.close(tab.path)
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 8, weight: .bold))
-                    .frame(width: 14, height: 14)
-                    .contentShape(.rect)
-            }
-            .buttonStyle(.borderless)
-            .opacity(hovering || isSelected ? 1 : 0)
-            .help("Close")
+            Button("Close", systemImage: "xmark") { files.close(tab.path) }
+                .labelStyle(.iconOnly)
+                .buttonStyle(.borderless)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .opacity(hovering || isSelected ? 1 : 0)
         }
-        .font(.callout)
-        .padding(.leading, 9)
+        .font(.caption)
+        .padding(.leading, 8)
         .padding(.trailing, 4)
         .padding(.vertical, 3)
-        .background(isSelected ? AnyShapeStyle(.fill.secondary) : AnyShapeStyle(.clear), in: .rect(cornerRadius: 6))
-        .contentShape(.rect)
+        .background(isSelected ? AnyShapeStyle(.quaternary) : AnyShapeStyle(.clear), in: .capsule)
+        .contentShape(.capsule)
         .onHover { hovering = $0 }
         .onTapGesture(count: 2) { files.keep(tab.path) }
         .onTapGesture { files.select(tab.path) }
-        .help(tab.path)
+        .help(tab.isPreview ? "\(tab.path)\nDouble-click to keep it open" : tab.path)
         .contextMenu {
             Button("Keep Open") { files.keep(tab.path) }
                 .disabled(!tab.isPreview)
@@ -213,39 +274,27 @@ private struct FileTabButton: View {
     }
 }
 
-/// Where the file is, and what you can do with it.
-private struct FilePathBar: View {
-    let files: FilesModel
+/// Where the file is, at the top of its card: the name stands out, and stays when it's cut.
+private struct FilePath: View {
     let path: String
-    @AppStorage("filesWrapLines") private var wraps = false
 
     var body: some View {
-        HStack(spacing: 6) {
-            Text(path)
-                .font(.caption.monospaced())
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.head)
-                .textSelection(.enabled)
-            Spacer(minLength: 4)
-            Toggle(isOn: $wraps) {
-                Image(systemName: "text.word.spacing")
+        let folder = (path as NSString).deletingLastPathComponent
+        let name = Text((path as NSString).lastPathComponent).foregroundStyle(.primary)
+        Group {
+            if folder.isEmpty {
+                name
+            } else {
+                Text("\(Text(folder + "/").foregroundStyle(.secondary))\(name)")
             }
-            .toggleStyle(.button)
-            .buttonStyle(.borderless)
-            .help(wraps ? "Don't wrap lines" : "Wrap lines")
-            Menu {
-                FileMenuItems(files: files, path: path)
-            } label: {
-                Image(systemName: "ellipsis")
-            }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .help("More")
         }
+        .font(.caption)
+        .lineLimit(1)
+        .truncationMode(.head)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 10)
-        .padding(.vertical, 4)
+        .padding(.vertical, 6)
+        .help(path)
     }
 }
 
@@ -265,82 +314,67 @@ private struct FileMenuItems: View {
 
 // MARK: - Go to file
 
-private struct GoToFileField: View {
-    @Environment(AppModel.self) private var app
-    @Binding var query: String
-    let files: FilesModel
-    let thread: ThreadModel
+/// What's typed in Go to File finds, floating over the tree and the file.
+private struct GoToFileResults: View {
+    let matches: [String]
+    let highlighted: Int
+    let open: (String) -> Void
 
     var body: some View {
-        TextField("Go to File", text: $query)
-            .textFieldStyle(.roundedBorder)
-            .controlSize(.small)
-            .onExitCommand { query = "" }
-            // Return opens the best match.
-            .onSubmit {
-                let typed = query
-                Task {
-                    guard let index = await app.fileIndex(root: files.root) else { return }
-                    guard let first = await Task.detached(priority: .userInitiated, operation: { index.matches(typed, limit: 1).first }).value else { return }
-                    query = ""
-                    if first.hasSuffix("/") { files.open(first) } else { files.open(first, keep: true) }
-                }
-            }
-    }
-}
-
-/// Files whose names match what's typed, best first, from the index: nothing is read.
-private struct GoToFileList: View {
-    @Environment(AppModel.self) private var app
-    let files: FilesModel
-    let thread: ThreadModel
-    @Binding var query: String
-    @State private var matches: [String] = []
-
-    var body: some View {
-        // Plain rows rather than a List: they're made anew with each key typed.
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 0) {
-                ForEach(matches, id: \.self) { path in
-                    Button {
-                        open(path)
-                    } label: {
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text((path.hasSuffix("/") ? String(path.dropLast()) : path).split(separator: "/").last.map(String.init) ?? path)
-                                .lineLimit(1)
-                            Text(path)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                                .truncationMode(.head)
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(matches.enumerated()), id: \.element) { index, path in
+                        Button {
+                            open(path)
+                        } label: {
+                            row(path, isHighlighted: index == highlighted)
                         }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 5)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .contentShape(.rect)
+                        .buttonStyle(.plain)
+                        .id(path)
                     }
-                    .buttonStyle(.plain)
+                }
+                .padding(6)
+                .overlay {
+                    if matches.isEmpty {
+                        Text("No Matches")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .padding(10)
+                    }
                 }
             }
-        }
-        .overlay {
-            if matches.isEmpty {
-                Text("No Matches")
-                    .foregroundStyle(.secondary)
+            .onChange(of: highlighted) { _, index in
+                if matches.indices.contains(index) { proxy.scrollTo(matches[index]) }
             }
         }
-        .task(id: query) {
-            guard let index = await app.fileIndex(root: files.root), !Task.isCancelled else { return }
-            // Off the main thread: a big project has tens of thousands of paths to rank.
-            let typed = query
-            let found = await Task.detached(priority: .userInitiated) { index.matches(typed, limit: 40) }.value
-            if !Task.isCancelled { matches = found }
-        }
+        .frame(height: min(CGFloat(max(matches.count, 1)) * 40 + 12, 340))
+        .glassEffect(.regular, in: .rect(cornerRadius: Theme.floatingRadius))
     }
 
-    private func open(_ path: String) {
-        query = ""
-        if path.hasSuffix("/") { files.open(path) } else { files.open(path, keep: true) }
+    private func row(_ path: String, isHighlighted: Bool) -> some View {
+        let isFolder = path.hasSuffix("/")
+        let trimmed = isFolder ? String(path.dropLast()) : path
+        return HStack(spacing: 8) {
+            Image(systemName: FileSymbol.name(for: trimmed, isFolder: isFolder))
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .frame(width: 16)
+            VStack(alignment: .leading, spacing: 1) {
+                Text((trimmed as NSString).lastPathComponent)
+                    .font(.callout)
+                    .lineLimit(1)
+                Text((trimmed as NSString).deletingLastPathComponent)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.head)
+            }
+        }
+        .padding(.horizontal, 8)
+        .frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
+        .background(isHighlighted ? AnyShapeStyle(.quaternary) : AnyShapeStyle(.clear), in: .rect(cornerRadius: Theme.innerRadius))
+        .contentShape(.rect)
     }
 }
 
