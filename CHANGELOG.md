@@ -6,6 +6,8 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+## [0.0.13] - 2026-10-30
+
 ### Added
 - **Files tab.** The right sidebar has a Files tab: the thread's folder (its worktree, if it has one) as a tree, and the files you open from it in tabs, read-only, with syntax colors and line numbers. Paths in the chat are links: in Claude's replies (`src/app.ts:12`, `app.ts:12-20`, `README.md#L5`, code spans too), in your own messages (`@mentions`), and the file in a Read, Edit or Write step. Clicking one opens the file at that line, marked, or for an edit, where the edit went. ⌘-click opens it in its own app. A link only appears for a file that's really in the folder; a name two files share isn't linked rather than linked to the wrong one, and nothing outside the folder is linked. Links you click reuse one preview tab (in italics) until you keep it with a double-click, so reading through a reply doesn't pile up tabs. A file Claude changes while you read it reloads where you were, and the tree follows files coming and going. Go to File finds any file by name (↑↓ and Return work). In a workspace, the files of every repo in it link and open too, even when its own repo ignores them. Files git ignores are dimmed. Big files open as fast as small ones (only what's on screen is laid out; files over 8 MB show their start, lines over 5,000 characters are cut, so a minified file doesn't freeze the app), pictures show as pictures, and the tabs, the folders you opened and the tree's state are kept with the thread. The sidebar's tabs are icons now, to fit five. See [docs/files.md](docs/files.md).
 
