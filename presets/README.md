@@ -22,4 +22,5 @@ has a `home` folder, the Home project's, so `claude` never runs in your real hom
 
 The made folders live in `test-harness-root/`, which git ignores.
 | `files` | A project (`shop`, a git repo) with code, a 100,000-line JSON file, a picture, a binary and ignored folders, and a thread whose reply mentions paths every way it can (and some that mustn't link), for the Files tab: `scripts/dev-run.sh test-harness-root/files YH_OPEN_FILE=src/checkout/cart.ts:10-14` or `YH_FILES_PROBE=20`. |
+| `files-workspace` | A workspace (`platform`, a shell repo) holding two gitignored clones, `api` and `web`, and a thread with paths in each, for the Files tab across repos. |
 | `memory` | A project (`acme`) for trying memory: Claude Code-format memory files in `sources/claude-memory` (import them directly) and a ChatGPT memory export in `sources/chatgpt-memory.txt` (for the Importer). New threads use Haiku. |

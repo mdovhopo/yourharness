@@ -1,0 +1,15 @@
+{
+ "projects": [
+  {"id": "AAAAAAAA-0000-4000-8000-0000000000E1", "name": "Home", "path": "{{ROOT}}/home", "permissionMode": "auto"},
+  {"id": "AAAAAAAA-0000-4000-8000-0000000000E2", "name": "Platform", "path": "{{ROOT}}/platform", "permissionMode": "auto"}
+ ],
+ "homeProjectID": "AAAAAAAA-0000-4000-8000-0000000000E1",
+ "threads": [
+  {"id": "BBBBBBBB-0000-4000-8000-0000000000E1", "projectID": "AAAAAAAA-0000-4000-8000-0000000000E2",
+   "title": "Login across api and web", "createdAt": "2026-10-29T10:00:00Z", "updatedAt": "2026-10-29T10:05:00Z", "model": "haiku"}
+ ],
+ "selectedThreadID": "BBBBBBBB-0000-4000-8000-0000000000E1",
+ "showsInspector": true,
+ "defaults": {"model": "haiku"},
+ "titleGeneration": {"provider": "claude", "model": "haiku"}
+}

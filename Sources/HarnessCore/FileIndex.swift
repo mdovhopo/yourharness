@@ -31,9 +31,29 @@ public struct FileIndex: Sendable {
         }
     }
 
+    /// Everything in a folder, read off the main thread: what git sees (nothing ignored) in
+    /// the folder and in each repo cloned inside it, however a workspace is laid out. Finds
+    /// the repos itself, so the first listing doesn't depend on a scan having finished.
+    public static func list(_ root: URL, git: Git?) async -> FileIndex {
+        guard let git else { return FileIndex(files: walk(root)) }
+        // A worktree inside the project is a copy of a repo: its files would make every name ambiguous.
+        let nested = WorkspaceScanner.scan(root).clonedRepos.filter { !$0.isRoot && !isLinkedWorktree($0.url) }
+        var files = await git.files(in: root) ?? walk(root, skipping: Set(nested.map(\.relativePath)))
+        for repo in nested {
+            files += (await git.files(in: repo.url) ?? []).map { repo.relativePath + "/" + $0 }
+        }
+        return FileIndex(files: files)
+    }
+
+    /// `.git` is a file in a worktree and in a submodule; a worktree's points into `worktrees/`.
+    private static func isLinkedWorktree(_ repo: URL) -> Bool {
+        guard let pointer = try? String(contentsOf: repo.appending(path: ".git"), encoding: .utf8) else { return false }
+        return pointer.contains("/worktrees/")
+    }
+
     /// Files under `root` when it isn't a git repo: hidden files and the usual build and
-    /// dependency folders are skipped.
-    public static func walk(_ root: URL) -> [String] {
+    /// dependency folders are skipped, and `skipping`, paths relative to it.
+    public static func walk(_ root: URL, skipping: Set<String> = []) -> [String] {
         let skipped: Set<String> = ["node_modules", "build", "dist", "DerivedData", "Pods", "target", "vendor", "__pycache__"]
         guard let enumerator = FileManager.default.enumerator(
             at: root, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return [] }
@@ -41,7 +61,9 @@ public struct FileIndex: Sendable {
         var files: [String] = []
         for case let url as URL in enumerator {
             if (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true {
-                if skipped.contains(url.lastPathComponent) { enumerator.skipDescendants() }
+                if skipped.contains(url.lastPathComponent) || skipping.contains(String(url.standardizedFileURL.path.dropFirst(base))) {
+                    enumerator.skipDescendants()
+                }
                 continue
             }
             files.append(String(url.standardizedFileURL.path.dropFirst(base)))

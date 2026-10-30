@@ -1530,8 +1530,7 @@ final class AppModel {
         return await fileIndex(root: project.url)
     }
 
-    /// The files of any folder a thread works in: the project's own (with its nested
-    /// repos) or a worktree's.
+    /// The files of any folder a thread works in: the project's, or a worktree's.
     func fileIndex(root: URL, fresh: Bool = false) async -> FileIndex? {
         let key = root.standardizedFileURL.path
         if !fresh, let cached = fileIndexes[key], cached.listedAt.timeIntervalSinceNow > -30 { return cached.index }
@@ -1540,15 +1539,7 @@ final class AppModel {
         if let listing = fileListings[key] { return await listing.value }
         await bootstrap?.value
         let git = workspaceTools.git
-        let project = projects.first { $0.url.standardizedFileURL.path == key }
-        let nested = project.flatMap { workspace(for: $0) }?.repos.filter { !$0.isRoot && $0.isCloned } ?? []
-        let listing = Task.detached(priority: .userInitiated) { () -> FileIndex in
-            guard let git, var files = await git.files(in: root) else { return FileIndex(files: FileIndex.walk(root)) }
-            for repo in nested {
-                files += (await git.files(in: repo.url) ?? []).map { repo.relativePath + "/" + $0 }
-            }
-            return FileIndex(files: files)
-        }
+        let listing = Task.detached(priority: .userInitiated) { await FileIndex.list(root, git: git) }
         fileListings[key] = listing
         let index = await listing.value
         fileListings[key] = nil

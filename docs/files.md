@@ -20,9 +20,10 @@ Downloads would each ask for access.
 
 ## Links
 
-`AppModel.loadFileLinker(for:)` lists the thread's folder once, off the main thread (what git
-sees, as `@` mentions do: `git ls-files`, or a walk when it isn't a repo; at most
-`FileIndex.limit` paths), and builds a `FileLinker`: a set of the paths and a map from each
+`AppModel.loadFileLinker(for:)` lists the thread's folder once, off the main thread
+(`FileIndex.list`, as `@` mentions do: `git ls-files` there and in each repo found inside it,
+so a workspace's clones count though its shell repo ignores them; a walk of what's outside any
+repo in a plain folder; at most `FileIndex.limit` paths), and builds a `FileLinker`: a set of the paths and a map from each
 name to the paths with it. It's listed again after each turn, and replaced only when the files
 changed (`revision`, a hash of them), since text linked against it is built again then.
 
@@ -67,6 +68,8 @@ the first show of any sidebar tab.
 ## Checking it
 
 - `swift test --filter "FileLinkerTests|FileReaderTests|FilesModelTests"`.
+- `scripts/preset.sh files-workspace` for a workspace: paths in both clones link, and their
+  folders aren't dimmed.
 - `scripts/preset.sh files`, then `scripts/dev-run.sh test-harness-root/files YH_FILES_PROBE=5`
   (PASS: every stall under 50 ms) and `YH_OPEN_FILE=src/checkout/cart.ts:10-14` with
   `YH_SNAPSHOT` to look at it.

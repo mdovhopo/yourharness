@@ -139,3 +139,55 @@ struct FileReaderTests {
         #expect(FileReader.language(for: "notes.md") == "")
     }
 }
+
+/// Uses the real `git`. Run with `YH_INTEGRATION=1 swift test --filter FileListingIntegration`.
+@Suite(.enabled(if: ProcessInfo.processInfo.environment["YH_INTEGRATION"] == "1"))
+struct FileListingIntegrationTests {
+    private let git = Git(executable: URL(fileURLWithPath: "/usr/bin/git"), environment: ProcessInfo.processInfo.environment)
+
+    private func write(_ path: String, in root: URL) throws {
+        let url = root.appending(path: path)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data().write(to: url)
+    }
+
+    private func initRepo(_ url: URL) async {
+        _ = await git.run(["init", "-q"], in: url, writes: true)
+    }
+
+    /// `api` and `web`, each ignoring its `dist`.
+    private func clones(in root: URL) async throws {
+        for name in ["api", "web"] {
+            try write("\(name)/src/\(name).ts", in: root)
+            try write("\(name)/dist/out.js", in: root)
+            try "dist/\n".write(to: root.appending(path: "\(name)/.gitignore"), atomically: true, encoding: .utf8)
+            await initRepo(root.appending(path: name))
+        }
+    }
+
+    private func folder() throws -> URL {
+        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        return root
+    }
+
+    @Test func shellRepoListsItsClones() async throws {
+        let root = try folder()
+        try await clones(in: root)
+        try write("docker-compose.yml", in: root)
+        try "api/\nweb/\n".write(to: root.appending(path: ".gitignore"), atomically: true, encoding: .utf8)
+        await initRepo(root)
+        let paths = Set(await FileIndex.list(root, git: git).paths)
+        #expect(paths.isSuperset(of: ["docker-compose.yml", "api/", "api/src/api.ts", "web/src/web.ts"]))
+        #expect(!paths.contains("api/dist/out.js"))
+    }
+
+    @Test func plainFolderOfReposRespectsTheirIgnores() async throws {
+        let root = try folder()
+        try await clones(in: root)
+        try write("notes.md", in: root)
+        let paths = Set(await FileIndex.list(root, git: git).paths)
+        #expect(paths.isSuperset(of: ["notes.md", "api/src/api.ts", "web/src/web.ts"]))
+        #expect(!paths.contains("web/dist/out.js"))
+    }
+}
