@@ -2,9 +2,9 @@
 # millions of tokens of history across many compactions, turns of hundreds of tool calls with
 # reasoning between them, some huge results. For YH_PERF_PROBE (scripts/perf-run.sh).
 #   python3 generate.py <data folder> [scale]
-# Scale 1: 8 huge threads of 30 compactions and about 32,000 rows each, 1.3 GB in all (about
-# 40M tokens a thread by size, past anything real on purpose), plus 100 ordinary ones to fill
-# the sidebar.
+# Scale 1: 20 huge threads, 4 of 30 compactions and about 32,000 rows, 16 of half that, about
+# 2 GB in all (up to 40M tokens a thread by size, past anything real on purpose), plus 100
+# ordinary ones to fill the sidebar.
 import json, os, random, sys, uuid
 
 out = sys.argv[1]
@@ -49,9 +49,9 @@ def tool(day, minute):
     return {"id": "toolu_" + uid(), "kind": "tool", "text": "", "toolName": name, "toolInput": json.dumps(tool_input),
             "toolResult": "\n".join(line for _ in range(max(1, size // len(line)))), "date": stamp(day, minute)}
 
-def huge_thread(day):
+def huge_thread(day, size):
     entries, minute = [], 0
-    compactions = max(1, int(30 * scale))
+    compactions = max(1, int(30 * scale * size))
     for compaction in range(compactions):
         for _ in range(3):
             minute += 3
@@ -76,13 +76,13 @@ os.makedirs(f"{out}/threads", exist_ok=True)
 for project in projects:
     os.makedirs(f"{out}/{project['name'].lower()}", exist_ok=True)
 threads, total = [], 0
-for index in range(8):
+for index in range(20):
     id = uid()
-    entries = huge_thread(55)
+    entries = huge_thread(55, 1 if index < 4 else 0.5)
     total += len(entries)
     with open(f"{out}/threads/{id}.json", "w") as file:
         json.dump(entries, file)
-    threads.append({"id": id, "projectID": projects[0]["id"], "title": f"Huge {index + 1}", "createdAt": stamp(55, index),
+    threads.append({"id": id, "projectID": projects[0]["id"], "title": f"Huge {index + 1:02d}", "createdAt": stamp(55, index),
                     "updatedAt": stamp(55, 60 - index), "model": "haiku", "sessionID": str(uuid.UUID(int=rng.getrandbits(128), version=4))})
 for index in range(100):
     id = uid()
@@ -97,4 +97,4 @@ state = {"projects": projects, "threads": threads, "selectedThreadID": threads[0
          "autoSettleDays": 0, "browserAutoShow": False}
 with open(f"{out}/state.json", "w") as file:
     json.dump(state, file)
-print(f"{len(threads)} threads, 8 huge, {total} rows in those")
+print(f"{len(threads)} threads, 20 huge, {total} rows in those")

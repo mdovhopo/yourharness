@@ -100,6 +100,25 @@ struct HarnessDatabaseTests {
         #expect(open().loadTranscript(thread) == entries)
     }
 
+    @Test func aBigReadDoesNotHoldUpQuickLookups() async throws {
+        let id = UUID()
+        let database = open()
+        database.saveTranscript(id, entries: (0..<20_000).map { entry("row\($0)", .assistant, String(repeating: "words ", count: 40)) })
+        database.flush()
+        let reading = Task.detached { database.loadTranscript(id).count }
+        var lookups = 0
+        let start = ContinuousClock.now
+        var slowest: Duration = .zero
+        while lookups < 200 {
+            let before = ContinuousClock.now
+            _ = database.transcriptSavedAt(id)
+            slowest = max(slowest, ContinuousClock.now - before)
+            lookups += 1
+        }
+        #expect(await reading.value == 20_000)
+        #expect(slowest < .milliseconds(50), "slowest lookup \(slowest) of \(ContinuousClock.now - start)")
+    }
+
     @Test func changesAreSavedRowByRow() throws {
         let id = UUID()
         do {

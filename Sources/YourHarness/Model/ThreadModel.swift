@@ -378,7 +378,9 @@ final class ThreadModel: Identifiable {
         guard !transcriptLoaded else { return }
         if transcriptLoad == nil {
             let store = app.store, id = id
+            isLoadingTranscript = true
             transcriptLoad = Task { [weak self] in
+                defer { self?.isLoadingTranscript = false }
                 let loaded = await Task.detached(priority: .userInitiated) { store.loadTranscript(id) }.value
                 let rows = await Task.detached(priority: .userInitiated) { Self.shownRows(of: loaded) }.value
                 // Tens of thousands of rows take a while to make, and only this thread can:
@@ -402,6 +404,8 @@ final class ThreadModel: Identifiable {
     }
 
     @ObservationIgnored private var transcriptLoad: Task<Void, Never>?
+    /// Its history is being read in, for showing that it is.
+    private(set) var isLoadingTranscript = false
     @ObservationIgnored private var savedRowCount = 0
 
     /// The transcript for another thread's agent to read: what's in memory when it's loaded

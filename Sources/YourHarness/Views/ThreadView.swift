@@ -374,6 +374,24 @@ private struct TranscriptView: View {
         .onChange(of: thread.messageJump) { _, jump in
             if let jump { self.jump(jump.direction) }
         }
+        .overlay {
+            if showsLoading {
+                ProgressView("Loading conversation…")
+                    .controlSize(.small)
+                    .foregroundStyle(.secondary)
+                    .transition(.opacity)
+            }
+        }
+        // Only when it takes a moment: a thread that opens at once shouldn't flash this.
+        .task(id: thread.isLoadingTranscript && thread.entries.isEmpty) {
+            guard thread.isLoadingTranscript, thread.entries.isEmpty else {
+                withAnimation(.easeOut(duration: 0.12)) { showsLoading = false }
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(120))
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeOut(duration: 0.12)) { showsLoading = true }
+        }
         .overlay(alignment: .bottomTrailing) {
             if !isShort {
                 MessageJumpControls(thread: thread, canGoTop: !isAtTop || hasEarlierTurns, canGoPrevious: hasMessageAbove, canGoNext: !isAtBottom)
@@ -442,6 +460,7 @@ private struct TranscriptView: View {
     }
 
     @State private var hasBeenShown = false
+    @State private var showsLoading = false
     @State private var layoutGeneration = 0
 
     private final class OwnScroll {

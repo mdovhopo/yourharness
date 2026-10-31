@@ -105,7 +105,12 @@ public final class HarnessDatabase: Sendable {
     public let recoveredFrom: URL?
 
     let writer: Mutex<Writer>
+    /// For quick lookups, which the main thread makes. Anything that can take a while uses
+    /// `bulkRead`: a whole transcript read under this lock had the window waiting behind it.
     let reader: Mutex<SQLiteConnection>
+    private let bulkReaders = Mutex<[SQLiteConnection]>([])
+    /// A few at a time: twenty threads opening at once shouldn't read twenty histories at once.
+    private let bulkSlots = DispatchSemaphore(value: 4)
     private let pending = Mutex(Pending())
     /// Old transcripts still to move in, by thread ID.
     private let legacyPending: Mutex<Set<String>>
@@ -165,6 +170,19 @@ public final class HarnessDatabase: Sendable {
         return (writer, reader)
     }
 
+    /// On a connection of its own (WAL lets readers run side by side). Not on the main thread.
+    private func bulkRead<T>(_ body: (SQLiteConnection) throws -> T) throws -> T {
+        bulkSlots.wait()
+        defer { bulkSlots.signal() }
+        let connection = try bulkReaders.withLock { $0.popLast() } ?? {
+            let opened = try SQLiteConnection(url: url)
+            try opened.execute("PRAGMA query_only = 1; PRAGMA foreign_keys = ON;")
+            return opened
+        }()
+        defer { bulkReaders.withLock { $0.append(connection) } }
+        return try body(connection)
+    }
+
     // MARK: - State
 
     /// Settings, projects and threads as last saved, or as moved in from `state.json`.
@@ -191,7 +209,7 @@ public final class HarnessDatabase: Sendable {
         }
         writeChangesBeforeReading(key)
         importLegacyTranscriptNow(key)
-        return (try? reader.withLock { try Writer.readEntries($0, thread: key) }) ?? []
+        return (try? bulkRead { try Writer.readEntries($0, thread: key) }) ?? []
     }
 
     /// The transcript in pages of `pageSize`, for going through a long one without holding
@@ -206,7 +224,7 @@ public final class HarnessDatabase: Sendable {
         importLegacyTranscriptNow(key)
         var from = 0
         while true {
-            let page = (try? reader.withLock { try Writer.readEntries($0, thread: key, from: from, limit: pageSize) }) ?? []
+            let page = (try? bulkRead { try Writer.readEntries($0, thread: key, from: from, limit: pageSize) }) ?? []
             if page.isEmpty { return }
             body(page)
             from += page.count
@@ -299,7 +317,7 @@ public final class HarnessDatabase: Sendable {
 
     /// Transcript rows written after `rev`, oldest change first: for an indexer to follow.
     public func changes(after rev: Int, limit: Int = 500) -> [EntryChange] {
-        (try? reader.withLock { try Writer.changes($0, after: rev, limit: limit) }) ?? []
+        (try? bulkRead { try Writer.changes($0, after: rev, limit: limit) }) ?? []
     }
 
     /// How far an indexer has got in the change feed.
@@ -318,7 +336,7 @@ public final class HarnessDatabase: Sendable {
     /// `projectID` keeps to that project's threads.
     public func search(_ query: String, projectID: String? = nil, limit: Int = 50) -> [SearchHit] {
         guard let match = Self.matchExpression(query) else { return [] }
-        return (try? reader.withLock { connection in
+        return (try? bulkRead { connection in
             var hits: [SearchHit] = []
             try connection.query("""
                 SELECT e.thread_id, e.seq, e.id, e.kind, snippet(entries_fts, 0, '[', ']', '…', 12)

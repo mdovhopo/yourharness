@@ -1,6 +1,7 @@
 import AppKit
 import Darwin
 import QuartzCore
+import SwiftUI
 import os
 
 /// `YH_PERF_PROBE=<folder>`: runs the app through the heaviest use there is, phase by phase,
@@ -40,6 +41,9 @@ final class PerfProbe: NSObject {
     private var results: [[String: Any]] = []
     private var csv = "elapsed,phase,fps,worst_ms,main_cpu_pct,process_cpu_pct,footprint_mb,threads\n"
     private let started = CACurrentMediaTime()
+    private var frameWaiters: [CheckedContinuation<Void, Never>] = []
+    /// How long each kind of click took to show on screen, in milliseconds.
+    private var clicks: [String: [Double]] = [:]
 
     private init(app: AppModel, folder: String) {
         self.app = app
@@ -142,6 +146,9 @@ final class PerfProbe: NSObject {
             second.add(delta: delta, period: period)
         }
         lastTimestamp = link.timestamp
+        let waiting = frameWaiters
+        frameWaiters = []
+        for waiter in waiting { waiter.resume() }
         Self.lastFrame.withLock { $0 = CACurrentMediaTime() }
     }
 
@@ -201,7 +208,8 @@ final class PerfProbe: NSObject {
         let front = env["YH_PERF_FRONT"] == "1"
         Task { @MainActor in
             while true {
-                let point = NSPoint(x: content.bounds.midX + CGFloat.random(in: -200...300), y: CGFloat.random(in: 150...(content.bounds.height - 100)))
+                // Anywhere in the window: the sidebar's rows have hover too.
+                let point = NSPoint(x: CGFloat.random(in: 20...(content.bounds.width - 20)), y: CGFloat.random(in: 150...(content.bounds.height - 100)))
                 if let event = NSEvent.mouseEvent(with: .mouseMoved, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
                                                   windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 0, pressure: 0) {
                     window.sendEvent(event)
@@ -241,8 +249,64 @@ final class PerfProbe: NSObject {
         var index = 0
         while CACurrentMediaTime() < end, !list.isEmpty {
             index = (index + 1) % list.count
-            app.selectedThreadID = list[index].id
+            await switchTo(list[index])
             try? await Task.sleep(for: .seconds(seconds))
+        }
+    }
+
+    private func nextFrame() async {
+        await withCheckedContinuation { frameWaiters.append($0) }
+    }
+
+    /// Does what a click does, and times it until it has been on screen for a frame: the main
+    /// thread free again after it, which is what a click feels like.
+    private func click(_ label: String, _ action: () -> Void) async {
+        let start = CACurrentMediaTime()
+        action()
+        await nextFrame()
+        await nextFrame()
+        let ms = (CACurrentMediaTime() - start) * 1000
+        clicks[label, default: []].append(ms)
+        if ms > 100 { log(String(format: "slow click %@: %.0f ms", label, ms)) }
+    }
+
+    private func switchTo(_ thread: ThreadModel) async {
+        let wasLoaded = !thread.entries.isEmpty
+        await click(wasLoaded ? "switch-loaded" : "switch-unloaded") { app.selectedThreadID = thread.id }
+        guard !wasLoaded else { return }
+        // Then its history reading in, under a loading indicator.
+        let start = CACurrentMediaTime()
+        while thread.entries.isEmpty, CACurrentMediaTime() - start < 20 { await nextFrame() }
+        clicks["history-shown", default: []].append((CACurrentMediaTime() - start) * 1000)
+    }
+
+    /// The things you click most, in turn, while everything's working.
+    private func clicking(among list: [ThreadModel], until end: CFTimeInterval) async {
+        var index = 0
+        let pause: Duration = .milliseconds(700)
+        while CACurrentMediaTime() < end, !list.isEmpty {
+            index = (index + 1) % list.count
+            let thread = list[index]
+            await switchTo(thread)
+            try? await Task.sleep(for: pause)
+            let worked = thread.transcriptDisplayRows.last { if case .work = $0 { true } else { false } }
+            if case .work(let work)? = worked {
+                await click("expand-work") { withAnimation(.smooth(duration: 0.3)) { _ = thread.expandedTurns.insert(work.turnID) } }
+                try? await Task.sleep(for: pause)
+                await click("collapse-work") { withAnimation(.smooth(duration: 0.3)) { _ = thread.expandedTurns.remove(work.turnID) } }
+                try? await Task.sleep(for: pause)
+            }
+            let shows = app.showsInspector
+            await click("inspector") { app.setShowsInspector(!shows) }
+            try? await Task.sleep(for: pause)
+            await click("inspector") { app.setShowsInspector(shows) }
+            try? await Task.sleep(for: pause)
+            if let project = app.project(id: thread.projectID) {
+                await click("project-page") { app.showOverview(of: project) }
+                try? await Task.sleep(for: pause)
+            }
+            await click("new-thread") { app.newThreadInCurrentProject() }
+            try? await Task.sleep(for: pause)
         }
     }
 
@@ -312,18 +376,26 @@ final class PerfProbe: NSObject {
                 self.startTurns(8, seconds: end - CACurrentMediaTime())
                 try? await Task.sleep(for: .seconds(end - CACurrentMediaTime()))
             }),
-            ("stream-8-scroll", { end in
-                self.startTurns(8, seconds: end - CACurrentMediaTime())
+            ("stream-all", { end in
+                self.startTurns(huge.count, seconds: end - CACurrentMediaTime())
+                try? await Task.sleep(for: .seconds(end - CACurrentMediaTime()))
+            }),
+            ("stream-all-scroll", { end in
+                self.startTurns(huge.count, seconds: end - CACurrentMediaTime())
                 await self.scrolling(until: end)
             }),
-            ("stream-8-switch", { end in
-                self.startTurns(8, seconds: end - CACurrentMediaTime())
+            ("stream-all-switch", { end in
+                self.startTurns(huge.count, seconds: end - CACurrentMediaTime())
                 await self.switching(among: huge, until: end)
             }),
-            ("stream-8-elsewhere", { end in
+            ("stream-all-clicks", { end in
+                self.startTurns(huge.count, seconds: end - CACurrentMediaTime())
+                await self.clicking(among: huge, until: end)
+            }),
+            ("stream-all-elsewhere", { end in
                 // All of it in threads you aren't looking at.
                 let other = self.app.threads.first { !$0.title.hasPrefix("Huge") }
-                self.startTurns(8, seconds: end - CACurrentMediaTime())
+                self.startTurns(huge.count, seconds: end - CACurrentMediaTime())
                 self.app.selectedThreadID = other?.id
                 try? await Task.sleep(for: .seconds(end - CACurrentMediaTime()))
                 self.app.selectedThreadID = first.id
@@ -339,8 +411,10 @@ final class PerfProbe: NSObject {
                 try? await Task.sleep(for: .seconds(wait))
             }
             await record(name, seconds: length, action)
-            // A turn runs on past its phase by its last reply; the next starts clean.
-            await waitForTurnsToEnd()
+            // A turn runs on past its phase by its last reply, and ending folds its work away.
+            if threads.contains(where: { $0.phase == .running }) {
+                await record("\(name)-end", seconds: 0) { _ in await self.waitForTurnsToEnd() }
+            }
             app.selectedThreadID = first.id
             try? await Task.sleep(for: .seconds(2))
         }
@@ -348,6 +422,14 @@ final class PerfProbe: NSObject {
         let summary = try? JSONSerialization.data(withJSONObject: results, options: [.prettyPrinted, .sortedKeys])
         FileManager.default.createFile(atPath: "\(folder)/phases.json", contents: summary)
         FileManager.default.createFile(atPath: "\(folder)/seconds.csv", contents: Data(csv.utf8))
+        var clickReport: [String: Any] = [:]
+        for (label, times) in clicks.sorted(by: { $0.key < $1.key }) {
+            let sorted = times.sorted()
+            let median = sorted[sorted.count / 2], worst = sorted.last ?? 0
+            clickReport[label] = ["count": sorted.count, "medianMs": median, "worstMs": worst]
+            log(String(format: "click %@: %d times, median %.0f ms, worst %.0f ms", label, sorted.count, median, worst))
+        }
+        FileManager.default.createFile(atPath: "\(folder)/clicks.json", contents: try? JSONSerialization.data(withJSONObject: clickReport, options: [.prettyPrinted, .sortedKeys]))
         log("DONE \(results.count) phases")
         if env["YH_PERF_QUIT"] == "1" { NSApp.terminate(nil) }
     }
@@ -391,6 +473,8 @@ final class PerfProbe: NSObject {
         let selected = app.selectedThread
         let rows = selected?.transcriptDisplayRows.count ?? 0
         let ink = SwitchProbe.conversationInk() ?? -1
+        // That was the probe drawing the window, not a stall of the app's.
+        lastTimestamp = 0
         if rows > 0, ink >= 0, ink < 0.002 {
             log(String(format: "BLANK at the end of %@: %d rows, %.4f inked", name, rows, ink))
         }
