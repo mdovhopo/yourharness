@@ -7,6 +7,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 ## [Unreleased]
 
 ### Fixed
+- A background command's output no longer draws over its header and your attachments when you open it above the composer.
 - Many threads working at once stay much smoother: threads out of sight no longer redraw, and long threads no longer go through all their rows on every update.
 - Long threads give memory back after a turn ends.
 - A long thread no longer freezes the app when you send to it, and saving while Claude works stays quick however long the thread gets.

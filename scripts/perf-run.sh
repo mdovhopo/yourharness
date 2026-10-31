@@ -37,6 +37,8 @@ PATH="$ROOT/presets/extreme/fake-claude:$PATH" "$ROOT/scripts/dev-run.sh" "$DATA
 PID=$(cat "$DATA/dev.pid")
 while kill -0 "$PID" 2>/dev/null; do sleep 2; done
 cp "$DATA/dev.log" "$RESULTS/dev.log"
+# It parks its window below the screen: don't let the next Dev copy open there.
+defaults delete com.mdovhopo.yourharness.dev "NSWindow Frame main" 2>/dev/null || true
 grep '^PERF' "$RESULTS/dev.log" || true
 grep -q 'PERF DONE' "$RESULTS/dev.log" && echo "Finished." || echo "THE APP DIED BEFORE FINISHING (pid $PID)."
 sleep 5

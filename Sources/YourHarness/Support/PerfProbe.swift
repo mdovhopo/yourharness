@@ -13,8 +13,9 @@ import os
 /// rate: a vsync with no callback is a frame the main thread wasn't there for. That's what
 /// the app can miss; the window server's own drops don't show here.
 ///
-/// Macs don't draw a covered window, so results would flatter: the window floats, nearly
-/// transparent and letting clicks through, so it's composited for real and doesn't get in the way.
+/// Macs don't draw a covered window, so results would flatter: the window floats, letting
+/// clicks through, almost entirely below the screen. Your pointer isn't over it, so hovering
+/// isn't part of the run.
 @MainActor
 final class PerfProbe: NSObject {
     private static var probe: PerfProbe?
@@ -151,6 +152,11 @@ final class PerfProbe: NSObject {
             window.level = .floating
             window.alphaValue = 0.03
             window.ignoresMouseEvents = true
+            // Past the bottom of the screen but for a strip, so it counts as on screen and is
+            // drawn, without being over what you're doing: nearly transparent still showed.
+            if let screen = window.screen ?? NSScreen.main {
+                window.setFrameOrigin(NSPoint(x: screen.frame.minX, y: screen.frame.minY - window.frame.height + 2))
+            }
             window.orderFrontRegardless()
         }
         let link = view.displayLink(target: self, selector: #selector(tick))
@@ -167,20 +173,34 @@ final class PerfProbe: NSObject {
         app.threads.filter { $0.title.hasPrefix("Huge") }.sorted { $0.title < $1.title }
     }
 
+    /// Straight to the scroll view under the middle of the transcript: the window is below
+    /// the screen, where an event's location wouldn't find it.
     private func wheel(_ points: Int32) {
-        guard let window = mainWindow, let content = window.contentView else { return }
-        let point = window.convertPoint(toScreen: NSPoint(x: content.bounds.midX + 120, y: content.bounds.midY))
-        guard let cg = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: points, wheel2: 0, wheel3: 0) else { return }
-        cg.location = CGPoint(x: point.x, y: (NSScreen.screens.first?.frame.height ?? 0) - point.y)
-        if let event = NSEvent(cgEvent: cg) { window.sendEvent(event) }
+        guard let content = mainWindow?.contentView else { return }
+        guard let cg = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: points, wheel2: 0, wheel3: 0),
+              let event = NSEvent(cgEvent: cg) else { return }
+        var view = content.hitTest(NSPoint(x: content.bounds.midX + 120, y: content.bounds.midY))
+        while let current = view, !(current is NSScrollView) { view = current.superview }
+        view?.scrollWheel(with: event)
     }
 
     /// Scrolls for as long as the phase: long pulls up and back, as you do reading back.
     private func scrolling(until end: CFTimeInterval, speed: Int32 = 40) async {
         var direction: Int32 = 1, count = 0
+        let id = app.selectedThreadID
+        var lowest = id.flatMap { TranscriptDiagnostics.scroll[$0]?.offset } ?? 0, highest = lowest
+        defer {
+            // Scrolling that doesn't arrive would look like a perfect result.
+            if highest - lowest < 100 { log("FAIL: scrolling moved the transcript only \(Int(highest - lowest)) pt") }
+            else { log("scrolled across \(Int(highest - lowest)) pt") }
+        }
         while CACurrentMediaTime() < end {
             wheel(speed * direction)
             count += 1
+            if let id, let offset = TranscriptDiagnostics.scroll[id]?.offset {
+                lowest = min(lowest, offset)
+                highest = max(highest, offset)
+            }
             if count % 200 == 0 { direction = -direction }
             try? await Task.sleep(for: .milliseconds(8))
         }

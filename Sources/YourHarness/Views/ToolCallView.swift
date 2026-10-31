@@ -224,6 +224,7 @@ private struct FollowsForegroundJob: ViewModifier {
 struct CodeBox: View {
     let text: String
     var tint: Color?
+    var maxHeight: CGFloat = 320
 
     var body: some View {
         ScrollView([.vertical, .horizontal]) {
@@ -234,7 +235,7 @@ struct CodeBox: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(10)
         }
-        .frame(maxHeight: 320)
+        .frame(maxHeight: maxHeight)
         .fixedSize(horizontal: false, vertical: true)
         .background(.background.opacity(0.6), in: .rect(cornerRadius: Theme.innerRadius))
     }

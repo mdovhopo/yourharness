@@ -88,8 +88,7 @@ struct JobOutput: View {
     @State private var text: String?
 
     var body: some View {
-        CodeBox(text: text.map { $0.isEmpty ? "No output yet" : $0 } ?? (job.outputFile == nil ? "Its output shows once it reports" : "…"))
-            .frame(maxHeight: 220)
+        CodeBox(text: text.map { $0.isEmpty ? "No output yet" : $0 } ?? (job.outputFile == nil ? "Its output shows once it reports" : "…"), maxHeight: 220)
             .task(id: job.isRunning) {
                 guard let path = job.outputFile else { return }
                 repeat {
