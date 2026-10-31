@@ -292,6 +292,7 @@ final class PerfProbe: NSObject {
                 try? await Task.sleep(for: .seconds(5))
             }),
             ("idle-huge", { end in try? await Task.sleep(for: .seconds(end - CACurrentMediaTime())) }),
+            ("scroll-reading", { end in await self.scrolling(until: end, speed: 10) }),
             ("scroll-huge", { end in await self.scrolling(until: end) }),
             ("scroll-huge-fast", { end in await self.scrolling(until: end, speed: 200) }),
             ("switch-huge", { end in await self.switching(among: Array(huge.prefix(4)), until: end) }),

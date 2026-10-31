@@ -380,8 +380,22 @@ final class ThreadModel: Identifiable {
             let store = app.store, id = id
             transcriptLoad = Task { [weak self] in
                 let loaded = await Task.detached(priority: .userInitiated) { store.loadTranscript(id) }.value
+                let rows = await Task.detached(priority: .userInitiated) { Self.shownRows(of: loaded) }.value
+                // Tens of thousands of rows take a while to make, and only this thread can:
+                // a little at a time, so the window goes on drawing.
+                var made: [TranscriptEntry] = []
+                made.reserveCapacity(rows.count)
+                var sliceStart = ContinuousClock.now
+                for (seq, snapshot) in rows.enumerated() {
+                    made.append(Self.entry(from: snapshot, seq: seq, in: loaded))
+                    if seq % 64 == 0, ContinuousClock.now - sliceStart > .milliseconds(4) {
+                        try? await Task.sleep(for: .milliseconds(2))
+                        sliceStart = .now
+                        if Task.isCancelled { return }
+                    }
+                }
                 guard let self, !Task.isCancelled, !self.transcriptLoaded else { return }
-                self.apply(loaded)
+                self.show(made, savedRows: loaded.count)
             }
         }
         await transcriptLoad?.value
@@ -399,14 +413,25 @@ final class ThreadModel: Identifiable {
         return await Task.detached(priority: .userInitiated) { store.loadTranscript(id) }.value
     }
 
+    private nonisolated static func shownRows(of snapshots: [EntrySnapshot]) -> [EntrySnapshot] {
+        snapshots.filter { !($0.kind == .thinking && $0.text.isEmpty) }
+    }
+
+    private static func entry(from snapshot: EntrySnapshot, seq: Int, in saved: [EntrySnapshot]) -> TranscriptEntry {
+        let entry = TranscriptEntry(snapshot: snapshot)
+        // As it's saved, unless dropping a row above has moved it.
+        if saved[seq].id == snapshot.id { entry.markSaved(as: seq) }
+        return entry
+    }
+
     private func apply(_ snapshots: [EntrySnapshot]) {
+        let made = Self.shownRows(of: snapshots).enumerated().map { Self.entry(from: $1, seq: $0, in: snapshots) }
+        show(made, savedRows: snapshots.count)
+    }
+
+    private func show(_ loaded: [TranscriptEntry], savedRows: Int) {
         transcriptLoaded = true
-        let loaded = snapshots
-            .filter { !($0.kind == .thinking && $0.text.isEmpty) }
-            .map(TranscriptEntry.init(snapshot:))
-        // As they're saved, unless dropping a row above has moved them.
-        for (seq, entry) in loaded.enumerated() where entry.id == snapshots[seq].id { entry.markSaved(as: seq) }
-        savedRowCount = snapshots.count
+        savedRowCount = savedRows
         // History should just be there, whatever animation is going on around it.
         var transaction = Transaction()
         transaction.disablesAnimations = true
@@ -1383,7 +1408,13 @@ final class ThreadModel: Identifiable {
         transcriptLoad?.cancel()
         transcriptLoad = nil
         transcriptLoaded = false
-        entries.removeAll()
+        // Freed aside: tens of thousands of rows take long enough to drop a few frames.
+        let gone = UncheckedBox(entries)
+        entries = []
+        transcriptRowsCache = nil
+        displayRowsCache = nil
+        rowsBasis = nil
+        Task.detached(priority: .utility) { _ = gone }
         expandedTurns.removeAll()
         rebuildPlan()
         app.store.forgetTranscript(id)
@@ -1745,4 +1776,10 @@ private extension AgentEvent {
             false
         }
     }
+}
+
+/// For handing rows to another thread only to be let go of there.
+private struct UncheckedBox<Value>: @unchecked Sendable {
+    let value: Value
+    init(_ value: Value) { self.value = value }
 }

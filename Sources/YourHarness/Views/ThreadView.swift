@@ -335,6 +335,13 @@ private struct TranscriptView: View {
                 scrollStill { $0.scrollTo(id: id, anchor: .bottom) }
             }
         }
+        // A turn with a lot of work just folded away. The lazy stack would go on laying out the
+        // rows that went, showing nothing until `foundBlank` noticed: made anew right away instead.
+        .onChange(of: thread.phase) { old, new in
+            guard old == .running, new != .running, isShown, followsBottom else { return }
+            let worked = thread.transcriptDisplayRows.last { if case .work = $0 { true } else { false } }
+            if case .work(let work)? = worked, work.entries.count >= Self.foldsWithNewLayout { makeLayoutAnew() }
+        }
         .modifier(ScrollProbe(position: $position))
         // ⌘F: searched a moment after you stop typing, and again as the thread grows.
         .task(id: FindKey(query: thread.find.isOpen ? thread.find.query : "", rows: thread.entries.count)) {
@@ -461,14 +468,30 @@ private struct TranscriptView: View {
     }
 
     private func foundBlank() {
-        guard let last = lastRowID else { return }
+        guard lastRowID != nil else { return }
         TranscriptDiagnostics.lostPlace(app: app)
         if ProcessInfo.processInfo.environment["YH_BLANK_HEAL"] == "0" { return }
+        makeLayoutAnew()
+    }
+
+    private static let foldsWithNewLayout = 8
+
+    private func makeLayoutAnew() {
+        guard let last = lastRowID else { return }
         followsBottom = true
-        // The new scroll view settling isn't you scrolling.
-        ownScroll.at = .now
+        // The new scroll view settling isn't you scrolling, and with rows above still height
+        // estimates it can take a while and land short.
+        ownScroll.at = .now + .seconds(1)
         position = ScrollPosition(id: last, anchor: .bottom)
         layoutGeneration += 1
+        let generation = layoutGeneration
+        Task { @MainActor in
+            for wait in [150, 350, 500] {
+                try? await Task.sleep(for: .milliseconds(wait))
+                guard generation == layoutGeneration, followsBottom, let last = lastRowID else { return }
+                scrollStill { $0.scrollTo(id: last, anchor: .bottom) }
+            }
+        }
     }
 
     private func rememberPlace() {
