@@ -1,7 +1,6 @@
 import AppKit
 import Darwin
 import QuartzCore
-import SwiftUI
 import os
 
 /// `YH_PERF_PROBE=<folder>`: runs the app through the heaviest use there is, phase by phase,
@@ -41,7 +40,7 @@ final class PerfProbe: NSObject {
     private var results: [[String: Any]] = []
     private var csv = "elapsed,phase,fps,worst_ms,main_cpu_pct,process_cpu_pct,footprint_mb,threads\n"
     private let started = CACurrentMediaTime()
-    private var frameWaiters: [CheckedContinuation<Void, Never>] = []
+    private var frameWaiters: [CheckedContinuation<CFTimeInterval, Never>] = []
     /// How long each kind of click took to show on screen, in milliseconds.
     private var clicks: [String: [Double]] = [:]
 
@@ -148,7 +147,10 @@ final class PerfProbe: NSObject {
         lastTimestamp = link.timestamp
         let waiting = frameWaiters
         frameWaiters = []
-        for waiter in waiting { waiter.resume() }
+        // The frame's own time: resuming goes through the main actor's queue, which can be seconds
+        // behind in a burst while frames and clicks aren't.
+        let now = CACurrentMediaTime()
+        for waiter in waiting { waiter.resume(returning: now) }
         Self.lastFrame.withLock { $0 = CACurrentMediaTime() }
     }
 
@@ -254,7 +256,7 @@ final class PerfProbe: NSObject {
         }
     }
 
-    private func nextFrame() async {
+    @discardableResult private func nextFrame() async -> CFTimeInterval {
         await withCheckedContinuation { frameWaiters.append($0) }
     }
 
@@ -264,8 +266,8 @@ final class PerfProbe: NSObject {
         let start = CACurrentMediaTime()
         action()
         await nextFrame()
-        await nextFrame()
-        let ms = (CACurrentMediaTime() - start) * 1000
+        let shown = await nextFrame()
+        let ms = (shown - start) * 1000
         clicks[label, default: []].append(ms)
         if ms > 100 { log(String(format: "slow click %@: %.0f ms", label, ms)) }
     }
@@ -291,9 +293,9 @@ final class PerfProbe: NSObject {
             try? await Task.sleep(for: pause)
             let worked = thread.transcriptDisplayRows.last { if case .work = $0 { true } else { false } }
             if case .work(let work)? = worked {
-                await click("expand-work") { withAnimation(.smooth(duration: 0.3)) { _ = thread.expandedTurns.insert(work.turnID) } }
+                await click("expand-work") { thread.setWork(work, expanded: true) }
                 try? await Task.sleep(for: pause)
-                await click("collapse-work") { withAnimation(.smooth(duration: 0.3)) { _ = thread.expandedTurns.remove(work.turnID) } }
+                await click("collapse-work") { thread.setWork(work, expanded: false) }
                 try? await Task.sleep(for: pause)
             }
             let shows = app.showsInspector

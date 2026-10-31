@@ -337,16 +337,20 @@ private struct ThreadRow: View {
                     .accessibilityValue(thread.isGeneratingTitle ? "Generating title" : "")
             }
             Spacer(minLength: 6)
-            if hovering && !renaming {
-                RowActions(thread: thread, renaming: $renaming)
-                    .transition(.opacity)
-            } else if thread.isPinned {
-                Image(systemName: "pin.fill")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(.tertiary)
-                    .rotationEffect(.degrees(40))
-                    .transition(.opacity)
+            // Hover animates what appears, not the row: see `AssistantMessageView`.
+            Group {
+                if hovering && !renaming {
+                    RowActions(thread: thread, renaming: $renaming)
+                        .transition(.opacity)
+                } else if thread.isPinned {
+                    Image(systemName: "pin.fill")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                        .rotationEffect(.degrees(40))
+                        .transition(.opacity)
+                }
             }
+            .animation(.easeOut(duration: 0.12), value: hovering)
             TimelineView(.everyMinute) { context in
                 Text(ShortAge.string(from: thread.updatedAt, to: context.date))
                     .font(.caption.monospacedDigit())
@@ -362,9 +366,10 @@ private struct ThreadRow: View {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .fill(Color.primary.opacity(0.1))
                     .matchedGeometryEffect(id: "selection", in: selection)
-            } else if hovering {
+            } else {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(Color.primary.opacity(0.045))
+                    .fill(Color.primary.opacity(hovering ? 0.045 : 0))
+                    .animation(.easeOut(duration: 0.12), value: hovering)
             }
         }
         .contentShape(.rect)
@@ -373,7 +378,6 @@ private struct ThreadRow: View {
             app.selectedThreadID = thread.id
         }
         .onHover { hovering = $0 }
-        .animation(.easeOut(duration: 0.12), value: hovering)
         .animation(.snappy, value: thread.hasUnread)
         .animation(.snappy, value: thread.isPinned)
         .animation(.easeInOut(duration: 0.25), value: thread.title)

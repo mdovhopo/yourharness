@@ -391,9 +391,14 @@ final class ThreadModel: Identifiable {
                 for (seq, snapshot) in rows.enumerated() {
                     made.append(Self.entry(from: snapshot, seq: seq, in: loaded))
                     if seq % 64 == 0, ContinuousClock.now - sliceStart > .milliseconds(4) {
-                        try? await Task.sleep(for: .milliseconds(2))
+                        // A share of the main thread between them all, however many are loading,
+                        // and the thread on screen goes first.
+                        Self.rowMakingResumes = .now + .milliseconds(6)
+                        repeat {
+                            try? await Task.sleep(for: .milliseconds(self?.isOnScreen == true ? 1 : 4))
+                            if Task.isCancelled { return }
+                        } while self?.isOnScreen != true && ContinuousClock.now < Self.rowMakingResumes
                         sliceStart = .now
-                        if Task.isCancelled { return }
                     }
                 }
                 guard let self, !Task.isCancelled, !self.transcriptLoaded else { return }
@@ -404,6 +409,8 @@ final class ThreadModel: Identifiable {
     }
 
     @ObservationIgnored private var transcriptLoad: Task<Void, Never>?
+    private static var rowMakingResumes = ContinuousClock.now
+    private var isOnScreen: Bool { app.selectedThreadID == id }
     /// Its history is being read in, for showing that it is.
     private(set) var isLoadingTranscript = false
     @ObservationIgnored private var savedRowCount = 0
@@ -1402,6 +1409,15 @@ final class ThreadModel: Identifiable {
         guard !changes.isEmpty || entries.count != savedRowCount else { return }
         savedRowCount = entries.count
         app.store.saveTranscriptChanges(id, count: entries.count, changes: changes)
+    }
+
+    /// Opens or closes a turn's work. A big one just appears: animating hundreds of rows' sizes
+    /// takes longer than the animation is worth.
+    func setWork(_ work: TurnWork, expanded: Bool) {
+        let change = { [self] in
+            if expanded { expandedTurns.insert(work.turnID) } else { expandedTurns.remove(work.turnID) }
+        }
+        if work.entries.count > 30 { change() } else { withAnimation(.smooth(duration: 0.3), change) }
     }
 
     /// Lets go of the transcript to save memory; opening the thread reads it back. Only a

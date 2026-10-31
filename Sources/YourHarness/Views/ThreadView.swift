@@ -642,11 +642,7 @@ private struct TranscriptRowView: View {
                     // A little more room above each turn, so they read as separate.
                     .padding(.top, entry.startsTurn && !isFirst ? 12 : 0)
             case .work(let work):
-                WorkSummaryRow(work: work) {
-                    withAnimation(.smooth(duration: 0.3)) {
-                        if work.isExpanded { thread.expandedTurns.remove(work.turnID) } else { thread.expandedTurns.insert(work.turnID) }
-                    }
-                }
+                WorkSummaryRow(work: work) { thread.setWork(work, expanded: !work.isExpanded) }
             case .earlier(let count):
                 EarlierTurnsRow(count: count) { thread.showEarlierTurns() }
             }

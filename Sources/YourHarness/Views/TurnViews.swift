@@ -79,7 +79,8 @@ struct WorkSummaryRow: View {
 
             if work.isExpanded {
                 Divider()
-                VStack(alignment: .leading, spacing: 14) {
+                // Lazy: a turn can hold hundreds of tool calls, and made at once they took seconds.
+                LazyVStack(alignment: .leading, spacing: 14) {
                     ForEach(work.entries) { entry in
                         EntryView(entry: entry)
                     }

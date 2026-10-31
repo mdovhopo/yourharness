@@ -60,6 +60,27 @@ final class TranscriptEntry: Identifiable {
         self.date = date
     }
 
+    /// Everything set directly, so nothing's observed: a long thread makes tens of thousands.
+    init(snapshot: EntrySnapshot) {
+        id = snapshot.id
+        kind = snapshot.kind
+        text = snapshot.text
+        isStreaming = false
+        date = snapshot.date
+        turnEndedAt = snapshot.turnEndedAt
+        changedFiles = snapshot.changedFiles
+        toolName = snapshot.toolName ?? ""
+        toolInput = snapshot.toolInput ?? ""
+        toolResult = snapshot.toolResult
+        toolResultRef = snapshot.toolResultRef
+        toolResultLength = snapshot.toolResultLength
+        toolIsError = snapshot.toolIsError ?? false
+        noticeStyle = snapshot.noticeStyle ?? .info
+        attachments = snapshot.attachments ?? []
+        subagent = snapshot.subagent.map { SubagentRun(id: snapshot.id, snapshot: $0) }
+        delivery = snapshot.delivery ?? .normal
+    }
+
     /// A message you sent that starts a turn, rather than one that joined Claude's work
     /// (an interruption stops the turn, so it starts the next).
     var startsTurn: Bool { kind == .user && delivery != .steered }
@@ -106,22 +127,6 @@ extension TranscriptEntry {
             toolResultLength: toolResultLength,
             changedFiles: changedFiles
         )
-    }
-
-    convenience init(snapshot: EntrySnapshot) {
-        self.init(id: snapshot.id, kind: snapshot.kind, text: snapshot.text, date: snapshot.date)
-        turnEndedAt = snapshot.turnEndedAt
-        changedFiles = snapshot.changedFiles
-        toolName = snapshot.toolName ?? ""
-        toolInput = snapshot.toolInput ?? ""
-        toolResult = snapshot.toolResult
-        toolResultRef = snapshot.toolResultRef
-        toolResultLength = snapshot.toolResultLength
-        toolIsError = snapshot.toolIsError ?? false
-        noticeStyle = snapshot.noticeStyle ?? .info
-        attachments = snapshot.attachments ?? []
-        subagent = snapshot.subagent.map { SubagentRun(id: snapshot.id, snapshot: $0) }
-        delivery = snapshot.delivery ?? .normal
     }
 }
 

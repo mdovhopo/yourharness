@@ -85,7 +85,9 @@ enum TranscriptDiagnostics {
         }
         let json = (try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])) ?? Data()
         try? json.write(to: base.appendingPathExtension("json"))
-        WindowSnapshot.write(to: base.appendingPathExtension("png").path)
+        // Drawing the window takes hundreds of milliseconds, which is no way to catch a problem
+        // in the app you're using: only when you asked for it.
+        if reveal { WindowSnapshot.write(to: base.appendingPathExtension("png").path) }
         if reveal { NSWorkspace.shared.activateFileViewerSelecting([base.appendingPathExtension("json")]) }
         FileHandle.standardError.write(Data("captured \(base.path).json\n".utf8))
     }
