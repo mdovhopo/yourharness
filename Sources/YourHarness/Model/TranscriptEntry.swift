@@ -11,7 +11,7 @@ final class TranscriptEntry: Identifiable {
 
     let id: String
     let kind: Kind
-    var text: String
+    var text: String { didSet { savedSeq = -1 } }
     var isStreaming: Bool
     // Set before the entry joins a transcript and never after, so not observed: the
     // transcript reads them for every entry each time it lays out its rows, and observing
@@ -19,32 +19,38 @@ final class TranscriptEntry: Identifiable {
 
     /// When it happened; nil for rows saved before times were kept, or taken from a
     /// session's history.
-    @ObservationIgnored var date: Date?
+    @ObservationIgnored var date: Date? { didSet { savedSeq = -1 } }
     /// On the message that starts a turn: when Claude finished it.
-    var turnEndedAt: Date?
+    var turnEndedAt: Date? { didSet { savedSeq = -1 } }
     /// On the message that starts a turn: the files it changed, as git saw them, however
     /// they were changed (absolute paths). Nil outside a repo, or before it's worked out.
-    var changedFiles: [String]?
+    var changedFiles: [String]? { didSet { savedSeq = -1 } }
 
     // Tool calls
-    @ObservationIgnored var toolName = ""
+    @ObservationIgnored var toolName = "" { didSet { savedSeq = -1 } }
     /// JSON; partial while the model is still streaming the input.
-    var toolInput = ""
-    var toolResult: String?
+    var toolInput = "" { didSet { savedSeq = -1 } }
+    var toolResult: String? { didSet { savedSeq = -1 } }
     /// For a big result loaded as its head: where the whole one is kept, and its length.
-    @ObservationIgnored var toolResultRef: String?
-    @ObservationIgnored var toolResultLength: Int?
-    var toolIsError = false
+    @ObservationIgnored var toolResultRef: String? { didSet { savedSeq = -1 } }
+    @ObservationIgnored var toolResultLength: Int? { didSet { savedSeq = -1 } }
+    var toolIsError = false { didSet { savedSeq = -1 } }
     /// For an Agent tool call: the sub-agent it started.
-    var subagent: SubagentRun?
+    var subagent: SubagentRun? { didSet { savedSeq = -1 } }
     /// For a command or watch that went on running: the job, while the session lasts.
     var job: BackgroundJob?
 
-    var noticeStyle = NoticeStyle.info
+    var noticeStyle = NoticeStyle.info { didSet { savedSeq = -1 } }
     /// Images sent with a user message: file names in the store's attachments folder.
-    var attachments: [String] = []
+    var attachments: [String] = [] { didSet { savedSeq = -1 } }
     /// How a message you sent while Claude was working got to it.
-    @ObservationIgnored var delivery = Delivery.normal
+    @ObservationIgnored var delivery = Delivery.normal { didSet { savedSeq = -1 } }
+
+    /// The row it was last saved as, as it is now; -1 when it has changed since. Going
+    /// through a long transcript for these is quick, making every row's snapshot isn't.
+    @ObservationIgnored var savedSeq = -1
+    /// Its sub-agent was running when last saved, so what it's become still needs saving.
+    @ObservationIgnored var savedSubagentRunning = false
 
     init(id: String = UUID().uuidString, kind: Kind, text: String = "", isStreaming: Bool = false, date: Date? = .now) {
         self.id = id
@@ -68,6 +74,19 @@ final class TranscriptEntry: Identifiable {
 // MARK: - Persistence
 
 extension TranscriptEntry {
+    /// Whether it needs saving as row `seq`. A sub-agent changes without the entry knowing,
+    /// but only while it runs.
+    func needsSave(as seq: Int) -> Bool {
+        if savedSeq != seq { return true }
+        guard let subagent else { return false }
+        return subagent.status == .running || savedSubagentRunning
+    }
+
+    func markSaved(as seq: Int) {
+        savedSeq = seq
+        savedSubagentRunning = subagent?.status == .running
+    }
+
     var snapshot: EntrySnapshot {
         EntrySnapshot(
             id: id,

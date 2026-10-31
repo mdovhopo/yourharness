@@ -382,6 +382,7 @@ final class ThreadModel: Identifiable {
     }
 
     @ObservationIgnored private var transcriptLoad: Task<Void, Never>?
+    @ObservationIgnored private var savedRowCount = 0
 
     /// The transcript for another thread's agent to read: what's in memory when it's loaded
     /// (newer than what's saved while Claude works), else read from the database without
@@ -397,6 +398,9 @@ final class ThreadModel: Identifiable {
         let loaded = snapshots
             .filter { !($0.kind == .thinking && $0.text.isEmpty) }
             .map(TranscriptEntry.init(snapshot:))
+        // As they're saved, unless dropping a row above has moved them.
+        for (seq, entry) in loaded.enumerated() where entry.id == snapshots[seq].id { entry.markSaved(as: seq) }
+        savedRowCount = snapshots.count
         // History should just be there, whatever animation is going on around it.
         var transaction = Transaction()
         transaction.disablesAnimations = true
@@ -530,7 +534,14 @@ final class ThreadModel: Identifiable {
             }
             if command.name == "rename" { renameRequested = true }
         }
-        loadTranscriptIfNeeded()
+        // Reading a long history here would freeze the window: it's read aside, then this goes on.
+        guard transcriptLoaded else {
+            Task { [weak self] in
+                await self?.loadTranscriptSoon()
+                self?.send(text, images: images, files: files, interrupting: interrupting)
+            }
+            return
+        }
         // Picking a settled thread back up brings it back to the list, and new activity
         // lifts the hold an un-settle puts on automatic settling.
         if isSettled { app.setSettled(false, self) }
@@ -1324,8 +1335,21 @@ final class ThreadModel: Identifiable {
         pendingSave = nil
         guard !isEphemeral else { return }
         // Only a transcript that's in memory: one that isn't would be saved as empty.
-        if transcriptLoaded { app.store.saveTranscript(id, entries: entries.map(\.snapshot)) }
+        if transcriptLoaded { saveChangedRows() }
         app.save()
+    }
+
+    /// Only what changed since the last save: this runs every couple of seconds while Claude
+    /// streams, and a long thread has tens of thousands of rows.
+    private func saveChangedRows() {
+        var changes: [Int: EntrySnapshot] = [:]
+        for (seq, entry) in entries.enumerated() where entry.needsSave(as: seq) {
+            changes[seq] = entry.snapshot
+            entry.markSaved(as: seq)
+        }
+        guard !changes.isEmpty || entries.count != savedRowCount else { return }
+        savedRowCount = entries.count
+        app.store.saveTranscriptChanges(id, count: entries.count, changes: changes)
     }
 
     /// Lets go of the transcript to save memory; opening the thread reads it back. Only a

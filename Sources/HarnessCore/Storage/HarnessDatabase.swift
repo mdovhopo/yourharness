@@ -189,6 +189,7 @@ public final class HarnessDatabase: Sendable {
         if let waiting = pending.withLock({ $0.deletes.contains(key) ? [] : $0.transcripts[key] ?? $0.inFlightTranscripts[key] }) {
             return waiting
         }
+        writeChangesBeforeReading(key)
         importLegacyTranscriptNow(key)
         return (try? reader.withLock { try Writer.readEntries($0, thread: key) }) ?? []
     }
@@ -201,6 +202,7 @@ public final class HarnessDatabase: Sendable {
             stride(from: 0, to: waiting.count, by: pageSize).forEach { body(Array(waiting[$0..<min($0 + pageSize, waiting.count)])) }
             return
         }
+        writeChangesBeforeReading(key)
         importLegacyTranscriptNow(key)
         var from = 0
         while true {
@@ -220,6 +222,35 @@ public final class HarnessDatabase: Sendable {
             $0.deletes.remove(id.uuidString)
         }
         scheduleDrain()
+    }
+
+    /// Just the rows that changed since the last save, and how many there are now. What a long
+    /// thread saves as it streams: going through all its rows would hold up the main thread,
+    /// and comparing against a copy of them would keep the whole transcript in memory twice.
+    public func saveTranscriptChanges(_ id: UUID, count: Int, changes: [Int: EntrySnapshot]) {
+        let key = id.uuidString
+        pending.withLock { pending in
+            pending.deletes.remove(key)
+            if var whole = pending.transcripts[key] {
+                pending.transcripts[key] = nil
+                whole.removeLast(max(0, whole.count - count))
+                for (seq, entry) in changes.sorted(by: { $0.key < $1.key }) {
+                    if seq < whole.count { whole[seq] = entry } else { whole.append(entry) }
+                }
+                pending.transcripts[key] = whole
+            } else {
+                var waiting = pending.changes[key] ?? TranscriptChanges(count: count, rows: [:])
+                waiting.count = count
+                waiting.rows.merge(changes) { _, new in new }
+                pending.changes[key] = waiting
+            }
+        }
+        scheduleDrain()
+    }
+
+    /// Changes waiting for this thread are written first, so what's read has them.
+    private func writeChangesBeforeReading(_ key: String) {
+        if pending.withLock({ $0.changes[key] != nil || $0.inFlightChanges.contains(key) }) { queue.sync { drain() } }
     }
 
     /// The transcript was let go of in memory: so is what the last save compared against.
@@ -330,9 +361,16 @@ public final class HarnessDatabase: Sendable {
 
     // MARK: - Writing
 
+    private struct TranscriptChanges {
+        var count: Int
+        var rows: [Int: EntrySnapshot]
+    }
+
     private struct Pending {
         var state: StateRows?
         var transcripts: [String: [EntrySnapshot]] = [:]
+        var changes: [String: TranscriptChanges] = [:]
+        var inFlightChanges: Set<String> = []
         var deletes: Set<String> = []
         var forgets: Set<String> = []
         /// Being written: still what a load should see until it's committed.
@@ -352,20 +390,22 @@ public final class HarnessDatabase: Sendable {
 
     /// Writes what's waiting, in one transaction. Runs on `queue`.
     private func drain() {
-        let (state, transcripts, deletes, forgets) = pending.withLock { pending in
+        let (state, transcripts, changes, deletes, forgets) = pending.withLock { pending in
             defer {
                 pending.inFlightState = pending.state
                 pending.inFlightTranscripts = pending.transcripts
+                pending.inFlightChanges = Set(pending.changes.keys)
                 pending.state = nil
                 pending.transcripts = [:]
+                pending.changes = [:]
                 pending.deletes = []
                 pending.forgets = []
                 pending.drainScheduled = false
             }
-            return (pending.state, pending.transcripts, pending.deletes, pending.forgets)
+            return (pending.state, pending.transcripts, pending.changes, pending.deletes, pending.forgets)
         }
-        guard state != nil || !transcripts.isEmpty || !deletes.isEmpty || !forgets.isEmpty else { return }
-        for key in Set(transcripts.keys).subtracting(deletes) { importLegacyTranscriptNow(key, onQueue: true) }
+        guard state != nil || !transcripts.isEmpty || !changes.isEmpty || !deletes.isEmpty || !forgets.isEmpty else { return }
+        for key in Set(transcripts.keys).union(changes.keys).subtracting(deletes) { importLegacyTranscriptNow(key, onQueue: true) }
         var wroteEntries = false
         do {
             try writer.withLock { writer in
@@ -373,6 +413,9 @@ public final class HarnessDatabase: Sendable {
                     if let state { try writer.writeState(state) }
                     for (key, entries) in transcripts where !deletes.contains(key) {
                         if try writer.writeTranscript(key, entries) { wroteEntries = true }
+                    }
+                    for (key, waiting) in changes where !deletes.contains(key) {
+                        if try writer.writeTranscriptChanges(key, count: waiting.count, rows: waiting.rows) { wroteEntries = true }
                     }
                     for key in deletes { try writer.deleteTranscript(key) }
                 }
@@ -389,6 +432,14 @@ public final class HarnessDatabase: Sendable {
             pending.withLock { pending in
                 if pending.state == nil { pending.state = state }
                 for (key, entries) in transcripts where pending.transcripts[key] == nil { pending.transcripts[key] = entries }
+                for (key, waiting) in changes {
+                    // Older than what's come in since, so what's come in goes on top.
+                    if let newer = pending.changes[key] {
+                        pending.changes[key] = TranscriptChanges(count: newer.count, rows: waiting.rows.merging(newer.rows) { _, new in new })
+                    } else {
+                        pending.changes[key] = waiting
+                    }
+                }
                 pending.deletes.formUnion(deletes)
             }
             queue.asyncAfter(deadline: .now() + 2) { [weak self] in self?.drain() }
@@ -396,6 +447,7 @@ public final class HarnessDatabase: Sendable {
         pending.withLock { pending in
             pending.inFlightState = nil
             pending.inFlightTranscripts = [:]
+            pending.inFlightChanges = []
         }
         if wroteEntries || !deletes.isEmpty { scheduleIndexing() }
     }
@@ -770,6 +822,27 @@ final class Writer: @unchecked Sendable {
             ON CONFLICT(thread_id) DO UPDATE SET saved_at = excluded.saved_at, entry_count = excluded.entry_count
             """, [.text(thread), .of(Date.now), .int(Int64(entries.count))])
         baselines[thread] = entries
+        return wrote
+    }
+
+    func writeTranscriptChanges(_ thread: String, count: Int, rows: [Int: EntrySnapshot]) throws -> Bool {
+        // A whole save compared against this would be out of date from here on.
+        baselines[thread] = nil
+        let saved = try connection.scalar("SELECT entry_count FROM transcripts WHERE thread_id = ?", [.text(thread)])
+            .flatMap { if case .int(let value) = $0 { Int(value) } else { nil } } ?? 0
+        var wrote = false
+        for (seq, entry) in rows.sorted(by: { $0.key < $1.key }) where seq < count {
+            try upsert(thread, seq: seq, entry)
+            wrote = true
+        }
+        if saved > count {
+            try truncate(thread, from: count)
+            wrote = true
+        }
+        try connection.run("""
+            INSERT INTO transcripts(thread_id, saved_at, entry_count) VALUES (?, ?, ?)
+            ON CONFLICT(thread_id) DO UPDATE SET saved_at = excluded.saved_at, entry_count = excluded.entry_count
+            """, [.text(thread), .of(Date.now), .int(Int64(count))])
         return wrote
     }
 

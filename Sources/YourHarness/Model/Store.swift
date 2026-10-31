@@ -533,6 +533,10 @@ final class Store: Sendable {
         database.saveTranscript(id, entries: entries)
     }
 
+    func saveTranscriptChanges(_ id: UUID, count: Int, changes: [Int: EntrySnapshot]) {
+        database.saveTranscriptChanges(id, count: count, changes: changes)
+    }
+
     /// The transcript was let go of in memory.
     func forgetTranscript(_ id: UUID) {
         database.forgetTranscript(id)

@@ -100,6 +100,33 @@ struct HarnessDatabaseTests {
         #expect(open().loadTranscript(thread) == entries)
     }
 
+    @Test func changesAreSavedRowByRow() throws {
+        let id = UUID()
+        do {
+            let database = open()
+            database.saveTranscript(id, entries: [entry("a"), entry("b"), entry("c")])
+            database.flush()
+            database.saveTranscriptChanges(id, count: 4, changes: [1: entry("b", .assistant, "changed"), 3: entry("d")])
+            // Read before it's written: the load must see it.
+            #expect(database.loadTranscript(id).map(\.id) == ["a", "b", "c", "d"])
+            #expect(database.loadTranscript(id)[1].text == "changed")
+            database.saveTranscriptChanges(id, count: 2, changes: [:])
+            database.flush()
+        }
+        #expect(open().loadTranscript(id).map(\.id) == ["a", "b"])
+    }
+
+    @Test func changesLandOnAWholeSaveStillWaiting() throws {
+        let id = UUID()
+        let database = open()
+        database.saveTranscript(id, entries: [entry("a"), entry("b")])
+        database.saveTranscriptChanges(id, count: 3, changes: [0: entry("a", .assistant, "new"), 2: entry("c")])
+        database.flush()
+        let saved = database.loadTranscript(id)
+        #expect(saved.map(\.id) == ["a", "b", "c"])
+        #expect(saved[0].text == "new")
+    }
+
     @Test func unchangedRowsAreNotRewritten() throws {
         let thread = UUID()
         let database = open()

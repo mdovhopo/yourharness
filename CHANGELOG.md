@@ -6,6 +6,9 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+### Fixed
+- A long thread no longer freezes the app when you send to it, and saving while Claude works stays quick however long the thread gets.
+
 ## [0.0.13] - 2026-10-30
 
 ### Added

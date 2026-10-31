@@ -1,0 +1,167 @@
+#!/usr/bin/env -S python3 -I
+# Stands in for `claude` in performance runs: speaks stream-json the way the real CLI does, so
+# the app's whole path runs (process, pipes, parser, transcript, saving, drawing), with no
+# tokens spent. A message "PERF seconds=60 rate=1" streams a turn for that long: reasoning,
+# text, hundreds of tool calls, big results, sub-agents, compactions. Rate 1 is a fast model.
+import json, os, random, re, sys, threading, time, uuid
+
+words = ("parser migration index thread session memory window sidebar transcript render layout switch commit branch "
+         "release build test flaky timezone cache budget token query search worktree review merge stack diagram").split()
+args = sys.argv[1:]
+if "--version" in args:
+    print("2.1.302 (Claude Code)")
+    sys.exit(0)
+if "stream-json" not in args:
+    # A one-shot, such as a title.
+    print("Performance run")
+    sys.exit(0)
+
+session = str(uuid.uuid4())
+if "--resume" in args and args.index("--resume") + 1 < len(args):
+    session = args[args.index("--resume") + 1]
+rng = random.Random(os.getpid())
+lock = threading.Lock()
+stop_turn = threading.Event()
+
+def emit(obj):
+    obj.setdefault("session_id", session)
+    with lock:
+        sys.stdout.write(json.dumps(obj) + "\n")
+        sys.stdout.flush()
+
+def sentence(n=12):
+    return " ".join(rng.choice(words) for _ in range(n)).capitalize() + "."
+
+def stream(message_id, event, parent=None):
+    emit({"type": "stream_event", "event": event, "parent_tool_use_id": parent, "api_message_id": message_id})
+
+def status(value):
+    emit({"type": "system", "subtype": "status", "status": value})
+
+def begin(model_id):
+    status("requesting")
+    stream(model_id, {"type": "message_start", "message": {"id": model_id, "model": "claude-haiku-5-5", "role": "assistant", "content": [],
+                                                           "usage": {"input_tokens": 3, "cache_read_input_tokens": rng.randint(20_000, 190_000), "output_tokens": 1}}})
+
+def finish(model_id):
+    stream(model_id, {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"input_tokens": 3, "output_tokens": rng.randint(50, 900)}})
+    stream(model_id, {"type": "message_stop"})
+
+def blocks_of(text, rate, gap=0.012):
+    # About 80 deltas a second at rate 1, as a fast model sends them.
+    while text:
+        piece, text = text[:rng.randint(3, 14)], text
+        text = text[len(piece):]
+        yield piece
+        time.sleep(gap / rate)
+
+def thinking(rate):
+    mid = "msg_" + uuid.uuid4().hex
+    begin(mid)
+    stream(mid, {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": ""}})
+    text = " ".join(sentence(16) for _ in range(rng.randint(2, 8)))
+    for piece in blocks_of(text, rate):
+        if stop_turn.is_set(): break
+        stream(mid, {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": piece}})
+    emit({"type": "assistant", "message": {"id": mid, "model": "claude-haiku-5-5", "content": [{"type": "thinking", "thinking": text}]}})
+    stream(mid, {"type": "content_block_stop", "index": 0})
+
+def reply(rate, long=False):
+    mid = "msg_" + uuid.uuid4().hex
+    begin(mid)
+    stream(mid, {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})
+    parts = [sentence(25) for _ in range(3 if long else 1)]
+    if long or rng.random() < 0.4:
+        parts.append("```swift\n" + "\n".join(f"let {rng.choice(words)}{i} = {i}" for i in range(rng.randint(5, 30))) + "\n```")
+    if long or rng.random() < 0.3:
+        parts.append("| Part | Before | After |\n|---|---|---|\n" + "\n".join(f"| {rng.choice(words)} | {i} ms | {i // 2} ms |" for i in range(6)))
+    if long or rng.random() < 0.5:
+        parts.append("\n".join(f"- `{rng.choice(words)}.swift`: {sentence(10)}" for _ in range(4)))
+    text = "\n\n".join(parts)
+    for piece in blocks_of(text, rate):
+        if stop_turn.is_set(): break
+        stream(mid, {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": piece}})
+    emit({"type": "assistant", "message": {"id": mid, "model": "claude-haiku-5-5", "content": [{"type": "text", "text": text}]}})
+    stream(mid, {"type": "content_block_stop", "index": 0})
+    finish(mid)
+
+def tool(rate, parent=None):
+    mid, tid = "msg_" + uuid.uuid4().hex, "toolu_" + uuid.uuid4().hex
+    name = rng.choice(["Bash", "Read", "Read", "Grep", "Edit"])
+    tool_input = {"command": f"swift test --filter {rng.choice(words)}", "description": sentence(4)} if name == "Bash" else \
+        {"file_path": f"/tmp/project/{rng.choice(words)}.swift", "old_string": sentence(8), "new_string": sentence(12)} if name == "Edit" else \
+        {"file_path": f"/tmp/project/{rng.choice(words)}.swift"}
+    if parent is None: begin(mid)
+    stream(mid, {"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": tid, "name": name, "input": {}}}, parent)
+    for piece in blocks_of(json.dumps(tool_input), rate):
+        stream(mid, {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": piece}}, parent)
+    emit({"type": "assistant", "parent_tool_use_id": parent, "message": {"id": mid, "model": "claude-haiku-5-5", "content": [{"type": "tool_use", "id": tid, "name": name, "input": tool_input}]}})
+    stream(mid, {"type": "content_block_stop", "index": 0}, parent)
+    time.sleep(rng.uniform(0.02, 0.2) / rate)
+    roll, line = rng.random(), sentence(12)
+    size = rng.randint(200_000, 800_000) if roll < 0.01 else rng.randint(8_000, 40_000) if roll < 0.15 else rng.randint(60, 3_000)
+    emit({"type": "user", "parent_tool_use_id": parent, "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": tid, "content": "\n".join(line for _ in range(max(1, size // len(line)))), "is_error": rng.random() < 0.03}]}})
+
+def subagent(rate):
+    mid, tid, task = "msg_" + uuid.uuid4().hex, "toolu_" + uuid.uuid4().hex, uuid.uuid4().hex[:16]
+    tool_input = {"description": sentence(4), "prompt": sentence(30), "subagent_type": "general-purpose"}
+    begin(mid)
+    stream(mid, {"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": tid, "name": "Agent", "input": {}}})
+    emit({"type": "assistant", "message": {"id": mid, "model": "claude-haiku-5-5", "content": [{"type": "tool_use", "id": tid, "name": "Agent", "input": tool_input}]}})
+    stream(mid, {"type": "content_block_stop", "index": 0})
+    emit({"type": "system", "subtype": "task_started", "task_id": task, "tool_use_id": tid, "description": tool_input["description"],
+          "subagent_type": "general-purpose", "task_type": "local_agent", "prompt": tool_input["prompt"]})
+    for used in range(rng.randint(3, 12)):
+        tool(rate, parent=tid)
+        emit({"type": "system", "subtype": "task_progress", "task_id": task, "tool_use_id": tid, "description": sentence(3),
+              "subagent_type": "general-purpose", "usage": {"total_tokens": 1000 * used, "tool_uses": used, "duration_ms": 100 * used}, "last_tool_name": "Read"})
+    emit({"type": "system", "subtype": "task_notification", "task_id": task, "tool_use_id": tid, "status": "completed", "summary": sentence(20)})
+    emit({"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tid, "content": sentence(40), "is_error": False}]}})
+
+def compact():
+    status("compacting")
+    time.sleep(0.2)
+    emit({"type": "system", "subtype": "compact_boundary", "compact_metadata": {"trigger": "auto", "pre_tokens": rng.randint(180_000, 200_000), "post_tokens": rng.randint(10_000, 30_000)}})
+    status("requesting")
+
+def turn(seconds, rate):
+    started, step = time.time(), 0
+    emit({"type": "system", "subtype": "init", "session_id": session, "model": "claude-haiku-5-5", "permissionMode": "default", "claude_code_version": "2.1.302", "cwd": os.getcwd()})
+    while time.time() - started < seconds and not stop_turn.is_set():
+        step += 1
+        thinking(rate)
+        for _ in range(rng.randint(1, 4)):
+            tool(rate)
+        if step % 2 == 0: reply(rate)
+        if step % 12 == 0: subagent(rate)
+        if step % 40 == 0: compact()
+    reply(rate, long=True)
+    elapsed = int((time.time() - started) * 1000)
+    emit({"type": "result", "subtype": "success", "is_error": False, "duration_ms": elapsed, "num_turns": step, "result": "Done.",
+          "usage": {"input_tokens": 3, "output_tokens": 500}, "total_cost_usd": 0, "modelUsage": {}})
+    stop_turn.clear()
+
+worker = None
+for line in sys.stdin:
+    try:
+        message = json.loads(line)
+    except ValueError:
+        continue
+    kind = message.get("type")
+    if kind == "control_request":
+        subtype = message.get("request", {}).get("subtype")
+        if subtype == "interrupt": stop_turn.set()
+        response = {"commands": [], "models": [], "account": {}} if subtype == "initialize" else {}
+        emit({"type": "control_response", "response": {"subtype": "success", "request_id": message.get("request_id"), "response": response}})
+    elif kind == "user":
+        content = message.get("message", {}).get("content")
+        text = content if isinstance(content, str) else " ".join(b.get("text", "") for b in content or [] if isinstance(b, dict))
+        seconds = float((re.search(r"seconds=([\d.]+)", text) or [0, 5])[1])
+        rate = float((re.search(r"rate=([\d.]+)", text) or [0, 1])[1])
+        if message.get("uuid"):
+            emit({"type": "user", "uuid": message["uuid"], "isReplay": True, "message": message["message"]})
+        if worker: worker.join()
+        worker = threading.Thread(target=turn, args=(seconds, rate), daemon=True)
+        worker.start()
+if worker: worker.join()

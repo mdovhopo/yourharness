@@ -191,6 +191,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             SwitchProbe.runIfRequested(app: AppModel.shared)
             UsageProbe.runIfRequested(app: AppModel.shared)
             FollowProbe.runIfRequested(app: AppModel.shared)
+            PerfProbe.runIfRequested(app: AppModel.shared)
             TranscriptDiagnostics.runIfRequested(app: AppModel.shared)
             NavigationProbe.runIfRequested(app: AppModel.shared)
             SearchProbe.runIfRequested(app: AppModel.shared)

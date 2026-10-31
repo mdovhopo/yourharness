@@ -8,8 +8,9 @@ set -euo pipefail
 ROOT="${0:A:h:h}"
 DATA="${${1:?usage: scripts/dev-run.sh <data dir> [YH_VAR=value ...]}:A}"
 shift
-APP_DIR="$ROOT/test-harness-root/app"
-[[ -d "$APP_DIR/YourHarness Dev.app" && "$APP_DIR/YourHarness Dev.app" -nt "$ROOT/build/YourHarness.app/Contents/MacOS/YourHarness" ]] \
+# YH_APP_DIR: a Dev copy made elsewhere, such as a baseline build to compare against.
+APP_DIR="${YH_APP_DIR:-$ROOT/test-harness-root/app}"
+[[ -n ${YH_APP_DIR:-} || ( -d "$APP_DIR/YourHarness Dev.app" && "$APP_DIR/YourHarness Dev.app" -nt "$ROOT/build/YourHarness.app/Contents/MacOS/YourHarness" ) ]] \
     || "$ROOT/scripts/dev-app.sh" "$APP_DIR" >/dev/null
 env=(--env "YH_DATA_DIR=$DATA" --env "YH_PATH=$PATH" --env YH_NOTIFICATIONS=log)
 for variable in "$@"; do env+=(--env "$variable"); done
