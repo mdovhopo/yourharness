@@ -265,6 +265,7 @@ struct CodeBlockView: View {
                 .buttonStyle(.borderless)
                 .font(.caption)
                 .opacity(hovering || copied ? 1 : 0)
+                .animation(.easeOut(duration: 0.12), value: hovering)
                 .help("Copy code")
             }
             .padding(.horizontal, 12)
@@ -272,6 +273,5 @@ struct CodeBlockView: View {
         }
         .card()
         .onHover { hovering = $0 }
-        .animation(.easeOut(duration: 0.12), value: hovering)
     }
 }

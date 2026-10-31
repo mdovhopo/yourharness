@@ -41,14 +41,19 @@ struct AssistantMessageView: View {
         StreamingMarkdown(entry: entry)
             // In the gap below, so showing it doesn't move anything.
             .overlay(alignment: .bottomTrailing) {
-                if hovering, !entry.isStreaming {
-                    CopyMessageButton(text: entry.text)
-                        .offset(y: 20)
-                        .transition(.opacity)
+                // Only the button animates. Content moving under a resting pointer flips hover
+                // over and over, and on the whole row each flip stacked another animation onto
+                // its frame (this curve can't merge with the last) until a frame took minutes.
+                Group {
+                    if hovering, !entry.isStreaming {
+                        CopyMessageButton(text: entry.text)
+                            .offset(y: 20)
+                            .transition(.opacity)
+                    }
                 }
+                .animation(.easeOut(duration: 0.12), value: hovering)
             }
             .onHover { hovering = $0 }
-            .animation(.easeOut(duration: 0.12), value: hovering)
     }
 }
 
@@ -113,10 +118,14 @@ struct UserMessageView: View {
                     EmptyView()
                 }
                 HStack(spacing: 6) {
-                    if hovering, !text.isEmpty {
+                    // Its room is always kept: hovering mustn't change the row's height, or the
+                    // row moves, the pointer's off it, and round again.
+                    if !text.isEmpty {
                         CopyMessageButton(text: text)
                             .font(.caption)
-                            .transition(.opacity)
+                            .opacity(hovering ? 1 : 0)
+                            .allowsHitTesting(hovering)
+                            .animation(.easeOut(duration: 0.12), value: hovering)
                     }
                     if let date {
                         MessageTime(date: date)
@@ -125,7 +134,6 @@ struct UserMessageView: View {
             }
         }
         .onHover { hovering = $0 }
-        .animation(.easeOut(duration: 0.12), value: hovering)
     }
 }
 

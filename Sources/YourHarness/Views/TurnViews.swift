@@ -62,6 +62,7 @@ struct WorkSummaryRow: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .opacity(hovering || work.isExpanded ? 1 : 0)
+                        .animation(.easeOut(duration: 0.12), value: hovering)
                     Image(systemName: "chevron.right")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
@@ -91,10 +92,13 @@ struct WorkSummaryRow: View {
                 .transition(.opacity)
             }
         }
-        .background(hovering && !work.isExpanded ? AnyShapeStyle(.primary.opacity(0.06)) : AnyShapeStyle(.primary.opacity(0.035)),
-                    in: .rect(cornerRadius: Theme.innerRadius))
+        // The fill animates, not the row: see `AssistantMessageView`.
+        .background {
+            RoundedRectangle(cornerRadius: Theme.innerRadius)
+                .fill(.primary.opacity(hovering && !work.isExpanded ? 0.06 : 0.035))
+                .animation(.easeOut(duration: 0.12), value: hovering)
+        }
         .overlay(RoundedRectangle(cornerRadius: Theme.innerRadius).strokeBorder(.separator.opacity(0.6)))
-        .animation(.easeOut(duration: 0.12), value: hovering)
     }
 
     /// Counted when the row shows, not for every turn of the thread.

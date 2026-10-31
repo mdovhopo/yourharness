@@ -15,7 +15,8 @@ import os
 ///
 /// Macs don't draw a covered window, so results would flatter: the window floats, letting
 /// clicks through, almost entirely below the screen. Your pointer isn't over it, so hovering
-/// isn't part of the run.
+/// isn't really part of that run. `YH_PERF_FRONT=1` is the true test, and takes over the Mac
+/// while it runs: in front, filling the screen, moving the real pointer over the transcript.
 @MainActor
 final class PerfProbe: NSObject {
     private static var probe: PerfProbe?
@@ -158,6 +159,14 @@ final class PerfProbe: NSObject {
                 window.setFrameOrigin(NSPoint(x: screen.frame.minX, y: screen.frame.minY - window.frame.height + 2))
             }
             window.orderFrontRegardless()
+        } else {
+            // As you use it: in front, filling the screen, the real pointer over it.
+            if let screen = window.screen ?? NSScreen.main { window.setFrame(screen.visibleFrame, display: true) }
+            // Above everything: a window covered by another isn't drawn, and that flatters the
+            // numbers (occlusionState can still say it's visible).
+            window.level = .floating
+            NSApp.activate()
+            window.makeKeyAndOrderFront(nil)
         }
         let link = view.displayLink(target: self, selector: #selector(tick))
         let top = Float(window.screen?.maximumFramesPerSecond ?? 120)
@@ -182,6 +191,28 @@ final class PerfProbe: NSObject {
         var view = content.hitTest(NSPoint(x: content.bounds.midX + 120, y: content.bounds.midY))
         while let current = view, !(current is NSScrollView) { view = current.superview }
         view?.scrollWheel(with: event)
+    }
+
+    /// A pointer resting over the transcript, moved now and then: content moving under it is
+    /// a big part of what a real session does. `YH_PERF_POINTER=0` leaves it out.
+    private func keepPointerOverTranscript() {
+        guard env["YH_PERF_POINTER"] != "0", let window = mainWindow, let content = window.contentView else { return }
+        window.acceptsMouseMovedEvents = true
+        let front = env["YH_PERF_FRONT"] == "1"
+        Task { @MainActor in
+            while true {
+                let point = NSPoint(x: content.bounds.midX + CGFloat.random(in: -200...300), y: CGFloat.random(in: 150...(content.bounds.height - 100)))
+                if let event = NSEvent.mouseEvent(with: .mouseMoved, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                                  windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 0, pressure: 0) {
+                    window.sendEvent(event)
+                }
+                if front {
+                    let screen = window.convertPoint(toScreen: point)
+                    CGWarpMouseCursorPosition(CGPoint(x: screen.x, y: (NSScreen.screens.first?.frame.height ?? 0) - screen.y))
+                }
+                try? await Task.sleep(for: .seconds(front ? 2 : 0.5))
+            }
+        }
     }
 
     /// Scrolls for as long as the phase: long pulls up and back, as you do reading back.
@@ -238,12 +269,16 @@ final class PerfProbe: NSObject {
         while mainWindow == nil {
             try? await Task.sleep(for: .milliseconds(50))
             waited += 1
-            if waited % 200 == 0 {
-                log("no main window after \(waited / 20) s: \(NSApp.windows.map { "\(type(of: $0)) “\($0.frameAutosaveName)” “\($0.title)” visible \($0.isVisible)" })")
+            // SwiftUI sometimes doesn't name it. Named here, the rest of the probe (and the checks
+            // it uses) can find it.
+            if waited % 100 == 0, let window = NSApp.windows.first(where: { $0.isVisible && $0.canBecomeMain && !($0 is NSPanel) }) {
+                window.setFrameAutosaveName("main")
+                log("named the unnamed main window after \(waited / 20) s")
             }
         }
         guard startFrames() else { return log("FAIL: no window") }
         watchForFreezes()
+        keepPointerOverTranscript()
         let length = Double(env["YH_PERF_SECONDS"] ?? "") ?? 30
         let only = env["YH_PERF_PHASES"].map { Set($0.split(separator: ",").map(String.init)) }
         let huge = threads
@@ -318,6 +353,10 @@ final class PerfProbe: NSObject {
 
     private func record(_ name: String, seconds: Double, _ action: @escaping (CFTimeInterval) async -> Void) async {
         phaseName = name
+        if env["YH_PERF_FRONT"] == "1" {
+            NSApp.activate()
+            mainWindow?.makeKeyAndOrderFront(nil)
+        }
         log("start \(name)")
         frames = FrameStats()
         second = FrameStats()
@@ -375,6 +414,7 @@ final class PerfProbe: NSObject {
             "transcriptRows": rows,
             "conversationInk": ink,
             "windowVisible": mainWindow?.occlusionState.contains(.visible) ?? false,
+            "appActive": NSApp.isActive,
         ]
         results.append(result)
         log(String(format: "end %@: %.0f fps of %.0f, %.1f%% missed, worst %.0f ms, %d stalls >100ms, %d >250ms, %d >1s, main %.0f%%, process %.0f%%, %.0f MB (peak %.0f)",

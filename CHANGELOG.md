@@ -7,6 +7,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 ## [Unreleased]
 
 ### Fixed
+- Fixed freezes while Claude works in long threads with the pointer resting over the conversation, some lasting minutes. Copy buttons under messages now keep their space, so hovering doesn't move anything.
 - A background command's output no longer draws over its header and your attachments when you open it above the composer.
 - Many threads working at once stay much smoother: threads out of sight no longer redraw, and long threads no longer go through all their rows on every update.
 - Long threads give memory back after a turn ends.
