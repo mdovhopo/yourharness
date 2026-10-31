@@ -375,7 +375,7 @@ private struct TranscriptView: View {
             if let jump { self.jump(jump.direction) }
         }
         .overlay {
-            if showsLoading {
+            if showsLoading, thread.entries.isEmpty {
                 ProgressView("Loading conversation…")
                     .controlSize(.small)
                     .foregroundStyle(.secondary)

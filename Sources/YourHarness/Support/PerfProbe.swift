@@ -256,6 +256,14 @@ final class PerfProbe: NSObject {
         }
     }
 
+    /// `YH_PERF_SHOTS=1`: the first time each thing is on screen, a drawing of the window, for
+    /// checking how it looks. Costs frames: not for runs that measure.
+    private var shots: Set<String> = []
+    private func shot(_ name: String) {
+        guard env["YH_PERF_SHOTS"] == "1", shots.insert(name).inserted else { return }
+        WindowSnapshot.write(to: "\(folder)/\(name).png")
+    }
+
     @discardableResult private func nextFrame() async -> CFTimeInterval {
         await withCheckedContinuation { frameWaiters.append($0) }
     }
@@ -276,6 +284,8 @@ final class PerfProbe: NSObject {
         let wasLoaded = !thread.entries.isEmpty
         await click(wasLoaded ? "switch-loaded" : "switch-unloaded") { app.selectedThreadID = thread.id }
         guard !wasLoaded else { return }
+        try? await Task.sleep(for: .milliseconds(150))
+        shot("loading")
         // Then its history reading in, under a loading indicator.
         let start = CACurrentMediaTime()
         while thread.entries.isEmpty, CACurrentMediaTime() - start < 20 { await nextFrame() }
@@ -295,6 +305,7 @@ final class PerfProbe: NSObject {
             if case .work(let work)? = worked {
                 await click("expand-work") { thread.setWork(work, expanded: true) }
                 try? await Task.sleep(for: pause)
+                shot("expanded")
                 await click("collapse-work") { thread.setWork(work, expanded: false) }
                 try? await Task.sleep(for: pause)
             }
