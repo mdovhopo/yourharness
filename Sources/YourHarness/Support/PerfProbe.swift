@@ -1,6 +1,7 @@
 import AppKit
 import Darwin
 import QuartzCore
+import os
 
 /// `YH_PERF_PROBE=<folder>`: runs the app through the heaviest use there is, phase by phase,
 /// and records frames, CPU and memory: `<folder>/phases.json` per phase, `<folder>/seconds.csv`
@@ -61,6 +62,29 @@ final class PerfProbe: NSObject {
         }
     }
 
+    private static let lastFrame = OSAllocatedUnfairLock(initialState: CACurrentMediaTime())
+
+    /// Off the main thread: when frames stop for 3 s, samples the process, so a freeze says
+    /// where it is. Up to five a run.
+    private func watchForFreezes() {
+        let folder = folder, pid = ProcessInfo.processInfo.processIdentifier
+        Thread.detachNewThread {
+            var taken = 0
+            while taken < 5 {
+                Thread.sleep(forTimeInterval: 0.5)
+                guard CACurrentMediaTime() - Self.lastFrame.withLock({ $0 }) > 3 else { continue }
+                taken += 1
+                let sample = Process()
+                sample.executableURL = URL(fileURLWithPath: "/usr/bin/sample")
+                sample.arguments = ["\(pid)", "3", "-file", "\(folder)/freeze-\(taken).sample"]
+                try? sample.run()
+                sample.waitUntilExit()
+                FileHandle.standardError.write(Data("PERF freeze sampled: freeze-\(taken).sample\n".utf8))
+                Thread.sleep(forTimeInterval: 5)
+            }
+        }
+    }
+
     private func log(_ line: String) {
         FileHandle.standardError.write(Data("PERF \(line)\n".utf8))
     }
@@ -116,6 +140,7 @@ final class PerfProbe: NSObject {
             second.add(delta: delta, period: period)
         }
         lastTimestamp = link.timestamp
+        Self.lastFrame.withLock { $0 = CACurrentMediaTime() }
     }
 
     private var mainWindow: NSWindow? { NSApp.windows.first { $0.frameAutosaveName == "main" } }
@@ -198,6 +223,7 @@ final class PerfProbe: NSObject {
             }
         }
         guard startFrames() else { return log("FAIL: no window") }
+        watchForFreezes()
         let length = Double(env["YH_PERF_SECONDS"] ?? "") ?? 30
         let only = env["YH_PERF_PHASES"].map { Set($0.split(separator: ",").map(String.init)) }
         let huge = threads

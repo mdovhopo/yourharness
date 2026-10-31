@@ -32,7 +32,11 @@ final class ThreadModel: Identifiable {
         didSet { rowsChanged() }
     }
     private(set) var phase = Phase.idle {
-        didSet { if phase != oldValue { rowsChanged() } }
+        didSet {
+            guard phase != oldValue else { return }
+            rowsChanged()
+            if oldValue == .running { app.trimLoadedTranscriptsSoon() }
+        }
     }
     private(set) var pendingPermissions: [PermissionRequest] = [] {
         didSet {
@@ -61,6 +65,8 @@ final class ThreadModel: Identifiable {
     /// again on the next read, once, however many times the view asks.
     private(set) var rowsRevision = 0
     @ObservationIgnored var transcriptRowsCache: (revision: Int, rows: [TranscriptEntry], turnStarts: [Int])?
+    /// What `transcriptRowsCache` was worked out from, for adding to it.
+    @ObservationIgnored private var rowsBasis: (folded: Set<String>, entryCount: Int, firstEntry: TranscriptEntry, lastEntry: TranscriptEntry)?
     @ObservationIgnored var displayRowsCache: (revision: Int, rows: [TranscriptRow])?
 
     /// For changes the rows depend on that aren't to the list itself: a turn's end, a result.
@@ -434,8 +440,25 @@ final class ThreadModel: Identifiable {
     private var cachedTranscriptRows: (revision: Int, rows: [TranscriptEntry], turnStarts: [Int]) {
         let revision = rowsRevision
         if let cached = transcriptRowsCache, cached.revision == revision { return cached }
-        let rows = foldedPlanCalls.isEmpty ? entries : entries.filter { !foldedPlanCalls.contains($0.id) }
-        let cached = (revision, rows, Self.turnStarts(in: rows))
+        var rows: [TranscriptEntry], starts: [Int]
+        // Streaming only adds at the end: a long thread shouldn't go through all its rows for
+        // that on every change. The last turn is looked through again, its messages can change.
+        if let last = rowsBasis, let cached = transcriptRowsCache, last.folded == foldedPlanCalls,
+           last.entryCount <= entries.count, last.entryCount > 0,
+           entries[last.entryCount - 1] === last.lastEntry, entries[0] === last.firstEntry {
+            rows = foldedPlanCalls.isEmpty ? entries : cached.rows
+                + entries[last.entryCount...].filter { !foldedPlanCalls.contains($0.id) }
+            let from = cached.turnStarts.last ?? 0
+            starts = Array(cached.turnStarts.dropLast())
+            starts.append(contentsOf: (from..<rows.count).lazy.filter { rows[$0].startsTurn })
+        } else {
+            rows = foldedPlanCalls.isEmpty ? entries : entries.filter { !foldedPlanCalls.contains($0.id) }
+            starts = Self.turnStarts(in: rows)
+        }
+        rowsBasis = entries.first.flatMap { first in
+            entries.last.map { (foldedPlanCalls, entries.count, first, $0) }
+        }
+        let cached = (revision, rows, starts)
         transcriptRowsCache = cached
         return cached
     }

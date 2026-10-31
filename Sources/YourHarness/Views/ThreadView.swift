@@ -25,7 +25,12 @@ struct ThreadView: View {
 
     private var keptThreads: [ThreadModel] {
         let ids = recent.contains(thread.id) ? recent : [thread.id] + recent
-        return ids.compactMap { id in id == thread.id ? thread : app.threads.first { $0.id == id } }
+        return ids.compactMap { id in
+            if id == thread.id { return thread }
+            // One working out of sight would still draw all it does, and that adds up: it's made
+            // again when you come back.
+            return app.threads.first { $0.id == id && $0.phase != .running }
+        }
     }
 
     var body: some View {
@@ -291,9 +296,7 @@ private struct TranscriptView: View {
                 // animates there. Never animated itself: this runs as the content moves, and
                 // an animation started on each move stacks onto the last (SwiftUI combines
                 // them) until a frame takes seconds.
-                var still = Transaction()
-                still.disablesAnimations = true
-                withTransaction(still) { position.scrollTo(id: last, anchor: .bottom) }
+                scrollStill { $0.scrollTo(id: last, anchor: .bottom) }
             }
             var diagnostics = TranscriptDiagnostics.scroll[thread.id] ?? .init()
             diagnostics.offset = new.offset
@@ -329,7 +332,7 @@ private struct TranscriptView: View {
             if FollowLog.isOn { FollowLog.write("new last row, follow \(followsBottom)") }
             if followsBottom {
                 ownScroll.at = .now
-                position.scrollTo(id: id, anchor: .bottom)
+                scrollStill { $0.scrollTo(id: id, anchor: .bottom) }
             }
         }
         .modifier(ScrollProbe(position: $position))
@@ -414,11 +417,21 @@ private struct TranscriptView: View {
         if let anchor = thread.scrollAnchor { thread.showTurns(including: anchor) }
         if let anchor = thread.scrollAnchor, thread.transcriptDisplayRows.contains(where: { $0.id == anchor }) {
             followsBottom = false
-            position.scrollTo(id: anchor, anchor: .bottom)
+            scrollStill { $0.scrollTo(id: anchor, anchor: .bottom) }
         } else {
             followsBottom = true
-            if let last = lastRowID { position.scrollTo(id: last, anchor: .bottom) }
+            if let last = lastRowID { scrollStill { $0.scrollTo(id: last, anchor: .bottom) } }
         }
+    }
+
+    /// Without an animation, whichever one the change that led here came with: these run for
+    /// every new row, and animations started on top of each other stack up (SwiftUI combines
+    /// them) until one frame takes seconds, then tens of them.
+    private func scrollStill(_ move: (inout ScrollPosition) -> Void) {
+        var still = Transaction()
+        still.disablesAnimations = true
+        still.animation = nil
+        withTransaction(still) { move(&position) }
     }
 
     @State private var hasBeenShown = false
@@ -521,10 +534,10 @@ private struct TranscriptView: View {
                 Task { @MainActor in jump(.top) }
                 return
             }
-            position.scrollTo(edge: .top)
+            scrollStill { $0.scrollTo(edge: .top) }
         case .bottom:
             followsBottom = true
-            if let last = lastRowID { position.scrollTo(id: last, anchor: .bottom) }
+            if let last = lastRowID { scrollStill { $0.scrollTo(id: last, anchor: .bottom) } }
         }
     }
 

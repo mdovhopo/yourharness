@@ -98,7 +98,20 @@ struct WorkSummaryRow: View {
     }
 
     /// Counted when the row shows, not for every turn of the thread.
+    /// Worked out once per state of a turn: it parses every edit's input and asks the file
+    /// system for each folder, and scrolling makes these rows again and again.
+    @MainActor private static var detailsCache: [String: String] = [:]
+
     private var details: String {
+        let key = "\(work.turnID) \(work.entries.count) \(work.entries.last?.toolInput.utf8.count ?? 0) \(work.changedFiles?.count ?? -1)"
+        if let known = Self.detailsCache[key] { return known }
+        if Self.detailsCache.count > 2_000 { Self.detailsCache.removeAll() }
+        let worked = workedOutDetails
+        Self.detailsCache[key] = worked
+        return worked
+    }
+
+    private var workedOutDetails: String {
         var tools = 0, agents = 0
         var files = Set<String>()
         for entry in work.entries where entry.kind == .tool {

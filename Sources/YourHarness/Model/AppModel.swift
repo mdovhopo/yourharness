@@ -40,10 +40,32 @@ final class AppModel {
     private func noteViewed() {
         guard let selectedThreadID else { return }
         viewed = [selectedThreadID] + viewed.filter { $0 != selectedThreadID }
-        guard viewed.count > Self.loadedTranscripts else { return }
-        let stale = Set(viewed.dropFirst(Self.loadedTranscripts))
-        for thread in threads where stale.contains(thread.id) { thread.unloadTranscript() }
+        trimLoadedTranscripts()
         viewed = Array(viewed.prefix(Self.loadedTranscripts))
+    }
+
+    /// Keeps the last few you looked at, as many as the window keeps made, and more while
+    /// they're not huge. Threads that were only loaded to work in go once they're done.
+    private func trimLoadedTranscripts() {
+        var keep: Set<UUID> = []
+        var rows = 0
+        for id in viewed.prefix(Self.loadedTranscripts) {
+            rows += threads.first { $0.id == id }?.entries.count ?? 0
+            guard keep.count < 4 || rows <= Self.loadedRows else { break }
+            keep.insert(id)
+        }
+        for thread in threads where !keep.contains(thread.id) && thread.id != selectedThreadID && !thread.entries.isEmpty {
+            thread.unloadTranscript()
+        }
+    }
+    private static let loadedRows = 60_000
+
+    /// After a turn, when what it had waiting to save has gone.
+    func trimLoadedTranscriptsSoon() {
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(5))
+            self?.trimLoadedTranscripts()
+        }
     }
     /// When set, the detail pane shows this project's page instead of a thread: its repos and
     /// PRs, or its memory (`projectTab`).
