@@ -73,7 +73,6 @@ private struct InspectorToolbar: ViewModifier {
 
     func body(content: Content) -> some View {
         content.toolbar {
-            // Hidden, the sidebar leaves only its toggle in the toolbar.
             if hasThread, app.showsInspector {
                 ToolbarItem {
                     // Icons: five names don't fit a narrow sidebar.
@@ -93,7 +92,8 @@ private struct InspectorToolbar: ViewModifier {
             // The same items whichever tab shows: a toolbar that changes with the tab is rebuilt,
             // and fades, on every switch.
             ToolbarSpacer(.flexible)
-            // Only where there's a thread for it to show.
+            // Only where there's a thread for it to show. Closed, this goes too:
+            // `ShowRightSidebarButton` in the thread's toolbar takes its place.
             if hasThread {
                 ToolbarItem {
                     Button("Sidebar", systemImage: "sidebar.trailing") { app.setShowsInspector(!app.showsInspector) }

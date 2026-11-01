@@ -6,6 +6,9 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+### Fixed
+- The right sidebar's toolbar button stays when the sidebar is closed, so there's a visible way to open it again.
+
 ## [0.0.15] - 2026-11-01
 
 ### Changed

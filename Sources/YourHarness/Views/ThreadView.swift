@@ -104,6 +104,20 @@ private struct SelectedThreadToolbar: ViewModifier {
             ToolbarItem { SelectedThread { WorktreesItem(thread: $0) } }
             ToolbarItem { SelectedThread { ThreadTasksButton(thread: $0) } }
             ToolbarItem { SelectedThread { ThreadPullRequestsButton(thread: $0) } }
+            ToolbarItem { ShowRightSidebarButton() }
+        }
+    }
+}
+
+/// The way back to a closed right sidebar: the sidebar's own toggle (`InspectorToolbar`) goes
+/// with it, since a closed inspector makes none of its content.
+private struct ShowRightSidebarButton: View {
+    @Environment(AppModel.self) private var app
+
+    var body: some View {
+        if !app.showsInspector {
+            Button("Sidebar", systemImage: "sidebar.trailing") { app.setShowsInspector(true) }
+                .help("Show the side chat and sub-agents (⌥⌘0)")
         }
     }
 }
