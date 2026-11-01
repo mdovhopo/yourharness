@@ -15,7 +15,7 @@ scripts/bundle.sh   # → build/YourHarness.app
 
 ## Versions and releases
 
-The user's main app is `/Applications/YourHarness.app`, installed by releases; `build/YourHarness.app` is the development build. The version is in `VERSION` (semver, from 0.0.1). When a feature lands, add a line to CHANGELOG.md under **Unreleased**, in the reader's terms. `scripts/release.sh <version>` cuts a release (changelog, tag, push, install); the tag's workflow publishes the DMG on GitHub Releases.
+The user's main app is `/Applications/YourHarness.app`, installed by releases; `build/YourHarness.app` is the development build. The version is in `VERSION` (semver, from 0.0.1). When a feature lands, add a line to CHANGELOG.md under **Unreleased**, in the reader's terms. `scripts/release.sh <version>` cuts a release (changelog, tag, push, install); the tag's workflow publishes the DMG on GitHub Releases. It needs a clean tree: stash only the user's own uncommitted files, by name, around it, and put them back.
 
 Builds are signed with the app's own self-signed certificate, "YourHarness Self-Signed", so macOS sees every build as the same app and keeps the permissions it was given, and the updater only installs updates signed the same way. The certificate and its passwords live in `~/.yourharness/signing` (back it up: a lost certificate means a new identity, and macOS asking for everything again) and in the repo's `SIGNING_P12` / `SIGNING_P12_PASSWORD` secrets for the release workflow. `scripts/bundle.sh` signs with it when it's there, in a keychain of its own (`scripts/signing-keychain.sh`), never the login keychain, so signing never prompts; without it, ad hoc. Dev copies (`scripts/dev-app.sh`) are always ad hoc.
 
@@ -30,3 +30,31 @@ For manual runs, use a Dev copy (`scripts/dev-app.sh <dir>` makes `YourHarness D
 - **`HarnessCore` never imports SwiftUI/AppKit.** Adapters emit `AgentEvent`. The UI only consumes `AgentEvent`.
 - **CLI protocols change often.** Parsers ignore unknown event types and must never crash on new fields. When the protocol changes, capture a real session, sanitize it (no local paths or user config), and add it under `Tests/HarnessCoreTests/Fixtures/`.
 - **Never extract or reuse CLI credentials.** Always drive the official binary.
+
+## Keeping it fast
+
+Each of these comes from a freeze, a crash or a day lost; docs/performance.md has the evidence.
+
+**Where code goes.** Anything big, long-lived or updating many times a second goes in AppKit. What you open now and then stays in SwiftUI (Settings, Usage, Memory, pull request pages, popovers, sheets). Move more over because a measurement says so, not by default.
+
+- **Nothing that changes often in the window's hosting view.** A change there goes through the whole window's graph, toolbar included. Give it a hosting view of its own, as transcript rows have.
+- **No lazy stack with a scroll position for anything that streams.** Its heights are estimates and moving your place changes what it measures next, so it can go back and forth for good, inside SwiftUI's update, where nothing can stop it.
+- **`.toolbar` where it isn't re-evaluated.** In a body that updates often, it rebuilds its items and asks for another layout pass, which is how a loop in the transcript became a crash. Put it in a `ViewModifier` with only values that rarely change (`SelectedThreadToolbar`, `InspectorToolbar`). Likewise `RootView` must not read the selection, or every switch goes through the split view and all its columns (`DetailColumn`, `InspectorColumn`).
+- **Watch only what you use.** Reading `thread.entries` updates a view for every new row: `hasNoEntries` says what most views want. What's hidden makes nothing (the right sidebar built its panels on every switch while closed).
+- **`@Observable`, tested on Swift 6.4:** assigning an equal value tells nobody, `didSet` or not, so don't guard writes. In-place changes (`append`, `+=`) always tell, and so does any assignment of a type that isn't `Equatable`.
+- **Answer the click, then do the work.** The first frame shows the selection and the title; what's slow follows a run loop pass later (`TranscriptDeckView.show`, `InspectorColumn`). Time both: `PerfProbe` logs when a click was answered and when it was done.
+- **Nothing long on the main thread from a click or an event.** Histories load with `loadTranscriptSoon`, never `loadTranscriptIfNeeded`. Long tool output is looked through aside (`noteLinks`). Going through tens of thousands of rows yields now and then (`transcriptForReading`).
+- **Animate what fades, not rows.** Never start an animation from something that fires as content moves: `easeOut` can't merge, and SwiftUI stacks them until a frame takes minutes. Hovering never changes a row's height. What spins or pulses is Core Animation (`SpinningClaudeMark`, `pulsing`): a repeating SwiftUI animation or a `TimelineView` lays the window out on every frame.
+- **SwiftUI inside AppKit.** A row's hosting view has `safeAreaRegions = []`, or scrolled under the toolbar it's pushed down inside itself. In the detail column, `.ignoresSafeArea()` on all edges reaches under the sidebars: use `edges: .vertical`. A SwiftUI `ScrollView` in a row keeps wheel events it can't use, hence `TranscriptWheelRouter`. A wheel event moves the scroll view after `scrollWheel` returns, so don't judge where it went until later.
+
+## Testing performance
+
+- **First check the run is valid.** A window that can't be seen (display off, screen locked, another Space) gets few frames with the main thread idle, and clicks seem to take seconds. A day went to explaining "830 ms clicks" that were this, with `windowVisible: false` in `phases.json` all along. Trust no run with `INVALID` lines. `pmset -g log | grep "Display is turned"` shows the display going off; `lsappinfo front` says `loginwindow` when the screen is locked, and this Mac locks after about 20 idle minutes whatever `caffeinate` does, so check long runs at the end too.
+- **Look at the sequence, not the median.** `clicks.csv` and `seconds.csv` over time: frames gone with the main thread idle isn't the app, and a sudden step in click times isn't load building up. Medians hid both.
+- **Compare before believing.** A slowdown counts once a baseline build (`YH_APP_DIR`) doesn't show it under the same conditions; a fix counts once the same test fails without it, over several runs, as a freeze can be one run in three.
+- **Two failed patches on one mechanism: question the mechanism.** Telling the lazy stack to go to an edge, a row, a point each just changed how it froze (the point froze for good). Replacing it took less time than the patches had.
+- **Test what you assume about a framework** with a small program before building on it or writing it down. Guards against same-value `@Observable` writes shipped with a comment explaining them, and a 30-second test showed they did nothing.
+- **Widen the test before trusting it.** The crash only showed once the probe went beyond six kinds of click. Add new user actions to `everything` and `chaos` in `PerfProbe`, and run `stream-all-chaos` on the full preset before a release.
+- **Probes take the real path.** A wheel event handed straight to the list hid the code block that would have swallowed it. Go through what a real event goes through, or say in the probe what it skips.
+- **Numbers don't see layout.** Rows clipped under about 876 pt with every check passing. After layout changes, look at what `YH_NAV_PROBE` draws at narrow widths and with the right sidebar open.
+- **A frozen run never exits.** `perf-run.sh` has no time limit: run long ones in the background and watch for `PERF freeze` lines. `YH_PERF_SECONDS` applies to every phase, `settled` included. Dev copies share a saved window frame: `perf-run.sh` clears it, other runs don't, so `defaults delete com.mdovhopo.yourharness.dev "NSWindow Frame main"` before comparing layouts.

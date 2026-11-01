@@ -76,9 +76,8 @@ final class TranscriptDeckView: NSView {
 
     override var isFlipped: Bool { true }
 
-    // Resized (the window, the right sidebar opening), it has no constraints to tell AppKit to ask.
-    override func setFrameSize(_ newSize: NSSize) {
-        super.setFrameSize(newSize)
+    override func layout() {
+        super.layout()
         current?.host.frame = bounds
     }
 

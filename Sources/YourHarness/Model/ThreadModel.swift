@@ -31,7 +31,7 @@ final class ThreadModel: Identifiable {
     private(set) var entries: [TranscriptEntry] = [] {
         didSet {
             rowsChanged()
-            if entries.isEmpty != hasNoEntries { hasNoEntries = entries.isEmpty }
+            hasNoEntries = entries.isEmpty
         }
     }
     /// For what only cares about that: watching `entries` updates a view for every new row.
@@ -593,7 +593,7 @@ final class ThreadModel: Identifiable {
     }
 
     func markRead() {
-        if hasUnread { hasUnread = false }
+        hasUnread = false
     }
 
     // MARK: - Actions
@@ -928,9 +928,8 @@ final class ThreadModel: Identifiable {
             app.save()
 
         case .status(let status):
-            if status == "requesting" { setRunning() }
-            let doing = status == "compacting" ? "Compacting the conversation…" : nil
-            if activity != doing { activity = doing }
+            if status == "requesting" { phase = .running }
+            activity = status == "compacting" ? "Compacting the conversation…" : nil
 
         case .commandOutput(let text):
             entries.append(TranscriptEntry(kind: .commandOutput, text: text))
@@ -978,7 +977,7 @@ final class ThreadModel: Identifiable {
         case .blockStarted(let ref, let kind):
             // Subagent internals (non-nil parent) get a nested view later; skip for now.
             guard ref.parentToolUseID == nil else { return }
-            setRunning()
+            phase = .running
             streamedMessageIDs.insert(ref.messageID)
             let entry: TranscriptEntry
             switch kind {
@@ -1138,7 +1137,7 @@ final class ThreadModel: Identifiable {
             app.updateRateLimit(info)
 
         case .contextUsage(let tokens):
-            if contextTokens != tokens { contextTokens = tokens }
+            contextTokens = tokens
 
         case .messageUsage(let usage):
             // Threads' sessions are in Claude Code's files, which the usage view reads; side
@@ -1212,12 +1211,6 @@ final class ThreadModel: Identifiable {
                 entries.append(.notice("Claude exited (code \(code)). \(detail)", style: .error))
             }
         }
-    }
-
-    /// Written only if it's news: setting it tells everything watching it, every row in the
-    /// sidebar included, and Claude's every step says it's running.
-    private func setRunning() {
-        if phase != .running { phase = .running }
     }
 
     /// What Claude is waiting for, in a notification.

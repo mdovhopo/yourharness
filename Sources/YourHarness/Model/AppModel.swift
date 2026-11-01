@@ -386,8 +386,7 @@ final class AppModel {
     private(set) var inspectorHasThread = false
 
     private func noteInspectorHasThread() {
-        let has = overviewProject == nil && selectedThread != nil
-        if has != inspectorHasThread { inspectorHasThread = has }
+        inspectorHasThread = overviewProject == nil && selectedThread != nil
     }
 
     func showInspector(_ panel: InspectorPanel) {

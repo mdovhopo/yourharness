@@ -102,17 +102,9 @@ final class TranscriptListView: NSView {
         ScrollProbe.runIfRequested(on: self)
     }
 
-    // Resized, it has no constraints to tell AppKit to ask.
-    override func setFrameSize(_ newSize: NSSize) {
-        let changed = newSize != frame.size
-        super.setFrameSize(newSize)
-        guard changed else { return }
-        scrollView.frame = bounds
-        needsLayout = true
-    }
-
     override func layout() {
         super.layout()
+        scrollView.frame = bounds
         update()
     }
 
@@ -498,11 +490,11 @@ final class TranscriptListView: NSView {
             let top = firstRow(endingBelow: y + topInset)
             above = earlier || slots[..<top].contains { $0.row.entry?.kind == .user }
         }
-        if place.isAtBottom != atBottom { place.isAtBottom = atBottom }
-        if place.isAtTop != atTop { place.isAtTop = atTop }
-        if place.isShort != short { place.isShort = short }
-        if place.hasMessageAbove != above { place.hasMessageAbove = above }
-        if place.hasEarlierTurns != earlier { place.hasEarlierTurns = earlier }
+        place.isAtBottom = atBottom
+        place.isAtTop = atTop
+        place.isShort = short
+        place.hasMessageAbove = above
+        place.hasEarlierTurns = earlier
         thread.isReadingBack = !followsEnd
 
         var visible: [String] = [], touched: [String] = []
