@@ -16,7 +16,8 @@ if pmset -g batt | grep -q "Battery Power" && [[ ${FORCE:-} != 1 ]]; then
     echo "On battery: plug in for a run worth comparing (FORCE=1 to run anyway)." >&2
     exit 2
 fi
-SEED="$ROOT/test-harness-root/extreme"
+# PERF_SEED: another seed, such as a smaller one made with scripts/preset.sh extreme <dir> 0.1.
+SEED="${PERF_SEED:-$ROOT/test-harness-root/extreme}"
 [[ -d $SEED && ${FRESH:-} != 1 ]] || "$ROOT/scripts/preset.sh" extreme
 # Moved into the database and indexed once, so runs measure use, not the upgrade.
 if [[ ! -f $SEED/.moved ]]; then

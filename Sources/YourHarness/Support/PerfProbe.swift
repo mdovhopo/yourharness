@@ -1,6 +1,7 @@
 import AppKit
 import Darwin
 import QuartzCore
+import SwiftUI
 import os
 
 /// `YH_PERF_PROBE=<folder>`: runs the app through the heaviest use there is, phase by phase,
@@ -43,6 +44,8 @@ final class PerfProbe: NSObject {
     private var frameWaiters: [CheckedContinuation<CFTimeInterval, Never>] = []
     /// How long each kind of click took to show on screen, in milliseconds.
     private var clicks: [String: [Double]] = [:]
+    private var clickLog = "phase,seconds_in,click,ms,main_cpu_ms\n"
+    private var phaseStart: CFTimeInterval = 0
 
     private init(app: AppModel, folder: String) {
         self.app = app
@@ -144,6 +147,14 @@ final class PerfProbe: NSObject {
         guard result == KERN_SUCCESS else { return 0 }
         return Double(info.user_time.seconds + info.system_time.seconds)
             + Double(info.user_time.microseconds + info.system_time.microseconds) / 1_000_000
+    }
+
+    private static func secondsSinceLaunch() -> Double {
+        var process = kinfo_proc(), size = MemoryLayout<kinfo_proc>.stride
+        var name = [CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()]
+        guard sysctl(&name, 4, &process, &size, nil, 0) == 0 else { return 0 }
+        let started = process.kp_proc.p_starttime
+        return Date().timeIntervalSince1970 - (Double(started.tv_sec) + Double(started.tv_usec) / 1_000_000)
     }
 
     private static func threadCount() -> Int {
@@ -296,13 +307,40 @@ final class PerfProbe: NSObject {
     /// Does what a click does, and times it until it has been on screen for a frame: the main
     /// thread free again after it, which is what a click feels like.
     private func click(_ label: String, _ action: () -> Void) async {
-        let start = CACurrentMediaTime()
+        let start = CACurrentMediaTime(), cpu = Self.threadCPU()
         action()
         await nextFrame()
         let shown = await nextFrame()
         let ms = (shown - start) * 1000
         clicks[label, default: []].append(ms)
-        if ms > 100 { log(String(format: "slow click %@: %.0f ms", label, ms)) }
+        let used = (Self.threadCPU() - cpu) * 1000
+        clickLog += String(format: "%@,%.1f,%@,%.0f,%.0f\n", phaseName, start - phaseStart, label, ms, used)
+        if ms > 100 { log(String(format: "slow click %@: %.0f ms, %.0f ms of it main thread, %.1f s into %@", label, ms, used, start - phaseStart, phaseName)) }
+    }
+
+    /// What it costs for a while after: a click that shows at once and then stalls is slow too.
+    /// Only for clicks that say so: the frames it waits for count as the pause between clicks.
+    private func aftermath(_ label: String, for seconds: Double = 0.7) async {
+        let end = CACurrentMediaTime() + seconds
+        var last = await nextFrame(), worst: CFTimeInterval = 0
+        while last < end {
+            let next = await nextFrame()
+            worst = max(worst, next - last)
+            last = next
+        }
+        clicks[label + " (worst frame after)", default: []].append(worst * 1000)
+    }
+
+    /// A key typed into whatever has the focus, as the keyboard sends it.
+    private func typed(_ character: Character) -> Bool {
+        guard let window = mainWindow else { return false }
+        for type in [NSEvent.EventType.keyDown, .keyUp] {
+            guard let event = NSEvent.keyEvent(with: type, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                               windowNumber: window.windowNumber, context: nil, characters: String(character),
+                                               charactersIgnoringModifiers: String(character), isARepeat: false, keyCode: 0) else { return false }
+            window.sendEvent(event)
+        }
+        return true
     }
 
     private func switchTo(_ thread: ThreadModel) async {
@@ -346,6 +384,122 @@ final class PerfProbe: NSObject {
             await click("new-thread") { app.newThreadInCurrentProject() }
             try? await Task.sleep(for: pause)
         }
+    }
+
+    /// Everything else you do in a day, in turn, for what `clicking` doesn't reach: typing, tabs,
+    /// search, jumping, resizing, the sidebar. `YH_PERF_ONLY=<a,b>` runs only those labels' groups.
+    private func everything(among list: [ThreadModel], until end: CFTimeInterval) async {
+        let pause: Duration = .milliseconds(Int(env["YH_PERF_PAUSE"] ?? "") ?? 500)
+        let only = env["YH_PERF_ONLY"].map { Set($0.split(separator: ",").map(String.init)) }
+        func wants(_ group: String) -> Bool { only?.contains(group) ?? true }
+        var index = 0
+        let ordinary = app.threads.first { !$0.title.hasPrefix("Huge") }
+        while CACurrentMediaTime() < end, !list.isEmpty {
+            index = (index + 1) % list.count
+            let thread = list[index]
+            await switchTo(thread)
+            try? await Task.sleep(for: pause)
+
+            if wants("type") {
+                // Whatever the keyboard reaches, it must be the composer.
+                var typedText = ""
+                for character in "fix the parser" {
+                    typedText.append(character)
+                    await click("type-key") { _ = typed(character) }
+                    try? await Task.sleep(for: .milliseconds(40))
+                }
+                if thread.draft != typedText { log("FAIL: typed \"\(typedText)\", the composer has \"\(thread.draft.prefix(40))\"") }
+                await click("clear-draft") { thread.draft = "" }
+                try? await Task.sleep(for: pause)
+            }
+            if wants("tabs") {
+                for panel in AppModel.InspectorPanel.allCases where panel != .browser {
+                    await click("tab-\(panel.rawValue)") { app.showInspector(panel) }
+                    await aftermath("tab-\(panel.rawValue)")
+                }
+                // And switching with it open, as you'd have it.
+                await switchTo(list[(index + 1) % list.count])
+                try? await Task.sleep(for: pause)
+                await switchTo(thread)
+                try? await Task.sleep(for: pause)
+                await click("inspector-close") { app.setShowsInspector(false) }
+                try? await Task.sleep(for: pause)
+            }
+            if wants("spotlight") {
+                await click("spotlight-open") { app.spotlight.open(app) }
+                try? await Task.sleep(for: pause)
+                await click("spotlight-type") { app.spotlight.query = "timezone" }
+                await aftermath("spotlight-type", for: 1.2)
+                await click("spotlight-close") { app.spotlight.close() }
+                try? await Task.sleep(for: pause)
+            }
+            if wants("find") {
+                await click("find-open") { thread.find.open() }
+                try? await Task.sleep(for: pause)
+                await click("find-type") { thread.find.query = "migration" }
+                await aftermath("find-type", for: 1.2)
+                await click("find-close") { thread.find.close() }
+                try? await Task.sleep(for: pause)
+            }
+            if wants("jump") {
+                await click("jump-previous") { thread.jumpToMessage(.previous) }
+                await aftermath("jump-previous")
+                await click("jump-top") { thread.jumpToMessage(.top) }
+                await aftermath("jump-top", for: 1.5)
+                await click("jump-bottom") { thread.jumpToMessage(.bottom) }
+                await aftermath("jump-bottom", for: 1.5)
+            }
+            if wants("sidebar"), let ordinary, let project = app.project(id: ordinary.projectID) {
+                await click("pin") { withAnimation(.snappy) { app.togglePinned(ordinary) } }
+                await aftermath("pin")
+                await click("unpin") { withAnimation(.snappy) { app.togglePinned(ordinary) } }
+                await aftermath("unpin")
+                await click("settle") { withAnimation(.snappy) { app.toggleSettled(ordinary) } }
+                await aftermath("settle")
+                await click("unsettle") { withAnimation(.snappy) { app.toggleSettled(ordinary) } }
+                await aftermath("unsettle")
+                await click("collapse") { withAnimation(.snappy(duration: 0.25)) { app.setCollapsed(true, for: project) } }
+                await aftermath("collapse")
+                await click("uncollapse") { withAnimation(.snappy(duration: 0.25)) { app.setCollapsed(false, for: project) } }
+                await aftermath("uncollapse")
+                app.selectedThreadID = thread.id
+                try? await Task.sleep(for: pause)
+            }
+            if wants("pages"), let project = app.project(id: thread.projectID) {
+                await click("memory-page") { app.showMemory(of: project) }
+                await aftermath("memory-page")
+                await click("back-to-thread") { app.selectedThreadID = thread.id }
+                await aftermath("back-to-thread")
+                await click("usage-open") { app.tokenUsage.open() }
+                await aftermath("usage-open", for: 1.2)
+                await click("usage-close") { app.tokenUsage.close() }
+                await aftermath("usage-close")
+            }
+            if wants("resize"), let window = mainWindow {
+                let frame = window.frame
+                // A live resize: every frame a little narrower, then back.
+                for step in Array(1...15) + Array((0...14).reversed()) {
+                    await click("resize-step") {
+                        window.setFrame(NSRect(x: frame.minX, y: frame.minY, width: frame.width - CGFloat(step) * 12, height: frame.height), display: true)
+                    }
+                }
+                try? await Task.sleep(for: pause)
+                if let split = Self.splitView(in: window.contentView), split.arrangedSubviews.count >= 2 {
+                    let left = split.arrangedSubviews[0].frame.width
+                    for step in Array(1...10) + Array((0...9).reversed()) {
+                        await click("sidebar-drag-step") { split.setPosition(left + CGFloat(step) * 8, ofDividerAt: 0) }
+                    }
+                }
+                try? await Task.sleep(for: pause)
+            }
+        }
+    }
+
+    private static func splitView(in view: NSView?) -> NSSplitView? {
+        guard let view else { return nil }
+        if let split = view as? NSSplitView { return split }
+        for child in view.subviews { if let found = splitView(in: child) { return found } }
+        return nil
     }
 
     /// Starts turns and waits until they're all really streaming: a send waits for its history to
@@ -394,6 +548,7 @@ final class PerfProbe: NSObject {
                 log("named the unnamed main window after \(waited / 20) s")
             }
         }
+        log(String(format: "launch: window after %.2f s", Self.secondsSinceLaunch()))
         guard startFrames() else { return log("FAIL: no window") }
         watchForFreezes()
         pingMainThread()
@@ -404,6 +559,9 @@ final class PerfProbe: NSObject {
         guard let first = huge.first else { return log("FAIL: no threads named Huge") }
         log("pid \(ProcessInfo.processInfo.processIdentifier), \(huge.count) huge threads, screen \(mainWindow?.screen?.maximumFramesPerSecond ?? 0) Hz, low power \(ProcessInfo.processInfo.isLowPowerModeEnabled)")
         app.selectedThreadID = first.id
+        await first.loadTranscriptSoon()
+        await nextFrame()
+        log(String(format: "launch: first huge transcript shown after %.2f s (%d rows)", Self.secondsSinceLaunch(), first.entries.count))
 
         let phases: [(String, (CFTimeInterval) async -> Void)] = [
             ("open-huge", { _ in
@@ -452,6 +610,13 @@ final class PerfProbe: NSObject {
                 let end = await self.startTurns(huge.count, length: length)
                 await self.clicking(among: huge, until: end)
             }),
+            ("idle-everything", { end in
+                await self.everything(among: huge, until: end)
+            }),
+            ("stream-all-everything", { _ in
+                let end = await self.startTurns(huge.count, length: length)
+                await self.everything(among: huge, until: end)
+            }),
             ("stream-all-elsewhere", { _ in
                 // All of it in threads you aren't looking at.
                 let other = self.app.threads.first { !$0.title.hasPrefix("Huge") }
@@ -489,6 +654,7 @@ final class PerfProbe: NSObject {
             clickReport[label] = ["count": sorted.count, "medianMs": median, "worstMs": worst]
             log(String(format: "click %@: %d times, median %.0f ms, worst %.0f ms", label, sorted.count, median, worst))
         }
+        FileManager.default.createFile(atPath: "\(folder)/clicks.csv", contents: Data(clickLog.utf8))
         FileManager.default.createFile(atPath: "\(folder)/clicks.json", contents: try? JSONSerialization.data(withJSONObject: clickReport, options: [.prettyPrinted, .sortedKeys]))
         log("DONE \(results.count) phases")
         if env["YH_PERF_QUIT"] == "1" { NSApp.terminate(nil) }
@@ -496,6 +662,7 @@ final class PerfProbe: NSObject {
 
     private func record(_ name: String, seconds: Double, _ action: @escaping (CFTimeInterval) async -> Void) async {
         phaseName = name
+        phaseStart = CACurrentMediaTime()
         Self.pingPhase.withLock { $0 = [] }
         if env["YH_PERF_FRONT"] == "1" {
             NSApp.activate()
