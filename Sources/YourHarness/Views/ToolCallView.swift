@@ -60,7 +60,7 @@ struct ToolPresentation {
 
 struct ToolCallView: View {
     let entry: TranscriptEntry
-    @State private var expanded = false
+    private var expanded: Bool { entry.isOpen }
     @Environment(\.findHighlight) private var findHighlight
     @Environment(ThreadModel.self) private var thread: ThreadModel?
 
@@ -69,9 +69,9 @@ struct ToolCallView: View {
         VStack(alignment: .leading, spacing: 0) {
             // A tap rather than a button, so the file's path in it can be a button of its own.
             header(presentation)
-                .onTapGesture { withAnimation(.snappy) { expanded.toggle() } }
+                .onTapGesture { withAnimation(.snappy) { entry.isOpen.toggle() } }
                 .accessibilityAddTraits(.isButton)
-                .accessibilityAction { withAnimation(.snappy) { expanded.toggle() } }
+                .accessibilityAction { withAnimation(.snappy) { entry.isOpen.toggle() } }
 
             // A command that's taking a while: what it printed last, as it goes.
             if let job = entry.job, job.isRunning, !job.isBackground, !expanded, let line = job.lastLine, !line.isEmpty {

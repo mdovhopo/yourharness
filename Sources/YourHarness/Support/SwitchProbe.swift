@@ -63,7 +63,7 @@ enum SwitchProbe {
         for _ in 0..<max(1, abs(points) / 40) {
             guard let cg = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: Int32(step), wheel2: 0, wheel3: 0) else { continue }
             cg.location = location
-            if let event = NSEvent(cgEvent: cg) { window.sendEvent(event) }
+            if let event = NSEvent(cgEvent: cg), let onward = TranscriptWheelRouter.handle(event, in: window) { window.sendEvent(onward) }
             try? await Task.sleep(for: .milliseconds(20))
         }
     }

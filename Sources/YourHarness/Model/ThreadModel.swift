@@ -29,12 +29,18 @@ final class ThreadModel: Identifiable {
     private(set) var contextTokens: Int?
     private(set) var contextWindow: Int?
     private(set) var entries: [TranscriptEntry] = [] {
-        didSet { rowsChanged() }
+        didSet {
+            rowsChanged()
+            if entries.isEmpty != hasNoEntries { hasNoEntries = entries.isEmpty }
+        }
     }
+    /// For what only cares about that: watching `entries` updates a view for every new row.
+    private(set) var hasNoEntries = true
     private(set) var phase = Phase.idle {
         didSet {
             guard phase != oldValue else { return }
             rowsChanged()
+            app.workingChanged()
             if oldValue == .running { app.trimLoadedTranscriptsSoon() }
         }
     }
@@ -368,6 +374,8 @@ final class ThreadModel: Identifiable {
             ?? app.contextWindow(forModel: app.claudeModel(for: effectiveModel)?.resolvedModel)
     }
 
+    var isTranscriptLoaded: Bool { transcriptLoaded }
+
     /// Right now, on this thread: for sending, steering and the like, which need it.
     func loadTranscriptIfNeeded() {
         guard !transcriptLoaded else { return }
@@ -423,7 +431,16 @@ final class ThreadModel: Identifiable {
     /// (newer than what's saved while Claude works), else read from the database without
     /// loading it here.
     func transcriptForReading() async -> [EntrySnapshot] {
-        if transcriptLoaded { return entries.map(\.snapshot) }
+        if transcriptLoaded {
+            // A little at a time: another thread's agent reading a long one shouldn't stop the window.
+            var snapshots: [EntrySnapshot] = []
+            snapshots.reserveCapacity(entries.count)
+            for (index, entry) in entries.enumerated() {
+                snapshots.append(entry.snapshot)
+                if index % 1024 == 1023 { await Task.yield() }
+            }
+            return snapshots
+        }
         let store = app.store, id = id
         return await Task.detached(priority: .userInitiated) { store.loadTranscript(id) }.value
     }
@@ -576,7 +593,7 @@ final class ThreadModel: Identifiable {
     }
 
     func markRead() {
-        hasUnread = false
+        if hasUnread { hasUnread = false }
     }
 
     // MARK: - Actions
@@ -911,8 +928,9 @@ final class ThreadModel: Identifiable {
             app.save()
 
         case .status(let status):
-            if status == "requesting" { phase = .running }
-            activity = status == "compacting" ? "Compacting the conversation…" : nil
+            if status == "requesting" { setRunning() }
+            let doing = status == "compacting" ? "Compacting the conversation…" : nil
+            if activity != doing { activity = doing }
 
         case .commandOutput(let text):
             entries.append(TranscriptEntry(kind: .commandOutput, text: text))
@@ -960,7 +978,7 @@ final class ThreadModel: Identifiable {
         case .blockStarted(let ref, let kind):
             // Subagent internals (non-nil parent) get a nested view later; skip for now.
             guard ref.parentToolUseID == nil else { return }
-            phase = .running
+            setRunning()
             streamedMessageIDs.insert(ref.messageID)
             let entry: TranscriptEntry
             switch kind {
@@ -1120,7 +1138,7 @@ final class ThreadModel: Identifiable {
             app.updateRateLimit(info)
 
         case .contextUsage(let tokens):
-            contextTokens = tokens
+            if contextTokens != tokens { contextTokens = tokens }
 
         case .messageUsage(let usage):
             // Threads' sessions are in Claude Code's files, which the usage view reads; side
@@ -1194,6 +1212,12 @@ final class ThreadModel: Identifiable {
                 entries.append(.notice("Claude exited (code \(code)). \(detail)", style: .error))
             }
         }
+    }
+
+    /// Written only if it's news: setting it tells everything watching it, every row in the
+    /// sidebar included, and Claude's every step says it's running.
+    private func setRunning() {
+        if phase != .running { phase = .running }
     }
 
     /// What Claude is waiting for, in a notification.
@@ -1442,6 +1466,8 @@ final class ThreadModel: Identifiable {
         expandedTurns.removeAll()
         rebuildPlan()
         app.store.forgetTranscript(id)
+        // Its rows are held by its views too, while they're made.
+        app.transcriptDeck.forget(id)
     }
 
     /// Saved now, not in a moment: an export reads the database.
@@ -1568,7 +1594,19 @@ final class ThreadModel: Identifiable {
 
     /// Notes PR and MR links in some text from the thread.
     private func noteLinks(in text: String) {
-        let found = PullRequestLink.find(in: text).map(\.url.absoluteString)
+        // A long output takes a while to look through, and they come by the dozen.
+        if text.utf8.count > 8_192 {
+            Task.detached(priority: .utility) { [weak self] in
+                let found = PullRequestLink.find(in: text).map(\.url.absoluteString)
+                guard !found.isEmpty else { return }
+                await self?.noteLinks(found)
+            }
+        } else {
+            noteLinks(PullRequestLink.find(in: text).map(\.url.absoluteString))
+        }
+    }
+
+    private func noteLinks(_ found: [String]) {
         guard !found.isEmpty else { return }
         let merged = Self.mergeLinks(found, into: pullRequestLinks)
         if merged != pullRequestLinks { pullRequestLinks = merged }

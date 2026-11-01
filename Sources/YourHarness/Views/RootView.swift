@@ -19,40 +19,22 @@ struct RootView: View {
                 .takesWindowHeight()
                 .navigationSplitViewColumnWidth(min: 220, ideal: 270, max: 380)
         } detail: {
-            ZStack {
-                // Switching is instant, as in Mail or Messages: no crossfade to wait through.
-                if let project = app.overviewProject {
-                    ProjectPage(project: project)
-                        .id(project.id)
-                        // Narrower than it would like, it's cut at the column's edge rather
-                        // than drawn over the sidebar.
-                        .clipped()
-                } else if let thread = app.selectedThread {
-                    // Not keyed on the thread: it keeps its composer and toolbar, and only its
-                    // transcript is made anew.
-                    ThreadView(thread: thread)
-                } else {
-                    EmptyDetailView()
+            DetailColumn()
+                // As narrow as the window lets it be, down to a floor of its own: a page's content
+                // would set the window's smallest width otherwise (Memory's made it 1,300 pt, past
+                // the edge of a narrow screen).
+                .frame(minWidth: 280, maxWidth: .infinity)
+                .takesWindowHeight()
+                // One surface under every view, so switching swaps content, not the canvas.
+                .canvasBackground()
+                // Everything in the right sidebar belongs to a thread: on a project's overview it has
+                // nothing to show, so it steps aside, and comes back as it was with a thread.
+                .inspector(isPresented: Binding(get: { showsInspector },
+                                                set: { if app.inspectorHasThread { app.setShowsInspector($0) } })) {
+                    InspectorColumn()
+                        .takesWindowHeight()
+                        .inspectorColumnWidth(min: 300, ideal: 380, max: 960)
                 }
-            }
-            // As narrow as the window lets it be, down to a floor of its own: a page's content
-            // would set the window's smallest width otherwise (Memory's made it 1,300 pt, past
-            // the edge of a narrow screen).
-            .frame(minWidth: 280, maxWidth: .infinity)
-            .takesWindowHeight()
-            // One surface under every view, so switching swaps content, not the canvas.
-            .canvasBackground()
-            .transaction(value: app.selectedThreadID) { $0.animation = nil }
-            .transaction(value: app.overviewProjectID) { $0.animation = nil }
-            .transaction(value: app.projectTab) { $0.animation = nil }
-            // Everything in the right sidebar belongs to a thread: on a project's overview it has
-            // nothing to show, so it steps aside, and comes back as it was with a thread.
-            .inspector(isPresented: Binding(get: { showsInspector },
-                                            set: { if app.inspectorHasThread { app.setShowsInspector($0) } })) {
-                ThreadInspector(thread: app.inspectorHasThread ? app.selectedThread : nil)
-                    .takesWindowHeight()
-                    .inspectorColumnWidth(min: 300, ideal: 380, max: 960)
-            }
         }
         .overlay {
             if app.spotlight.isOpen {
@@ -124,6 +106,42 @@ struct RootView: View {
 
     private var showsInspector: Bool {
         isOnScreen && app.showsInspector && app.inspectorHasThread
+    }
+}
+
+/// What's in the detail column, by itself: going to another thread updates this, not the split
+/// view around it, which would go through all its columns.
+private struct DetailColumn: View {
+    @Environment(AppModel.self) private var app
+
+    var body: some View {
+        ZStack {
+            // Switching is instant, as in Mail or Messages: no crossfade to wait through.
+            if let project = app.overviewProject {
+                ProjectPage(project: project)
+                    .id(project.id)
+                    // Narrower than it would like, it's cut at the column's edge rather
+                    // than drawn over the sidebar.
+                    .clipped()
+            } else if let thread = app.selectedThread {
+                // Not keyed on the thread: it keeps its composer and toolbar, and only its
+                // transcript is swapped.
+                ThreadView(thread: thread)
+            } else {
+                EmptyDetailView()
+            }
+        }
+        .transaction(value: app.selectedThreadID) { $0.animation = nil }
+        .transaction(value: app.overviewProjectID) { $0.animation = nil }
+        .transaction(value: app.projectTab) { $0.animation = nil }
+    }
+}
+
+private struct InspectorColumn: View {
+    @Environment(AppModel.self) private var app
+
+    var body: some View {
+        ThreadInspector(thread: app.inspectorHasThread ? app.selectedThread : nil)
     }
 }
 

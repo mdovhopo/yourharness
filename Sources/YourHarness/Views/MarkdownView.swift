@@ -12,6 +12,8 @@ extension EnvironmentValues {
     @Entry var issueLinker = IssueLinker(repos: [], openPullRequests: [])
     /// Turns paths into links to the thread's files.
     @Entry var fileLinker = FileLinker.empty
+    /// The transcript a row is in, when it's in one.
+    @Entry var transcriptRows: TranscriptRowContext?
 }
 
 /// What text is linked with: PR and issue references, and the thread's files.
@@ -26,6 +28,7 @@ struct StreamingMarkdown: View {
     let entry: TranscriptEntry
     /// Set while revealing; nil shows the entry's full text.
     @State private var shown: String?
+    @Environment(\.transcriptRows) private var rows
 
     var body: some View {
         // `??` only reads `entry.text` when not revealing, so deltas don't re-render this
@@ -44,7 +47,20 @@ struct StreamingMarkdown: View {
         var count = entry.text.count
         shown = entry.text
         var last = ContinuousClock.now
+        var wasParked = false
         while !Task.isCancelled {
+            // Its transcript parked: nobody's looking, and twenty of these add up. It catches up
+            // at once when it's back.
+            if rows?.isShown == false {
+                wasParked = true
+                try? await Task.sleep(for: .milliseconds(250))
+                continue
+            }
+            if wasParked {
+                wasParked = false
+                count = entry.text.count
+                shown = entry.text
+            }
             // 30 Hz reads as smooth for word-sized steps and halves the layout work of 60.
             try? await Task.sleep(for: .milliseconds(33))
             let full = entry.text

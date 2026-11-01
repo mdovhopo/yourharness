@@ -39,12 +39,12 @@ final class PerfProbe: NSObject {
     private var second = FrameStats()
     private var phaseName = "launch"
     private var results: [[String: Any]] = []
-    private var csv = "elapsed,phase,fps,worst_ms,main_cpu_pct,process_cpu_pct,footprint_mb,threads\n"
+    private var csv = "elapsed,phase,fps,worst_ms,main_cpu_pct,process_cpu_pct,footprint_mb,threads,window_visible,app_active\n"
     private let started = CACurrentMediaTime()
     private var frameWaiters: [CheckedContinuation<CFTimeInterval, Never>] = []
     /// How long each kind of click took to show on screen, in milliseconds.
     private var clicks: [String: [Double]] = [:]
-    private var clickLog = "phase,seconds_in,click,ms,main_cpu_ms\n"
+    private var clickLog = "phase,seconds_in,click,ms,main_cpu_ms,answered_ms,rows_made,rows_ms\n"
     private var phaseStart: CFTimeInterval = 0
 
     private init(app: AppModel, folder: String) {
@@ -190,6 +190,48 @@ final class PerfProbe: NSObject {
         Self.lastFrame.withLock { $0 = CACurrentMediaTime() }
     }
 
+    /// `YH_ROW_CHECK=1`: every half a second, that rows are the height they say, which is what
+    /// keeps them from drawing over each other. Being a moment behind is fine, a while isn't.
+    private func checkRowHeights() {
+        guard env["YH_ROW_CHECK"] == "1" else { return }
+        Task { @MainActor in
+            var lastBad: Set<String> = []
+            var reported = 0
+            while true {
+                try? await Task.sleep(for: .milliseconds(500))
+                let bad = app.transcriptDeck.currentList?.rowsOffTheirHeight() ?? []
+                let still = bad.filter { lastBad.contains($0) }
+                if !still.isEmpty, reported < 40 {
+                    reported += 1
+                    log("FAIL: rows off their height for half a second: \(still.prefix(6))")
+                }
+                lastBad = Set(bad)
+            }
+        }
+    }
+
+    /// Frames stop by themselves when the window can't be seen, with the app idle: says so, so
+    /// that a hand on the Mac or another Space isn't taken for a freeze.
+    private func watchWhatsOutsideTheApp() {
+        let center = NotificationCenter.default, workspace = NSWorkspace.shared.notificationCenter
+        center.addObserver(forName: NSWindow.didChangeOcclusionStateNotification, object: mainWindow, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.log("OUTSIDE window visible: \(self?.mainWindow?.occlusionState.contains(.visible) == true)") }
+        }
+        center.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.log("OUTSIDE app no longer active") }
+        }
+        workspace.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.log("OUTSIDE the Space changed") }
+        }
+        workspace.addObserver(forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.log("OUTSIDE the screen slept") }
+        }
+        workspace.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] note in
+            let name = (note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.localizedName ?? "?"
+            MainActor.assumeIsolated { self?.log("OUTSIDE \(name) came to the front") }
+        }
+    }
+
     private var mainWindow: NSWindow? { NSApp.windows.first { $0.frameAutosaveName == "main" } }
 
     private func startFrames() -> Bool {
@@ -210,8 +252,11 @@ final class PerfProbe: NSObject {
             // Above everything: a window covered by another isn't drawn, and that flatters the
             // numbers (occlusionState can still say it's visible).
             window.level = .floating
+            // On whichever Space you're on, full screen or not: on another it can't be seen.
+            window.collectionBehavior.formUnion([.canJoinAllSpaces, .fullScreenAuxiliary])
             NSApp.activate()
             window.makeKeyAndOrderFront(nil)
+            window.orderFrontRegardless()
         }
         let link = view.displayLink(target: self, selector: #selector(tick))
         let top = Float(window.screen?.maximumFramesPerSecond ?? 120)
@@ -227,14 +272,15 @@ final class PerfProbe: NSObject {
         app.threads.filter { $0.title.hasPrefix("Huge") }.sorted { $0.title < $1.title }
     }
 
-    /// Straight to the scroll view under the middle of the transcript: the window is below
-    /// the screen, where an event's location wouldn't find it.
+    /// Straight to the scroll view of the transcript: the window is below the screen, where an
+    /// event's location wouldn't find it.
     private func wheel(_ points: Int32) {
         guard let content = mainWindow?.contentView else { return }
         guard let cg = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: points, wheel2: 0, wheel3: 0),
               let event = NSEvent(cgEvent: cg) else { return }
         var view = content.hitTest(NSPoint(x: content.bounds.midX + 120, y: content.bounds.midY))
-        while let current = view, !(current is NSScrollView) { view = current.superview }
+        // Past a code block's own scroll view, which is for going sideways.
+        while let current = view, !(current is TranscriptScrollView) { view = current.superview }
         view?.scrollWheel(with: event)
     }
 
@@ -295,6 +341,7 @@ final class PerfProbe: NSObject {
     /// `YH_PERF_SHOTS=1`: the first time each thing is on screen, a drawing of the window, for
     /// checking how it looks. Costs frames: not for runs that measure.
     private var shots: Set<String> = []
+    private var switches = 0
     private func shot(_ name: String) {
         guard env["YH_PERF_SHOTS"] == "1", shots.insert(name).inserted else { return }
         WindowSnapshot.write(to: "\(folder)/\(name).png")
@@ -308,13 +355,17 @@ final class PerfProbe: NSObject {
     /// thread free again after it, which is what a click feels like.
     private func click(_ label: String, _ action: () -> Void) async {
         let start = CACurrentMediaTime(), cpu = Self.threadCPU()
+        let rowsBefore = TranscriptListView.rowsMade, mountBefore = TranscriptListView.secondsMaking
         action()
-        await nextFrame()
+        // The first frame answers the click; rows being made can follow it.
+        let answered = await nextFrame()
         let shown = await nextFrame()
         let ms = (shown - start) * 1000
         clicks[label, default: []].append(ms)
+        clicks[label + " (answered)", default: []].append((answered - start) * 1000)
         let used = (Self.threadCPU() - cpu) * 1000
-        clickLog += String(format: "%@,%.1f,%@,%.0f,%.0f\n", phaseName, start - phaseStart, label, ms, used)
+        clickLog += String(format: "%@,%.1f,%@,%.0f,%.0f,%.0f,%d,%.0f\n", phaseName, start - phaseStart, label, ms, used, (answered - start) * 1000,
+                           TranscriptListView.rowsMade - rowsBefore, (TranscriptListView.secondsMaking - mountBefore) * 1000)
         if ms > 100 { log(String(format: "slow click %@: %.0f ms, %.0f ms of it main thread, %.1f s into %@", label, ms, used, start - phaseStart, phaseName)) }
     }
 
@@ -346,6 +397,11 @@ final class PerfProbe: NSObject {
     private func switchTo(_ thread: ThreadModel) async {
         let wasLoaded = !thread.entries.isEmpty
         await click(wasLoaded ? "switch-loaded" : "switch-unloaded") { app.selectedThreadID = thread.id }
+        if switches < 3 {
+            switches += 1
+            try? await Task.sleep(for: .milliseconds(300))
+            shot("switched-\(switches)")
+        }
         guard !wasLoaded else { return }
         try? await Task.sleep(for: .milliseconds(150))
         shot("loading")
@@ -449,6 +505,23 @@ final class PerfProbe: NSObject {
                 await click("jump-bottom") { thread.jumpToMessage(.bottom) }
                 await aftermath("jump-bottom", for: 1.5)
             }
+            if wants("bigtool"), case .work(let work)? = thread.transcriptDisplayRows.last(where: { if case .work = $0 { true } else { false } }) {
+                // The biggest output there is, opened.
+                await click("expand-work") { thread.setWork(work, expanded: true) }
+                await aftermath("expand-work")
+                if let big = work.entries.filter({ $0.kind == .tool }).max(by: { ($0.toolResult?.utf8.count ?? 0) < ($1.toolResult?.utf8.count ?? 0) }) {
+                    app.transcriptDeck.currentList?.show(rowID: big.id)
+                    try? await Task.sleep(for: pause)
+                    await click("open-big-tool") { big.isOpen = true }
+                    await aftermath("open-big-tool")
+                    await click("close-big-tool") { big.isOpen = false }
+                    await aftermath("close-big-tool")
+                }
+                await click("collapse-work") { thread.setWork(work, expanded: false) }
+                await aftermath("collapse-work")
+                await click("jump-bottom") { thread.jumpToMessage(.bottom) }
+                try? await Task.sleep(for: pause)
+            }
             if wants("sidebar"), let ordinary, let project = app.project(id: ordinary.projectID) {
                 await click("pin") { withAnimation(.snappy) { app.togglePinned(ordinary) } }
                 await aftermath("pin")
@@ -492,6 +565,121 @@ final class PerfProbe: NSObject {
                 }
                 try? await Task.sleep(for: pause)
             }
+        }
+    }
+
+    /// Anything, in any order, as fast as a hand could: what a list of clicks doesn't think of.
+    /// Each action is logged before it's done, so a crash says what led to it, and
+    /// `YH_PERF_CHAOS_SEED=<n>` plays a run again.
+    private func chaos(among list: [ThreadModel], until end: CFTimeInterval) async {
+        let seed = env["YH_PERF_CHAOS_SEED"].flatMap(UInt64.init) ?? UInt64(Date().timeIntervalSince1970)
+        var random = ChaosRandom(state: seed | 1)
+        log("chaos seed \(seed)")
+        let ordinary = app.threads.filter { !$0.title.hasPrefix("Huge") }
+        let actions: [(String, Int, (ThreadModel) async -> Void)] = [
+            ("switch", 12, { [self] _ in
+                var pick = ChaosRandom(state: random.next())
+                await switchTo(list[Int(pick.next() % UInt64(list.count))])
+            }),
+            ("switch-ordinary", 2, { [self] _ in
+                if let other = ordinary.randomElement() { await switchTo(other) }
+            }),
+            ("jump-top", 3, { [self] thread in await click("jump-top") { thread.jumpToMessage(.top) } }),
+            ("jump-bottom", 3, { [self] thread in await click("jump-bottom") { thread.jumpToMessage(.bottom) } }),
+            ("jump-previous", 4, { [self] thread in await click("jump-previous") { thread.jumpToMessage(.previous) } }),
+            ("jump-next", 3, { [self] thread in await click("jump-next") { thread.jumpToMessage(.next) } }),
+            ("wheel-up", 6, { [self] _ in
+                for _ in 0..<30 { wheel(60); try? await Task.sleep(for: .milliseconds(8)) }
+            }),
+            ("wheel-down", 4, { [self] _ in
+                for _ in 0..<30 { wheel(-60); try? await Task.sleep(for: .milliseconds(8)) }
+            }),
+            ("wheel-fling", 2, { [self] _ in
+                for _ in 0..<40 { wheel(400); try? await Task.sleep(for: .milliseconds(8)) }
+            }),
+            ("expand-work", 4, { [self] thread in
+                if case .work(let work)? = thread.transcriptDisplayRows.last(where: { if case .work = $0 { true } else { false } }) {
+                    await click(work.isExpanded ? "collapse-work" : "expand-work") { thread.setWork(work, expanded: !work.isExpanded) }
+                }
+            }),
+            ("earlier-turns", 1, { [self] thread in await click("earlier-turns") { thread.showEarlierTurns() } }),
+            ("inspector", 3, { [self] _ in let shows = app.showsInspector; await click("inspector") { app.setShowsInspector(!shows) } }),
+            ("tab", 3, { [self] _ in
+                let panels = AppModel.InspectorPanel.allCases.filter { $0 != .browser }
+                if let panel = panels.randomElement() { await click("tab-\(panel.rawValue)") { app.showInspector(panel) } }
+            }),
+            ("spotlight", 2, { [self] _ in
+                await click("spotlight-open") { app.spotlight.open(app) }
+                try? await Task.sleep(for: .milliseconds(120))
+                await click("spotlight-type") { app.spotlight.query = "timezone" }
+                try? await Task.sleep(for: .milliseconds(200))
+                await click("spotlight-close") { app.spotlight.close() }
+            }),
+            ("find", 2, { [self] thread in
+                await click("find-open") { thread.find.open() }
+                await click("find-type") { thread.find.query = "migration" }
+                try? await Task.sleep(for: .milliseconds(250))
+                await click("find-next") { thread.find.step(1) }
+                try? await Task.sleep(for: .milliseconds(150))
+                await click("find-close") { thread.find.close() }
+            }),
+            ("type", 3, { [self] thread in
+                for character in "go on" { await click("type-key") { _ = typed(character) }; try? await Task.sleep(for: .milliseconds(30)) }
+                thread.draft = ""
+            }),
+            ("new-thread", 2, { [self] _ in await click("new-thread") { app.newThreadInCurrentProject() } }),
+            ("project-page", 2, { [self] thread in
+                if let project = app.project(id: thread.projectID) { await click("project-page") { app.showMemory(of: project) } }
+                try? await Task.sleep(for: .milliseconds(150))
+                await click("back-to-thread") { app.selectedThreadID = thread.id }
+            }),
+            ("usage", 1, { [self] _ in
+                await click("usage-open") { app.tokenUsage.open() }
+                try? await Task.sleep(for: .milliseconds(200))
+                await click("usage-close") { app.tokenUsage.close() }
+            }),
+            ("sidebar-order", 2, { [self] _ in
+                guard let other = ordinary.randomElement(), let project = app.project(id: other.projectID) else { return }
+                await click("pin") { withAnimation(.snappy) { app.togglePinned(other) } }
+                await click("settle") { withAnimation(.snappy) { app.toggleSettled(other) } }
+                await click("collapse") { withAnimation(.snappy(duration: 0.25)) { app.setCollapsed(true, for: project) } }
+                try? await Task.sleep(for: .milliseconds(100))
+                await click("uncollapse") { withAnimation(.snappy(duration: 0.25)) { app.setCollapsed(false, for: project) } }
+                await click("unsettle") { withAnimation(.snappy) { app.toggleSettled(other) } }
+                await click("unpin") { withAnimation(.snappy) { if other.isPinned { app.togglePinned(other) } } }
+            }),
+            ("resize", 2, { [self] _ in
+                guard let window = mainWindow else { return }
+                let frame = window.frame
+                for step in [1, 3, 5, 7, 5, 3, 1, 0] {
+                    await click("resize-step") { window.setFrame(NSRect(x: frame.minX, y: frame.minY, width: frame.width - CGFloat(step) * 30, height: frame.height), display: true) }
+                }
+            }),
+            ("stop", 1, { [self] thread in await click("stop") { thread.stop() } }),
+            ("send", 2, { [self] thread in await click("send") { thread.send("PERF seconds=8 rate=1") } }),
+        ]
+        let total = actions.reduce(0) { $0 + $1.1 }
+        var count = 0
+        while CACurrentMediaTime() < end {
+            var roll = Int(random.next() % UInt64(total))
+            guard let action = actions.first(where: { roll -= $0.1; return roll < 0 }) else { continue }
+            guard let thread = app.selectedThread ?? list.first else { continue }
+            count += 1
+            log("chaos \(count) \(action.0) in \(thread.title)")
+            if app.visibleThreadID == nil { app.selectedThreadID = thread.id }
+            await action.2(thread)
+            try? await Task.sleep(for: .milliseconds(Int(random.next() % 400)))
+        }
+        log("chaos done, \(count) actions")
+    }
+
+    private struct ChaosRandom: RandomNumberGenerator {
+        var state: UInt64
+        mutating func next() -> UInt64 {
+            state ^= state << 13
+            state ^= state >> 7
+            state ^= state << 17
+            return state
         }
     }
 
@@ -550,6 +738,8 @@ final class PerfProbe: NSObject {
         }
         log(String(format: "launch: window after %.2f s", Self.secondsSinceLaunch()))
         guard startFrames() else { return log("FAIL: no window") }
+        watchWhatsOutsideTheApp()
+        checkRowHeights()
         watchForFreezes()
         pingMainThread()
         keepPointerOverTranscript()
@@ -617,6 +807,13 @@ final class PerfProbe: NSObject {
                 let end = await self.startTurns(huge.count, length: length)
                 await self.everything(among: huge, until: end)
             }),
+            ("idle-chaos", { end in
+                await self.chaos(among: huge, until: end)
+            }),
+            ("stream-all-chaos", { _ in
+                let end = await self.startTurns(huge.count, length: length)
+                await self.chaos(among: huge, until: end)
+            }),
             ("stream-all-elsewhere", { _ in
                 // All of it in threads you aren't looking at.
                 let other = self.app.threads.first { !$0.title.hasPrefix("Huge") }
@@ -667,6 +864,7 @@ final class PerfProbe: NSObject {
         if env["YH_PERF_FRONT"] == "1" {
             NSApp.activate()
             mainWindow?.makeKeyAndOrderFront(nil)
+            mainWindow?.orderFrontRegardless()
         }
         log("start \(name)")
         frames = FrameStats()
@@ -675,6 +873,7 @@ final class PerfProbe: NSObject {
         let mainStart = Self.threadCPU(), processStart = Self.processCPU(), memoryStart = Self.footprintMB()
         var peak = memoryStart
         var lastWall = wallStart, lastMain = mainStart, lastProcess = processStart
+        var hiddenSeconds = 0
 
         let sampler = Task { @MainActor in
             while !Task.isCancelled {
@@ -682,8 +881,11 @@ final class PerfProbe: NSObject {
                 let now = CACurrentMediaTime(), main = Self.threadCPU(), process = Self.processCPU(), memory = Self.footprintMB()
                 peak = max(peak, memory)
                 let wall = max(0.001, now - lastWall)
-                let row = String(format: "%.1f,%@,%.0f,%.1f,%.0f,%.0f,%.0f,%d\n", now - self.started, name, Double(self.second.vsyncs - self.second.missed) / wall,
-                                 self.second.worst * 1000, (main - lastMain) / wall * 100, (process - lastProcess) / wall * 100, memory, Self.threadCount())
+                let visible = self.mainWindow?.occlusionState.contains(.visible) ?? false
+                if !visible { hiddenSeconds += 1 }
+                let row = String(format: "%.1f,%@,%.0f,%.1f,%.0f,%.0f,%.0f,%d,%d,%d\n", now - self.started, name, Double(self.second.vsyncs - self.second.missed) / wall,
+                                 self.second.worst * 1000, (main - lastMain) / wall * 100, (process - lastProcess) / wall * 100, memory, Self.threadCount(),
+                                 visible ? 1 : 0, NSApp.isActive ? 1 : 0)
                 self.csv += row
                 self.second = FrameStats()
                 lastWall = now; lastMain = main; lastProcess = process
@@ -734,6 +936,9 @@ final class PerfProbe: NSObject {
             "appActive": NSApp.isActive,
         ]
         results.append(result)
+        // A window that can't be seen (the display off, another Space) gets few frames, with the
+        // main thread idle and clicks seeming to take a second: it says nothing about the app.
+        if hiddenSeconds > 0 { log("INVALID \(name): the window couldn't be seen for \(hiddenSeconds) s of \(Int(wall)) s, so its numbers don't count") }
         log(String(format: "end %@: %.0f fps of %.0f, %.1f%% missed, worst %.0f ms, %d stalls >100ms, %d >250ms, %d >1s, main %.0f%%, process %.0f%%, %.0f MB (peak %.0f)",
                    name, Double(drawn) / wall, 1 / period, result["framesMissedPct"] as? Double ?? 0, frames.worst * 1000,
                    frames.stalls100, frames.stalls250, frames.stalls1000, result["mainThreadCpuPct"] as? Double ?? 0,

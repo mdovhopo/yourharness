@@ -28,7 +28,9 @@ final class WindowPresence {
     }
 
     private func update() {
+        // For test runs on a Mac with its screen locked: everything but the drawing goes on as usual.
         let visible = NSApp.windows.contains { $0.isVisible && $0.occlusionState.contains(.visible) }
+            || ProcessInfo.processInfo.environment["YH_ASSUME_VISIBLE"] == "1"
         guard visible != isVisible else { return }
         isVisible = visible
         if visible { flush() }

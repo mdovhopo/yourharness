@@ -26,6 +26,7 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     }
 
     func post(_ kind: Kind, thread: UUID, title: String, subtitle: String, body: String) {
+        cleared.remove(thread)
         if logsOnly {
             Self.log("notification \(kind.rawValue): \(title) · \(subtitle) · \(body)")
             return
@@ -57,8 +58,12 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         NSApp.dockTile.badgeLabel = count > 0 ? "\(count)" : nil
     }
 
+    /// Threads with nothing to clear: this is on every switch, and goes to another process.
+    private var cleared: Set<UUID> = []
+
     /// You're looking at the thread now: its notifications have done their job.
     func clear(thread: UUID) {
+        guard cleared.insert(thread).inserted else { return }
         center?.removeDeliveredNotifications(withIdentifiers: [Self.identifier(.finished, thread), Self.identifier(.needsYou, thread)])
     }
 

@@ -12,7 +12,8 @@ struct ThreadInspector: View {
 
     var body: some View {
         Group {
-            if let thread {
+            // Hidden, it makes nothing: it's updated on every switch whether it shows or not.
+            if let thread, app.showsInspector {
                 ZStack {
                     ForEach(AppModel.InspectorPanel.allCases.filter { $0 != .browser && (opened.contains($0) || $0 == app.inspectorPanel) }) { panel in
                         let shown = panel == app.inspectorPanel
@@ -28,7 +29,7 @@ struct ThreadInspector: View {
                 .id(thread.id)
                 // A tab change shows the other tab at once: nothing fades or slides.
                 .transaction { $0.animation = nil }
-            } else {
+            } else if thread == nil {
                 ContentUnavailableView("No Thread Selected", systemImage: "sidebar.trailing")
             }
         }
@@ -41,9 +42,39 @@ struct ThreadInspector: View {
         .onChange(of: thread.map { app.workedPullRequests(for: $0).isEmpty } ?? true) { _, empty in
             if !empty, let thread { app.pullRequestsAppeared(for: thread) }
         }
-        .toolbar {
+        .modifier(InspectorToolbar(hasThread: thread != nil))
+    }
+
+    @ViewBuilder
+    private func panel(_ panel: AppModel.InspectorPanel, for thread: ThreadModel, shown: Bool) -> some View {
+        switch panel {
+        case .pullRequests: PullRequestsPanel(thread: thread, isShown: shown)
+        case .sideChat:
+            // File links in the side chat open in the thread's Files tab. Set here rather than
+            // on the whole sidebar: it's updated on every switch, even hidden, and an action
+            // made anew each time counted as a change to everything in it.
+            SideChatPanel(thread: thread)
+                .environment(\.fileLinker, app.fileLinker(for: thread))
+                .environment(\.openURL, OpenURLAction { url in
+                    FileLinkAction.open(url, in: thread) ? .handled : .systemAction
+                })
+        case .subagents: SubagentInspector(thread: thread)
+        case .files: FilesPanel(thread: thread)
+        case .browser: EmptyView()
+        }
+    }
+}
+
+/// By itself, with only whether there's a thread for it: if `.toolbar`'s content were made anew
+/// with each thread, the window's toolbar would be rebuilt and laid out again on every switch.
+private struct InspectorToolbar: ViewModifier {
+    @Environment(AppModel.self) private var app
+    let hasThread: Bool
+
+    func body(content: Content) -> some View {
+        content.toolbar {
             // Hidden, the sidebar leaves only its toggle in the toolbar.
-            if thread != nil, app.showsInspector {
+            if hasThread, app.showsInspector {
                 ToolbarItem {
                     // Icons: five names don't fit a narrow sidebar.
                     Picker("Panel", selection: Binding(get: { app.inspectorPanel }, set: { app.pickPanel($0) })) {
@@ -63,31 +94,12 @@ struct ThreadInspector: View {
             // and fades, on every switch.
             ToolbarSpacer(.flexible)
             // Only where there's a thread for it to show.
-            if app.inspectorHasThread {
+            if hasThread {
                 ToolbarItem {
                     Button("Sidebar", systemImage: "sidebar.trailing") { app.setShowsInspector(!app.showsInspector) }
                         .help(app.showsInspector ? "Hide the side chat and sub-agents (⌥⌘0)" : "Show the side chat and sub-agents (⌥⌘0)")
                 }
             }
-        }
-    }
-
-    @ViewBuilder
-    private func panel(_ panel: AppModel.InspectorPanel, for thread: ThreadModel, shown: Bool) -> some View {
-        switch panel {
-        case .pullRequests: PullRequestsPanel(thread: thread, isShown: shown)
-        case .sideChat:
-            // File links in the side chat open in the thread's Files tab. Set here rather than
-            // on the whole sidebar: it's updated on every switch, even hidden, and an action
-            // made anew each time counted as a change to everything in it.
-            SideChatPanel(thread: thread)
-                .environment(\.fileLinker, app.fileLinker(for: thread))
-                .environment(\.openURL, OpenURLAction { url in
-                    FileLinkAction.open(url, in: thread) ? .handled : .systemAction
-                })
-        case .subagents: SubagentInspector(thread: thread)
-        case .files: FilesPanel(thread: thread)
-        case .browser: EmptyView()
         }
     }
 }

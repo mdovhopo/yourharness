@@ -2,9 +2,11 @@ import HarnessCore
 import SwiftUI
 
 struct ComposerView: View {
+    @Environment(AppModel.self) private var app
     @Bindable var thread: ThreadModel
     @FocusState private var focused: Bool
     @State private var pasteMonitor = ImagePasteMonitor()
+    @State private var settledThread: UUID?
 
     private var canSend: Bool {
         !thread.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !thread.draftImages.isEmpty || !thread.draftFiles.isEmpty
@@ -97,16 +99,19 @@ struct ComposerView: View {
         .padding(.top, 14)
         .padding(.bottom, 10)
         .glassEffect(.regular, in: .rect(cornerRadius: 22))
-        .animation(.snappy, value: thread.draftImages.isEmpty && thread.draftFiles.isEmpty)
-        .animation(.snappy, value: thread.queuedMessages.map(\.id))
-        .animation(.snappy, value: thread.liveJobs.map(\.id))
-        .animation(.snappy, value: isSteering && canSend)
+        // For changes to this thread: going to another just shows it.
+        .animation(settledThread == thread.id ? .snappy : nil, value: thread.draftImages.isEmpty && thread.draftFiles.isEmpty)
+        .animation(settledThread == thread.id ? .snappy : nil, value: thread.queuedMessages.map(\.id))
+        .animation(settledThread == thread.id ? .snappy : nil, value: thread.liveJobs.map(\.id))
+        .animation(settledThread == thread.id ? .snappy : nil, value: isSteering && canSend)
+        .onChange(of: thread.id, initial: true) { settledThread = thread.id }
         .onAppear {
             focused = true
             pasteMonitor.start { [thread] sources in thread.attach(sources) }
         }
         .onDisappear { pasteMonitor.stop() }
         .onChange(of: focused, initial: true) { _, isFocused in pasteMonitor.isActive = isFocused }
+        .onChange(of: app.composerFocusRequests) { focused = true }
     }
 
     private func send(interrupting: Bool = false) {

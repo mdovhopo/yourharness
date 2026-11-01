@@ -77,29 +77,15 @@ struct WorkSummaryRow: View {
             .onHover { hovering = $0 }
             .help(work.isExpanded ? "Hide Claude's work" : "Show what Claude did: thinking, tool calls and sub-agents")
 
-            if work.isExpanded {
-                Divider()
-                // Lazy: a turn can hold hundreds of tool calls, and made at once they took seconds.
-                LazyVStack(alignment: .leading, spacing: 14) {
-                    ForEach(work.entries) { entry in
-                        EntryView(entry: entry)
-                    }
-                }
-                .padding(.leading, 12)
-                .overlay(alignment: .leading) {
-                    Rectangle().fill(.separator).frame(width: 2)
-                }
-                .padding(12)
-                .transition(.opacity)
-            }
+            if work.isExpanded { Divider() }
         }
         // The fill animates, not the row: see `AssistantMessageView`.
         .background {
-            RoundedRectangle(cornerRadius: Theme.innerRadius)
+            WorkBox(isOpenBelow: work.isExpanded, isOpenAbove: false)
                 .fill(.primary.opacity(hovering && !work.isExpanded ? 0.06 : 0.035))
                 .animation(.easeOut(duration: 0.12), value: hovering)
         }
-        .overlay(RoundedRectangle(cornerRadius: Theme.innerRadius).strokeBorder(.separator.opacity(0.6)))
+        .overlay { WorkBoxEdge(isOpenBelow: work.isExpanded, isOpenAbove: false) }
     }
 
     /// Counted when the row shows, not for every turn of the thread.
@@ -146,6 +132,54 @@ struct WorkSummaryRow: View {
         guard let data = inputJSON.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
         return (object["file_path"] ?? object["notebook_path"]) as? String
+    }
+}
+
+/// One step of a turn's opened work: a row of its own, in the box its header starts.
+struct WorkStepRow<Content: View>: View {
+    let isLast: Bool
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        content
+            .padding(.vertical, 7)
+            .padding(.leading, 12)
+            .overlay(alignment: .leading) {
+                Rectangle().fill(.separator).frame(width: 2)
+            }
+            .padding(.top, 0)
+            .padding(.horizontal, 12)
+            .padding(.bottom, isLast ? 12 : 0)
+            .background { WorkBox(isOpenBelow: !isLast, isOpenAbove: true).fill(.primary.opacity(0.035)) }
+            .overlay { WorkBoxEdge(isOpenBelow: !isLast, isOpenAbove: true) }
+    }
+}
+
+/// The box a turn's work sits in, in pieces: its corners only where it really ends.
+private struct WorkBox: Shape {
+    let isOpenBelow: Bool
+    let isOpenAbove: Bool
+
+    func path(in rect: CGRect) -> Path {
+        let radius = Theme.innerRadius
+        return Path(roundedRect: rect, cornerRadii: RectangleCornerRadii(
+            topLeading: isOpenAbove ? 0 : radius, bottomLeading: isOpenBelow ? 0 : radius,
+            bottomTrailing: isOpenBelow ? 0 : radius, topTrailing: isOpenAbove ? 0 : radius))
+    }
+}
+
+/// Its edge, left off where the next piece goes on.
+private struct WorkBoxEdge: View {
+    let isOpenBelow: Bool
+    let isOpenAbove: Bool
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: Theme.innerRadius)
+            .strokeBorder(.separator.opacity(0.6))
+            .padding(.top, isOpenAbove ? -40 : 0)
+            .padding(.bottom, isOpenBelow ? -40 : 0)
+            .clipped()
+            .allowsHitTesting(false)
     }
 }
 

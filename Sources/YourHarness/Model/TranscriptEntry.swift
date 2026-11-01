@@ -46,6 +46,10 @@ final class TranscriptEntry: Identifiable {
     /// How a message you sent while Claude was working got to it.
     @ObservationIgnored var delivery = Delivery.normal { didSet { savedSeq = -1 } }
 
+    /// You opened this row to see more. Here rather than in the view, which comes and goes
+    /// with scrolling.
+    var isOpen = false
+
     /// The row it was last saved as, as it is now; -1 when it has changed since. Going
     /// through a long transcript for these is quick, making every row's snapshot isn't.
     @ObservationIgnored var savedSeq = -1

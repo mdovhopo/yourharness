@@ -21,10 +21,13 @@ final class AppModel {
     static let shared = AppModel()
 
     private(set) var projects: [Project] = []
-    private(set) var threads: [ThreadModel] = []
+    private(set) var threads: [ThreadModel] = [] {
+        didSet { noteInspectorHasThread() }
+    }
     var selectedThreadID: UUID? {
         didSet {
             overviewProjectID = nil
+            noteInspectorHasThread()
             selectedThread?.markRead()
             if let selectedThreadID { notifier.clear(thread: selectedThreadID) }
             noteViewed()
@@ -35,7 +38,11 @@ final class AppModel {
     /// Threads you looked at, newest first. Beyond the last few, an idle thread's transcript
     /// is let go: a long one is tens of megabytes in memory, and reading it back is quick.
     @ObservationIgnored private var viewed: [UUID] = []
-    private static let loadedTranscripts = 6
+    private static let loadedTranscripts = 12
+    /// The transcripts, kept made from thread to thread.
+    @ObservationIgnored lazy var transcriptDeck = TranscriptDeckView()
+    /// Asks the composer to take the keyboard.
+    var composerFocusRequests = 0
 
     private func noteViewed() {
         guard let selectedThreadID else { return }
@@ -60,6 +67,21 @@ final class AppModel {
     }
     private static let loadedRows = 60_000
 
+    /// While Claude works, macOS doesn't put the app to sleep behind your other windows (App Nap):
+    /// its requests for permission and its notifications would come late, and a nap's backlog
+    /// would land on the main thread when you came back. The Mac itself may still sleep.
+    @ObservationIgnored private var workActivity: NSObjectProtocol?
+
+    func workingChanged() {
+        let working = threads.contains { $0.phase == .running }
+        if working, workActivity == nil {
+            workActivity = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep, reason: "Claude is working")
+        } else if !working, let activity = workActivity {
+            ProcessInfo.processInfo.endActivity(activity)
+            workActivity = nil
+        }
+    }
+
     /// After a turn, when what it had waiting to save has gone.
     func trimLoadedTranscriptsSoon() {
         Task { [weak self] in
@@ -69,7 +91,9 @@ final class AppModel {
     }
     /// When set, the detail pane shows this project's page instead of a thread: its repos and
     /// PRs, or its memory (`projectTab`).
-    private(set) var overviewProjectID: UUID?
+    private(set) var overviewProjectID: UUID? {
+        didSet { noteInspectorHasThread() }
+    }
 
     /// The project page's two halves.
     enum ProjectTab: String, CaseIterable, Identifiable {
@@ -247,6 +271,7 @@ final class AppModel {
         } else if let id = state.overviewProjectID, let project = project(id: id), !isHome(project) {
             overviewProjectID = id
         }
+        noteInspectorHasThread()
         tokenUsage.onRangeChange = { [weak self] in self?.save() }
         tokenUsage.configDirectory = { [weak self] in
             await self?.bootstrap?.value
@@ -356,7 +381,14 @@ final class AppModel {
     }
 
     /// A thread is showing, so the right sidebar has something to show.
-    var inspectorHasThread: Bool { overviewProject == nil && selectedThread != nil }
+    /// Whether the right sidebar has a thread to show. Kept rather than worked out: what depends
+    /// on it would update on every switch, the window's split view among them.
+    private(set) var inspectorHasThread = false
+
+    private func noteInspectorHasThread() {
+        let has = overviewProject == nil && selectedThread != nil
+        if has != inspectorHasThread { inspectorHasThread = has }
+    }
 
     func showInspector(_ panel: InspectorPanel) {
         inspectorPanel = panel
@@ -1477,6 +1509,14 @@ final class AppModel {
     /// a one-shot request with no tools, in an empty folder.
     func generateTitle(for thread: ThreadModel, from source: TitleSource) {
         guard !thread.isEphemeral, let provider = titleGeneration.provider, let model = titleGeneration.effectiveModel else { return }
+        // What it's written from may need reading first: not here, a long history would freeze the window.
+        if case .firstMessage = source {} else if !thread.isTranscriptLoaded {
+            Task {
+                await thread.loadTranscriptSoon()
+                if thread.isTranscriptLoaded { generateTitle(for: thread, from: source) }
+            }
+            return
+        }
         let regenerating: Bool
         let messages: [ThreadTitlePrompt.Message]
         var hint: String?

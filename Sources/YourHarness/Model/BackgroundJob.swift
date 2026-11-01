@@ -97,7 +97,8 @@ final class BackgroundJob: Identifiable {
     /// same session ("Output is being written to: …/tasks/b1.output."): a foreground
     /// command's own path is only told once it ends.
     static func outputFile(inResult result: String) -> String? {
-        guard let start = result.range(of: "Output is being written to: ") else { return nil }
+        // A line or two: every other result, however long, needn't be searched.
+        guard result.utf8.count < 2_048, let start = result.range(of: "Output is being written to: ") else { return nil }
         let rest = result[start.upperBound...]
         guard let end = rest.range(of: ".output") else { return nil }
         return String(rest[..<end.upperBound])

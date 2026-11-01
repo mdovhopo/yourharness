@@ -41,12 +41,13 @@ PID=$(cat "$DATA/dev.pid")
 # The display sleeping stops the frames the probe counts, which looks like a freeze.
 caffeinate -d -i -w "$PID" &!
 # And on, however long the Mac has gone without being touched.
-( while kill -0 "$PID" 2>/dev/null; do caffeinate -u -t 1; sleep 20; done ) &!
+( while kill -0 "$PID" 2>/dev/null; do caffeinate -u -t 1; sleep 5; done ) &!
 while kill -0 "$PID" 2>/dev/null; do sleep 2; done
 cp "$DATA/dev.log" "$RESULTS/dev.log"
 # It parks its window below the screen: don't let the next Dev copy open there.
 defaults delete com.mdovhopo.yourharness.dev "NSWindow Frame main" 2>/dev/null || true
 grep '^PERF' "$RESULTS/dev.log" || true
+grep -q '^PERF INVALID' "$RESULTS/dev.log" && echo "NOT A VALID RUN: the window couldn't be seen for part of it. See the INVALID lines."
 grep -q 'PERF DONE' "$RESULTS/dev.log" && echo "Finished." || echo "THE APP DIED BEFORE FINISHING (pid $PID)."
 sleep 5
 for report in ~/Library/Logs/DiagnosticReports/YourHarness*.ips(N.om[1,3]); do

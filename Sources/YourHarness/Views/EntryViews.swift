@@ -192,12 +192,12 @@ private struct CommandOutputView: View {
 
 private struct ThinkingView: View {
     let entry: TranscriptEntry
-    @State private var expanded = false
+    private var expanded: Bool { entry.isOpen }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Button {
-                withAnimation(.snappy) { expanded.toggle() }
+                withAnimation(.snappy) { entry.isOpen.toggle() }
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "brain")

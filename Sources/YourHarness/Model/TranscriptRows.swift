@@ -4,14 +4,20 @@ import Foundation
 enum TranscriptRow: Identifiable, Equatable {
     case entry(TranscriptEntry)
     case work(TurnWork)
+    /// One step of a turn's opened work.
+    case workStep(TranscriptEntry, isLast: Bool)
     /// Above the turns shown: how many earlier ones there are.
     case earlier(Int)
+    /// Claude is working and nothing is streaming in.
+    case typing
 
     var id: String {
         switch self {
         case .entry(let entry): entry.id
         case .work(let work): work.id
+        case .workStep(let entry, _): entry.id
         case .earlier: "earlier-turns"
+        case .typing: "typing-indicator"
         }
     }
 
@@ -23,7 +29,9 @@ enum TranscriptRow: Identifiable, Equatable {
         switch (a, b) {
         case let (.entry(x), .entry(y)): x === y
         case let (.work(x), .work(y)): x == y
+        case let (.workStep(x, xLast), .workStep(y, yLast)): x === y && xLast == yLast
         case let (.earlier(x), .earlier(y)): x == y
+        case (.typing, .typing): true
         default: false
         }
     }
@@ -120,7 +128,7 @@ extension ThreadModel {
         let shown = older.filter { Self.alwaysShows($0) }
         let work = TurnWork(turnID: first.id, entries: older.filter { !Self.alwaysShows($0) }, startedAt: first.date, endedAt: nil,
                             isExpanded: expandedTurns.contains(first.id) || expandsAll, changedFiles: first.changedFiles)
-        return [.entry(first), .work(work)] + shown.map(TranscriptRow.entry) + turn.dropFirst(folded).map(TranscriptRow.entry)
+        return [.entry(first), .work(work)] + Self.steps(of: work) + shown.map(TranscriptRow.entry) + turn.dropFirst(folded).map(TranscriptRow.entry)
     }
 
     private static let runningRowsLimit = ProcessInfo.processInfo.environment["YH_RUNNING_ROWS"].flatMap(Int.init) ?? 90
@@ -137,6 +145,9 @@ extension ThreadModel {
         rows.indices.filter { rows[$0].startsTurn }
     }
 
+    /// When the turn started: the typing indicator shows how long it's been going.
+    var turnStartedAt: Date? { entries.last(where: \.startsTurn)?.date }
+
     /// Shows enough earlier turns that `entryID` is among them.
     func showTurns(including entryID: String) {
         let rows = transcriptRows
@@ -145,6 +156,11 @@ extension ThreadModel {
         let turn = turns.lastIndex(where: { $0 <= position }) ?? 0
         let needed = turns.count - turn
         if needed > shownTurns { shownTurns = needed }
+    }
+
+    private static func steps(of work: TurnWork) -> [TranscriptRow] {
+        guard work.isExpanded else { return [] }
+        return work.entries.enumerated().map { .workStep($1, isLast: $0 == work.entries.count - 1) }
     }
 
     private static func fold(_ turn: ArraySlice<TranscriptEntry>, isCurrent: Bool, expanded: Set<String>) -> [TranscriptRow] {
@@ -159,8 +175,9 @@ extension ThreadModel {
         let isExpanded = expanded.contains(first.id) || expandsAll
         let work = TurnWork(turnID: first.id, entries: hidden, startedAt: first.date, endedAt: first.turnEndedAt, isExpanded: isExpanded,
                             changedFiles: first.changedFiles)
-        // Opened, the work shows inside its own row, as one group.
-        var rows: [TranscriptRow] = [.entry(first), .work(work)]
+        // Opened, the work shows as rows of their own, reading as one group: a turn can hold
+        // hundreds of tool calls, and only the ones near the screen are made.
+        var rows: [TranscriptRow] = [.entry(first), .work(work)] + steps(of: work)
         for entry in turn.dropFirst() where shows(entry) {
             rows.append(.entry(entry))
         }

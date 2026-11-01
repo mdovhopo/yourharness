@@ -7,7 +7,7 @@ struct SubagentCallView: View {
     @Environment(AppModel.self) private var app
     @Environment(\.findHighlight) private var findHighlight
     let entry: TranscriptEntry
-    @State private var expanded = false
+    private var expanded: Bool { entry.isOpen }
 
     /// Live, or from history. Older transcripts only kept the tool call.
     private var run: SubagentRun? { entry.subagent }
@@ -24,7 +24,7 @@ struct SubagentCallView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Button {
-                withAnimation(.snappy) { expanded.toggle() }
+                withAnimation(.snappy) { entry.isOpen.toggle() }
             } label: {
                 header
             }

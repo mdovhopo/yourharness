@@ -153,7 +153,8 @@ enum FollowProbe {
             for _ in 0..<12 {
                 if let cg = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: 60, wheel2: 0, wheel3: 0) {
                     cg.location = CGPoint(x: point.x, y: (NSScreen.screens.first?.frame.height ?? 0) - point.y)
-                    if let event = NSEvent(cgEvent: cg) { window.sendEvent(event) }
+                    // As an event from the window server goes: `sendEvent` comes after the app's monitors.
+                    if let event = NSEvent(cgEvent: cg), let onward = TranscriptWheelRouter.handle(event, in: window) { window.sendEvent(onward) }
                 }
                 await pause(16)
             }

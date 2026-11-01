@@ -8,6 +8,16 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ### Changed
 - Threads in the sidebar stay in the order they were made, newest first, instead of moving as they become active. Pinned threads still go on top.
+- The transcript is a new native list. Going back to a thread you've been in takes a few hundredths of a second and finds it exactly as you left it; a thread you haven't opened yet answers the click at once, with its rows right after. Scrolling stays smooth whatever else is going on.
+- A turn's opened work shows every step as rows of their own in the same box, however many hundreds there are.
+
+### Fixed
+- The freeze that ended in a crash. Going to the top of a thread (and likely other jumps) while a turn streamed could stop the window for good, or until macOS ended the app.
+- Scrolling with the pointer over a code block moves the conversation; sideways still scrolls the block.
+- Regenerating the title of a long thread no longer freezes the window while its history is read.
+- The window stays responsive when a turn prints very long output, and another thread's agent reading a long thread no longer holds it up.
+- The prompt of a new thread no longer fades over the conversation when you leave it.
+- macOS doesn't put the app to sleep behind your other windows while Claude works, so requests for permission and notifications come on time.
 
 ## [0.0.14] - 2026-11-01
 
