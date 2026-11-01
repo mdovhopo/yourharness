@@ -35,7 +35,7 @@ For manual runs, use a Dev copy (`scripts/dev-app.sh <dir>` makes `YourHarness D
 
 Each of these comes from a freeze, a crash or a day lost; docs/performance.md has the evidence.
 
-**Where code goes.** Anything big, long-lived or updating many times a second goes in AppKit. What you open now and then stays in SwiftUI (Settings, Usage, Memory, pull request pages, popovers, sheets). Move more over because a measurement says so, not by default.
+**Where code goes.** Anything big, long-lived or updating many times a second goes in AppKit. What you open now and then stays in SwiftUI (Settings, Usage, Memory, pull request pages, popovers, sheets). Move more over because a measurement says so, not by default. The direction, as time allows: the app's core in AppKit, because its layout and updates are code we can read and stop, where the worst hangs ran inside SwiftUI and nothing could reach them. The most common transcript rows come first, then the window frame, and the sidebar and composer if they show up as a problem. SwiftUI stays for Settings, sheets, popovers, Swift Charts and glass transitions, which take far more code in AppKit. Not measured yet: an AppKit row against a SwiftUI row in this app, so do that before moving more.
 
 - **Nothing that changes often in the window's hosting view.** A change there goes through the whole window's graph, toolbar included. Give it a hosting view of its own, as transcript rows have.
 - **No lazy stack with a scroll position for anything that streams.** Its heights are estimates and moving your place changes what it measures next, so it can go back and forth for good, inside SwiftUI's update, where nothing can stop it.
