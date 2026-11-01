@@ -6,6 +6,9 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+### Changed
+- Threads in the sidebar stay in the order they were made, newest first, instead of moving as they become active. Pinned threads still go on top.
+
 ## [0.0.14] - 2026-11-01
 
 ### Added

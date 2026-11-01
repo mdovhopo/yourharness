@@ -430,7 +430,9 @@ final class AppModel {
     /// Active threads: pinned first, then most recent.
     func threads(in project: Project) -> [ThreadModel] {
         threads.filter { $0.projectID == project.id && !$0.isSettled }.sorted { a, b in
-            a.isPinned != b.isPinned ? a.isPinned : a.sortDate > b.sortDate
+            // By when it was made, newest first, so rows stay where you left them: sorted by last
+            // activity, every thread starting or ending a turn slid the list around.
+            a.isPinned != b.isPinned ? a.isPinned : a.createdAt > b.createdAt
         }
     }
 

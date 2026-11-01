@@ -23,6 +23,12 @@ The running turn's row cap (`currentTurnRows`) bounds what a long turn keeps on 
 
 Still open: the order dependence, and turn ends (`stream-all-end` runs at 9-14 fps with the main thread at 80-90%, with 20 turns ending together). The time is in SwiftUI's own update and layout, not in the app's code.
 
+## Sidebar order
+
+Sorting by last activity slid rows on every turn start and end. Stable order by creation, against the build before it, two 30-second runs each of 20 streaming threads with small histories: stalls over 250 ms went from 6 to 1, the worst frame while just streaming from 304-316 ms to 228-248 ms, the median switch from 217-258 ms to 193-221 ms. Inspector and new-thread clicks and FPS at turn ends didn't change. Few runs, so read it as a direction.
+
+These switch times are far below the 830 ms above, from a different order of phases, which is the open question there.
+
 ## Traps in testing this
 
 - **30-second phases mislead.** A send waits for its history, so with huge threads most of a short phase measures loading. Results before the wait for streaming was added (early click tables, `stream-all` in `rel2-*`) overstate how good it was.
