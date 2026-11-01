@@ -18,6 +18,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 - The window stays responsive when a turn prints very long output, and another thread's agent reading a long thread no longer holds it up.
 - The prompt of a new thread no longer fades over the conversation when you leave it.
 - macOS doesn't put the app to sleep behind your other windows while Claude works, so requests for permission and notifications come on time.
+- Memory comes back down after long turns: a thread that's let go of no longer keeps its session's tool output.
 
 ## [0.0.14] - 2026-11-01
 

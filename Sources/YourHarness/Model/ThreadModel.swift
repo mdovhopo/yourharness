@@ -1462,6 +1462,13 @@ final class ThreadModel: Identifiable {
         transcriptRowsCache = nil
         displayRowsCache = nil
         rowsBasis = nil
+        // What the session looks rows up by: nothing's running, and it held on to every tool call
+        // of the session, long outputs and all.
+        tools.removeAll()
+        blocks.removeAll()
+        subagents.removeAll()
+        jobs.removeAll()
+        streamedMessageIDs.removeAll()
         Task.detached(priority: .utility) { _ = gone }
         expandedTurns.removeAll()
         rebuildPlan()

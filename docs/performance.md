@@ -22,6 +22,38 @@ A thread's transcript is `TranscriptListView`: a list in AppKit (an `NSScrollVie
 | Hitch on the first blank found | The check drew the window to a PNG on the main thread | Only when asked for from the Debug menu now |
 | Sidebar rows sliding | Sorted by last activity, so every turn start and end moved them | Stable order by creation; stalls over 250 ms 6 to 1 in two runs each |
 
+## Where it stands
+
+M1 Max, the full `extreme` preset (2 GB, 20 huge threads of 16,000 to 32,000 rows), all 20 streaming, window in front and full screen, pointer moving over it.
+
+| Measured | Result |
+|---|---|
+| 15-minute soak of random actions (1,783 of them) | No crash, no stall over 1 s, worst 561 ms; 63-68 fps from the first two minutes to the last (the old list degraded over a soak like this) |
+| Streaming, nothing else going on | 111 fps, worst frame 137 ms |
+| 20 turns ending at once | 82 fps, worst frame 103 ms |
+| Scrolling while streaming | 82 fps, worst frame 132 ms |
+| Memory | About 2 GB with all 20 histories loaded, 409 MB a minute after the turns end |
+| Launch to the first huge thread on screen | 2 s (31,626 rows) |
+
+Clicks, median ms under that load: when the click is answered (first frame), then done (the frame after).
+
+| Click | Answered | Done |
+|---|---|---|
+| Typing a key | 10 | 20 |
+| Open or close a turn's work | 8 | 23 |
+| Open a tool call's long output | 55 | 62 |
+| Go to another thread (with the right sidebar open and first visits among them) | 117 | 256 |
+| Back to a thread from a project page | 276 | 296 |
+| Right sidebar tabs | 8-154 | 17-212 |
+| Search (⌘K) | 102 | 126 |
+| Find (⌘F) | 83 | 108 |
+| Jump to top, to end | 51-108 | 87-125 |
+| One step of a live window resize | 74 | 83 |
+
+With the right sidebar closed, going to a thread is answered in 17-50 ms, and takes 36-56 ms in all if you've been there and it hasn't changed (first visit under load: about 150 ms, rows included).
+
+Still the slowest, and what to go after next: coming back from a project page (the thread's view is made again), and the first visit to a thread (each row is a hosting view to make; making them ahead of time in idle moments would answer it). Memory with every huge history loaded is high, because a running thread keeps all its rows in memory.
+
 ## Traps in testing this
 
 - **A window that can't be seen says nothing.** With the display off, the screen locked or another Space in front, frames all but stop while the main thread sits idle, events are held and applied in batches, and clicks seem to take seconds. For a whole day that read as "clicks take 830 ms, depending on the order of phases": every such run had `windowVisible: false`, and `pmset -g log` shows the display going off and on through them. A run now prints `INVALID` for this: trust nothing with those lines. A Mac left alone locks its screen after a while, whatever `caffeinate` says.

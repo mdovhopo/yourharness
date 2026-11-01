@@ -139,9 +139,21 @@ private struct DetailColumn: View {
 
 private struct InspectorColumn: View {
     @Environment(AppModel.self) private var app
+    /// A moment behind the window's: going to another thread makes its tabs anew, and what you
+    /// clicked shouldn't wait for that.
+    @State private var thread: ThreadModel?
+
+    private var selected: ThreadModel? { app.inspectorHasThread ? app.selectedThread : nil }
 
     var body: some View {
-        ThreadInspector(thread: app.inspectorHasThread ? app.selectedThread : nil)
+        ThreadInspector(thread: thread)
+            .onChange(of: selected?.id, initial: true) {
+                guard thread != nil, selected != nil, app.showsInspector else {
+                    thread = selected
+                    return
+                }
+                DispatchQueue.main.async { thread = selected }
+            }
     }
 }
 

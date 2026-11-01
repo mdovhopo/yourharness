@@ -719,6 +719,8 @@ final class AppModel {
         let wasSelected = selectedThreadID == thread.id
         if wasSelected { selectNeighbour(of: thread) }
         threads.remove(at: index)
+        // Once the window has gone to the neighbour.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.transcriptDeck.forget(thread.id) }
         save()
         if purge {
             purgeFiles(of: thread.id)

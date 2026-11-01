@@ -25,7 +25,7 @@ For manual runs, use a Dev copy (`scripts/dev-app.sh <dir>` makes `YourHarness D
 
 ## Principles
 
-- **Performance and memory are the product.** Check app footprint (`footprint $(pgrep -x YourHarness)`) after UI changes that touch the transcript. Use Debug → stress transcript.
+- **Performance and memory are the product.** Check app footprint (`footprint $(pgrep -x YourHarness)`) after UI changes that touch the transcript. Use Debug → stress transcript. The transcript is a list in AppKit (`TranscriptListView`, each row's content a small SwiftUI view in its own hosting view; `TranscriptDeck` keeps each thread's made and parks it): don't go back to a lazy stack with a scroll position, or put what changes often in the window's own hosting view, which froze and crashed the app. See docs/performance.md.
 - **Apple-quality UI.** Native controls, Liquid Glass (`glassEffect`, `.glass` button styles), SF Symbols, standard shortcuts. No web views. Draw from `Views/Theme.swift` so the window stays coherent: content sits on the `.canvas` (set once under the detail column), boxes use `.card()`, labels use `Chip`, radii come from `Theme`. Glass is for what floats above content (composer, prompts, buttons), not for transcript rows.
 - **`HarnessCore` never imports SwiftUI/AppKit.** Adapters emit `AgentEvent`. The UI only consumes `AgentEvent`.
 - **CLI protocols change often.** Parsers ignore unknown event types and must never crash on new fields. When the protocol changes, capture a real session, sanitize it (no local paths or user config), and add it under `Tests/HarnessCoreTests/Fixtures/`.

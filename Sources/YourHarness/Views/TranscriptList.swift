@@ -97,6 +97,8 @@ final class TranscriptListView: NSView {
         guard window != nil else { return }
         rowsAreStale = true
         needsLayout = true
+        // Back after a while, what's on screen may all be new, and it should show whole.
+        hasShownRows = false
         ScrollProbe.runIfRequested(on: self)
     }
 
@@ -141,11 +143,6 @@ final class TranscriptListView: NSView {
         if scrollView.contentInsets.top != insets.top || scrollView.contentInsets.bottom != insets.bottom {
             scrollView.contentInsets = insets
         }
-        if context.width != bounds.width {
-            // Each row made says its new height when it's laid out; those not made are estimates
-            // anyway, and these still good ones.
-            context.width = bounds.width
-        }
         if rowsAreStale { takeRows() }
 
         var rounds = 0
@@ -157,6 +154,7 @@ final class TranscriptListView: NSView {
             rounds += 1
         }
         target = nil
+        giveRowsInViewTheirWidth()
         placeRows()
         letGoOfFarRows()
         report()
@@ -213,11 +211,11 @@ final class TranscriptListView: NSView {
                 var slot = slots[old]
                 if slot.row != row || firstChanged {
                     slot.row = row
-                    hosts[id]?.rootView = root(row)
+                    if let host = hosts[id] { host.rootView = root(row, width: host.rootView.width) }
                 }
                 new.append(slot)
             } else {
-                new.append(Slot(row: row, height: Self.estimate(row, width: context.width)))
+                new.append(Slot(row: row, height: Self.estimate(row, width: bounds.width)))
             }
         }
         for (id, host) in hosts where newIndexes[id] == nil {
@@ -375,7 +373,7 @@ final class TranscriptListView: NSView {
             Self.secondsMaking += CACurrentMediaTime() - started
         }
         let row = slots[index].row
-        let host = TranscriptRowHost(rootView: root(row))
+        let host = TranscriptRowHost(rootView: root(row, width: bounds.width))
         // Where it is on the screen is nothing to it: the list keeps rows clear of what's over them.
         // Otherwise, scrolled under the toolbar, a row would be pushed down inside itself.
         host.safeAreaRegions = []
@@ -392,9 +390,44 @@ final class TranscriptListView: NSView {
         return true
     }
 
-    private func root(_ row: TranscriptRow) -> TranscriptRowRoot {
-        TranscriptRowRoot(row: row, isFirst: row.id == firstID, thread: thread, context: context)
+    private func root(_ row: TranscriptRow, width: CGFloat) -> TranscriptRowRoot {
+        TranscriptRowRoot(row: row, isFirst: row.id == firstID, width: width, thread: thread, context: context)
     }
+
+    /// The list's width changed: rows on screen go with it, each saying its new height when it's
+    /// laid out. The rest wait until it has settled: dragging the window's edge, rewrapping
+    /// every row made, off screen too, took a quarter of a second a step.
+    private func giveRowsInViewTheirWidth() {
+        let width = bounds.width
+        var behind = false
+        for (id, host) in hosts where host.rootView.width != width {
+            guard let index = indexes[id] else { continue }
+            let minY = slots[index].y + shortfall
+            if minY < clip.bounds.maxY, minY + slots[index].height > clip.bounds.minY {
+                host.rootView = root(slots[index].row, width: width)
+            } else {
+                behind = true
+            }
+        }
+        widthSettling?.cancel()
+        widthSettling = nil
+        guard behind else { return }
+        widthSettling = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled, let self else { return }
+            self.widthSettling = nil
+            self.giveEveryRowItsWidth()
+        }
+    }
+
+    private func giveEveryRowItsWidth() {
+        for (id, host) in hosts where host.rootView.width != bounds.width {
+            guard let index = indexes[id] else { continue }
+            host.rootView = root(slots[index].row, width: bounds.width)
+        }
+        needsLayout = true
+    }
+    private var widthSettling: Task<Void, Never>?
 
     /// A first guess, before a row comes near the screen. It only sets how long the transcript
     /// looks to the scroll bar: your place is held by a row.
@@ -431,7 +464,7 @@ final class TranscriptListView: NSView {
     private func placeRows() {
         for (id, host) in hosts {
             guard let index = indexes[id] else { continue }
-            let frame = NSRect(x: 0, y: slots[index].y + shortfall, width: bounds.width, height: slots[index].height)
+            let frame = NSRect(x: 0, y: slots[index].y + shortfall, width: host.rootView.width, height: slots[index].height)
             if host.frame != frame { host.frame = frame }
         }
     }
@@ -606,10 +639,9 @@ final class TranscriptListView: NSView {
     /// For test runs: rows whose height in the list isn't what SwiftUI makes of them now.
     func rowsOffTheirHeight() -> [String] {
         guard window != nil, bounds.width > 0 else { return [] }
-        let width = context.width != bounds.width ? ["list \(Int(bounds.width)) wide, its rows \(Int(context.width))"] : []
-        return width + hosts.compactMap { id, host in
+        return hosts.compactMap { id, host in
             guard let index = indexes[id] else { return "\(id): made, not in the list" }
-            if abs(host.frame.width - bounds.width) > 0.5 { return "\(id.prefix(8)): \(Int(host.frame.width)) wide in a list of \(Int(bounds.width))" }
+            if abs(host.frame.width - bounds.width) > 0.5, widthSettling == nil { return "\(id.prefix(8)): \(Int(host.frame.width)) wide in a list of \(Int(bounds.width))" }
             host.sizingOptions = [.intrinsicContentSize]
             let real = ceil(host.intrinsicContentSize.height)
             host.sizingOptions = []
@@ -677,7 +709,6 @@ final class TranscriptRowContext {
     @ObservationIgnored weak var list: TranscriptListView?
     /// On screen, rather than parked.
     @ObservationIgnored var isShown = false
-    var width: CGFloat = 0
     var issueLinker = IssueLinker(repos: [], openPullRequests: [])
     var fileLinker = FileLinker.empty
 
@@ -701,6 +732,7 @@ final class TranscriptRowContext {
 struct TranscriptRowRoot: View {
     let row: TranscriptRow
     let isFirst: Bool
+    let width: CGFloat
     let thread: ThreadModel
     let context: TranscriptRowContext
 
@@ -709,7 +741,7 @@ struct TranscriptRowRoot: View {
             .frame(maxWidth: 820, alignment: .leading)
             .frame(maxWidth: .infinity)
             .padding(.horizontal, 28)
-            .frame(width: context.width)
+            .frame(width: width)
             .fixedSize(horizontal: false, vertical: true)
             // Its real height, from its layout, whatever made it change: text streaming in, a
             // tool call opened, the width.
