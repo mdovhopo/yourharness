@@ -6,6 +6,8 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+## [0.0.14] - 2026-11-01
+
 ### Added
 - A loading indicator while a long thread's history reads in.
 
