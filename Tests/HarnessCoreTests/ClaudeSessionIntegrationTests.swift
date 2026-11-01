@@ -142,6 +142,46 @@ struct MCPIntegrationTests {
         func call(_ tool: String, arguments: JSONValue, toolUseID: String?) async -> MCPToolResult { .text("pelican") }
     }
 
+    private struct SlowApproval: MCPToolServer {
+        let name = "yh"
+        let wait: Duration
+        var tools: [MCPTool] { [MCPTool(name: "request_approval", description: "Waits for the user's answer and returns it.", inputSchema: MCPTool.schema([:]))] }
+        func call(_ tool: String, arguments: JSONValue, toolUseID: String?) async -> MCPToolResult {
+            try? await Task.sleep(for: wait)
+            return .text("pelican")
+        }
+    }
+
+    /// An approval prompt holds its tool call open until the user answers, so the CLI must not time it out.
+    /// Takes as long as it waits: YH_MCP_WAIT_SECONDS, 6 minutes by default.
+    @Test func aToolCallCanWaitForTheUser() async throws {
+        let seconds = ProcessInfo.processInfo.environment["YH_MCP_WAIT_SECONDS"].flatMap(Int.init) ?? 360
+        var environment = await ShellEnvironment.load()
+        environment.removeValue(forKey: "CLAUDECODE")
+        let executable = try #require(ShellEnvironment.which("claude", in: environment))
+        var options = ClaudeLaunchOptions(executable: executable, workingDirectory: FileManager.default.temporaryDirectory,
+                                          environment: environment, model: "haiku")
+        options.tools = []
+        options.withoutMCP = true
+        options.persistsSession = false
+        options.allowedTools = ["mcp__yh"]
+        let session = try ClaudeSession(options: options, servers: [SlowApproval(wait: .seconds(seconds))])
+        try await session.initialize()
+        try await session.send(text: "Call the request_approval tool, then reply with only the word it returned.")
+        var reply = ""
+        let clock = ContinuousClock(), start = clock.now
+        for await event in session.events {
+            switch event {
+            case .textDelta(_, let text): reply += text
+            case .turnCompleted: await session.terminate()
+            default: break
+            }
+        }
+        print("tool call waited, turn took \(clock.now - start)")
+        #expect(clock.now - start >= .seconds(seconds))
+        #expect(reply.lowercased().contains("pelican"))
+    }
+
     @Test func claudeCallsAnInAppTool() async throws {
         var environment = await ShellEnvironment.load()
         environment.removeValue(forKey: "CLAUDECODE")
