@@ -6,6 +6,8 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+## [0.0.15] - 2026-11-01
+
 ### Changed
 - Threads in the sidebar stay in the order they were made, newest first, instead of moving as they become active. Pinned threads still go on top.
 - The transcript is a new native list. Going back to a thread you've been in takes a few hundredths of a second and finds it exactly as you left it; a thread you haven't opened yet answers the click at once, with its rows right after. Scrolling stays smooth whatever else is going on.
