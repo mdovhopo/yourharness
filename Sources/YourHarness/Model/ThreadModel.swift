@@ -68,6 +68,10 @@ final class ThreadModel: Identifiable {
     /// What `transcriptRowsCache` was worked out from, for adding to it.
     @ObservationIgnored private var rowsBasis: (folded: Set<String>, entryCount: Int, firstEntry: TranscriptEntry, lastEntry: TranscriptEntry)?
     @ObservationIgnored var displayRowsCache: (revision: Int, rows: [TranscriptRow])?
+    /// How many rows of the turn in progress have gone into its work row.
+    @ObservationIgnored var runningFold: (turnID: String, rows: Int)?
+    /// You've scrolled up in this transcript: what you're reading stays where it is.
+    @ObservationIgnored var isReadingBack = false
 
     /// For changes the rows depend on that aren't to the list itself: a turn's end, a result.
     func rowsChanged() {

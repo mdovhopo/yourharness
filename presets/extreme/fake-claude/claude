@@ -125,7 +125,7 @@ def compact():
     emit({"type": "system", "subtype": "compact_boundary", "compact_metadata": {"trigger": "auto", "pre_tokens": rng.randint(180_000, 200_000), "post_tokens": rng.randint(10_000, 30_000)}})
     status("requesting")
 
-def turn(seconds, rate):
+def turn(seconds, rate, subagents=True):
     started, step = time.time(), 0
     emit({"type": "system", "subtype": "init", "session_id": session, "model": "claude-haiku-5-5", "permissionMode": "default", "claude_code_version": "2.1.302", "cwd": os.getcwd()})
     while time.time() - started < seconds and not stop_turn.is_set():
@@ -134,7 +134,7 @@ def turn(seconds, rate):
         for _ in range(rng.randint(1, 4)):
             tool(rate)
         if step % 2 == 0: reply(rate)
-        if step % 12 == 0: subagent(rate)
+        if step % 12 == 0 and subagents: subagent(rate)
         if step % 40 == 0: compact()
     reply(rate, long=True)
     elapsed = int((time.time() - started) * 1000)
@@ -162,6 +162,6 @@ for line in sys.stdin:
         if message.get("uuid"):
             emit({"type": "user", "uuid": message["uuid"], "isReplay": True, "message": message["message"]})
         if worker: worker.join()
-        worker = threading.Thread(target=turn, args=(seconds, rate), daemon=True)
+        worker = threading.Thread(target=turn, args=(seconds, rate, "nosubagents" not in text), daemon=True)
         worker.start()
 if worker: worker.join()

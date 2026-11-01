@@ -226,7 +226,11 @@ private struct TranscriptView: View {
                 }
                 foundBlank()
             }
-            .onDisappear { rememberPlace() }
+            .onChange(of: followsBottom, initial: true) { _, following in thread.isReadingBack = !following }
+            .onDisappear {
+                rememberPlace()
+                thread.isReadingBack = false
+            }
     }
 
     private var transcript: some View {

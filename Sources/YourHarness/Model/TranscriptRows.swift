@@ -65,7 +65,7 @@ private let expandsAll = ProcessInfo.processInfo.environment["YH_EXPAND_WORK"] !
 
 extension ThreadModel {
     /// The transcript with each finished turn's work folded between your message and
-    /// Claude's answer. The turn in progress shows everything, so you can follow along;
+    /// Claude's answer. The turn in progress shows what's recent, so you can follow along;
     /// messages you sent during a turn, and notices, always show.
     ///
     /// Only the last `shownTurns` turns: a long thread opens as fast as a short one, and
@@ -101,9 +101,35 @@ extension ThreadModel {
             while index < rows.count, !rows[index].startsTurn { index += 1 }
             let turn = rows[start..<index]
             let isCurrent = index == rows.count && (phase == .running || !pendingPermissions.isEmpty)
-            result.append(contentsOf: Self.fold(turn, isCurrent: isCurrent, expanded: expandedTurns))
+            result.append(contentsOf: isCurrent ? currentTurnRows(turn) : Self.fold(turn, isCurrent: false, expanded: expandedTurns))
         }
         return result
+    }
+
+    /// The turn in progress: once it's long, what's older goes into its work row, as it will
+    /// when the turn ends, so the rows on screen are the same few however long it runs. Hundreds
+    /// of tool calls in, switching to a thread that made them all took seconds. In steps, not
+    /// row by row, and not while you're reading back, so nothing moves under you.
+    private func currentTurnRows(_ turn: ArraySlice<TranscriptEntry>) -> [TranscriptRow] {
+        guard let first = turn.first else { return [] }
+        var folded = runningFold?.turnID == first.id ? runningFold?.rows ?? 0 : 0
+        if !isReadingBack, turn.count - folded > Self.runningRowsLimit { folded = turn.count - Self.runningRowsKept }
+        runningFold = (first.id, folded)
+        guard folded > 1 else { return turn.map(TranscriptRow.entry) }
+        let older = turn.prefix(folded).dropFirst()
+        let shown = older.filter { Self.alwaysShows($0) }
+        let work = TurnWork(turnID: first.id, entries: older.filter { !Self.alwaysShows($0) }, startedAt: first.date, endedAt: nil,
+                            isExpanded: expandedTurns.contains(first.id) || expandsAll, changedFiles: first.changedFiles)
+        return [.entry(first), .work(work)] + shown.map(TranscriptRow.entry) + turn.dropFirst(folded).map(TranscriptRow.entry)
+    }
+
+    private static let runningRowsLimit = ProcessInfo.processInfo.environment["YH_RUNNING_ROWS"].flatMap(Int.init) ?? 90
+    private static var runningRowsKept: Int { runningRowsLimit * 4 / 9 }
+
+    private static func alwaysShows(_ entry: TranscriptEntry) -> Bool {
+        entry.kind == .user || entry.kind == .notice || entry.kind == .commandOutput
+            // What Claude put in front of you to see.
+            || entry.kind == .tool && entry.toolName == MediaTool.toolName && !entry.toolIsError
     }
 
     /// Where each turn starts in `rows`.
@@ -125,9 +151,7 @@ extension ThreadModel {
         guard let first = turn.first, !isCurrent else { return turn.map(TranscriptRow.entry) }
         let answer = turn.last { $0.kind == .assistant }
         let shows: (TranscriptEntry) -> Bool = { entry in
-            entry === first || entry === answer || entry.kind == .user || entry.kind == .notice || entry.kind == .commandOutput
-                // What Claude put in front of you to see.
-                || entry.kind == .tool && entry.toolName == MediaTool.toolName && !entry.toolIsError
+            entry === first || entry === answer || alwaysShows(entry)
         }
         let hidden = turn.filter { !shows($0) }
         guard !hidden.isEmpty else { return turn.map(TranscriptRow.entry) }

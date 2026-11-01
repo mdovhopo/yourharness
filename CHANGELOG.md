@@ -10,6 +10,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 - A loading indicator while a long thread's history reads in.
 
 ### Fixed
+- A very long turn folds its older work into the Worked row as it goes, where you can still open it, so the conversation doesn't keep growing while Claude works.
 - Opening a turn's work with hundreds of tool calls no longer freezes for seconds, and many long threads loading at once share the window's time instead of stalling it.
 - The window no longer waits behind other threads' histories being read, which could freeze it for a second or more with many threads going.
 - Opening or sending to a very long thread no longer stalls the window while its history loads, and a thread no longer goes blank for a moment when a long turn ends.

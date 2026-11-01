@@ -32,9 +32,15 @@ cp -R "$SEED" "$DATA"
 find "$DATA" -maxdepth 1 -name state.json -exec sed -i '' "s|$SEED|$DATA|g" {} +
 mkdir -p "$RESULTS"
 START=$(date +%s)
+# A display that's off gives the probe no frames at all.
+caffeinate -u -t 2
 PATH="$ROOT/presets/extreme/fake-claude:$PATH" "$ROOT/scripts/dev-run.sh" "$DATA" \
     YH_PERF_PROBE="$RESULTS" YH_PERF_QUIT=1 CLAUDE_CONFIG_DIR="$DATA/claude-config" "$@"
 PID=$(cat "$DATA/dev.pid")
+# The display sleeping stops the frames the probe counts, which looks like a freeze.
+caffeinate -d -i -w "$PID" &!
+# And on, however long the Mac has gone without being touched.
+( while kill -0 "$PID" 2>/dev/null; do caffeinate -u -t 1; sleep 20; done ) &!
 while kill -0 "$PID" 2>/dev/null; do sleep 2; done
 cp "$DATA/dev.log" "$RESULTS/dev.log"
 # It parks its window below the screen: don't let the next Dev copy open there.

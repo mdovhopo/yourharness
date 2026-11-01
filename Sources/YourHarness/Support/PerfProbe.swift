@@ -73,19 +73,40 @@ final class PerfProbe: NSObject {
     /// where it is. Up to five a run.
     private func watchForFreezes() {
         let folder = folder, pid = ProcessInfo.processInfo.processIdentifier
+        // `YH_PERF_FREEZE_AFTER=<seconds>`: sooner, to land inside stalls too short for the default.
+        let freezeAfter = env["YH_PERF_FREEZE_AFTER"].flatMap(Double.init) ?? 3
         Thread.detachNewThread {
             var taken = 0
-            while taken < 5 {
-                Thread.sleep(forTimeInterval: 0.5)
-                guard CACurrentMediaTime() - Self.lastFrame.withLock({ $0 }) > 3 else { continue }
+            while taken < (freezeAfter < 3 ? 25 : 5) {
+                Thread.sleep(forTimeInterval: freezeAfter < 3 ? 0.1 : 0.5)
+                guard CACurrentMediaTime() - Self.lastFrame.withLock({ $0 }) > freezeAfter else { continue }
                 taken += 1
                 let sample = Process()
                 sample.executableURL = URL(fileURLWithPath: "/usr/bin/sample")
-                sample.arguments = ["\(pid)", "3", "-file", "\(folder)/freeze-\(taken).sample"]
+                sample.arguments = ["\(pid)", freezeAfter < 3 ? "1" : "3", "-file", "\(folder)/freeze-\(taken).sample"]
                 try? sample.run()
                 sample.waitUntilExit()
                 FileHandle.standardError.write(Data("PERF freeze sampled: freeze-\(taken).sample\n".utf8))
-                Thread.sleep(forTimeInterval: 5)
+                Thread.sleep(forTimeInterval: freezeAfter < 3 ? 0.5 : 5)
+            }
+        }
+    }
+
+    /// The longest the main thread took to answer since the last frame, and all phase, whatever
+    /// the frames did: frames can stop with the main thread free, which is another problem.
+    private static let pingWorst = OSAllocatedUnfairLock(initialState: CFTimeInterval(0))
+    private static let pingPhase = OSAllocatedUnfairLock(initialState: [CFTimeInterval]())
+
+    private func pingMainThread() {
+        Thread.detachNewThread {
+            while true {
+                let sent = CACurrentMediaTime()
+                DispatchQueue.main.async {
+                    let latency = CACurrentMediaTime() - sent
+                    Self.pingWorst.withLock { $0 = max($0, latency) }
+                    Self.pingPhase.withLock { $0.append(latency) }
+                }
+                Thread.sleep(forTimeInterval: 0.05)
             }
         }
     }
@@ -141,7 +162,11 @@ final class PerfProbe: NSObject {
             let delta = link.timestamp - lastTimestamp
             frames.add(delta: delta, period: period)
             // Wherever it falls: a freeze can run past the end of its phase.
-            if delta > 0.25 { log(String(format: "stall %.0f ms in or after %@", delta * 1000, phaseName)) }
+            if delta > 0.25 {
+                log(String(format: "stall %.0f ms in or after %@ (main thread answered within %.0f ms)", delta * 1000, phaseName,
+                           Self.pingWorst.withLock { $0 } * 1000))
+            }
+            Self.pingWorst.withLock { $0 = 0 }
             second.add(delta: delta, period: period)
         }
         lastTimestamp = link.timestamp
@@ -323,10 +348,26 @@ final class PerfProbe: NSObject {
         }
     }
 
-    private func startTurns(_ count: Int, seconds: Double) {
-        for thread in threads.prefix(count) where thread.phase != .running {
-            thread.send("PERF seconds=\(Int(seconds)) rate=\(env["YH_PERF_RATE"] ?? "1")")
+    /// Starts turns and waits until they're all really streaming: a send waits for its history to
+    /// load, tens of seconds with twenty huge threads, and a phase timed from here would mostly
+    /// measure that. Returns when the phase should end.
+    private func startTurns(_ count: Int, length: Double) async -> CFTimeInterval {
+        let started = threads.prefix(count).filter { $0.phase != .running }
+        let marks = Dictionary(uniqueKeysWithValues: started.map { ($0.id, $0.entries.count) })
+        let begin = CACurrentMediaTime()
+        for thread in started {
+            thread.send("PERF seconds=\(Int(length)) rate=\(env["YH_PERF_RATE"] ?? "1")\(env["YH_PERF_NO_SUBAGENTS"] == "1" ? " nosubagents" : "")")
         }
+        // Loaded, your message and something from Claude after it.
+        func streaming(_ thread: ThreadModel) -> Bool {
+            guard let last = thread.entries.last, thread.entries.count > (marks[thread.id] ?? 0) else { return false }
+            return thread.phase == .running && last.kind != .user
+        }
+        while !started.allSatisfy(streaming), CACurrentMediaTime() - begin < 120 {
+            try? await Task.sleep(for: .milliseconds(200))
+        }
+        log(String(format: "%d turns streaming after %.1f s", started.count, CACurrentMediaTime() - begin))
+        return CACurrentMediaTime() + length
     }
 
     private func waitForTurnsToEnd() async {
@@ -355,6 +396,7 @@ final class PerfProbe: NSObject {
         }
         guard startFrames() else { return log("FAIL: no window") }
         watchForFreezes()
+        pingMainThread()
         keepPointerOverTranscript()
         let length = Double(env["YH_PERF_SECONDS"] ?? "") ?? 30
         let only = env["YH_PERF_PHASES"].map { Set($0.split(separator: ",").map(String.init)) }
@@ -373,43 +415,48 @@ final class PerfProbe: NSObject {
             ("scroll-huge", { end in await self.scrolling(until: end) }),
             ("scroll-huge-fast", { end in await self.scrolling(until: end, speed: 200) }),
             ("switch-huge", { end in await self.switching(among: Array(huge.prefix(4)), until: end) }),
-            ("stream-1", { end in
-                self.startTurns(1, seconds: end - CACurrentMediaTime())
+            ("switch-all-idle", { end in
+                // Every thread loaded, nothing running: what a switch itself costs.
+                for thread in huge { await thread.loadTranscriptSoon() }
+                await self.switching(among: huge, until: CACurrentMediaTime() + length)
+            }),
+            ("stream-1", { _ in
+                let end = await self.startTurns(1, length: length)
                 try? await Task.sleep(for: .seconds(end - CACurrentMediaTime()))
             }),
-            ("stream-1-scroll", { end in
-                self.startTurns(1, seconds: end - CACurrentMediaTime())
+            ("stream-1-scroll", { _ in
+                let end = await self.startTurns(1, length: length)
                 await self.scrolling(until: end)
             }),
-            ("stream-4", { end in
-                self.startTurns(4, seconds: end - CACurrentMediaTime())
+            ("stream-4", { _ in
+                let end = await self.startTurns(4, length: length)
                 try? await Task.sleep(for: .seconds(end - CACurrentMediaTime()))
             }),
-            ("stream-8", { end in
-                self.startTurns(8, seconds: end - CACurrentMediaTime())
+            ("stream-8", { _ in
+                let end = await self.startTurns(8, length: length)
                 try? await Task.sleep(for: .seconds(end - CACurrentMediaTime()))
             }),
-            ("stream-all", { end in
-                self.startTurns(huge.count, seconds: end - CACurrentMediaTime())
+            ("stream-all", { _ in
+                let end = await self.startTurns(huge.count, length: length)
                 try? await Task.sleep(for: .seconds(end - CACurrentMediaTime()))
             }),
-            ("stream-all-scroll", { end in
-                self.startTurns(huge.count, seconds: end - CACurrentMediaTime())
+            ("stream-all-scroll", { _ in
+                let end = await self.startTurns(huge.count, length: length)
                 await self.scrolling(until: end)
             }),
-            ("stream-all-switch", { end in
-                self.startTurns(huge.count, seconds: end - CACurrentMediaTime())
+            ("stream-all-switch", { _ in
+                let end = await self.startTurns(huge.count, length: length)
                 await self.switching(among: huge, until: end)
             }),
-            ("stream-all-clicks", { end in
-                self.startTurns(huge.count, seconds: end - CACurrentMediaTime())
+            ("stream-all-clicks", { _ in
+                let end = await self.startTurns(huge.count, length: length)
                 await self.clicking(among: huge, until: end)
             }),
-            ("stream-all-elsewhere", { end in
+            ("stream-all-elsewhere", { _ in
                 // All of it in threads you aren't looking at.
                 let other = self.app.threads.first { !$0.title.hasPrefix("Huge") }
-                self.startTurns(huge.count, seconds: end - CACurrentMediaTime())
                 self.app.selectedThreadID = other?.id
+                let end = await self.startTurns(huge.count, length: length)
                 try? await Task.sleep(for: .seconds(end - CACurrentMediaTime()))
                 self.app.selectedThreadID = first.id
             }),
@@ -449,6 +496,7 @@ final class PerfProbe: NSObject {
 
     private func record(_ name: String, seconds: Double, _ action: @escaping (CFTimeInterval) async -> Void) async {
         phaseName = name
+        Self.pingPhase.withLock { $0 = [] }
         if env["YH_PERF_FRONT"] == "1" {
             NSApp.activate()
             mainWindow?.makeKeyAndOrderFront(nil)
@@ -491,6 +539,10 @@ final class PerfProbe: NSObject {
         if rows > 0, ink >= 0, ink < 0.002 {
             log(String(format: "BLANK at the end of %@: %d rows, %.4f inked", name, rows, ink))
         }
+        let pings = Self.pingPhase.withLock { $0 }.sorted()
+        let pingMedian = pings.isEmpty ? 0 : pings[pings.count / 2], pingWorst = pings.last ?? 0
+        log(String(format: "main thread answers %@: median %.0f ms, worst %.0f ms, %d over 100 ms, %d over 250 ms, %d over 1 s, of %d",
+                   name, pingMedian * 1000, pingWorst * 1000, pings.count { $0 > 0.1 }, pings.count { $0 > 0.25 }, pings.count { $0 > 1 }, pings.count))
         let drawn = frames.vsyncs - frames.missed
         let result: [String: Any] = [
             "phase": name,
