@@ -168,6 +168,8 @@ struct PersistedState: Codable {
     var collapsedProjectIDs: Set<UUID> = []
     /// Tell agents they can answer with diagrams. On unless turned off.
     var diagramInstructions = true
+    /// Keep the Mac awake while Claude works (or always). On unless turned off.
+    var keepAwake = KeepAwakeSettings()
     /// Idle threads move to the Settled shelf after this many days; 0 turns it off.
     var autoSettleDays = 3
     /// Who names new threads. Claude Code's Haiku unless changed.
@@ -234,6 +236,7 @@ struct PersistedState: Codable {
         rateLimitUpdatedAt = try container.decodeIfPresent(Date.self, forKey: .rateLimitUpdatedAt)
         collapsedProjectIDs = try container.decodeIfPresent(Set<UUID>.self, forKey: .collapsedProjectIDs) ?? []
         diagramInstructions = try container.decodeIfPresent(Bool.self, forKey: .diagramInstructions) ?? true
+        keepAwake = try container.decodeIfPresent(KeepAwakeSettings.self, forKey: .keepAwake) ?? KeepAwakeSettings()
         autoSettleDays = try container.decodeIfPresent(Int.self, forKey: .autoSettleDays) ?? 3
         titleGeneration = try container.decodeIfPresent(TitleGenerationSettings.self, forKey: .titleGeneration) ?? TitleGenerationSettings()
         titlePrompt = try container.decodeIfPresent(String.self, forKey: .titlePrompt)

@@ -6,6 +6,9 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+### Added
+- Your Mac stays awake while Claude works, so long turns keep going when you step away. A small cup in the sidebar shows when it's on and keeps the Mac awake for an hour, a few hours or until you stop it. Settings → General → Sleep turns it off, keeps it awake whenever the app is open, gives a few minutes' grace after the last turn, or keeps the display on too.
+
 ### Fixed
 - The right sidebar's toolbar button stays when the sidebar is closed, so there's a visible way to open it again.
 

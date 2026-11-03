@@ -71,9 +71,12 @@ final class AppModel {
     /// its requests for permission and its notifications would come late, and a nap's backlog
     /// would land on the main thread when you came back. The Mac itself may still sleep.
     @ObservationIgnored private var workActivity: NSObjectProtocol?
+    /// Keeps the Mac itself from sleeping, as Settings says (`KeepAwakeSettings`).
+    @ObservationIgnored let keepAwake = KeepAwake()
 
     func workingChanged() {
-        let working = threads.contains { $0.phase == .running }
+        let working = threads.contains { $0.phase == .running || $0.sideChat?.phase == .running }
+        keepAwake.setWorking(working)
         if working, workActivity == nil {
             workActivity = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep, reason: "Claude is working")
         } else if !working, let activity = workActivity {
@@ -240,6 +243,7 @@ final class AppModel {
         rateLimitUpdatedAt = state.rateLimitUpdatedAt
         collapsedProjectIDs = state.collapsedProjectIDs
         diagramInstructions = state.diagramInstructions
+        keepAwake.configure(state.keepAwake)
         autoSettleDays = state.autoSettleDays
         titleGeneration = state.titleGeneration
         titlePrompt = state.titlePrompt
@@ -1425,6 +1429,11 @@ final class AppModel {
         return servers
     }
 
+    func setKeepAwake(_ settings: KeepAwakeSettings) {
+        keepAwake.configure(settings)
+        save()
+    }
+
     func setNotifications(_ enabled: Bool) {
         notifications = enabled
         save()
@@ -1869,6 +1878,7 @@ final class AppModel {
         state.rateLimitUpdatedAt = rateLimitUpdatedAt
         state.collapsedProjectIDs = collapsedProjectIDs
         state.diagramInstructions = diagramInstructions
+        state.keepAwake = keepAwake.settings
         state.autoSettleDays = autoSettleDays
         state.titleGeneration = titleGeneration
         state.titlePrompt = titlePrompt

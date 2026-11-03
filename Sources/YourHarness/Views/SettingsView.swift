@@ -398,6 +398,8 @@ private struct GeneralSettingsView: View {
 
             NotificationsSection()
 
+            KeepAwakeSection()
+
             Section {
                 Picker(selection: defaultModel) {
                     Text("Claude Code Default · \(app.modelDisplayName(for: nil))").tag(String?.none)

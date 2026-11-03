@@ -628,10 +628,13 @@ private struct UsageFooter: View {
                         .font(.caption2.monospacedDigit())
                         .foregroundStyle(.tertiary)
                         .contentTransition(.numericText())
+                        .lineLimit(1)
+                        .fixedSize()
                         .help("This app's memory use")
                 }
                 VersionButton()
                 Spacer()
+                KeepAwakeButton()
                 RefreshLimitsButton()
                 SettingsLink {
                     Image(systemName: "gearshape")
