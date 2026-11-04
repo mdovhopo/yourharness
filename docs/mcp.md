@@ -90,6 +90,9 @@ Claude Code forwards an MCP server's `elicitation/create` as a `control_request`
 
 A running session notices a `user` or `project` server added to the config about a second later; `mcp_reconnect` with its name then connects it (`connectNewMCPServer` retries for 3 s). A `local` one it never notices, since it reads the folder's config at start, so the session starts over: at once when idle, after the turn otherwise. Removing always starts over.
 
+### Settings → MCP — done
+`MCPSettingsView`: the same views on an `MCPServersModel(folder:)` with no thread, asking Claude Code in Home's folder and showing only what applies everywhere (`user`, your organization's, claude.ai connectors). No on/off switches there: Claude Code keeps those per folder. Adding from Settings always adds everywhere.
+
 ### 4. Project `.mcp.json` approval
 Ask before a project's `.mcp.json` servers start, as the terminal does: launch with them held back (find how: `--strict-mcp-config` plus our own `--mcp-config` of the approved ones, or the CLI's own `enabledMcpjsonServers`), show "This project wants to run: npx foo-mcp" with Allow / Don't Allow, remember per project. Ties in with the "confirm, but don't annoy" stance.
 

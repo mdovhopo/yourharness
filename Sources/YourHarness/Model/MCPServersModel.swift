@@ -77,7 +77,9 @@ final class MCPServersModel: Identifiable {
         do {
             let session = try await session()
             // The app's own servers (memory, threads, the browser) aren't yours to manage.
-            let servers = try await session.mcpStatus().filter { $0.transport != "sdk" }
+            var servers = try await session.mcpStatus().filter { $0.transport != "sdk" }
+            // Settings is about what applies everywhere, not Home's own.
+            if thread == nil { servers = servers.filter { [.user, .organization, .claudeAI].contains($0.place) } }
             self.servers = servers
             loaded = true
             failure = nil

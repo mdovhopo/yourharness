@@ -3,19 +3,54 @@ import HarnessCore
 import SwiftUI
 
 struct SettingsView: View {
+    /// Development: `YH_SETTINGS_TAB=mcp` (agents, general, mcp, releases) opens on that tab.
+    @State private var tab = ProcessInfo.processInfo.environment["YH_SETTINGS_TAB"] ?? "agents"
+
     var body: some View {
-        TabView {
-            Tab("Agents", systemImage: "terminal") {
+        TabView(selection: $tab) {
+            Tab("Agents", systemImage: "terminal", value: "agents") {
                 AgentsSettingsView()
             }
-            Tab("General", systemImage: "gearshape") {
+            Tab("General", systemImage: "gearshape", value: "general") {
                 GeneralSettingsView()
             }
-            Tab("Releases", systemImage: "shippingbox") {
+            Tab("MCP", systemImage: "puzzlepiece.extension", value: "mcp") {
+                MCPSettingsView()
+            }
+            Tab("Releases", systemImage: "shippingbox", value: "releases") {
                 ReleasesSettingsView()
             }
         }
         .frame(width: 640, height: 560)
+    }
+}
+
+// MARK: - MCP
+
+/// The MCP servers that apply everywhere, asked of Claude Code in Home's folder, and
+/// handled as `/mcp` handles a thread's.
+private struct MCPSettingsView: View {
+    @Environment(AppModel.self) private var app
+    @State private var model: MCPServersModel?
+
+    var body: some View {
+        Group {
+            if let model {
+                MCPServersSheet(model: model)
+            } else {
+                ProgressView().controlSize(.small)
+            }
+        }
+        .onAppear {
+            guard model == nil, let home = app.project(id: app.homeProjectID) else { return }
+            let model = MCPServersModel(folder: home.url, app: app)
+            model.open()
+            self.model = model
+        }
+        .onDisappear {
+            model?.close()
+            model = nil
+        }
     }
 }
 

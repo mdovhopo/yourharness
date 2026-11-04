@@ -8,6 +8,8 @@ struct MCPServersSheet: View {
     @Environment(AppModel.self) private var app
     @Environment(\.dismiss) private var dismiss
     let model: MCPServersModel
+    /// In Settings: no thread, the servers that apply everywhere, filling the tab.
+    private var inSettings: Bool { model.thread == nil }
 
     var body: some View {
         Group {
@@ -15,14 +17,15 @@ struct MCPServersSheet: View {
                 AddMCPServerPage(model: model)
             } else if let server = model.selectedServer {
                 MCPServerPage(model: model, server: server) { done in
-                    if done { dismiss() } else { model.selected = nil }
+                    if done, !inSettings { dismiss() } else { model.selected = nil }
                 }
             } else {
                 list
             }
         }
-        .frame(width: 600, height: height)
-        .onDisappear { model.close() }
+        .frame(width: inSettings ? nil : 600, height: inSettings ? nil : height)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onDisappear { if !inSettings { model.close() } }
     }
 
     /// As tall as the list, within reason: the sheet doesn't resize as servers connect.
@@ -41,7 +44,9 @@ struct MCPServersSheet: View {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("MCP Servers").font(.headline)
-                    Text("What Claude can reach in \(projectName). Changes apply right away.")
+                    Text(inSettings
+                         ? "Servers for every project, and for Claude Code in the terminal. A project's own are in /mcp, in a thread there."
+                         : "What Claude can reach in \(projectName). Changes apply right away.")
                         .font(.callout).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -58,8 +63,10 @@ struct MCPServersSheet: View {
             HStack {
                 Button("Add Server…", systemImage: "plus") { model.isAdding = true }
                 Spacer()
-                Button("Done") { dismiss() }
-                    .keyboardShortcut(.defaultAction)
+                if !inSettings {
+                    Button("Done") { dismiss() }
+                        .keyboardShortcut(.defaultAction)
+                }
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 12)
@@ -151,7 +158,7 @@ private struct MCPServerRow: View {
                     EmptyView()
                 }
             }
-            MCPServerSwitch(model: model, server: server)
+            if model.thread != nil { MCPServerSwitch(model: model, server: server) }
             Image(systemName: "chevron.right")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.tertiary)
@@ -310,7 +317,7 @@ private struct MCPServerPage: View {
                     if server.isRemote { Button("Sign Out") { model.signOut(server.name) } }
                     Button("Reconnect") { model.reconnect(server.name) }
                 }
-                Button("Done") { back(true) }.keyboardShortcut(.defaultAction)
+                Button(model.thread == nil ? "Back" : "Done") { back(true) }.keyboardShortcut(.defaultAction)
             }
             .disabled(model.busy.contains(server.name))
             .padding(.horizontal, 20)
@@ -330,8 +337,10 @@ private struct MCPServerPage: View {
             }
             Spacer()
             if model.busy.contains(server.name) { ProgressView().controlSize(.small) }
-            MCPServerSwitch(model: model, server: server)
-                .controlSize(.regular)
+            if model.thread != nil {
+                MCPServerSwitch(model: model, server: server)
+                    .controlSize(.regular)
+            }
         }
     }
 

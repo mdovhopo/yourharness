@@ -8,6 +8,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ### Added
 - Your Mac stays awake while Claude works, so long turns keep going when you step away. A small cup in the sidebar shows when it's on and keeps the Mac awake for an hour, a few hours or until you stop it. Settings → General → Sleep turns it off, keeps it awake whenever the app is open, gives a few minutes' grace after the last turn, or keeps the display on too.
+- Settings → MCP lists the MCP servers you have for every project, and claude.ai connectors, with sign-in, adding and removing.
 - Add MCP servers from `/mcp` without the terminal: paste a server's URL and sign in through your browser, or give a command or paste a README's JSON, for every project or just this one; or bring over Claude Desktop's. Remove one from its page. Claude Code in the terminal sees the same servers, and a running thread picks up a new one right away.
 - When an MCP server's tool needs something from you mid-task (a few details in a form, or a page to visit, such as confirming in your browser), it asks above the composer instead of the turn hanging.
 - When an MCP server needs you (to sign in, or because it won't start), a small label by the composer says so; click it for `/mcp`.
