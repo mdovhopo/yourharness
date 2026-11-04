@@ -91,6 +91,14 @@ struct RootView: View {
             if ProcessInfo.processInfo.environment["YH_OPEN_BROWSER_WINDOW"] != nil, let thread = app.selectedThread {
                 openWindow(id: "browser", value: thread.id)
             }
+            // Development: open the selected thread's last sent pictures or videos in Quick
+            // Look, as clicking one does.
+            if ProcessInfo.processInfo.environment["YH_PREVIEW_MEDIA"] != nil {
+                Task {
+                    try? await Task.sleep(for: .seconds(2))
+                    MediaPreview.showLastSent(in: app)
+                }
+            }
             // Development: open a memory specialist's window (importer or reconciler) for the
             // selected project, for checking it without clicking.
             if let role = ProcessInfo.processInfo.environment["YH_MEMORY_AGENT"].flatMap(MemoryRole.init(rawValue:)) {

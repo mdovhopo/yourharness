@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import HarnessCore
 import ImageIO
 import SwiftUI
@@ -147,12 +148,25 @@ enum Thumbnails {
         if let image { cache.setObject(image, forKey: key as NSString) }
         return image
     }
+
+    /// A video's first frame, as small.
+    static func loadVideo(key: String, maxPixels: Int, url: URL) async -> NSImage? {
+        if let image = cached(key) { return image }
+        let generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = CGSize(width: maxPixels, height: maxPixels)
+        guard let (cgImage, _) = try? await generator.image(at: .zero) else { return nil }
+        let image = NSImage(cgImage: cgImage, size: .zero)
+        cache.setObject(image, forKey: key as NSString)
+        return image
+    }
 }
 
 struct AttachmentThumbnail: View {
     enum Content {
         case data(ImageAttachment)
         case file(URL)
+        case video(URL)
     }
 
     let content: Content
@@ -163,6 +177,7 @@ struct AttachmentThumbnail: View {
         switch content {
         case .data(let attachment): "draft-\(attachment.id)"
         case .file(let url): url.lastPathComponent
+        case .video(let url): "video-" + url.path
         }
     }
 
@@ -188,6 +203,14 @@ struct AttachmentThumbnail: View {
             }
         }
         .frame(width: width(for: shown), height: maxSize.height)
+        .overlay {
+            if case .video = content {
+                Image(systemName: "play.circle.fill")
+                    .font(.system(size: min(36, maxSize.height / 2.5)))
+                    .symbolRenderingMode(.palette)
+                    .foregroundStyle(.white, .black.opacity(0.45))
+            }
+        }
         .clipShape(.rect(cornerRadius: 8))
         .contentShape(.rect(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.separator))
@@ -199,6 +222,8 @@ struct AttachmentThumbnail: View {
                 image = await Thumbnails.load(key: key, maxPixels: pixels) { CGImageSourceCreateWithData(data as CFData, nil) }
             case .file(let url):
                 image = await Thumbnails.load(key: key, maxPixels: pixels) { CGImageSourceCreateWithURL(url as CFURL, nil) }
+            case .video(let url):
+                image = await Thumbnails.loadVideo(key: key, maxPixels: pixels, url: url)
             }
         }
     }

@@ -73,25 +73,41 @@ struct UserMessageView: View {
             Spacer(minLength: 80)
             VStack(alignment: .trailing, spacing: 6) {
                 if !attachments.isEmpty {
+                    let urls = attachments.map(app.store.attachmentURL)
+                    // Pictures and videos open big in Quick Look, the arrow keys going through
+                    // the message's others; any other file in its own app.
+                    let media = attachments.indices.filter { Self.mediaKind(attachments[$0]) != nil }.map { urls[$0] }
                     HStack(spacing: 6) {
-                        ForEach(attachments, id: \.self) { name in
-                            let url = app.store.attachmentURL(name)
-                            // Images are kept flat; other files in a folder of their own, by their name.
-                            let isImage = !name.contains("/") && UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) == true
+                        ForEach(Array(attachments.enumerated()), id: \.element) { index, name in
+                            let url = urls[index]
+                            let kind = Self.mediaKind(name)
                             Button {
-                                NSWorkspace.shared.open(url)
-                            } label: {
-                                if isImage {
-                                    AttachmentThumbnail(content: .file(url), maxSize: CGSize(width: 220, height: 160))
+                                if kind != nil {
+                                    MediaPreview.show(media, at: media.firstIndex(of: url) ?? 0)
                                 } else {
+                                    NSWorkspace.shared.open(url)
+                                }
+                            } label: {
+                                switch kind {
+                                case .image:
+                                    AttachmentThumbnail(content: .file(url), maxSize: CGSize(width: 220, height: 160))
+                                case .video:
+                                    AttachmentThumbnail(content: .video(url), maxSize: CGSize(width: 220, height: 160))
+                                case nil:
                                     FileChip(url: url, isDirectory: name.hasSuffix("/"), size: nil)
                                         .frame(height: 48)
                                 }
                             }
                             .buttonStyle(.plain)
-                            .help(isImage ? "Open in Preview" : "Open \(url.lastPathComponent)")
+                            .pointerStyle(kind == nil ? nil : .link)
+                            .help(kind == nil ? "Open \(url.lastPathComponent)" : "Quick Look \(url.lastPathComponent)")
                             .contextMenu {
-                                Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+                                if kind != nil {
+                                    Button("Open in \(kind == .image ? "Preview" : "QuickTime Player")", systemImage: "arrow.up.forward.app") {
+                                        NSWorkspace.shared.open(url)
+                                    }
+                                }
+                                Button("Show in Finder", systemImage: "folder") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
                             }
                         }
                     }
@@ -138,6 +154,13 @@ struct UserMessageView: View {
 }
 
 extension UserMessageView {
+    /// Images are kept flat; other files in a folder of their own, by their name, so an image
+    /// in a folder is one that couldn't be sent inline and shows as a file.
+    static func mediaKind(_ name: String) -> MediaTool.Kind? {
+        guard !name.hasSuffix("/"), let kind = MediaTool.kind(of: name) else { return nil }
+        return kind == .image && name.contains("/") ? nil : kind
+    }
+
     /// A command reads as one: its name in monospace, then what you passed it.
     var message: Text {
         guard let command = SlashCommand.parse(text) else { return Text(linked(chained(AttributedString(text).highlighted(findHighlight), in: text))) }

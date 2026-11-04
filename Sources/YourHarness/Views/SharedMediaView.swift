@@ -41,7 +41,9 @@ struct SharedMediaView: View {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: single ? 300 : 180, maximum: single ? 640 : 320), spacing: 10, alignment: .topLeading)],
                           alignment: .leading, spacing: 10) {
                     ForEach(items, id: \.url) { item in
-                        MediaTile(item: item, large: single)
+                        MediaTile(item: item, large: single) {
+                            MediaPreview.show(items.map(\.url), at: items.firstIndex { $0.url == item.url } ?? 0)
+                        }
                     }
                 }
             }
@@ -68,8 +70,11 @@ private struct MediaItem {
 private struct MediaTile: View {
     let item: MediaItem
     let large: Bool
+    /// Opens the call's media big, at this one.
+    let expand: () -> Void
     @State private var poster: NSImage?
     @State private var player: AVPlayer?
+    @State private var hovering = false
 
     var body: some View {
         ZStack {
@@ -105,13 +110,36 @@ private struct MediaTile: View {
                 self.player = player
                 player.play()
             } else if item.kind == .image {
-                NSWorkspace.shared.open(item.url)
+                expand()
             }
         }
         .pointerStyle(.link)
-        .help(item.kind == .video ? "Play \((item.original as NSString).lastPathComponent)" : "Open \((item.original as NSString).lastPathComponent) in Preview")
+        .overlay(alignment: .topTrailing) {
+            // A video plays where it is; this opens it big. Always there, only faded in, so
+            // hovering never changes the row.
+            if item.kind == .video {
+                Button("Open Large", systemImage: "arrow.up.left.and.arrow.down.right") {
+                    player?.pause()
+                    expand()
+                }
+                .labelStyle(.iconOnly)
+                .buttonStyle(.glass)
+                .controlSize(.small)
+                .padding(8)
+                .opacity(hovering ? 1 : 0)
+                .allowsHitTesting(hovering)
+                .animation(.easeOut(duration: 0.12), value: hovering)
+                .help("Open large in Quick Look")
+            }
+        }
+        .onHover { hovering = $0 }
+        .help(item.kind == .video ? "Play \((item.original as NSString).lastPathComponent)" : "Quick Look \((item.original as NSString).lastPathComponent)")
         .contextMenu {
-            Button("Open", systemImage: "arrow.up.forward.app") { NSWorkspace.shared.open(item.url) }
+            Button("Open Large", systemImage: "arrow.up.left.and.arrow.down.right") {
+                player?.pause()
+                expand()
+            }
+            Button("Open in \(item.kind == .image ? "Preview" : "QuickTime Player")", systemImage: "arrow.up.forward.app") { NSWorkspace.shared.open(item.url) }
             Button("Show in Finder", systemImage: "folder") { NSWorkspace.shared.activateFileViewerSelecting([item.url]) }
             Button("Copy Original Path", systemImage: "doc.on.doc") { Pasteboard.copy(item.original) }
         }
