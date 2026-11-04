@@ -53,6 +53,16 @@ final class ThreadModel: Identifiable {
             rowsChanged()
         }
     }
+    /// Claude asked you to sign in to an MCP server (`MCPSignInTool`).
+    var mcpSignIn: MCPSignInRequest? {
+        didSet {
+            guard (mcpSignIn == nil) != (oldValue == nil) else { return }
+            app.waitingChanged()
+            rowsChanged()
+        }
+    }
+    /// Something Claude can't go on without: an approval, an answer, a sign-in.
+    var isWaitingForYou: Bool { !pendingPermissions.isEmpty || mcpSignIn != nil }
     /// Sub-agents still at work. Background ones outlive the turn that started them.
     private(set) var liveSubagents: [SubagentRun] = []
     /// Commands and watches Claude left running, oldest first.
@@ -824,6 +834,7 @@ final class ThreadModel: Identifiable {
         for message in queuedMessages where message.pending == nil { withdraw(message, toComposer: true) }
         interruptRequested = true
         pendingPermissions.removeAll()
+        mcpSignIn?.cancel()
         Task {
             do {
                 try await start.value.interrupt()
@@ -1306,6 +1317,7 @@ final class ThreadModel: Identifiable {
         if phase == .running { noteTurnEnded() }
         phase = .idle
         pendingPermissions.removeAll()
+        mcpSignIn?.cancel()
         for entry in blocks.values where entry.isStreaming { entry.isStreaming = false }
         for entry in tools.values where entry.isStreaming { entry.isStreaming = false }
         blocks.removeAll()

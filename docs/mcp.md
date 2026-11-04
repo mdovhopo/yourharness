@@ -75,6 +75,8 @@ Tested 2026-11-04: Claude Code looks for `.mcp.json` in parent folders too (a th
 - Claude Code's `local` scope servers already there show under the folder they're tied to, with an offer to move them to the workspace.
 
 ### Claude asks you to sign in
+Done (`MCPSignInTool`, `MCPSignInCard`, `AgentInstructions.mcpSignIn`). Measured on Haiku, fresh threads, 2026-11-04: with a plain instruction Claude called it in 3 of 4; Claude Code's own note ("The following MCP servers require authentication… non-interactive… use /mcp") won the fourth. Quoting that note in the instruction and saying to ignore its advice: 6 of 6 asked. The composer chip is the fallback when Claude doesn't.
+
 Tested: in `-p` mode the CLI gives the model no sign-in tool for a `needs-auth` server, and tells it the session is non-interactive. So Claude answers "run `/mcp` in a terminal". Fix in the app:
 - An app-served tool (beside memory/threads/browser), `sign_in_mcp_server(name, reason)`. It puts a sign-in card in the thread (like an approval prompt), runs `mcp_authenticate`, opens the URL in the default browser and waits for `connected`. Then it returns, and Claude carries on in the same turn, with the server's tools arriving as deferred tools. "Not Now" returns a refusal Claude can work around.
 - `--append-system-prompt` says to use it instead of pointing at the terminal, overriding the CLI's "non-interactive" note.

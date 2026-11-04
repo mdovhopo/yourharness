@@ -7,12 +7,16 @@ import UniformTypeIdentifiers
 /// thread, so they stay after the originals go. It only shows you files, so it doesn't ask.
 struct HarnessToolServer: MCPToolServer {
     let name = "harness"
-    let tools = [MediaTool.definition]
+    let tools = [MediaTool.definition, MCPSignInTool.definition]
     let media: MediaTool
+    let signIn: MCPSignInTool
 
     func call(_ tool: String, arguments: JSONValue, toolUseID: String?) async -> MCPToolResult {
-        guard tool == MediaTool.definition.name else { return .error("No tool named \(tool).") }
-        return await media.show(arguments, toolUseID: toolUseID)
+        switch tool {
+        case MediaTool.definition.name: await media.show(arguments, toolUseID: toolUseID)
+        case MCPSignInTool.definition.name: await signIn.signIn(arguments)
+        default: .error("No tool named \(tool).")
+        }
     }
 }
 

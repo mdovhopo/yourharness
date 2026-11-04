@@ -501,3 +501,63 @@ struct FlowLayout: Layout {
         return rows
     }
 }
+
+// MARK: - Claude asks you to sign in
+
+/// Above the composer, as an approval is: Claude needs a server you haven't signed in to.
+struct MCPSignInCard: View {
+    let request: MCPSignInRequest
+    /// Off only where glass can't be drawn (the mockups, drawn off screen).
+    var glass = true
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            MCPServerGlyph(server: request.server, size: 32)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(request.page == nil ? "Sign in to \(request.server.displayName)?" : "Waiting for you to sign in to \(request.server.displayName)…")
+                    .font(.headline)
+                Text(detail)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            HStack(spacing: 8) {
+                if let page = request.page {
+                    ProgressView().controlSize(.small)
+                    Button("Open Again") { MCPServersModel.openInBrowser(page) }
+                    Button("Cancel") { request.cancel() }
+                } else if request.decided {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Button("Not Now") { request.decide(false) }
+                        .keyboardShortcut(.delete, modifiers: .command)
+                        .help("Not Now (⌘⌫)")
+                    Button("Sign In…") { request.decide(true) }
+                        .keyboardShortcut(.return, modifiers: .command)
+                        .buttonStyle(.glassProminent)
+                        .help("Sign In (⌘↩)")
+                }
+            }
+            .controlSize(.large)
+        }
+        .padding(14)
+        .background {
+            if glass {
+                Color.clear.glassEffect(.regular.tint(.orange.opacity(0.12)), in: .rect(cornerRadius: Theme.floatingRadius))
+            } else {
+                Color.clear.card(radius: Theme.floatingRadius, tint: .orange)
+            }
+        }
+    }
+
+    private var detail: String {
+        if request.page != nil {
+            return "Finish in your browser; Claude carries on once it's connected."
+        }
+        let host = request.server.target.flatMap { URL(string: $0)?.host() }
+        let need = request.reason.map { "Claude needs it to \($0.prefix(1).lowercased() + $0.dropFirst())" } ?? "Claude needs it for this task"
+        return need.trimmingCharacters(in: CharacterSet(charactersIn: ".")) + ". Your browser opens"
+            + (host.map { " at \($0)" } ?? "") + ", with your company's sign-in if it uses one."
+    }
+}

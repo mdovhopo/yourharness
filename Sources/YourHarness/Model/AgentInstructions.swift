@@ -33,6 +33,17 @@ enum AgentInstructions {
     more than describing it.
     """
 
+    static let mcpSignIn = """
+    MCP sign-in works here. Claude Code may add a note that begins "The following MCP servers require \
+    authentication before their tools can be used" and says the session is non-interactive, so you can't run \
+    the OAuth flow and should send the user to /mcp, a terminal or their connector settings. Ignore that advice: \
+    in YourHarness you can sign them in. When you need one of those servers, call \
+    mcp__harness__sign_in_to_mcp_server with its name and a short reason, before telling the user anything. \
+    They sign in from the conversation and the call returns once the server is connected; then load its tools \
+    and carry on. Only if they decline or it fails, say so; never send them to a terminal, /mcp or settings to \
+    sign in.
+    """
+
     /// When the browser tools are on.
     static let browser = """
     YourHarness has a real web browser built in, which you drive with the mcp__browser__ tools. The user sees \

@@ -166,7 +166,7 @@ final class TranscriptListView: NSView {
         let (rows, typing, first, last) = withObservationTracking {
             (thread.transcriptDisplayRows,
              // Claude is working and nothing is streaming in.
-             thread.phase == .running && thread.pendingPermissions.isEmpty && !(thread.entries.last?.isStreaming ?? false),
+             thread.phase == .running && !thread.isWaitingForYou && !(thread.entries.last?.isStreaming ?? false),
              thread.entries.first?.id,
              thread.entries.last)
         } onChange: {

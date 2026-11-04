@@ -56,7 +56,7 @@ public struct SlashCommand: Sendable, Equatable, Codable, Identifiable {
         guard var name = json["name"] as? String, !name.isEmpty else { return nil }
         // An MCP prompt is listed as "server:prompt (MCP)" but typed as /mcp__server__prompt.
         let prompt = Self.mcpPrompt(listedAs: name)
-        if let prompt { name = "mcp__\(Self.normalized(prompt.server))__\(Self.normalized(prompt.prompt))" }
+        if let prompt { name = "mcp__\(Self.normalizedName(prompt.server))__\(Self.normalizedName(prompt.prompt))" }
         self.init(name: name, description: json["description"] as? String ?? "",
                   argumentHint: json["argumentHint"] as? String ?? "", aliases: json["aliases"] as? [String] ?? [],
                   isBuiltin: json["builtin"] as? Bool ?? false, mcpServer: prompt?.server)
@@ -72,7 +72,7 @@ public struct SlashCommand: Sendable, Equatable, Codable, Identifiable {
 
     /// How Claude Code puts a name into a tool's or command's: anything but letters, digits,
     /// `_` and `-` becomes `_` ("claude.ai Linear" → "claude_ai_Linear").
-    static func normalized(_ name: String) -> String {
+    public static func normalizedName(_ name: String) -> String {
         String(name.map { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_" || $0 == "-") ? $0 : "_" })
     }
 
@@ -80,7 +80,7 @@ public struct SlashCommand: Sendable, Equatable, Codable, Identifiable {
     /// name otherwise.
     public var displayName: String {
         guard let mcpServer else { return name }
-        let prefix = "mcp__\(Self.normalized(mcpServer))__"
+        let prefix = "mcp__\(Self.normalizedName(mcpServer))__"
         return name.hasPrefix(prefix) ? "\(mcpServer):\(name.dropFirst(prefix.count))" : name
     }
 

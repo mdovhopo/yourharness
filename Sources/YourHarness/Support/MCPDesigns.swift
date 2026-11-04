@@ -1,4 +1,5 @@
 import AppKit
+import HarnessCore
 import SwiftUI
 
 /// Development: `YH_MCP_DESIGNS=<folder>` draws mockups of the planned MCP views (see
@@ -40,6 +41,7 @@ enum MCPDesigns {
             Design(name: "E3-add-url-signing-in", width: 560, view: AnyView(AddURLDesign(step: .signingIn))),
             Design(name: "G-sign-in-in-thread", width: 720, canvas: true, view: AnyView(InThreadSignInDesign())),
             Design(name: "H-settings-everywhere", width: 680, view: AnyView(SettingsDesign())),
+            Design(name: "G2-sign-in-card", width: 760, canvas: true, view: AnyView(RealSignInCards())),
             Design(name: "F-project-approval", width: 720, canvas: true, view: AnyView(ApprovalDesign())),
         ]
     }
@@ -796,6 +798,21 @@ private struct SettingsDesign: View {
             Toggle("Let Claude ask me to sign in to servers", isOn: .constant(true))
         }
         .padding(24)
+    }
+}
+
+/// The real card, asking and then waiting for the browser.
+private struct RealSignInCards: View {
+    var body: some View {
+        let server = MCPServerStatus(name: "linear", state: .needsSignIn, transport: "http", target: "https://mcp.linear.app/mcp")
+        let waiting = MCPSignInRequest(server: server, reason: "List your open issues")
+        waiting.decide(true)
+        waiting.page = URL(string: "https://mcp.linear.app/authorize")
+        return VStack(spacing: 16) {
+            MCPSignInCard(request: MCPSignInRequest(server: server, reason: "List your open issues"), glass: false)
+            MCPSignInCard(request: waiting, glass: false)
+        }
+        .padding(20)
     }
 }
 

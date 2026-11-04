@@ -41,6 +41,10 @@ struct ThreadView: View {
                         RequestCard(request: request, thread: thread)
                             .transition(.move(edge: .bottom).combined(with: .opacity))
                     }
+                    if let signIn = thread.mcpSignIn {
+                        MCPSignInCard(request: signIn)
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                    }
                     ComposerView(thread: thread)
                 }
                 .frame(maxWidth: 820)
@@ -50,6 +54,7 @@ struct ThreadView: View {
                 // The same composer, lifted to the middle: it keeps its focus and draft on the way down.
                 .offset(y: isFresh ? -max((areaHeight - composerHeight) / 2, 0) : 0)
                 .animation(.snappy, value: thread.pendingPermissions)
+                .animation(.snappy, value: thread.mcpSignIn?.id)
                 .animation(settledThread == thread.id ? .spring(response: 0.55, dampingFraction: 0.86) : nil, value: isFresh)
             }
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { areaHeight = $0 }

@@ -187,7 +187,7 @@ private struct ProjectHeader: View {
     private var collapsed: Bool { app.isCollapsed(project) }
     private var threadCount: Int { app.threads(in: project).count }
     private var hasActivity: Bool {
-        app.threads(in: project).contains { $0.isWorking || $0.hasUnread || !$0.pendingPermissions.isEmpty }
+        app.threads(in: project).contains { $0.isWorking || $0.hasUnread || $0.isWaitingForYou }
     }
     private var workspace: WorkspaceModel? { app.workspace(for: project) }
     private var isSelected: Bool { app.overviewProjectID == project.id }
@@ -539,7 +539,7 @@ private struct ThreadStatus: View {
     }
 
     private var state: State {
-        if !thread.pendingPermissions.isEmpty { return .needsApproval }
+        if thread.isWaitingForYou { return .needsApproval }
         if thread.isWorking { return .running }
         if thread.isWaitingOnJobs { return .waitingOnJobs }
         if thread.hasUnread { return .unread }

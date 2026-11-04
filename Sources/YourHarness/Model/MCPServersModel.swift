@@ -111,7 +111,7 @@ final class MCPServersModel: Identifiable {
 
     /// Development: `YH_MCP_BROWSER=log` prints the page instead, so a test never puts a
     /// browser on the screen.
-    private static func openInBrowser(_ url: URL) {
+    static func openInBrowser(_ url: URL) {
         if ProcessInfo.processInfo.environment["YH_MCP_BROWSER"] == "log" {
             FileHandle.standardError.write(Data("MCP sign-in page: \(url.absoluteString)\n".utf8))
         } else {

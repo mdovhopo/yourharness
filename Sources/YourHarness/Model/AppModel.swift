@@ -1177,7 +1177,7 @@ final class AppModel {
         if !thread.isSideChat {
             // Showing you a file changes nothing: it doesn't ask.
             options.allowedTools.append("mcp__harness")
-            options.appendSystemPrompt = [options.appendSystemPrompt, AgentInstructions.media].compactMap(\.self).joined(separator: "\n\n")
+            options.appendSystemPrompt = [options.appendSystemPrompt, AgentInstructions.media, AgentInstructions.mcpSignIn].compactMap(\.self).joined(separator: "\n\n")
             // The thread tools touch only the app's own list and delete nothing; the
             // instructions keep changes to what you ask for.
             options.allowedTools.append("mcp__threads")
@@ -1431,7 +1431,7 @@ final class AppModel {
             if memoryEnabled { servers.append(memoryServer(for: thread, access: .readOnly, actor: .init("agent", threadID: thread.parentThread?.id.uuidString))) }
             return servers
         }
-        var servers: [any MCPToolServer] = [HarnessToolServer(media: MediaTool(thread: thread, app: self)),
+        var servers: [any MCPToolServer] = [HarnessToolServer(media: MediaTool(thread: thread, app: self), signIn: MCPSignInTool(thread: thread)),
                                             ThreadToolServer(threads: ThreadTools(thread: thread, app: self), updatesTitle: agentTitleUpdatesOn)]
         if browserTools { servers.append(BrowserToolServer(browser: BrowserTools(thread: thread, app: self, readOnly: false))) }
         if memoryEnabled { servers.append(memoryServer(for: thread, access: .agent, actor: .init("agent", threadID: thread.id.uuidString))) }
@@ -1476,7 +1476,7 @@ final class AppModel {
 
     /// The Dock icon counts threads waiting for your approval, answer or plan review.
     func waitingChanged() {
-        let waiting = threads.count { !$0.pendingPermissions.isEmpty || $0.sideChat?.pendingPermissions.isEmpty == false }
+        let waiting = threads.count { $0.isWaitingForYou || $0.sideChat?.pendingPermissions.isEmpty == false }
         notifier.setBadge(waiting)
     }
 
