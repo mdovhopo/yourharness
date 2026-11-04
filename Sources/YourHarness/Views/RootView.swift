@@ -64,6 +64,9 @@ struct RootView: View {
         .sheet(item: Bindable(app.stateTransfer).pending) { pending in
             StateImportSheet(pending: pending)
         }
+        .sheet(item: Bindable(app).mcpServersSheet) { model in
+            MCPServersSheet(model: model)
+        }
         .background(WindowReader { inspectorRoom.window = $0 })
         .onChange(of: showsInspector) { _, shown in inspectorRoom.shownChanged(shown) }
         .onChange(of: app.showsInspector) { _, shown in if !shown { inspectorRoom.closed() } }
@@ -85,6 +88,11 @@ struct RootView: View {
                 app.tokenUsage.range = range
             }
             if ProcessInfo.processInfo.environment["YH_OPEN_USAGE"] != nil { app.tokenUsage.open() }
+            // Development: open the selected thread's MCP servers (`YH_MCP_SELECT`: a server's
+            // page; `YH_MCP_SIGN_IN`: start signing in to one, once the list is in).
+            if ProcessInfo.processInfo.environment["YH_OPEN_MCP"] != nil, let thread = app.selectedThread {
+                MCPServersModel.openForDevelopment(app: app, thread: thread)
+            }
             // Development: open Settings, for checking it without a shortcut.
             if ProcessInfo.processInfo.environment["YH_OPEN_SETTINGS"] != nil { openSettings() }
             // Development: open the selected thread's browser in its own window.

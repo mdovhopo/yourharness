@@ -346,6 +346,17 @@ final class ThreadModel: Identifiable {
 
     var hasLiveSession: Bool { sessionStart != nil }
 
+    /// The running Claude Code process, if there is one; never starts one.
+    func liveSession() async -> ClaudeSession? {
+        guard let sessionStart, let session = try? await sessionStart.value, await session.isRunning else { return nil }
+        return session
+    }
+
+    /// What the `/mcp` sheet last heard, for whatever shows a server needing you.
+    func noteMCPServers(_ servers: [MCPServerStatus]) {
+        mcpServers = servers
+    }
+
     /// A turn is running, or a sub-agent is still at work after one.
     var isWorking: Bool { phase == .running || !liveSubagents.isEmpty }
 
@@ -712,6 +723,8 @@ final class ThreadModel: Identifiable {
     /// chat, `/model` and `/effort` go through the same pickers as the composer's chips.
     private func handleLocally(_ command: (name: String, arguments: String)) -> Bool {
         switch command.name {
+        case "mcp":
+            return handleMCPCommand(command.arguments)
         case "btw":
             askAside(command.arguments)
             return true
@@ -728,6 +741,47 @@ final class ThreadModel: Identifiable {
         default:
             return false
         }
+    }
+
+    /// `/mcp` opens the servers sheet; `/mcp enable|disable [<server>|all]` and
+    /// `/mcp reconnect <server>` do it here, as in the terminal.
+    private func handleMCPCommand(_ arguments: String) -> Bool {
+        let words = arguments.split(separator: " ", maxSplits: 1).map(String.init)
+        guard let verb = words.first?.lowercased() else {
+            app.openMCPServers(for: self)
+            return true
+        }
+        guard ["enable", "disable", "reconnect"].contains(verb), let target = words.dropFirst().first?.trimmingCharacters(in: .whitespaces),
+              !target.isEmpty else {
+            app.openMCPServers(for: self)
+            return true
+        }
+        Task { [weak self] in
+            guard let self else { return }
+            let model = MCPServersModel(thread: self, app: self.app)
+            await model.refresh()
+            let names = target == "all" && verb != "reconnect" ? model.servers.map(\.name) : [target]
+            var done: [String] = []
+            var failed: [String] = []
+            for name in names {
+                guard let session = try? await model.session() else { break }
+                do {
+                    switch verb {
+                    case "enable": try await session.setMCPServer(name, enabled: true)
+                    case "disable": try await session.setMCPServer(name, enabled: false)
+                    default: try await session.reconnectMCPServer(name)
+                    }
+                    done.append(name)
+                } catch {
+                    failed.append("\(name): \((error as? ClaudeControlError)?.description ?? error.localizedDescription)")
+                }
+            }
+            model.close()
+            let past = ["enable": "Turned on", "disable": "Turned off", "reconnect": "Reconnected"][verb] ?? verb
+            if !done.isEmpty { self.entries.append(.notice("\(past) MCP: \(done.joined(separator: ", "))")) }
+            if !failed.isEmpty { self.entries.append(.notice("Couldn't \(verb) MCP \(failed.joined(separator: "; "))", style: .error)) }
+        }
+        return true
     }
 
     // MARK: - Side chat

@@ -1277,6 +1277,8 @@ final class AppModel {
 
     /// Commands the app handles itself.
     static let appCommands = [
+        SlashCommand(name: "mcp", description: "See your MCP servers: sign in, turn them on or off, reconnect.",
+                     argumentHint: "[enable|disable|reconnect <server>]", isBuiltin: true),
         SlashCommand(name: "btw", description: "Ask a side question in the sidebar. Claude sees this thread; nothing is added to it.",
                      argumentHint: "<question>", isBuiltin: true),
     ]
@@ -1602,6 +1604,15 @@ final class AppModel {
 
     /// Shows the "Resume Claude Code Session" sheet.
     var isResumingSession = false
+    /// The `/mcp` sheet, for a thread.
+    var mcpServersSheet: MCPServersModel?
+
+    func openMCPServers(for thread: ThreadModel) {
+        mcpServersSheet?.close()
+        let model = MCPServersModel(thread: thread, app: self)
+        mcpServersSheet = model
+        model.open()
+    }
 
     /// The project's files for `@` mentions: listed in the background, kept a little while,
     /// so typing a mention never waits on the disk. In a git repo, what git sees (nothing

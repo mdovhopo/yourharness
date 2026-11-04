@@ -273,46 +273,6 @@ private struct ToolChips: View {
     }
 }
 
-private struct FlowLayout: Layout {
-    var spacing: CGFloat = 6
-
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let rows = arrange(width: proposal.width ?? .infinity, subviews: subviews)
-        return CGSize(width: proposal.width ?? rows.map(\.width).max() ?? 0,
-                      height: rows.map(\.height).reduce(0, +) + spacing * CGFloat(max(rows.count - 1, 0)))
-    }
-
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        var y = bounds.minY
-        for row in arrange(width: bounds.width, subviews: subviews) {
-            var x = bounds.minX
-            for index in row.indices {
-                let size = subviews[index].sizeThatFits(.unspecified)
-                subviews[index].place(at: CGPoint(x: x, y: y), proposal: .unspecified)
-                x += size.width + spacing
-            }
-            y += row.height + spacing
-        }
-    }
-
-    private func arrange(width: CGFloat, subviews: Subviews) -> [(indices: [Int], width: CGFloat, height: CGFloat)] {
-        var rows: [(indices: [Int], width: CGFloat, height: CGFloat)] = []
-        var current: (indices: [Int], width: CGFloat, height: CGFloat) = ([], 0, 0)
-        for index in subviews.indices {
-            let size = subviews[index].sizeThatFits(.unspecified)
-            if !current.indices.isEmpty, current.width + spacing + size.width > width {
-                rows.append(current)
-                current = ([], 0, 0)
-            }
-            current.width += (current.indices.isEmpty ? 0 : spacing) + size.width
-            current.height = max(current.height, size.height)
-            current.indices.append(index)
-        }
-        if !current.indices.isEmpty { rows.append(current) }
-        return rows
-    }
-}
-
 private struct MCPSectionLabel: View {
     let text: String
     var body: some View {

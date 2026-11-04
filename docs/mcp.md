@@ -12,7 +12,7 @@ From the mockups (`YH_MCP_DESIGNS=<folder>` draws them, see `Support/MCPDesigns.
 - **Settings → MCP** lists the servers that apply everywhere, where each is turned off, and every workspace's own.
 - No sidebar tab.
 
-Done: the core (below, step 1) and MCP prompts in the `/` menu.
+Done: the core (below, step 1), MCP prompts in the `/` menu, and the `/mcp` sheet with each server's page (`MCPServersSheet`, `MCPServersModel`). The sheet asks the thread's session when it has one, otherwise a Claude Code process of its own in the thread's folder, kept while the sheet is open so a sign-in's browser can come back to it. Its on/off switch is Claude Code's, saved for the exact folder: per workspace comes with step 4's scopes.
 
 ## What the CLI gives us (probed on 2.1.312, 2026-11-03)
 
