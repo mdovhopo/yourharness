@@ -362,6 +362,12 @@ final class ThreadModel: Identifiable {
         return session
     }
 
+    /// Servers waiting on you: to sign in, or to fix. Not claude.ai connectors you haven't
+    /// connected, which stay that way on purpose more often than not.
+    var mcpServersNeedingYou: [MCPServerStatus] {
+        mcpServers.filter { $0.transport != "sdk" && $0.state.needsAttention && !($0.place == .claudeAI && $0.state == .needsSignIn) }
+    }
+
     /// What the `/mcp` sheet last heard, for whatever shows a server needing you.
     func noteMCPServers(_ servers: [MCPServerStatus]) {
         mcpServers = servers

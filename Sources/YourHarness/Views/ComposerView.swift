@@ -63,6 +63,7 @@ struct ComposerView: View {
                 ModelChip(thread: thread)
                 EffortChip(thread: thread)
                 PermissionChip(thread: thread)
+                MCPAttentionChip(thread: thread)
                 Spacer(minLength: 8)
                 if let tokens = thread.contextTokens {
                     ContextIndicator(tokens: tokens, window: thread.effectiveContextWindow)
@@ -223,6 +224,41 @@ private struct EffortChip: View {
                 PickerFootnote("Applies from your next message.")
             }
         }
+    }
+}
+
+/// Only when an MCP server needs you: one to sign in to, or one that won't start. Opens /mcp.
+private struct MCPAttentionChip: View {
+    @Environment(AppModel.self) private var app
+    let thread: ThreadModel
+    @State private var hovering = false
+
+    var body: some View {
+        let needing = thread.mcpServersNeedingYou
+        if !needing.isEmpty {
+            Button {
+                app.openMCPServers(for: thread)
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "puzzlepiece.extension")
+                    Text(label(needing))
+                }
+                .font(.callout.weight(.medium))
+                .foregroundStyle(.orange)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 5)
+                .background(.orange.opacity(hovering ? 0.2 : 0.12), in: .capsule)
+                .contentShape(.capsule)
+            }
+            .buttonStyle(.plain)
+            .onHover { hovering = $0 }
+            .help("MCP servers: " + needing.map { "\($0.displayName) \($0.state == .failed ? "won't start" : "needs sign-in")" }.joined(separator: ", "))
+        }
+    }
+
+    private func label(_ needing: [MCPServerStatus]) -> String {
+        guard needing.count == 1, let server = needing.first else { return "\(needing.count) MCP servers need you" }
+        return server.state == .failed ? "\(server.displayName) won't start" : "Sign in to \(server.displayName)"
     }
 }
 

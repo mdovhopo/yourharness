@@ -86,6 +86,7 @@ final class MCPSignInTool {
             try? await Task.sleep(for: .seconds(1))
             if let now = try? await session.mcpStatus().first(where: { $0.name == server.name }) {
                 if now.state == .connected {
+                    if let all = try? await session.mcpStatus() { thread.noteMCPServers(all) }
                     let tools = now.tools.map(\.name)
                     return .text("Signed in: \(server.name) is connected"
                         + (tools.isEmpty ? "." : ", with \(tools.count) tools (mcp__\(SlashCommand.normalizedName(server.name))__…): \(tools.prefix(20).joined(separator: ", ")).")

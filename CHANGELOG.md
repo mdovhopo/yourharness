@@ -8,6 +8,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ### Added
 - Your Mac stays awake while Claude works, so long turns keep going when you step away. A small cup in the sidebar shows when it's on and keeps the Mac awake for an hour, a few hours or until you stop it. Settings → General → Sleep turns it off, keeps it awake whenever the app is open, gives a few minutes' grace after the last turn, or keeps the display on too.
+- When an MCP server needs you (to sign in, or because it won't start), a small label by the composer says so; click it for `/mcp`.
 - Claude asks you to sign in to an MCP server it needs, right in the thread, instead of sending you to the terminal: Sign In opens the server's page in your browser, and Claude carries on in the same turn once it's connected. Not Now tells Claude no.
 - `/mcp` opens your MCP servers instead of sending you to the terminal: what each is doing, its tools, an on/off switch per project, Retry for one that won't start (or ask Claude to fix it), and sign-in for servers on the web, in your own browser so your company's sign-in works. `/mcp enable`, `disable` and `reconnect` with a server's name do it straight away.
 - Prompts from your MCP servers show in the `/` menu as `/server:prompt`, with an MCP label, as soon as the server connects, and run when you pick or type them.
