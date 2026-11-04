@@ -6,6 +6,8 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+## [0.0.16] - 2026-11-04
+
 ### Added
 - `/mcp` opens your MCP servers instead of sending you to the terminal: what each is doing, its tools, an on/off switch per project, Retry for one that won't start (or ask Claude to fix it), and sign-in for servers on the web, in your own browser so your company's sign-in works. `/mcp enable`, `disable` and `reconnect` with a server's name do it straight away.
 - Add MCP servers from `/mcp` without the terminal: paste a server's URL and sign in through your browser, or give a command or paste a README's JSON, for every project or just this one; or bring over Claude Desktop's. Remove one from its page. Claude Code in the terminal sees the same servers, and a running thread picks up a new one right away.
