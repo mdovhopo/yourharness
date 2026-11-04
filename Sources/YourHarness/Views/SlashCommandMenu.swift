@@ -41,8 +41,10 @@ private struct SlashCommandMenu: ViewModifier {
         let q = query.lowercased()
         func rank(_ command: SlashCommand) -> Int? {
             let name = command.name.lowercased()
-            if name == q { return 0 }
-            if name.hasPrefix(q) { return 1 }
+            // An MCP prompt is found by what it shows, "github:review", too.
+            let shown = command.displayName.lowercased()
+            if name == q || shown == q { return 0 }
+            if name.hasPrefix(q) || shown.hasPrefix(q) { return 1 }
             if command.aliases.contains(where: { $0.lowercased().hasPrefix(q) }) { return 2 }
             if name.contains(q) { return 3 }
             return nil
@@ -159,6 +161,7 @@ private struct CommandRow: View {
     /// "Say hello (project)" → ("Say hello", "project"). The app's own say so too.
     private var parts: (description: String, source: String?) {
         if AppModel.appCommands.contains(where: { $0.name == command.name }) { return (command.description, "YourHarness") }
+        if command.mcpServer != nil { return (command.description, "MCP") }
         let description = command.description
         guard description.hasSuffix(")"), let open = description.lastIndex(of: "(") else { return (description, nil) }
         let source = description[description.index(after: open)..<description.index(before: description.endIndex)]
@@ -171,7 +174,7 @@ private struct CommandRow: View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
-                    Text("/\(command.name)")
+                    Text("/\(command.displayName)")
                         .font(.body.monospaced().weight(.medium))
                     if !command.argumentHint.isEmpty {
                         Text(command.argumentHint)

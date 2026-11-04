@@ -39,20 +39,49 @@ public struct SlashCommand: Sendable, Equatable, Codable, Identifiable {
     public var aliases: [String]
     /// Part of Claude Code itself, as opposed to your commands and skills.
     public var isBuiltin: Bool
+    /// For an MCP server's prompt: the server, as Claude Code names it.
+    public var mcpServer: String?
 
-    public init(name: String, description: String, argumentHint: String = "", aliases: [String] = [], isBuiltin: Bool = false) {
+    public init(name: String, description: String, argumentHint: String = "", aliases: [String] = [], isBuiltin: Bool = false,
+                mcpServer: String? = nil) {
         self.name = name
         self.description = description
         self.argumentHint = argumentHint
         self.aliases = aliases
         self.isBuiltin = isBuiltin
+        self.mcpServer = mcpServer
     }
 
     init?(json: [String: Any]) {
-        guard let name = json["name"] as? String, !name.isEmpty else { return nil }
+        guard var name = json["name"] as? String, !name.isEmpty else { return nil }
+        // An MCP prompt is listed as "server:prompt (MCP)" but typed as /mcp__server__prompt.
+        let prompt = Self.mcpPrompt(listedAs: name)
+        if let prompt { name = "mcp__\(Self.normalized(prompt.server))__\(Self.normalized(prompt.prompt))" }
         self.init(name: name, description: json["description"] as? String ?? "",
                   argumentHint: json["argumentHint"] as? String ?? "", aliases: json["aliases"] as? [String] ?? [],
-                  isBuiltin: json["builtin"] as? Bool ?? false)
+                  isBuiltin: json["builtin"] as? Bool ?? false, mcpServer: prompt?.server)
+    }
+
+    /// "github:review (MCP)" → ("github", "review").
+    static func mcpPrompt(listedAs name: String) -> (server: String, prompt: String)? {
+        guard name.hasSuffix(" (MCP)") else { return nil }
+        let bare = name.dropLast(" (MCP)".count)
+        guard let colon = bare.lastIndex(of: ":"), colon > bare.startIndex, bare.index(after: colon) < bare.endIndex else { return nil }
+        return (String(bare[..<colon]), String(bare[bare.index(after: colon)...]))
+    }
+
+    /// How Claude Code puts a name into a tool's or command's: anything but letters, digits,
+    /// `_` and `-` becomes `_` ("claude.ai Linear" → "claude_ai_Linear").
+    static func normalized(_ name: String) -> String {
+        String(name.map { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_" || $0 == "-") ? $0 : "_" })
+    }
+
+    /// What the menu shows: "server:prompt" for an MCP prompt, as Claude Code lists it; the
+    /// name otherwise.
+    public var displayName: String {
+        guard let mcpServer else { return name }
+        let prefix = "mcp__\(Self.normalized(mcpServer))__"
+        return name.hasPrefix(prefix) ? "\(mcpServer):\(name.dropFirst(prefix.count))" : name
     }
 
     /// "/name the rest" → ("name", "the rest"); nil when the text isn't a command.

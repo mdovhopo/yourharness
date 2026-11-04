@@ -27,6 +27,8 @@ final class ThreadModel: Identifiable {
     private(set) var activeModelName: String?
     /// Tokens currently in context, from the latest assistant message.
     private(set) var contextTokens: Int?
+    /// MCP servers as the session last said: the names, states and scopes from its start.
+    private(set) var mcpServers: [MCPServerStatus] = []
     private(set) var contextWindow: Int?
     private(set) var entries: [TranscriptEntry] = [] {
         didSet {
@@ -604,6 +606,11 @@ final class ThreadModel: Identifiable {
         var text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !images.isEmpty || !files.isEmpty else { return }
         noteLinks(in: text)
+        if images.isEmpty, files.isEmpty, let command = SlashCommand.parse(text),
+           let prompt = app.slashCommands(for: projectID).first(where: { $0.mcpServer != nil && $0.displayName == command.name }) {
+            // Typed as the menu shows it, "/github:review", which Claude Code doesn't take.
+            text = "/\(prompt.name)" + (command.arguments.isEmpty ? "" : " \(command.arguments)")
+        }
         if images.isEmpty, files.isEmpty, let command = SlashCommand.parse(text) {
             if isSideChat, command.name == "btw" {
                 // Already on the side: the question is all that's left.
@@ -925,6 +932,7 @@ final class ThreadModel: Identifiable {
             sessionID = info.sessionID
             activeModelName = info.model
             if let skills = info.skills, !isAside { app.noteSkills(skills, projectID: projectID) }
+            if let servers = info.mcpServers { mcpServers = servers }
             app.save()
 
         case .status(let status):
@@ -1147,7 +1155,10 @@ final class ThreadModel: Identifiable {
         case .catalog(let catalog):
             app.updateCatalog(catalog, projectID: isAside ? nil : projectID)
 
-        case .controlFailed, .mcpMessage:
+        case .commandsChanged(let commands):
+            if !isAside { app.updateSlashCommands(commands, projectID: projectID) }
+
+        case .controlReply, .controlFailed, .mcpMessage:
             break
 
         case .turnCompleted(let result):

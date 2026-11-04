@@ -1262,6 +1262,13 @@ final class AppModel {
         if changed { save() }
     }
 
+    /// A session's commands changed (an MCP server connected with its prompts).
+    func updateSlashCommands(_ commands: [SlashCommand], projectID: UUID) {
+        guard !commands.isEmpty, slashCommands[projectID] != commands else { return }
+        slashCommands[projectID] = commands
+        save()
+    }
+
     // MARK: - Slash commands
 
     /// By project: commands and skills depend on the folder (its `.claude/commands`, skills).

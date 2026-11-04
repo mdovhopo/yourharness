@@ -47,6 +47,11 @@ public enum AgentEvent: Sendable, Equatable {
     case messageUsage(MessageUsage)
     /// Reply to `initialize`: models, effort levels, CLI version.
     case catalog(ClaudeCatalog)
+    /// The commands changed: an MCP server connected or went away with its prompts, a
+    /// skill was added. The whole list, as in `catalog`.
+    case commandsChanged([SlashCommand])
+    /// Any other control request answered; `ClaudeSession.request` waits for these.
+    case controlReply(requestID: String, response: JSONValue)
     case controlFailed(requestID: String, message: String)
     /// For a server the app serves (`MCPToolServer`). The session answers these itself;
     /// they never reach the UI.
@@ -89,6 +94,9 @@ public struct SessionInfo: Sendable, Equatable {
     /// What the agent can run itself with its Skill tool: skills, bundled ones included,
     /// as opposed to commands only the CLI runs (`/compact`).
     public var skills: [String]? = nil
+    /// Each MCP server's name, state and scope as the session started; nil when the CLI
+    /// didn't say. `ClaudeSession.mcpStatus()` has the rest.
+    public var mcpServers: [MCPServerStatus]? = nil
 }
 
 public struct ToolResult: Sendable, Equatable {

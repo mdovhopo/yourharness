@@ -25,6 +25,8 @@ public struct ClaudeLaunchOptions: Sendable {
     public var allowedTools: [String] = []
     /// Folders besides the working directory that tools may use (`--add-dir`).
     public var addDirectories: [String] = []
+    /// MCP config files (or JSON) on top of Claude Code's own (`--mcp-config`).
+    public var mcpConfigs: [String] = []
 
     public init(
         executable: URL,
@@ -72,6 +74,7 @@ public struct ClaudeLaunchOptions: Sendable {
         if !persistsSession { args.append("--no-session-persistence") }
         if !allowedTools.isEmpty { args += ["--allowedTools", allowedTools.joined(separator: ",")] }
         for directory in addDirectories { args += ["--add-dir", directory] }
+        if !mcpConfigs.isEmpty { args += ["--mcp-config"] + mcpConfigs }
         return args
     }
 }
@@ -87,6 +90,7 @@ public actor ClaudeSession {
     private let stdin: LineWriter
     private var requestCounter = 0
     private let servers: [String: MCPServerEndpoint]
+    private let reader: OutputReader
 
     /// `servers` are tools served from inside the app; they're announced in `initialize`.
     public init(options: ClaudeLaunchOptions, servers: [any MCPToolServer] = []) throws {
@@ -145,6 +149,7 @@ public actor ClaudeSession {
         processIdentifier = process.processIdentifier
         self.stdin = writer
         self.servers = endpoints
+        self.reader = reader
         // Writing to a process that just died should throw, not kill the app with SIGPIPE.
         _ = fcntl(stdinPipe.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
         self.events = events
@@ -208,6 +213,59 @@ public actor ClaudeSession {
             "request_id": "yh-\(requestCounter)",
             "request": request,
         ])
+    }
+
+    /// Sends a control request and waits for its answer: the reply's payload, or
+    /// `ClaudeControlError`. Its reply never reaches `events`.
+    public func request(_ request: [String: Any], timeout: Duration = .seconds(30)) async throws -> JSONValue {
+        requestCounter += 1
+        let id = "yh-\(requestCounter)"
+        let message: [String: Any] = ["type": "control_request", "request_id": id, "request": request]
+        let reader = reader
+        return try await withCheckedThrowingContinuation { continuation in
+            reader.await(id, continuation)
+            do {
+                try write(message)
+            } catch {
+                reader.answer(id, with: .failure(error))
+                return
+            }
+            Task {
+                try? await Task.sleep(for: timeout)
+                reader.answer(id, with: .failure(ClaudeControlError.timedOut))
+            }
+        }
+    }
+
+    // MARK: - MCP servers (docs/mcp.md)
+
+    /// Every server this session knows, with its state and tools. Needs no turn.
+    public func mcpStatus() async throws -> [MCPServerStatus] {
+        MCPServerStatus.list(from: try await request(["subtype": "mcp_status"]))
+    }
+
+    /// Claude Code keeps this for the folder it runs in, past this session.
+    public func setMCPServer(_ name: String, enabled: Bool) async throws {
+        _ = try await request(["subtype": "mcp_toggle", "serverName": name, "enabled": enabled])
+    }
+
+    public func reconnectMCPServer(_ name: String) async throws {
+        _ = try await request(["subtype": "mcp_reconnect", "serverName": name], timeout: .seconds(60))
+    }
+
+    /// Starts signing in; open the page it returns. The browser coming back to Claude Code
+    /// connects the server, which `mcpStatus` then shows.
+    public func signInToMCPServer(_ name: String) async throws -> MCPSignIn {
+        MCPSignIn(json: try await request(["subtype": "mcp_authenticate", "serverName": name], timeout: .seconds(60)))
+    }
+
+    /// For when the browser couldn't reach Claude Code: the address it ended on.
+    public func finishMCPSignIn(_ name: String, callbackURL: String) async throws {
+        _ = try await request(["subtype": "mcp_oauth_callback_url", "serverName": name, "callbackUrl": callbackURL], timeout: .seconds(60))
+    }
+
+    public func signOutOfMCPServer(_ name: String) async throws {
+        _ = try await request(["subtype": "mcp_clear_auth", "serverName": name])
     }
 
     public func respond(to request: PermissionRequest, allow: Bool, denyMessage: String = "The user denied this action.") throws {
@@ -288,6 +346,8 @@ private final class OutputReader: Sendable {
     }
 
     private let state = Mutex(State())
+    /// `ClaudeSession.request`s waiting for their reply, by request ID.
+    private let waiting = Mutex<[String: CheckedContinuation<JSONValue, any Error>]>([:])
     private let continuation: AsyncStream<AgentEvent>.Continuation
     /// MCP messages for our servers go here, not to the UI.
     private let mcp: @Sendable (_ requestID: String, _ server: String, _ message: JSONValue) -> Void
@@ -306,12 +366,29 @@ private final class OutputReader: Sendable {
             return events
         }
         for event in events {
-            if case .mcpMessage(let requestID, let server, let message) = event {
+            switch event {
+            case .mcpMessage(let requestID, let server, let message):
                 mcp(requestID, server, message)
-            } else {
+            case .controlReply(let requestID, let response) where answer(requestID, with: .success(response)):
+                break
+            case .controlFailed(let requestID, let message) where answer(requestID, with: .failure(ClaudeControlError.failed(message))):
+                break
+            default:
                 continuation.yield(event)
             }
         }
+    }
+
+    func await(_ requestID: String, _ continuation: CheckedContinuation<JSONValue, any Error>) {
+        waiting.withLock { $0[requestID] = continuation }
+    }
+
+    /// Resumes whoever waits for `requestID`, once; false when nobody does.
+    @discardableResult
+    func answer(_ requestID: String, with result: Result<JSONValue, any Error>) -> Bool {
+        guard let waiter = waiting.withLock({ $0.removeValue(forKey: requestID) }) else { return false }
+        waiter.resume(with: result)
+        return true
     }
 
     func appendStderr(_ chunk: Data) {
@@ -339,6 +416,9 @@ private final class OutputReader: Sendable {
             return (code, String(decoding: state.stderrTail, as: UTF8.self))
         }
         guard let (code, stderr) = exit else { return }
+        for waiter in waiting.withLock({ waiting in defer { waiting = [:] }; return Array(waiting.values) }) {
+            waiter.resume(throwing: ClaudeControlError.ended)
+        }
         continuation.yield(.processExited(code: code, stderrTail: stderr))
         continuation.finish()
     }

@@ -94,7 +94,8 @@ public struct ClaudeStreamParser: Sendable {
                 cwd: object["cwd"] as? String,
                 permissionMode: object["permissionMode"] as? String,
                 cliVersion: object["claude_code_version"] as? String,
-                skills: object["skills"] as? [String]
+                skills: object["skills"] as? [String],
+                mcpServers: (object["mcp_servers"] as? [Any]).map { $0.compactMap { MCPServerStatus(json: JSONValue($0)) } }
             ))]
         case "status":
             guard let status = object["status"] as? String else { return [] }
@@ -143,6 +144,9 @@ public struct ClaudeStreamParser: Sendable {
                 summary: object["summary"] as? String,
                 usage: SubagentUsage(object["usage"])
             ))]
+        case "commands_changed":
+            guard let commands = object["commands"] as? [[String: Any]] else { return [] }
+            return [.commandsChanged(commands.compactMap(SlashCommand.init(json:)))]
         case "background_tasks_changed":
             guard let tasks = object["tasks"] as? [[String: Any]] else { return [] }
             return [.jobsRunning(tasks.filter { $0["task_type"] as? String != "local_agent" }.compactMap { $0["task_id"] as? String })]
@@ -229,9 +233,10 @@ public struct ClaudeStreamParser: Sendable {
         if response["subtype"] as? String == "error" {
             return [.controlFailed(requestID: requestID, message: response["error"] as? String ?? "Unknown error")]
         }
-        guard let payload = response["response"] as? [String: Any],
-              let models = payload["models"] as? [[String: Any]]
-        else { return [] }
+        let payload = response["response"] as? [String: Any]
+        guard let payload, let models = payload["models"] as? [[String: Any]] else {
+            return [.controlReply(requestID: requestID, response: JSONValue(payload ?? [:]))]
+        }
         return [.catalog(ClaudeCatalog(
             models: models.compactMap(ClaudeModel.init(json:)),
             cliVersion: payload["claude_code_version"] as? String,

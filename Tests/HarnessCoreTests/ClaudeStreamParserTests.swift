@@ -162,9 +162,10 @@ struct ClaudeStreamParserTests {
         #expect(parser.parse(line: Data(line.utf8)) == [
             .controlFailed(requestID: "yh-3", message: "Unsupported control request subtype: set_effort"),
         ])
-        // Plain acks (set_model, interrupt) carry nothing the UI needs.
+        // Plain acks (set_model, interrupt) come back as empty replies, for whoever waits on
+        // them (`ClaudeSession.request`); the UI ignores them.
         let ack = #"{"type":"control_response","response":{"subtype":"success","request_id":"yh-2"}}"#
-        #expect(parser.parse(line: Data(ack.utf8)).isEmpty)
+        #expect(parser.parse(line: Data(ack.utf8)) == [.controlReply(requestID: "yh-2", response: [:])])
     }
 
     @Test func outerClaudeSessionVariablesAreDropped() {
