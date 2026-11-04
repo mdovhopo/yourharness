@@ -164,6 +164,20 @@ struct MCPServerIntegrationTests {
             try await session.setMCPServer("nope", enabled: false)
         }
 
+        // Added through Claude Code's own command, the running session finds it by name.
+        let executable = try #require(ShellEnvironment.which("claude", in: environment))
+        let added = await ClaudeMCPConfig.add(name: "late", config: MCPServerConfig.command("python3", arguments: ["-I", script.path]).json,
+                                              scope: .user, executable: executable, environment: environment, folder: work)
+        if case .failure(let error) = added { Issue.record("add failed: \(error)") }
+        try await session.connectNewMCPServer("late")
+        #expect(try await session.mcpStatus().contains { $0.name == "late" })
+        if case .failure(let error) = await ClaudeMCPConfig.remove(name: "late", scope: .user, executable: executable, environment: environment, folder: work) {
+            Issue.record("remove failed: \(error)")
+        }
+        if case .success = await ClaudeMCPConfig.remove(name: "late", scope: .user, executable: executable, environment: environment, folder: work) {
+            Issue.record("removing it twice should fail")
+        }
+
         await session.terminate()
         await #expect(throws: (any Error).self) { _ = try await session.mcpStatus() }
     }
@@ -224,5 +238,52 @@ struct MCPElicitationParsingTests {
         ]]]], order: nil)
         guard case .choice(let options) = fields.first?.kind else { Issue.record("not a choice"); return }
         #expect(options.map(\.label) == ["Small", "Large"])
+    }
+}
+
+struct MCPServerConfigTests {
+    @Test func urlServersCarryHeadersAndOAuth() {
+        let config = MCPServerConfig.url(URL(string: "https://mcp.acme.com/mcp")!, headers: ["X-Team": "a"], clientID: "abc", callbackPort: 8123).json
+        #expect(config["type"] == "http")
+        #expect(config["url"] == "https://mcp.acme.com/mcp")
+        #expect(config["headers"]?["X-Team"] == "a")
+        #expect(config["oauth"]?["clientId"] == "abc")
+        #expect(config["oauth"]?["callbackPort"] == 8123)
+        #expect(MCPServerConfig.url(URL(string: "https://x.dev/mcp")!).json["oauth"] == nil)
+    }
+
+    @Test func commandsSplitLikeAShell() {
+        #expect(MCPServerConfig.splitCommandLine(#"npx -y "@scope/server name" --root '/a b'"#) == ["npx", "-y", "@scope/server name", "--root", "/a b"])
+        let config = MCPServerConfig.command("npx", arguments: ["-y", "pkg"], environment: ["TOKEN": "t"]).json
+        #expect(config["command"] == "npx")
+        #expect(config["args"] == ["-y", "pkg"])
+        #expect(config["env"]?["TOKEN"] == "t")
+    }
+
+    @Test func namesComeFromTheURLOrCommand() {
+        #expect(MCPServerConfig.suggestedName(for: URL(string: "https://mcp.linear.app/mcp")!) == "linear")
+        #expect(MCPServerConfig.suggestedName(for: URL(string: "https://api.githubcopilot.com/mcp/")!) == "githubcopilot")
+        #expect(MCPServerConfig.suggestedName(forCommand: "npx -y @modelcontextprotocol/server-github") == "github")
+        #expect(MCPServerConfig.suggestedName(forCommand: "uvx mcp-server-postgres postgresql://x") == "postgres")
+        #expect(MCPServerConfig.suggestedName(forCommand: "npx @playwright/mcp@latest") == "mcp")
+    }
+
+    @Test func pastedJSONComesInEveryShape() {
+        let block = MCPServerConfig.servers(fromJSON: #"{"mcpServers": {"a": {"command": "x"}, "b": {"url": "https://y"}}}"#, fallbackName: "z")
+        #expect(block?.keys.sorted() == ["a", "b"])
+        #expect(MCPServerConfig.servers(fromJSON: #"{"command": "x", "args": []}"#, fallbackName: "z")?.keys.sorted() == ["z"])
+        #expect(MCPServerConfig.servers(fromJSON: #"{"a": {"type": "http", "url": "https://y"}}"#, fallbackName: "z")?.keys.sorted() == ["a"])
+        #expect(MCPServerConfig.servers(fromJSON: "not json", fallbackName: "z") == nil)
+        #expect(MCPServerConfig.servers(fromJSON: #"{"a": 1}"#, fallbackName: "z") == nil)
+    }
+
+    @Test func claudeDesktopServersAreRead() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("yh-desktop-\(UUID().uuidString)")
+        let folder = home.appendingPathComponent("Library/Application Support/Claude")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        try #"{"mcpServers": {"files": {"command": "npx", "args": ["fs"]}}}"#.write(to: folder.appendingPathComponent("claude_desktop_config.json"), atomically: true, encoding: .utf8)
+        #expect(ClaudeMCPConfig.claudeDesktopServers(home: home).keys.sorted() == ["files"])
+        #expect(ClaudeMCPConfig.claudeDesktopServers(home: folder).isEmpty)
     }
 }

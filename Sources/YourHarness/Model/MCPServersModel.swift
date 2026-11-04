@@ -9,7 +9,10 @@ import HarnessCore
 /// conversation, and keeps it while the sheet is open: a sign-in's browser comes back to it.
 @MainActor @Observable
 final class MCPServersModel: Identifiable {
-    let thread: ThreadModel
+    /// Nil in Settings, which isn't about a thread: there it asks in `folder`.
+    let thread: ThreadModel?
+    /// Where Claude Code runs to answer: the thread's folder, or Home's in Settings.
+    let folder: URL
     nonisolated let id: UUID
     @ObservationIgnored private unowned let app: AppModel
 
@@ -29,9 +32,21 @@ final class MCPServersModel: Identifiable {
     @ObservationIgnored private var ownSession: ClaudeSession?
     @ObservationIgnored private var polling: Task<Void, Never>?
 
+    /// The Add Server page is open.
+    var isAdding = false
+
     init(thread: ThreadModel, app: AppModel) {
         self.thread = thread
+        self.folder = URL(fileURLWithPath: thread.effectiveDirectory, isDirectory: true)
         self.id = thread.id
+        self.app = app
+    }
+
+    /// For Settings: the servers Claude Code has in `folder`, no thread.
+    init(folder: URL, app: AppModel) {
+        self.thread = nil
+        self.folder = folder
+        self.id = UUID()
         self.app = app
     }
 
@@ -70,7 +85,7 @@ final class MCPServersModel: Identifiable {
             for name in signIns.keys where servers.first(where: { $0.name == name })?.state == .connected {
                 signIns[name] = nil
             }
-            thread.noteMCPServers(servers)
+            thread?.noteMCPServers(servers)
         } catch {
             failure = (error as? ClaudeControlError)?.description ?? error.localizedDescription
             loaded = true
@@ -127,6 +142,60 @@ final class MCPServersModel: Identifiable {
         perform(name) { try await $0.signOutOfMCPServer(name) }
     }
 
+    // MARK: - Adding and removing
+
+    /// Adds through `claude mcp add-json`, so the terminal has it too, then has the running
+    /// session pick it up (a reconnect does that, no restart). Returns why it failed.
+    func add(name: String, config: JSONValue, scope: MCPScope, clientSecret: String? = nil, signIn: Bool) async -> String? {
+        guard let executable = app.claudeExecutable else { return "Claude Code isn't installed." }
+        if let existing = servers.first(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
+            return "There's already a server named \(existing.name) (\(existing.place.title.lowercased())). Pick another name."
+        }
+        let result = await ClaudeMCPConfig.add(name: name, config: config, scope: scope, clientSecret: clientSecret,
+                                               executable: executable, environment: app.environment, folder: folder)
+        if case .failure(let error) = result { return error.message }
+        // A running session finds a new server by its name, except one just for this
+        // project, which it read at start: then it starts over (the thread after its turn).
+        if let session = try? await session(), (try? await session.connectNewMCPServer(name)) == nil {
+            await restartSessions()
+        }
+        await refresh()
+        isAdding = false
+        selected = name
+        if signIn, servers.first(where: { $0.name == name })?.state == .needsSignIn { self.signIn(name) }
+        return nil
+    }
+
+    /// Only what Claude Code keeps in its config: not claude.ai connectors (claude.ai's
+    /// settings) or the app's own.
+    func canRemove(_ server: MCPServerStatus) -> Bool {
+        [.project, .local, .user].contains(server.place)
+    }
+
+    /// Removes through `claude mcp remove`. A running session lets go of it once it restarts,
+    /// which happens now when the thread is idle, or after the turn.
+    func remove(_ server: MCPServerStatus) async -> String? {
+        guard let executable = app.claudeExecutable else { return "Claude Code isn't installed." }
+        let result = await ClaudeMCPConfig.remove(name: server.name, scope: server.scope.flatMap(MCPScope.init(rawValue:)),
+                                                  executable: executable, environment: app.environment, folder: folder)
+        if case .failure(let error) = result { return error.message }
+        selected = nil
+        await restartSessions()
+        servers.removeAll { $0.name == server.name }
+        await refresh()
+        return nil
+    }
+
+    /// So Claude Code reads its config again: the thread's session (after its turn, if one
+    /// is running) and this sheet's own.
+    private func restartSessions() async {
+        thread?.restartSession()
+        if let ownSession {
+            self.ownSession = nil
+            await ownSession.terminate()
+        }
+    }
+
     private func perform(_ name: String, _ action: @escaping (ClaudeSession) async throws -> Void) {
         guard !busy.contains(name) else { return }
         busy.insert(name)
@@ -151,17 +220,31 @@ final class MCPServersModel: Identifiable {
             FileHandle.standardError.write(Data("MCP servers: \(model.servers.map { "\($0.name)=\($0.state)" }.joined(separator: ", "))\(model.failure.map { " failure: \($0)" } ?? "")\n".utf8))
             if let name = environment["YH_MCP_SELECT"] { model.selected = name }
             if let name = environment["YH_MCP_SIGN_IN"] { model.signIn(name) }
+            if environment["YH_MCP_ADD_URL"] != nil || environment["YH_MCP_ADD_COMMAND"] != nil { model.isAdding = true }
+            if let name = environment["YH_MCP_REMOVE"], let server = model.servers.first(where: { $0.name == name }) {
+                let failure = await model.remove(server)
+                FileHandle.standardError.write(Data("MCP remove \(name): \(failure ?? "done")\n".utf8))
+            }
+            // What the list says a few seconds on, after anything above.
+            try? await Task.sleep(for: .seconds(6))
+            FileHandle.standardError.write(Data("MCP servers later: \(model.servers.map { "\($0.name)=\($0.state)/\($0.scope ?? "?")" }.joined(separator: ", "))\(model.selected.map { " page: \($0)" } ?? "")\(model.isAdding ? " adding" : "")\n".utf8))
         }
     }
 
     // MARK: - Session
 
     func session() async throws -> ClaudeSession {
-        if let live = await thread.liveSession() { return live }
+        if let live = await thread?.liveSession() { return live }
         if let ownSession, await ownSession.isRunning { return ownSession }
-        var options = try await app.launchOptions(for: thread)
-        // No conversation: this process only answers about servers.
-        options.resumeSessionID = nil
+        var options: ClaudeLaunchOptions
+        if let thread {
+            options = try await app.launchOptions(for: thread)
+            // No conversation: this process only answers about servers.
+            options.resumeSessionID = nil
+        } else {
+            guard let executable = app.claudeExecutable else { throw HarnessError.claudeNotFound }
+            options = ClaudeLaunchOptions(executable: executable, workingDirectory: folder, environment: app.environment)
+        }
         options.persistsSession = false
         let session = try ClaudeSession(options: options)
         try await session.initialize()

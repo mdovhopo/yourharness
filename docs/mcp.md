@@ -85,6 +85,11 @@ Tested: in `-p` mode the CLI gives the model no sign-in tool for a `needs-auth` 
 ### Servers asking mid-call (elicitation) — done
 Claude Code forwards an MCP server's `elicitation/create` as a `control_request` with `subtype: "elicitation"`: `mcp_server_name`, `message`, `mode` (`form` or `url`), `requested_schema` and `property_order` for a form, `url` and `elicitation_id` for a page. The answer is a `control_response` whose `response` is `{action: accept|decline|cancel, content}`. `system/elicitation_complete` says a page visit is done. Before this the app ignored them and the turn hung. Now `MCPElicitationCard` asks above the composer (fixture `mcp-elicitation.jsonl`).
 
+### Adding and removing — done
+`AddMCPServerPage` in the `/mcp` sheet: a URL first (Add and Sign In), a command, or pasted JSON (one config, `{"name": {…}}` or a whole `mcpServers` block), and where: everywhere (`user`), this project just you (`local`), or its `.mcp.json` (`project`). Through `claude mcp add-json` / `claude mcp remove` in the thread's folder (`ClaudeMCPConfig`), so the terminal sees them. Advanced for URLs: headers, and `oauth.clientId`, `oauth.callbackPort`, a client secret through `MCP_CLIENT_SECRET`. Claude Desktop's servers are read from its `claude_desktop_config.json`.
+
+A running session notices a `user` or `project` server added to the config about a second later; `mcp_reconnect` with its name then connects it (`connectNewMCPServer` retries for 3 s). A `local` one it never notices, since it reads the folder's config at start, so the session starts over: at once when idle, after the turn otherwise. Removing always starts over.
+
 ### 4. Project `.mcp.json` approval
 Ask before a project's `.mcp.json` servers start, as the terminal does: launch with them held back (find how: `--strict-mcp-config` plus our own `--mcp-config` of the approved ones, or the CLI's own `enabledMcpjsonServers`), show "This project wants to run: npx foo-mcp" with Allow / Don't Allow, remember per project. Ties in with the "confirm, but don't annoy" stance.
 

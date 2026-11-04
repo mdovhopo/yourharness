@@ -253,6 +253,20 @@ public actor ClaudeSession {
         _ = try await request(["subtype": "mcp_reconnect", "serverName": name], timeout: .seconds(60))
     }
 
+    /// Has a running session pick up a server just added to Claude Code's config, which it
+    /// notices a moment after the file changes. Fails for one just for this folder, which it
+    /// only reads at start.
+    public func connectNewMCPServer(_ name: String, within: Duration = .seconds(3)) async throws {
+        let deadline = ContinuousClock.now + within
+        while true {
+            do {
+                return try await reconnectMCPServer(name)
+            } catch ClaudeControlError.failed(let message) where message.hasPrefix("Server not found") && ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(400))
+            }
+        }
+    }
+
     /// Starts signing in; open the page it returns. The browser coming back to Claude Code
     /// connects the server, which `mcpStatus` then shows.
     public func signInToMCPServer(_ name: String) async throws -> MCPSignIn {
