@@ -237,23 +237,31 @@ struct DraftAttachments: View {
         ScrollView(.horizontal) {
             HStack(spacing: 8) {
                 ForEach(thread.draftFiles) { file in
-                    FileChip(url: file.url, isDirectory: file.isDirectory, size: file.size)
-                        .frame(height: 64)
-                        .overlay(alignment: .topTrailing) {
-                            Button("Remove", systemImage: "xmark.circle.fill") {
-                                withAnimation(.snappy) { thread.draftFiles.removeAll { $0.id == file.id } }
-                            }
-                            .labelStyle(.iconOnly)
-                            .buttonStyle(.plain)
-                            .symbolRenderingMode(.palette)
-                            .foregroundStyle(.white, .black.opacity(0.6))
-                            .padding(3)
+                    Group {
+                        if !file.isDirectory, MediaTool.kind(of: file.url.path) == .video {
+                            AttachmentThumbnail(content: .video(file.url), maxSize: CGSize(width: 96, height: 64))
+                        } else {
+                            FileChip(url: file.url, isDirectory: file.isDirectory, size: file.size)
+                                .frame(height: 64)
                         }
-                        .help(file.url.path)
-                        .transition(.scale(scale: 0.8).combined(with: .opacity))
+                    }
+                    .onTapGesture { thread.previewDraft(at: file.id) }
+                    .overlay(alignment: .topTrailing) {
+                        Button("Remove", systemImage: "xmark.circle.fill") {
+                            withAnimation(.snappy) { thread.draftFiles.removeAll { $0.id == file.id } }
+                        }
+                        .labelStyle(.iconOnly)
+                        .buttonStyle(.plain)
+                        .symbolRenderingMode(.palette)
+                        .foregroundStyle(.white, .black.opacity(0.6))
+                        .padding(3)
+                    }
+                    .help(file.url.path)
+                    .transition(.scale(scale: 0.8).combined(with: .opacity))
                 }
                 ForEach(thread.draftImages) { image in
                     AttachmentThumbnail(content: .data(image), maxSize: CGSize(width: 96, height: 64))
+                        .onTapGesture { thread.previewDraft(at: image.id) }
                         .overlay(alignment: .topTrailing) {
                             Button("Remove", systemImage: "xmark.circle.fill") {
                                 withAnimation(.snappy) { thread.draftImages.removeAll { $0.id == image.id } }
@@ -275,6 +283,26 @@ struct DraftAttachments: View {
 }
 
 extension ThreadModel {
+    /// Quick Look over everything waiting to be sent, at the one clicked (the first when
+    /// nil). Pasted pictures have no file yet: they're written to a temporary one first, off
+    /// the main thread.
+    func previewDraft(at id: UUID?) {
+        let files = draftFiles, images = draftImages
+        Task {
+            let imageURLs = await Task.detached(priority: .userInitiated) {
+                let folder = FileManager.default.temporaryDirectory.appending(path: "draft-previews", directoryHint: .isDirectory)
+                try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                return images.map { image in
+                    let url = folder.appending(path: "\(image.id.uuidString).\(image.fileExtension)")
+                    if !FileManager.default.fileExists(atPath: url.path) { try? image.data.write(to: url) }
+                    return url
+                }
+            }.value
+            let ids = files.map(\.id) + images.map(\.id)
+            MediaPreview.show(files.map(\.url) + imageURLs, at: id.flatMap(ids.firstIndex(of:)) ?? 0)
+        }
+    }
+
     /// Adds files and images to the next message, up to the limit. One already there isn't
     /// added twice.
     func attach(_ sources: [AttachmentIntake.Source]) {

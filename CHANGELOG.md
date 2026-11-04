@@ -9,7 +9,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 ### Added
 - Your Mac stays awake while Claude works, so long turns keep going when you step away. A small cup in the sidebar shows when it's on and keeps the Mac awake for an hour, a few hours or until you stop it. Settings → General → Sleep turns it off, keeps it awake whenever the app is open, gives a few minutes' grace after the last turn, or keeps the display on too.
 - Prompts from your MCP servers show in the `/` menu as `/server:prompt`, with an MCP label, as soon as the server connects, and run when you pick or type them.
-- Click a picture or video in a conversation, yours or one Claude showed you, to see it large in Quick Look, with full screen and the arrow keys going through the others in the message. Videos you attach show their first frame, and a video Claude shows has a button to open it large while it plays. Preview and QuickTime Player are still in the right-click menu.
+- Click a picture or video in a conversation, yours or one Claude showed you, to see it large in Quick Look, with full screen and the arrow keys going through the others in the message. Videos you attach show their first frame, and a video Claude shows has a button to open it large while it plays. Pictures and files waiting in the composer open in Quick Look on a click too. Preview and QuickTime Player are still in the right-click menu.
 
 ### Fixed
 - The right sidebar's toolbar button stays when the sidebar is closed, so there's a visible way to open it again.

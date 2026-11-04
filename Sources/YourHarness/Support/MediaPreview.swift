@@ -46,6 +46,18 @@ final class MediaPreview: NSResponder, QLPreviewPanelDataSource, QLPreviewPanelD
     /// Development (`YH_PREVIEW_MEDIA`): the selected thread's last message with pictures or
     /// videos, and whether Quick Look came up.
     static func showLastSent(in app: AppModel) {
+        // `YH_PREVIEW_MEDIA=draft`: what's waiting in the composer instead, as clicking it does.
+        if ProcessInfo.processInfo.environment["YH_PREVIEW_MEDIA"] == "draft", let thread = app.selectedThread {
+            thread.previewDraft(at: nil)
+            Task {
+                try? await Task.sleep(for: .seconds(1))
+                let panel = QLPreviewPanel.shared()
+                let line = "YH_PREVIEW_MEDIA draft: \(panel?.dataSource === shared && !shared.urls.isEmpty ? "PASS" : "FAIL"), \(shared.urls.count) items: "
+                    + shared.urls.map(\.lastPathComponent).joined(separator: ", ") + "\n"
+                FileHandle.standardError.write(Data(line.utf8))
+            }
+            return
+        }
         let names = app.selectedThread?.entries.last { entry in
             entry.attachments.contains { UserMessageView.mediaKind($0) != nil }
         }?.attachments.filter { UserMessageView.mediaKind($0) != nil } ?? []
