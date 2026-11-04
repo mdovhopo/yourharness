@@ -42,6 +42,7 @@ enum MCPDesigns {
             Design(name: "G-sign-in-in-thread", width: 720, canvas: true, view: AnyView(InThreadSignInDesign())),
             Design(name: "H-settings-everywhere", width: 680, view: AnyView(SettingsDesign())),
             Design(name: "G2-sign-in-card", width: 760, canvas: true, view: AnyView(RealSignInCards())),
+            Design(name: "G3-elicitation", width: 760, canvas: true, view: AnyView(RealElicitationCards())),
             Design(name: "F-project-approval", width: 720, canvas: true, view: AnyView(ApprovalDesign())),
         ]
     }
@@ -814,6 +815,25 @@ private struct RealSignInCards: View {
         }
         .padding(20)
     }
+}
+
+/// The real cards for a server's form and for a page to visit, from the captured requests.
+private struct RealElicitationCards: View {
+    var body: some View {
+        VStack(spacing: 16) {
+            ForEach(Self.samples) { MCPElicitationCard(elicitation: $0, answer: { _ in }, glass: false) }
+        }
+        .padding(20)
+    }
+
+    static let samples: [MCPElicitation] = {
+        var parser = ClaudeStreamParser()
+        let lines = [
+            #"{"type":"control_request","request_id":"a","request":{"subtype":"elicitation","mcp_server_name":"deploy","message":"Where should this deploy go?","mode":"form","requested_schema":{"type":"object","properties":{"environment":{"type":"string","title":"Environment","enum":["staging","production"],"enumNames":["Staging","Production"]},"replicas":{"type":"integer","title":"Replicas","default":2},"notify":{"type":"boolean","title":"Notify the team","default":true},"note":{"type":"string","title":"Note","description":"Anything to add"}},"required":["environment"]},"property_order":["environment","replicas","notify","note"]}}"#,
+            #"{"type":"control_request","request_id":"b","request":{"subtype":"elicitation","mcp_server_name":"deploy","message":"Confirm this production deploy in your browser.","mode":"url","url":"https://deploy.acme-corp.com/confirm?x=1","elicitation_id":"el-1"}}"#,
+        ]
+        return lines.flatMap { parser.parse(line: Data($0.utf8)) }.compactMap { if case .elicitation(let e) = $0 { e } else { nil } }
+    }()
 }
 
 // MARK: - F: a project's .mcp.json, asked about

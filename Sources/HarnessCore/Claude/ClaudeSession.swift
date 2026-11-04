@@ -264,6 +264,28 @@ public actor ClaudeSession {
         _ = try await request(["subtype": "mcp_oauth_callback_url", "serverName": name, "callbackUrl": callbackURL], timeout: .seconds(60))
     }
 
+    public enum ElicitationAnswer: Sendable, Equatable {
+        /// For a form: the fields' values. For a page: done there.
+        case accept(JSONValue?)
+        case decline
+        /// Dismissed without saying either.
+        case cancel
+    }
+
+    /// Answers an MCP server's question; its tool call goes on.
+    public func answer(_ elicitation: MCPElicitation, with answer: ElicitationAnswer) throws {
+        var body: [String: Any]
+        switch answer {
+        case .accept(let content):
+            body = ["action": "accept"]
+            if let content { body["content"] = content.any }
+        case .decline: body = ["action": "decline"]
+        case .cancel: body = ["action": "cancel"]
+        }
+        try write(["type": "control_response",
+                   "response": ["subtype": "success", "request_id": elicitation.id, "response": body]])
+    }
+
     public func signOutOfMCPServer(_ name: String) async throws {
         _ = try await request(["subtype": "mcp_clear_auth", "serverName": name])
     }

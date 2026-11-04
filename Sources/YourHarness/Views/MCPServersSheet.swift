@@ -535,7 +535,7 @@ struct MCPSignInCard: View {
                         .help("Not Now (⌘⌫)")
                     Button("Sign In…") { request.decide(true) }
                         .keyboardShortcut(.return, modifiers: .command)
-                        .buttonStyle(.glassProminent)
+                        .prominentButton(glass: glass)
                         .help("Sign In (⌘↩)")
                 }
             }
@@ -559,5 +559,155 @@ struct MCPSignInCard: View {
         let need = request.reason.map { "Claude needs it to \($0.prefix(1).lowercased() + $0.dropFirst())" } ?? "Claude needs it for this task"
         return need.trimmingCharacters(in: CharacterSet(charactersIn: ".")) + ". Your browser opens"
             + (host.map { " at \($0)" } ?? "") + ", with your company's sign-in if it uses one."
+    }
+}
+
+// MARK: - A server asks you something
+
+/// Above the composer, as an approval is: an MCP server's tool needs a few fields filled in,
+/// or a page visited, before it goes on.
+struct MCPElicitationCard: View {
+    let elicitation: MCPElicitation
+    let answer: (ClaudeSession.ElicitationAnswer) -> Void
+    /// Off only where glass can't be drawn (the mockups, drawn off screen).
+    var glass = true
+
+    @State private var texts: [String: String] = [:]
+    @State private var flags: [String: Bool] = [:]
+    @State private var opened = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: elicitation.mode == .url ? "link" : "list.bullet.rectangle")
+                    .font(.title3)
+                    .foregroundStyle(.orange)
+                    .frame(width: 24)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(elicitation.title ?? "\(elicitation.server) asks")
+                        .font(.headline)
+                    if !elicitation.message.isEmpty {
+                        Text(elicitation.message)
+                            .font(.callout)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .textSelection(.enabled)
+                    }
+                    if elicitation.mode == .url, let host = elicitation.url?.host() {
+                        Text("Opens \(host) in your browser.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if elicitation.mode == .form, !elicitation.fields.isEmpty {
+                Form {
+                    ForEach(elicitation.fields) { field in fieldView(field) }
+                }
+                .formStyle(.columns)
+                .padding(.leading, 36)
+            }
+            HStack(spacing: 8) {
+                Spacer()
+                Button("Decline") { answer(.decline) }
+                    .keyboardShortcut(.delete, modifiers: .command)
+                    .help("Decline (⌘⌫)")
+                if elicitation.mode == .url {
+                    if opened {
+                        Button("Done") { answer(.accept(nil)) }
+                            .keyboardShortcut(.return, modifiers: .command)
+                            .prominentButton(glass: glass)
+                    } else {
+                        Button("Open Page…") {
+                            if let url = elicitation.url { MCPServersModel.openInBrowser(url) }
+                            opened = true
+                        }
+                        .keyboardShortcut(.return, modifiers: .command)
+                        .prominentButton(glass: glass)
+                        .disabled(elicitation.url == nil)
+                    }
+                } else {
+                    Button("Send") { answer(.accept(content)) }
+                        .keyboardShortcut(.return, modifiers: .command)
+                        .prominentButton(glass: glass)
+                        .disabled(content == nil)
+                        .help("Send (⌘↩)")
+                }
+            }
+            .controlSize(.large)
+        }
+        .padding(14)
+        .background {
+            if glass {
+                Color.clear.glassEffect(.regular.tint(.orange.opacity(0.12)), in: .rect(cornerRadius: Theme.floatingRadius))
+            } else {
+                Color.clear.card(radius: Theme.floatingRadius, tint: .orange)
+            }
+        }
+        .onAppear(perform: fillDefaults)
+    }
+
+    @ViewBuilder private func fieldView(_ field: MCPElicitation.Field) -> some View {
+        let label = field.title + (field.required ? "" : " (optional)")
+        switch field.kind {
+        case .boolean:
+            Toggle(field.title, isOn: Binding(get: { flags[field.name] ?? false }, set: { flags[field.name] = $0 }))
+                .help(field.description ?? "")
+        case .choice(let options):
+            Picker(label, selection: Binding(get: { texts[field.name] ?? "" }, set: { texts[field.name] = $0 })) {
+                if !field.required || texts[field.name, default: ""].isEmpty { Text("—").tag("") }
+                ForEach(options, id: \.value) { Text($0.label).tag($0.value) }
+            }
+            .help(field.description ?? "")
+        case .number, .text:
+            TextField(label, text: Binding(get: { texts[field.name] ?? "" }, set: { texts[field.name] = $0 }),
+                      prompt: field.description.map(Text.init))
+                .textFieldStyle(.roundedBorder)
+        }
+    }
+
+    private func fillDefaults() {
+        for field in elicitation.fields {
+            switch (field.kind, field.defaultValue) {
+            case (.boolean, let value?): flags[field.name] = value.bool ?? false
+            case (.number, let value?): texts[field.name] = value.double.map { $0.rounded() == $0 ? String(Int($0)) : String($0) } ?? ""
+            case (_, let value?): texts[field.name] = value.string ?? ""
+            default: break
+            }
+        }
+    }
+
+    /// What goes back, or nil while a required field is empty or a number isn't one.
+    private var content: JSONValue? {
+        var values: [String: JSONValue] = [:]
+        for field in elicitation.fields {
+            switch field.kind {
+            case .boolean:
+                values[field.name] = .bool(flags[field.name] ?? false)
+            case .number(let integer):
+                let text = (texts[field.name] ?? "").trimmingCharacters(in: .whitespaces)
+                if text.isEmpty {
+                    if field.required { return nil }
+                    continue
+                }
+                guard let number = Double(text.replacingOccurrences(of: ",", with: ".")), !integer || number.rounded() == number else { return nil }
+                values[field.name] = .number(number)
+            case .choice, .text:
+                let text = texts[field.name] ?? ""
+                if text.isEmpty {
+                    if field.required { return nil }
+                    continue
+                }
+                values[field.name] = .string(text)
+            }
+        }
+        return .object(values)
+    }
+}
+
+private extension View {
+    /// Glass where it can be drawn; plain where it can't (the mockups, drawn off screen).
+    @ViewBuilder func prominentButton(glass: Bool) -> some View {
+        if glass { buttonStyle(.glassProminent) } else { buttonStyle(.borderedProminent) }
     }
 }

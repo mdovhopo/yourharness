@@ -61,8 +61,16 @@ final class ThreadModel: Identifiable {
             rowsChanged()
         }
     }
+    /// MCP servers asking you something mid-call; their tool calls wait for the answer.
+    private(set) var pendingElicitations: [MCPElicitation] = [] {
+        didSet {
+            guard pendingElicitations.isEmpty != oldValue.isEmpty else { return }
+            app.waitingChanged()
+            rowsChanged()
+        }
+    }
     /// Something Claude can't go on without: an approval, an answer, a sign-in.
-    var isWaitingForYou: Bool { !pendingPermissions.isEmpty || mcpSignIn != nil }
+    var isWaitingForYou: Bool { !pendingPermissions.isEmpty || mcpSignIn != nil || !pendingElicitations.isEmpty }
     /// Sub-agents still at work. Background ones outlive the turn that started them.
     private(set) var liveSubagents: [SubagentRun] = []
     /// Commands and watches Claude left running, oldest first.
@@ -840,6 +848,7 @@ final class ThreadModel: Identifiable {
         for message in queuedMessages where message.pending == nil { withdraw(message, toComposer: true) }
         interruptRequested = true
         pendingPermissions.removeAll()
+        pendingElicitations.removeAll()
         mcpSignIn?.cancel()
         Task {
             do {
@@ -872,6 +881,20 @@ final class ThreadModel: Identifiable {
         respond(to: request, with: .allow(mode: mode.controlValue))
         app.setPermissionMode(mode, for: projectID)
         if !feedback.isEmpty { send(feedback) }
+    }
+
+    /// Answers an MCP server's question; its tool call goes on.
+    func answer(_ elicitation: MCPElicitation, with answer: ClaudeSession.ElicitationAnswer) {
+        guard pendingElicitations.contains(where: { $0.id == elicitation.id }) else { return }
+        pendingElicitations.removeAll { $0.id == elicitation.id }
+        guard let start = sessionStart else { return }
+        Task {
+            do {
+                try await start.value.answer(elicitation, with: answer)
+            } catch {
+                fail(error.localizedDescription)
+            }
+        }
     }
 
     func respond(to request: PermissionRequest, with decision: PermissionDecision) {
@@ -1212,6 +1235,25 @@ final class ThreadModel: Identifiable {
             pendingPermissions.append(request)
             app.notify(.needsYou, about: self, Self.describe(request))
 
+        case .elicitation(let elicitation):
+            // Development: `YH_MCP_ELICIT_ANSWER=accept|decline` answers for you (a form with
+            // its defaults).
+            if let answer = ProcessInfo.processInfo.environment["YH_MCP_ELICIT_ANSWER"] {
+                FileHandle.standardError.write(Data("MCP elicitation from \(elicitation.server): \(elicitation.message) [\(elicitation.mode == .url ? "url" : "form: " + elicitation.fields.map(\.name).joined(separator: ", "))]\n".utf8))
+                pendingElicitations.append(elicitation)
+                let defaults = JSONValue.object(Dictionary(uniqueKeysWithValues: elicitation.fields.compactMap { field in field.defaultValue.map { (field.name, $0) } }))
+                self.answer(elicitation, with: answer == "accept" ? .accept(elicitation.mode == .form ? defaults : nil) : .decline)
+                return
+            }
+            pendingElicitations.append(elicitation)
+            app.notify(.needsYou, about: self, "\(elicitation.server): \(elicitation.message)")
+
+        case .elicitationComplete(let server, let elicitationID):
+            // Done on the page: the server has its answer.
+            for elicitation in pendingElicitations where elicitation.server == server && elicitation.elicitationID == elicitationID {
+                answer(elicitation, with: .accept(nil))
+            }
+
         case .rateLimit(let info):
             app.updateRateLimit(info)
 
@@ -1323,6 +1365,7 @@ final class ThreadModel: Identifiable {
         if phase == .running { noteTurnEnded() }
         phase = .idle
         pendingPermissions.removeAll()
+        pendingElicitations.removeAll()
         mcpSignIn?.cancel()
         for entry in blocks.values where entry.isStreaming { entry.isStreaming = false }
         for entry in tools.values where entry.isStreaming { entry.isStreaming = false }

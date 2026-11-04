@@ -144,6 +144,9 @@ public struct ClaudeStreamParser: Sendable {
                 summary: object["summary"] as? String,
                 usage: SubagentUsage(object["usage"])
             ))]
+        case "elicitation_complete":
+            guard let server = object["mcp_server_name"] as? String, let id = object["elicitation_id"] as? String else { return [] }
+            return [.elicitationComplete(server: server, elicitationID: id)]
         case "commands_changed":
             guard let commands = object["commands"] as? [[String: Any]] else { return [] }
             return [.commandsChanged(commands.compactMap(SlashCommand.init(json:)))]
@@ -250,6 +253,9 @@ public struct ClaudeStreamParser: Sendable {
         else { return [] }
         if request["subtype"] as? String == "mcp_message", let server = request["server_name"] as? String {
             return [.mcpMessage(requestID: requestID, server: server, message: JSONValue(request["message"]))]
+        }
+        if request["subtype"] as? String == "elicitation" {
+            return MCPElicitation(requestID: requestID, request: request).map { [.elicitation($0)] } ?? []
         }
         guard request["subtype"] as? String == "can_use_tool",
               let toolName = request["tool_name"] as? String

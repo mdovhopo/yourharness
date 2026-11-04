@@ -82,6 +82,9 @@ Tested: in `-p` mode the CLI gives the model no sign-in tool for a `needs-auth` 
 - `--append-system-prompt` says to use it instead of pointing at the terminal, overriding the CLI's "non-interactive" note.
 - Also answer the CLI's `elicitation` control requests (`mode: "url"` is a server asking you to visit a URL, e.g. step-up auth; `form` asks for fields). The app ignores them today.
 
+### Servers asking mid-call (elicitation) — done
+Claude Code forwards an MCP server's `elicitation/create` as a `control_request` with `subtype: "elicitation"`: `mcp_server_name`, `message`, `mode` (`form` or `url`), `requested_schema` and `property_order` for a form, `url` and `elicitation_id` for a page. The answer is a `control_response` whose `response` is `{action: accept|decline|cancel, content}`. `system/elicitation_complete` says a page visit is done. Before this the app ignored them and the turn hung. Now `MCPElicitationCard` asks above the composer (fixture `mcp-elicitation.jsonl`).
+
 ### 4. Project `.mcp.json` approval
 Ask before a project's `.mcp.json` servers start, as the terminal does: launch with them held back (find how: `--strict-mcp-config` plus our own `--mcp-config` of the approved ones, or the CLI's own `enabledMcpjsonServers`), show "This project wants to run: npx foo-mcp" with Allow / Don't Allow, remember per project. Ties in with the "confirm, but don't annoy" stance.
 

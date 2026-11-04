@@ -168,3 +168,61 @@ struct MCPServerIntegrationTests {
         await #expect(throws: (any Error).self) { _ = try await session.mcpStatus() }
     }
 }
+
+/// A real capture (sanitized): a server's tool asking for a form, then for a page visit, as
+/// Claude Code forwards them, plus the note that the page visit is done.
+struct MCPElicitationParsingTests {
+    private func events() throws -> [AgentEvent] {
+        let url = try #require(Bundle.module.url(forResource: "mcp-elicitation", withExtension: "jsonl", subdirectory: "Fixtures"))
+        var parser = ClaudeStreamParser()
+        return try String(contentsOf: url, encoding: .utf8)
+            .split(separator: "\n")
+            .flatMap { parser.parse(line: Data($0.utf8)) }
+    }
+
+    private func elicitations() throws -> [MCPElicitation] {
+        try events().compactMap { if case .elicitation(let e) = $0 { e } else { nil } }
+    }
+
+    @Test func formFieldsComeInTheServersOrder() throws {
+        let form = try #require(try elicitations().first)
+        #expect(form.mode == .form)
+        #expect(form.server == "elicit")
+        #expect(form.message == "Where should this deploy go?")
+        #expect(form.fields.map(\.name) == ["environment", "replicas", "notify", "note"])
+
+        let environment = form.fields[0]
+        #expect(environment.required)
+        guard case .choice(let options) = environment.kind else { Issue.record("not a choice"); return }
+        #expect(options.map(\.value) == ["staging", "production"])
+        #expect(options.map(\.label) == ["Staging", "Production"])
+
+        #expect(form.fields[1].kind == .number(integer: true))
+        #expect(form.fields[1].defaultValue == 2)
+        #expect(!form.fields[1].required)
+        #expect(form.fields[2].kind == .boolean)
+        #expect(form.fields[2].defaultValue == true)
+        #expect(form.fields[3].kind == .text)
+        #expect(form.fields[3].description == "Anything to add")
+    }
+
+    @Test func pageVisitsCarryTheirLink() throws {
+        let page = try #require(try elicitations().last)
+        #expect(page.mode == .url)
+        #expect(page.url?.host() == "example.com")
+        #expect(page.elicitationID == "el-1")
+        #expect(page.fields.isEmpty)
+    }
+
+    @Test func serversSayWhenAPageVisitIsDone() throws {
+        #expect(try events().contains(.elicitationComplete(server: "elicit", elicitationID: "el-1")))
+    }
+
+    @Test func choicesCanBeOneOfWithTitles() {
+        let fields = MCPElicitation.fields(schema: ["properties": ["size": ["oneOf": [
+            ["const": "s", "title": "Small"], ["const": "l", "title": "Large"],
+        ]]]], order: nil)
+        guard case .choice(let options) = fields.first?.kind else { Issue.record("not a choice"); return }
+        #expect(options.map(\.label) == ["Small", "Large"])
+    }
+}

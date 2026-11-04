@@ -129,3 +129,90 @@ public enum ClaudeControlError: Error, Equatable, CustomStringConvertible {
         }
     }
 }
+
+/// An MCP server asking you something mid-call: a few fields to fill in (`form`), or a page
+/// to visit (`url`), such as signing in again before something sensitive. Claude Code waits
+/// for the answer, so the tool call does too.
+public struct MCPElicitation: Sendable, Equatable, Identifiable {
+    public enum Mode: Sendable, Equatable { case form, url }
+
+    /// A field of a form, from its JSON Schema.
+    public struct Field: Sendable, Equatable, Identifiable {
+        public enum Kind: Sendable, Equatable {
+            case text
+            case number(integer: Bool)
+            case boolean
+            /// Values and what to show for each.
+            case choice([(value: String, label: String)])
+
+            public static func == (a: Kind, b: Kind) -> Bool {
+                switch (a, b) {
+                case (.text, .text), (.boolean, .boolean): true
+                case (.number(let x), .number(let y)): x == y
+                case (.choice(let x), .choice(let y)): x.map(\.value) == y.map(\.value) && x.map(\.label) == y.map(\.label)
+                default: false
+                }
+            }
+        }
+
+        public var id: String { name }
+        public var name: String
+        public var title: String
+        public var description: String?
+        public var kind: Kind
+        public var required: Bool
+        public var defaultValue: JSONValue?
+    }
+
+    /// The control request's, which the answer goes back under.
+    public var id: String
+    public var server: String
+    public var message: String
+    public var mode: Mode
+    public var url: URL?
+    /// The server's own ID for a `url` one, which says when it's done.
+    public var elicitationID: String?
+    public var fields: [Field]
+    public var title: String?
+
+    init?(requestID: String, request: [String: Any]) {
+        guard let server = request["mcp_server_name"] as? String else { return nil }
+        id = requestID
+        self.server = server
+        message = request["message"] as? String ?? ""
+        mode = request["mode"] as? String == "url" ? .url : .form
+        url = (request["url"] as? String).flatMap(URL.init(string:))
+        elicitationID = request["elicitation_id"] as? String
+        title = request["title"] as? String
+        fields = Self.fields(schema: JSONValue(request["requested_schema"]), order: request["property_order"] as? [String])
+    }
+
+    static func fields(schema: JSONValue, order: [String]?) -> [Field] {
+        guard case .object(let properties)? = schema["properties"] else { return [] }
+        let required = Set(schema["required"]?.array?.compactMap(\.string) ?? [])
+        let names = (order ?? []).filter { properties[$0] != nil } + properties.keys.sorted().filter { !(order ?? []).contains($0) }
+        return names.compactMap { name in
+            guard let property = properties[name] else { return nil }
+            let kind: Field.Kind
+            if let values = property["enum"]?.array?.compactMap(\.string) {
+                let labels = property["enumNames"]?.array?.compactMap(\.string) ?? []
+                kind = .choice(values.enumerated().map { ($1, $0 < labels.count ? labels[$0] : $1) })
+            } else if let options = property["oneOf"]?.array ?? property["anyOf"]?.array,
+                      case let choices = options.compactMap({ option -> (String, String)? in
+                          guard let value = option["const"]?.string else { return nil }
+                          return (value, option["title"]?.string ?? value)
+                      }), !choices.isEmpty {
+                kind = .choice(choices.map { (value: $0.0, label: $0.1) })
+            } else {
+                switch property["type"]?.string {
+                case "boolean": kind = .boolean
+                case "integer": kind = .number(integer: true)
+                case "number": kind = .number(integer: false)
+                default: kind = .text
+                }
+            }
+            return Field(name: name, title: property["title"]?.string ?? name, description: property["description"]?.string,
+                         kind: kind, required: required.contains(name), defaultValue: property["default"])
+        }
+    }
+}

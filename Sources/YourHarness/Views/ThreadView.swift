@@ -41,6 +41,10 @@ struct ThreadView: View {
                         RequestCard(request: request, thread: thread)
                             .transition(.move(edge: .bottom).combined(with: .opacity))
                     }
+                    ForEach(thread.pendingElicitations) { elicitation in
+                        MCPElicitationCard(elicitation: elicitation) { thread.answer(elicitation, with: $0) }
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                    }
                     if let signIn = thread.mcpSignIn {
                         MCPSignInCard(request: signIn)
                             .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -55,6 +59,7 @@ struct ThreadView: View {
                 .offset(y: isFresh ? -max((areaHeight - composerHeight) / 2, 0) : 0)
                 .animation(.snappy, value: thread.pendingPermissions)
                 .animation(.snappy, value: thread.mcpSignIn?.id)
+                .animation(.snappy, value: thread.pendingElicitations.map(\.id))
                 .animation(settledThread == thread.id ? .spring(response: 0.55, dampingFraction: 0.86) : nil, value: isFresh)
             }
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { areaHeight = $0 }

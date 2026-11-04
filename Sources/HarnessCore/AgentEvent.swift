@@ -29,6 +29,10 @@ public enum AgentEvent: Sendable, Equatable {
     /// starts and ends.
     case jobsRunning([String])
     case permissionRequest(PermissionRequest)
+    /// An MCP server asks you something mid-call; answer with `ClaudeSession.answer(_:…)`.
+    case elicitation(MCPElicitation)
+    /// A server says a `url` elicitation is done (you finished on the page).
+    case elicitationComplete(server: String, elicitationID: String)
     /// What a built-in command printed (`/context`, `/usage`, ...): markdown, not a reply.
     case commandOutput(String)
     /// The conversation was summarized to free context (`/compact`, or automatically).
