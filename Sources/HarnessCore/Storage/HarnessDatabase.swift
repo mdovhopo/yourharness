@@ -212,6 +212,33 @@ public final class HarnessDatabase: Sendable {
         return (try? bulkRead { try Writer.readEntries($0, thread: key) }) ?? []
     }
 
+    /// How many rows a transcript has, without reading them.
+    public func transcriptCount(_ id: UUID) -> Int {
+        let key = id.uuidString
+        if let waiting = pending.withLock({ $0.transcripts[key] ?? $0.inFlightTranscripts[key] }) { return waiting.count }
+        writeChangesBeforeReading(key)
+        importLegacyTranscriptNow(key)
+        var count = 0
+        try? bulkRead { connection in
+            // Rows are numbered from 0 without gaps: the last number is a lookup, a count a scan.
+            try connection.query("SELECT max(seq) FROM entries WHERE thread_id = ?", [.text(key)]) { count = $0.int(0).map { $0 + 1 } ?? 0 }
+        }
+        return count
+    }
+
+    /// Rows `from..<from + limit` of a transcript, for showing the end of a long one
+    /// without reading all of it.
+    public func loadTranscriptPage(_ id: UUID, from: Int, limit: Int) -> [EntrySnapshot] {
+        let key = id.uuidString
+        if let waiting = pending.withLock({ $0.transcripts[key] ?? $0.inFlightTranscripts[key] }) {
+            let start = min(max(0, from), waiting.count)
+            return Array(waiting[start..<min(start + limit, waiting.count)])
+        }
+        writeChangesBeforeReading(key)
+        importLegacyTranscriptNow(key)
+        return (try? bulkRead { try Writer.readEntries($0, thread: key, from: from, limit: limit) }) ?? []
+    }
+
     /// The transcript in pages of `pageSize`, for going through a long one without holding
     /// all of it.
     public func scanTranscript(_ id: UUID, pageSize: Int = 500, _ body: ([EntrySnapshot]) -> Void) {

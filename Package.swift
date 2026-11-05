@@ -6,6 +6,7 @@ let package = Package(
     platforms: [.macOS(.v26)],
     products: [
         .executable(name: "YourHarness", targets: ["YourHarness"]),
+        .executable(name: "YourHarnessWeb", targets: ["YourHarnessWeb"]),
         .library(name: "HarnessCore", targets: ["HarnessCore"]),
     ],
     targets: [
@@ -15,6 +16,13 @@ let package = Package(
         .executableTarget(
             name: "YourHarness",
             dependencies: ["HarnessCore"]
+        ),
+        // The web rendering experiment (web/README.md): a thin AppKit window holding one
+        // WKWebView, over the same HarnessCore.
+        .executableTarget(
+            name: "YourHarnessWeb",
+            dependencies: ["HarnessCore"],
+            path: "web/host"
         ),
         .testTarget(
             name: "HarnessCoreTests",
