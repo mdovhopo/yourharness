@@ -113,3 +113,23 @@ What the round found:
   web side gets 95–98% with a few frames of 60–100 ms; the native app 84–90% with 88–161 ms.
 
 Runs are in `test-harness-root/web-perf/` (`web-final`, `native-30`, `mem*`, `repro*`).
+
+## Experiment: Swift owns the rows (branch `experiment/swift-store`, 2026-11-06)
+
+`ThreadStore` (HarnessCore) turns Claude's events into rows and reports what changed
+(`add`, `app` for streamed text, `upd`, `run`, `perm`); the page applies those and reduces
+nothing. Against `main`, where the page rebuilds rows from raw events, alternating, three runs
+each, 15 s, on battery, `DIRECT` in both:
+
+| | Page reduces (`main`) | Swift owns rows |
+|---|---|---|
+| stream-all, on time | 96.4–98.1% | 97.3–98.2% |
+| stream-all-switch, on time | 96.8–97.8% | 97.2–97.3% |
+| worst frame | 31–70 ms | 51–59 ms |
+| page time per batch of changes | ≤ 6 ms | ≤ 4 ms |
+| host memory | 31–35 MB | 34–35 MB |
+
+No difference worth measuring, so the choice is about the design: one reducer in the backend,
+where saving, search and the tools agents call already need the rows, and a page that only
+mirrors. It also confirms where the remaining 50–70 ms frames come from: not from handling
+events (a few ms a batch), but from WebKit's own style, layout and painting.
