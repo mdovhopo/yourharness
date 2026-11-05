@@ -43,7 +43,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.title = "YourHarness Web"
         window.minSize = NSSize(width: 640, height: 420)
         window.delegate = self
-        window.setFrameAutosaveName("web-main")
+        // Test runs park the window off screen: they mustn't save where it was.
+        if env["YHW_PERF"] == nil && env["YHW_BACKGROUND"] != "1" { window.setFrameAutosaveName("web-main") }
+        if let screen = NSScreen.main, !screen.visibleFrame.intersects(window.frame) { window.center() }
         if window.frame.origin == .zero { window.center() }
 
         let content = NSView()
