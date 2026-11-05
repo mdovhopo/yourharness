@@ -1,12 +1,12 @@
 import Foundation
 import HarnessCore
 
-/// What happened since the last frame, for the page. Streamed text for the same block
-/// arrives as many small deltas; they're joined here, so a frame carries one per block.
+/// What changed since the last frame, for the page. Streamed text for the same row arrives
+/// as many small appends; they're joined here, so a frame carries one per row.
 @MainActor
 final class Outbox {
     private enum Item {
-        case delta(thread: String, message: String, index: Int, parent: String?, kind: String, text: String)
+        case append(thread: String, id: String, field: String, text: String)
         case event([String: Any])
     }
     private var items: [Item] = []
@@ -14,13 +14,12 @@ final class Outbox {
     /// Called when the first item since the last flush arrives.
     var onPending: (() -> Void)?
 
-    func delta(thread: String, ref: BlockRef, kind: String, text: String) {
+    func append(thread: String, id: String, field: String, text: String) {
         let wasEmpty = items.isEmpty
-        if case .delta(let t, let m, let i, let p, let k, let s)? = items.last,
-           t == thread, m == ref.messageID, i == ref.index, k == kind {
-            items[items.count - 1] = .delta(thread: t, message: m, index: i, parent: p, kind: k, text: s + text)
+        if case .append(let t, let i, let f, let s)? = items.last, t == thread, i == id, f == field {
+            items[items.count - 1] = .append(thread: t, id: i, field: f, text: s + text)
         } else {
-            items.append(.delta(thread: thread, message: ref.messageID, index: ref.index, parent: ref.parentToolUseID, kind: kind, text: text))
+            items.append(.append(thread: thread, id: id, field: field, text: text))
         }
         if wasEmpty { onPending?() }
     }
@@ -35,11 +34,8 @@ final class Outbox {
         guard !items.isEmpty else { return nil }
         let objects: [[String: Any]] = items.map {
             switch $0 {
-            case .delta(let thread, let message, let index, let parent, let kind, let text):
-                var object: [String: Any] = ["t": "d", "th": thread, "m": message, "i": index, "k": kind, "s": text]
-                if let parent { object["p"] = parent }
-                return object
-            case .event(let event): return event
+            case .append(let thread, let id, let field, let text): ["t": "app", "th": thread, "id": id, "f": field, "s": text]
+            case .event(let event): event
             }
         }
         items.removeAll(keepingCapacity: true)
@@ -47,18 +43,33 @@ final class Outbox {
     }
 }
 
-/// The `claude` processes, one per thread that's been talked to, and their events as the
-/// page's wire format.
+extension ThreadStore.Entry {
+    /// The page's row format (WireEntry in web/ui/src/host.ts), plus `live`.
+    var wire: [String: Any] {
+        var object: [String: Any] = ["id": id, "k": kind == .commandOutput ? "command" : kind.rawValue, "t": text]
+        if let toolName { object["n"] = toolName }
+        if let toolInput { object["i"] = toolInput }
+        if let toolResult { object["r"] = toolResult }
+        if let resultLength { object["rl"] = resultLength }
+        if isError { object["e"] = 1 }
+        if live { object["live"] = 1 }
+        if let subagent { object["sa"] = ["d": subagent.description, "s": subagent.status, "c": subagent.steps] }
+        return object
+    }
+}
+
+/// The `claude` processes, one per thread that's been talked to. Their events go through
+/// the `ThreadStore`, which owns the rows; the page only gets what changed.
 @MainActor
 final class LiveThreads {
     private struct Live {
         var session: ClaudeSession
         var pump: Task<Void, Never>
-        var permissions: [String: PermissionRequest] = [:]
     }
 
     private var live: [String: Live] = [:]
     private let outbox: Outbox
+    let store = ThreadStore(resultLimit: WireEntry.liveResultLimit, inputLimit: WireEntry.toolTextLimit)
     private var environment: [String: String]?
     private var executable: URL?
 
@@ -79,22 +90,29 @@ final class LiveThreads {
     }
 
     func send(thread: String, text: String, cwd: String, sessionID: String?, model: String?, mode: String?) async throws {
-        if live[thread] == nil {
-            let (environment, executable) = try await prepare()
-            var options = ClaudeLaunchOptions(executable: executable, workingDirectory: URL(fileURLWithPath: cwd, isDirectory: true),
-                                              environment: environment, model: model, permissionMode: mode ?? "default",
-                                              resumeSessionID: sessionID)
-            options.persistsSession = true
-            let session = try ClaudeSession(options: options)
-            let pump = Task { [weak self] in
-                for await event in session.events {
-                    self?.handle(event, thread: thread)
+        emit(store.userMessage(text, thread: thread))
+        do {
+            if live[thread] == nil {
+                let (environment, executable) = try await prepare()
+                var options = ClaudeLaunchOptions(executable: executable, workingDirectory: URL(fileURLWithPath: cwd, isDirectory: true),
+                                                  environment: environment, model: model, permissionMode: mode ?? "default",
+                                                  resumeSessionID: sessionID)
+                options.persistsSession = true
+                let session = try ClaudeSession(options: options)
+                let pump = Task { [weak self] in
+                    for await event in session.events {
+                        self?.handle(event, thread: thread)
+                    }
+                    self?.ended(thread)
                 }
-                self?.ended(thread)
+                live[thread] = Live(session: session, pump: pump)
             }
-            live[thread] = Live(session: session, pump: pump)
+            try await live[thread]?.session.send(text: text)
+        } catch {
+            emit(store.notice("Couldn't send: \(error)", thread: thread))
+            emit([.running(thread: thread, false)])
+            throw error
         }
-        try await live[thread]?.session.send(text: text)
     }
 
     func interrupt(thread: String) async {
@@ -110,7 +128,8 @@ final class LiveThreads {
     }
 
     func respond(thread: String, requestID: String, allow: Bool) async {
-        guard let request = live[thread]?.permissions.removeValue(forKey: requestID) else { return }
+        guard let request = store.pendingPermission(thread), request.requestID == requestID else { return }
+        emit(store.answered(thread))
         try? await live[thread]?.session.respond(to: request, allow: allow)
     }
 
@@ -123,62 +142,30 @@ final class LiveThreads {
     }
 
     private func handle(_ event: AgentEvent, thread: String) {
-        switch event {
-        case .sessionStarted(let info):
-            outbox.event(["t": "session", "th": thread, "sid": info.sessionID, "model": info.model ?? ""])
-        case .status(let status):
-            outbox.event(["t": "status", "th": thread, "s": status])
-        case .blockStarted(let ref, let kind):
-            var object: [String: Any] = ["t": "b", "th": thread, "m": ref.messageID, "i": ref.index]
-            if let parent = ref.parentToolUseID { object["p"] = parent }
-            switch kind {
-            case .text: object["k"] = "text"
-            case .thinking: object["k"] = "thinking"
-            case .toolUse(let id, let name): object["k"] = "tool"; object["id"] = id; object["n"] = name
-            }
-            outbox.event(object)
-        case .textDelta(let ref, let text): outbox.delta(thread: thread, ref: ref, kind: "text", text: text)
-        case .thinkingDelta(let ref, let text): outbox.delta(thread: thread, ref: ref, kind: "thinking", text: text)
-        case .toolInputDelta(let ref, let text): outbox.delta(thread: thread, ref: ref, kind: "input", text: text)
-        case .assistantMessage(let messageID, let blocks, let parent):
-            let wire: [[String: Any]] = blocks.map {
-                switch $0 {
-                case .text(let text): ["k": "text", "s": text]
-                case .thinking(let text): ["k": "thinking", "s": text]
-                case .toolUse(let id, let name, let input): ["k": "tool", "id": id, "n": name, "s": WireEntry.head(input) ?? ""]
+        emit(store.apply(event, thread: thread))
+    }
+
+    private func emit(_ patches: [ThreadStore.ThreadPatch]) {
+        for patch in patches {
+            switch patch {
+            case .add(let thread, let entry):
+                outbox.event(["t": "add", "th": thread, "e": entry.wire])
+            case .append(let thread, let id, let field, let text):
+                outbox.append(thread: thread, id: id, field: field == .text ? "t" : "i", text: text)
+            case .update(let thread, let entry):
+                outbox.event(["t": "upd", "th": thread, "e": entry.wire])
+            case .running(let thread, let running):
+                outbox.event(["t": "run", "th": thread, "v": running])
+            case .permission(let thread, let request):
+                if let request {
+                    outbox.event(["t": "perm", "th": thread, "id": request.requestID, "n": request.toolName,
+                                  "d": request.description ?? "", "i": WireEntry.head(request.inputJSON) ?? ""])
+                } else {
+                    outbox.event(["t": "perm", "th": thread])
                 }
+            case .session(let thread, let id):
+                outbox.event(["t": "session", "th": thread, "sid": id])
             }
-            var object: [String: Any] = ["t": "am", "th": thread, "m": messageID, "b": wire]
-            if let parent { object["p"] = parent }
-            outbox.event(object)
-        case .toolResults(let results, let parent):
-            let wire: [[String: Any]] = results.map {
-                ["id": $0.toolUseID, "s": WireEntry.head($0.content, limit: WireEntry.liveResultLimit) ?? "", "l": $0.content.count, "e": $0.isError ? 1 : 0]
-            }
-            var object: [String: Any] = ["t": "tr", "th": thread, "r": wire]
-            if let parent { object["p"] = parent }
-            outbox.event(object)
-        case .subagentStarted(let start):
-            outbox.event(["t": "sa", "th": thread, "id": start.toolUseID, "d": start.description])
-        case .subagentFinished(let end):
-            outbox.event(["t": "sae", "th": thread, "id": end.toolUseID, "s": end.status, "c": end.usage.toolUses ?? 0])
-        case .permissionRequest(let request):
-            live[thread]?.permissions[request.requestID] = request
-            outbox.event(["t": "perm", "th": thread, "id": request.requestID, "n": request.toolName,
-                          "d": request.description ?? "", "i": WireEntry.head(request.inputJSON) ?? ""])
-        case .compacted(let compaction):
-            outbox.event(["t": "notice", "th": thread, "s": "Conversation compacted (\(compaction.trigger))"])
-        case .commandOutput(let text):
-            outbox.event(["t": "command", "th": thread, "s": text])
-        case .contextUsage(let tokens):
-            outbox.event(["t": "ctx", "th": thread, "n": tokens])
-        case .turnCompleted(let result):
-            outbox.event(["t": "done", "th": thread, "err": result.isError ? 1 : 0, "ms": result.durationMs ?? 0,
-                          "s": result.isError ? (result.resultText ?? result.subtype) : ""])
-        case .processExited(let code, let tail):
-            outbox.event(["t": "exit", "th": thread, "code": Int(code), "s": code == 0 ? "" : String(tail.suffix(600))])
-        default:
-            break
         }
     }
 }

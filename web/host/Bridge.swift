@@ -98,6 +98,9 @@ final class Bridge: NSObject, WKScriptMessageHandlerWithReply {
         case "setModel":
             await live.setModel(thread: thread, model: p["model"] as? String ?? "default")
             return true
+        case "quit":
+            NSApp.terminate(nil)
+            return true
         case "log":
             log(p["s"] as? String ?? "")
             return true
@@ -109,7 +112,9 @@ final class Bridge: NSObject, WKScriptMessageHandlerWithReply {
                     "send": env["YHW_SEND"] ?? "", "model": env["YHW_MODEL"] ?? "", "mode": env["YHW_MODE"] ?? "",
                     "answer": env["YHW_ANSWER"] ?? "", "diagAfter": env["YHW_DIAG_AFTER"] ?? "",
                     // `YHW_FLAGS=a,b`: classes on the page's root, for turning one thing off to measure it.
-                    "flags": env["YHW_FLAGS"] ?? ""]
+                    "flags": env["YHW_FLAGS"] ?? "",
+                    // `YHW_QUIT=1`: quits once the `YHW_SEND` turn is done.
+                    "quit": env["YHW_QUIT"] == "1"]
         default:
             if method.hasPrefix("probe."), let probe {
                 return try await probe.handle(String(method.dropFirst(6)), p)

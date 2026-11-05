@@ -4,7 +4,8 @@
 # phases.json and clicks.json, the log in <results>/dev.log.
 # Usage: web/scripts/perf-run.sh <results dir> [YHW_VAR=value ...]
 #   YHW_PERF_SECONDS=30 per phase; YHW_PERF_PHASES=stream-all,stream-all-switch; YHW_PERF_FRONT=1
-#   takes over the screen as scripts/perf-run.sh's YH_PERF_FRONT does. SKIP_BUILD=1 reuses build/.
+#   takes over the screen as scripts/perf-run.sh's YH_PERF_FRONT does. SKIP_BUILD=1 reuses the last
+#   test build (test-harness-root/web-test), never build/, which may be the copy you have open.
 set -euo pipefail
 ROOT="${0:A:h:h:h}"
 RESULTS="${${1:?usage: web/scripts/perf-run.sh <results dir> [YHW_VAR=value ...]}:A}"
@@ -15,7 +16,8 @@ if pmset -g batt | grep -q "Battery Power" && [[ ${FORCE:-} != 1 ]]; then
 fi
 SEED="${PERF_SEED:-$ROOT/test-harness-root/extreme}"
 [[ -f $SEED/harness.sqlite ]] || "$ROOT/scripts/preset.sh" extreme
-[[ ${SKIP_BUILD:-} == 1 ]] || "$ROOT/web/scripts/bundle.sh" >/dev/null
+TEST_APP="$ROOT/test-harness-root/web-test/YourHarnessWeb.app"
+[[ ${SKIP_BUILD:-} == 1 ]] || APP="$TEST_APP" "$ROOT/web/scripts/bundle.sh" >/dev/null
 DATA="$ROOT/test-harness-root/web-perf-run"
 rm -rf "$DATA"
 mkdir -p "$DATA" "$RESULTS"
@@ -25,7 +27,9 @@ ARGS=(--env YHW_DB_DIR="$DATA" --env YHW_NO_CLAUDE=1 --env YHW_PERF="$RESULTS" -
       --env YH_PATH="$ROOT/presets/extreme/fake-claude:$PATH" --env CLAUDE_CONFIG_DIR="$DATA/claude-config")
 for kv in "$@"; do ARGS+=(--env "$kv"); done
 caffeinate -u -t 2
-open -g -n -W "${ARGS[@]}" --stderr "$RESULTS/dev.log" "$ROOT/build/YourHarnessWeb.app" &
+# A copy of its own: a build or a clean-up during the run never touches the one you have open.
+cp -R "$TEST_APP" "$DATA/YourHarnessWeb.app"
+open -g -n -W "${ARGS[@]}" --stderr "$RESULTS/dev.log" "$DATA/YourHarnessWeb.app" &
 OPENER=$!
 caffeinate -d -i -w $OPENER &!
 ( while kill -0 $OPENER 2>/dev/null; do caffeinate -u -t 1; sleep 5; done ) &!

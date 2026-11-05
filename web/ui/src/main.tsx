@@ -33,7 +33,7 @@ loadLibrary().then(async () => {
 });
 
 /** `YHW_SEND`: one real turn from a new thread, logged as it goes, for checking the live path. */
-function liveCheck(config: { send: string; model: string; mode: string; answer: string }) {
+function liveCheck(config: { send: string; model: string; mode: string; answer: string; quit: boolean }) {
   if (config.model) chooseModel(config.model);
   if (config.mode) chooseMode(config.mode);
   const project = projects()[0];
@@ -50,6 +50,7 @@ function liveCheck(config: { send: string; model: string; mode: string; answer: 
       if (was && !running) {
         const rows = t.items().map((i) => `${i.type}:${i.entries.map((e) => `${e.kind}=` + (e.kind === "tool" ? `${e.toolName}${e.isError ? "!" : ""}` : e.text.slice(0, 60)).replace(/\n/g, " ")).join("|")}`);
         hostLog(`LIVE done, session ${t.sessionId}\n  ${rows.join("\n  ")}`);
+        if (config.quit) setTimeout(() => call("quit"), 300);
       }
     }));
   });

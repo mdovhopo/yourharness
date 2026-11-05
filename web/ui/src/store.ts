@@ -122,21 +122,10 @@ export async function send(t: ThreadState, text: string) {
   const trimmed = text.trim();
   if (!trimmed) return;
   await ensureLoaded(t);
-  const user = new Entry(`u${Date.now()}`, "user", trimmed);
-  batch(() => {
-    t.append(user);
-    t.setRunning(true);
-    if (t.title() === "New thread") t.setTitle(trimmed.split("\n")[0].slice(0, 60));
-    t.meta.updatedAt = Date.now();
-  });
-  try {
-    await call("send", { th: t.id, text: trimmed, sid: t.sessionId ?? "", projectId: t.meta.projectId, model: model(), mode: mode() });
-  } catch (error) {
-    batch(() => {
-      t.notice(`Couldn't send: ${error}`);
-      t.setRunning(false);
-    });
-  }
+  // The host adds your message and says the thread is running: it owns the rows.
+  if (t.title() === "New thread") t.setTitle(trimmed.split("\n")[0].slice(0, 60));
+  t.meta.updatedAt = Date.now();
+  call("send", { th: t.id, text: trimmed, sid: t.sessionId ?? "", projectId: t.meta.projectId, model: model(), mode: mode() }).catch(() => {});
 }
 
 export function interrupt(t: ThreadState) {
@@ -146,6 +135,5 @@ export function interrupt(t: ThreadState) {
 export function respond(t: ThreadState, allow: boolean) {
   const p = t.permission();
   if (!p) return;
-  t.setPermission(null);
   call("respond", { th: t.id, id: p.id, allow }).catch(() => {});
 }

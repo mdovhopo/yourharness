@@ -9,7 +9,8 @@ export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 (cd "$ROOT" && swift build -c release --product YourHarnessWeb 2>&1 | grep -E "error|warning: .*web/host|Compiling YourHarnessWeb|Build complete" || true)
 BIN="$ROOT/.build/release/YourHarnessWeb"
 [[ -x $BIN ]] || { echo "build failed" >&2; exit 1; }
-APP="$ROOT/build/YourHarnessWeb.app"
+# APP=<path>: somewhere else, so a test build never replaces the copy you have open.
+APP="${APP:-$ROOT/build/YourHarnessWeb.app}"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/YourHarnessWeb"

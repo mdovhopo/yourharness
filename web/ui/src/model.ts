@@ -111,6 +111,8 @@ export class ThreadState {
   private blocks = new Map<string, Entry>();
   private tools = new Map<string, { entry: Entry; item: Item }>();
   private itemOf = new Map<Entry, Item>();
+  /** Live rows by ID, for the host's changes. */
+  private byId = new Map<string, Entry>();
   /** Bumped on anything that changes what the transcript shows. */
   changed: Accessor<number>;
   private setChanged: Setter<number>;
@@ -195,6 +197,7 @@ export class ThreadState {
     this.blocks.clear();
     this.tools.clear();
     this.itemOf.clear();
+    this.byId.clear();
     this.loaded = false;
     this.loading = null;
   }
@@ -208,132 +211,48 @@ export class ThreadState {
     this.append(new Entry(`n${Item.next}`, "notice", text));
   }
 
-  /** Applies one event from this thread's `claude`. */
+  /** Applies one change from the host, which owns the rows (ThreadStore.swift). */
   apply(ev: HostEvent) {
     switch (ev.t) {
       case "session":
         this.sessionId = ev.sid;
         break;
-      case "b": {
-        if (ev.p) return this.subagentStep(ev.p);
-        const key = `${ev.m}:${ev.i}`;
-        if (this.blocks.has(key)) return;
-        const kind: Kind = ev.k === "text" ? "assistant" : ev.k === "thinking" ? "thinking" : "tool";
-        const e = new Entry(ev.k === "tool" ? ev.id : key, kind);
-        e.toolName = ev.n;
-        e.live = true;
-        this.blocks.set(key, e);
+      case "add": {
+        const e = Entry.from(ev.e);
+        e.live = ev.e.live === 1;
+        this.byId.set(e.id, e);
         this.append(e);
         break;
       }
-      case "d": {
-        if (ev.p) return;
-        const key = `${ev.m}:${ev.i}`;
-        let e = this.blocks.get(key);
-        if (!e) {
-          e = new Entry(key, ev.k === "thinking" ? "thinking" : "assistant");
-          e.live = true;
-          this.blocks.set(key, e);
-          this.append(e);
-        }
-        if (ev.k === "input") e.toolInput = (e.toolInput ?? "") + ev.s;
+      case "app": {
+        const e = this.byId.get(ev.id);
+        if (!e) return;
+        if (ev.f === "i") e.toolInput = (e.toolInput ?? "") + ev.s;
         else e.text += ev.s;
         this.touch(e);
         break;
       }
-      case "am": {
-        if (ev.p) {
-          for (const block of ev.b) if (block.k === "tool") this.subagentStep(ev.p);
-          return;
-        }
-        ev.b.forEach((block: any, index: number) => {
-          const key = `${ev.m}:${index}`;
-          let e = this.blocks.get(key) ?? (block.k === "tool" ? this.tools.get(block.id)?.entry : undefined);
-          if (!e) {
-            e = new Entry(block.k === "tool" ? block.id : key, block.k === "text" ? "assistant" : block.k === "thinking" ? "thinking" : "tool");
-            this.blocks.set(key, e);
-            this.append(e);
-          }
-          if (block.k === "tool") {
-            e.toolName = block.n;
-            e.toolInput = block.s;
-          } else {
-            e.text = block.s;
-          }
-          e.live = false;
-          this.touch(e);
-        });
-        break;
-      }
-      case "tr": {
-        if (ev.p) return;
-        for (const r of ev.r) {
-          const found = this.tools.get(r.id);
-          if (!found) continue;
-          found.entry.toolResult = r.s;
-          found.entry.resultLength = r.l;
-          found.entry.isError = r.e === 1;
-          found.entry.live = false;
-          found.item.bump();
-        }
-        this.setChanged(0);
-        break;
-      }
-      case "sa": {
-        const found = this.tools.get(ev.id);
-        if (found) {
-          found.entry.sub = { d: ev.d, s: "running", c: 0 };
-          found.item.bump();
-        }
-        break;
-      }
-      case "sae": {
-        const found = this.tools.get(ev.id);
-        if (found) {
-          found.entry.sub = { ...(found.entry.sub ?? { d: "" }), s: ev.s, c: ev.c };
-          found.item.bump();
-        }
-        break;
-      }
-      case "perm":
-        this.setPermission({ id: ev.id, tool: ev.n, description: ev.d, input: ev.i });
-        break;
-      case "notice":
-        this.notice(ev.s);
-        break;
-      case "command":
-        this.append(new Entry(`c${Item.next}`, "command", ev.s));
-        break;
-      case "done":
-        this.endTurn();
-        if (ev.err && ev.s) this.notice(ev.s);
-        break;
-      case "exit":
-        this.endTurn();
-        if (ev.code !== 0) this.notice(`claude exited (${ev.code}) ${ev.s ?? ""}`);
-        break;
-    }
-  }
-
-  private subagentStep(parent: string) {
-    const found = this.tools.get(parent);
-    if (!found) return;
-    const sub = found.entry.sub ?? { d: "Sub-agent", s: "running", c: 0 };
-    found.entry.sub = { ...sub, c: (sub.c ?? 0) + 1 };
-    found.item.bump();
-  }
-
-  private endTurn() {
-    for (const e of this.blocks.values()) {
-      if (e.live) {
-        e.live = false;
+      case "upd": {
+        const e = this.byId.get(ev.e.id);
+        if (!e) return;
+        const w = ev.e;
+        e.text = w.t;
+        e.toolName = w.n;
+        e.toolInput = w.i;
+        e.toolResult = w.r;
+        e.resultLength = w.rl;
+        e.isError = w.e === 1;
+        e.sub = w.sa;
+        e.live = w.live === 1;
         this.touch(e);
+        break;
       }
+      case "run":
+        this.setRunning(ev.v);
+        break;
+      case "perm":
+        this.setPermission(ev.id ? { id: ev.id, tool: ev.n, description: ev.d, input: ev.i } : null);
+        break;
     }
-    this.blocks.clear();
-    batch(() => {
-      this.setRunning(false);
-      this.setPermission(null);
-    });
   }
 }
