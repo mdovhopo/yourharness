@@ -122,6 +122,7 @@ impl HarnessApp {
             while self.deck.len() > KEPT_TRANSCRIPTS {
                 let (old, _) = self.deck.remove(0);
                 if let Some(t) = self.thread(&old) {
+                    self.save_rows(&t, cx);
                     t.update(cx, |t, cx| {
                         t.in_deck = false;
                         if t.running {
@@ -151,14 +152,21 @@ impl HarnessApp {
             thread.update(cx, |t, _| t.loaded = true);
             return;
         }
-        thread.update(cx, |t, _| t.loading = true);
+        // Rows held from a live turn are newer than the history: read from before them.
+        let before = thread.update(cx, |t, _| {
+            t.loading = true;
+            t.first_seq()
+        });
         let library = self.library.clone();
         let weak = thread.downgrade();
         cx.spawn(async move |_, cx| {
-            let page = cx.background_executor().spawn(async move { library.page(&id, None, PAGE) }).await;
+            let page = cx.background_executor().spawn(async move { library.page(&id, before, PAGE) }).await;
             let _ = weak.update(cx, |t, cx| {
                 if !t.loading {
                     return; // let go of meanwhile
+                }
+                if t.total.is_none() {
+                    t.total = Some(page.total);
                 }
                 t.prepend(page.entries, page.from);
                 t.loaded = true;
@@ -218,6 +226,18 @@ impl HarnessApp {
         self.select(&id, window, cx);
     }
 
+    /// The thread's changed rows into harness.sqlite (in the background).
+    pub fn save_rows(&self, thread: &Entity<ThreadState>, cx: &mut Context<Self>) {
+        let Some(db) = self.library.db.clone() else { return };
+        let (id, total, rows) = thread.update(cx, |t, _| (t.id().to_string(), t.total, t.take_changes()));
+        if rows.is_empty() || id.starts_with("new:") || id.starts_with("cc:") {
+            return;
+        }
+        if let Some(total) = total {
+            db.save_rows(&id, total, rows);
+        }
+    }
+
     /// What the thread's record keeps (title, session, last activity), saved.
     fn persist_thread(&self, thread: &Entity<ThreadState>, cx: &App) {
         let t = thread.read(cx);
@@ -240,6 +260,11 @@ impl HarnessApp {
             let t = thread.read(cx);
             (t.id().to_string(), t.meta.project_id.clone(), t.session_id.clone(), t.title.clone())
         };
+        // The next row's number: its rows so far, before the first new one.
+        if thread.read(cx).total.is_none() {
+            let total = self.library.db.as_ref().map_or(0, |db| db.transcript_count(&id));
+            thread.update(cx, |t, _| t.total = Some(total));
+        }
         thread.update(cx, |t, cx| {
             if title == "New thread" {
                 t.title = text.lines().next().unwrap_or("").chars().take(60).collect();
@@ -283,6 +308,7 @@ impl HarnessApp {
     fn pump(&mut self, thread: Entity<ThreadState>, id: String, rx: flume::Receiver<Event>, cx: &mut Context<Self>) {
         let log = std::env::var("YH_EVENT_LOG").as_deref() == Ok("1");
         cx.spawn(async move |this, cx| {
+            let mut saved_at = std::time::Instant::now();
             while let Ok(first) = rx.recv_async().await {
                 let started = std::time::Instant::now();
                 let mut batch: Vec<Event> = vec![first];
@@ -307,6 +333,12 @@ impl HarnessApp {
                     chrome
                 });
                 probe::note_batch(started.elapsed().as_secs_f64() * 1000.0, count);
+                // Saved at most once a second while it streams, and when anything settles.
+                if chrome || exited || saved_at.elapsed() > Duration::from_secs(1) {
+                    saved_at = std::time::Instant::now();
+                    let thread = thread.clone();
+                    let _ = this.update(cx, |app, cx| app.save_rows(&thread, cx));
+                }
                 if chrome || exited {
                     let id = id.clone();
                     let thread = thread.clone();

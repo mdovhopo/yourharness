@@ -37,6 +37,8 @@ pub struct ToolResult {
     pub text: String,
     pub len: usize,
     pub is_error: bool,
+    /// The whole result when `text` is only its head: for saving, not for holding.
+    pub full: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -329,6 +331,7 @@ impl Parser {
                         ToolResult {
                             id: b["tool_use_id"].as_str().unwrap_or("").into(),
                             len: text.len(),
+                            full: (text.len() > LIVE_RESULT_LIMIT).then(|| text.clone()),
                             text: head(&text, LIVE_RESULT_LIMIT),
                             is_error: b["is_error"] == true,
                         }

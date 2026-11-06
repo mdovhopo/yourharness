@@ -3,6 +3,7 @@
 //! place and tells the list to measure just that row again (`ListState::splice`).
 
 use yh_core::claude::{Block, BlockKind, DeltaKind, Event};
+use yh_core::db::Row;
 use yh_core::library::{EntryData, Kind, ThreadMeta};
 use yh_core::markdown::Markdown;
 use gpui_kit::{px, Context, ListAlignment, ListOffset, ListState};
@@ -27,12 +28,44 @@ pub struct Entry {
     /// A step opened in its work row.
     pub open: bool,
     pub markdown: Option<(u64, Rc<Markdown>)>,
+    /// Its row number in the whole saved transcript.
+    pub seq: usize,
+    /// When it was written (seconds since 1970), for rows made here.
+    pub date: Option<f64>,
 }
 
 pub type EntryRef = Rc<RefCell<Entry>>;
 
-fn entry(data: EntryData) -> EntryRef {
-    Rc::new(RefCell::new(Entry { data, live: false, sub: None, version: 0, open: false, markdown: None }))
+fn entry(data: EntryData, seq: usize) -> EntryRef {
+    Rc::new(RefCell::new(Entry { data, live: false, sub: None, version: 0, open: false, markdown: None, seq, date: None }))
+}
+
+fn kind_name(kind: Kind) -> &'static str {
+    match kind {
+        Kind::User => "user",
+        Kind::Assistant => "assistant",
+        Kind::Thinking => "thinking",
+        Kind::Tool => "tool",
+        Kind::Notice => "notice",
+        Kind::Command => "commandOutput",
+    }
+}
+
+impl Entry {
+    /// As a row of `entries`, with the whole tool result when only its head is held.
+    pub fn row(&self, full_result: Option<String>) -> Row {
+        Row {
+            id: self.data.id.clone(),
+            kind: kind_name(self.data.kind).into(),
+            text: self.data.text.clone(),
+            tool_name: self.data.tool_name.clone(),
+            tool_input: self.data.tool_input.clone(),
+            tool_result: full_result.or_else(|| self.data.tool_result.clone()),
+            tool_is_error: (self.data.kind == Kind::Tool && self.data.tool_result.is_some()).then_some(self.data.is_error),
+            date: self.date,
+            ..Default::default()
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -88,6 +121,15 @@ pub struct ThreadState {
     /// Its transcript is made (open or kept for going back): all its rows stay.
     pub in_deck: bool,
     pub session_id: Option<String>,
+    /// Rows in the whole transcript, saved and held: the next row's number. `None` until known
+    /// (read from the database before the first new row).
+    pub total: Option<usize>,
+    /// Rows changed since the last save, by number.
+    dirty: std::collections::BTreeSet<usize>,
+    /// Whole tool results the rows hold only a head of, until saved.
+    full_results: HashMap<String, String>,
+    /// Changed rows let go of before they were saved: saved with the next changes.
+    unsaved: Vec<(usize, Row)>,
     blocks: HashMap<String, EntryRef>,
     tools: HashMap<String, (EntryRef, i64)>,
     next_note: u64,
@@ -108,6 +150,10 @@ impl ThreadState {
             loading: false,
             loading_earlier: false,
             in_deck: false,
+            total: None,
+            dirty: Default::default(),
+            full_results: HashMap::new(),
+            unsaved: vec![],
             blocks: HashMap::new(),
             tools: HashMap::new(),
             next_note: 0,
@@ -131,9 +177,9 @@ impl ThreadState {
     /// History rows, oldest first, put in front of what's held; what you're reading stays put.
     pub fn prepend(&mut self, rows: Vec<EntryData>, before: usize) {
         let mut items: Vec<Item> = vec![];
-        for data in rows {
+        for (n, data) in rows.into_iter().enumerate() {
             let kind = data.kind;
-            let e = entry(data);
+            let e = entry(data, before + n);
             match items.last_mut() {
                 Some(last) if is_work(kind) && last.ty == ItemType::Work => last.entries.push(e),
                 _ => items.push(Item { pos: 0, ty: item_type(kind), entries: vec![e], open: false }),
@@ -165,7 +211,11 @@ impl ThreadState {
     /// Puts a new entry at the end, folding work into the work row before it.
     fn append(&mut self, data: EntryData) -> EntryRef {
         let kind = data.kind;
-        let e = entry(data);
+        let seq = self.total.unwrap_or(0);
+        self.total = Some(seq + 1);
+        self.dirty.insert(seq);
+        let e = entry(data, seq);
+        e.borrow_mut().date = Some(yh_core::library::now_ms() / 1000.0);
         let pos = match self.items.last_mut() {
             Some(last) if is_work(kind) && last.ty == ItemType::Work => {
                 last.entries.push(e.clone());
@@ -201,6 +251,7 @@ impl ThreadState {
 
     fn touch(&mut self, e: &EntryRef) {
         e.borrow_mut().version += 1;
+        self.dirty.insert(e.borrow().seq);
         let id = e.borrow().data.id.clone();
         // Tool entries know their row; anything else streaming is in the last rows.
         if let Some((_, pos)) = self.tools.get(&id) {
@@ -214,6 +265,31 @@ impl ThreadState {
         }
     }
 
+    /// Rows changed since the last call, for saving: (row number, row). A row still being
+    /// written is saved as it is and again when it's done.
+    pub fn take_changes(&mut self) -> Vec<(usize, Row)> {
+        let mut out = std::mem::take(&mut self.unsaved);
+        if self.dirty.is_empty() {
+            return out;
+        }
+        let dirty = std::mem::take(&mut self.dirty);
+        for item in &self.items {
+            for e in &item.entries {
+                let b = e.borrow();
+                if dirty.contains(&b.seq) {
+                    let full = if b.live { None } else { self.full_results.remove(&b.data.id) };
+                    out.push((b.seq, b.row(full)));
+                }
+            }
+        }
+        out
+    }
+
+    /// The first held row's number, if any: history is read from before it.
+    pub fn first_seq(&self) -> Option<usize> {
+        self.items.first()?.entries.first().map(|e| e.borrow().seq)
+    }
+
     /// Keeps the newest `keep` rows; the ones before go back to "earlier".
     pub fn trim(&mut self, keep: usize) {
         if self.items.len() <= keep {
@@ -225,6 +301,10 @@ impl ThreadState {
             count += item.entries.len();
             for e in item.entries {
                 let b = e.borrow();
+                if self.dirty.remove(&b.seq) {
+                    let full = self.full_results.remove(&b.data.id);
+                    self.unsaved.push((b.seq, b.row(full)));
+                }
                 if b.data.kind == Kind::Tool {
                     self.tools.remove(&b.data.id);
                 }
@@ -375,6 +455,10 @@ impl ThreadState {
                 }
                 for r in results {
                     let Some((e, pos)) = self.tools.get(&r.id).cloned() else { continue };
+                    if let Some(full) = r.full {
+                        self.full_results.insert(r.id.clone(), full);
+                    }
+                    self.dirty.insert(e.borrow().seq);
                     {
                         let mut b = e.borrow_mut();
                         b.data.tool_result = Some(r.text);
@@ -434,6 +518,7 @@ impl ThreadState {
 
     fn subagent_step(&mut self, parent: &str) {
         let Some((e, pos)) = self.tools.get(parent).cloned() else { return };
+        self.dirty.insert(e.borrow().seq);
         {
             let mut b = e.borrow_mut();
             let sub = b.sub.get_or_insert(Subagent { description: "Sub-agent".into(), status: "running".into(), steps: 0 });
