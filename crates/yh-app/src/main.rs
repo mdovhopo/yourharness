@@ -304,6 +304,8 @@ fn main() {
                 let tab = match env("YH_MEMORY_TAB").as_deref() {
                     Some("tasks") => ui::memory::Tab::Tasks,
                     Some("activity") => ui::memory::Tab::Activity,
+                    Some("insights") => ui::memory::Tab::Insights,
+                    Some("graph") => ui::memory::Tab::Graph,
                     _ => ui::memory::Tab::Memories,
                 };
                 let _ = cx.update(|cx| {

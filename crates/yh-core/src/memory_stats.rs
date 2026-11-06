@@ -295,3 +295,73 @@ pub fn describe(s: &Stats, day: impl Fn(f64) -> String) -> String {
     }
     lines.join("\n")
 }
+
+/// The memory as a map: Fruchterman–Reingold in a unit square (linked memories pull
+/// together, everything pushes apart, a little gravity keeps the loners in view), seeded by
+/// ID so it lays out the same way every time. Points are in 0…1.
+pub fn graph_layout(ids: &[String], edges: &[(usize, usize)]) -> Vec<(f64, f64)> {
+    let n = ids.len();
+    if n == 0 {
+        return vec![];
+    }
+    let mut pos: Vec<(f64, f64)> = ids
+        .iter()
+        .map(|id| {
+            let mut h: u64 = 1469598103934665603;
+            for b in id.bytes() {
+                h = (h ^ b as u64).wrapping_mul(1099511628211);
+            }
+            ((h & 0xFFFF) as f64 / 65535., ((h >> 16) & 0xFFFF) as f64 / 65535.)
+        })
+        .collect();
+    let k = (1.0 / n as f64).sqrt() * 0.9;
+    let iterations = if n > 300 { 120 } else { 260 };
+    let mut temperature = 0.1;
+    for _ in 0..iterations {
+        let mut shift = vec![(0.0f64, 0.0f64); n];
+        for i in 0..n {
+            for j in i + 1..n {
+                let (mut dx, mut dy) = (pos[i].0 - pos[j].0, pos[i].1 - pos[j].1);
+                let mut d = (dx * dx + dy * dy).sqrt();
+                if d < 1e-4 {
+                    dx = 0.001 * (i as f64 - j as f64);
+                    dy = 0.001;
+                    d = 0.0015;
+                }
+                let f = k * k / d;
+                shift[i].0 += dx / d * f;
+                shift[i].1 += dy / d * f;
+                shift[j].0 -= dx / d * f;
+                shift[j].1 -= dy / d * f;
+            }
+        }
+        for &(a, b) in edges {
+            if a == b {
+                continue;
+            }
+            let (dx, dy) = (pos[a].0 - pos[b].0, pos[a].1 - pos[b].1);
+            let d = (dx * dx + dy * dy).sqrt().max(1e-4);
+            let f = d * d / k;
+            shift[a].0 -= dx / d * f;
+            shift[a].1 -= dy / d * f;
+            shift[b].0 += dx / d * f;
+            shift[b].1 += dy / d * f;
+        }
+        for i in 0..n {
+            shift[i].0 += (0.5 - pos[i].0) * 0.6 * k * 10.;
+            shift[i].1 += (0.5 - pos[i].1) * 0.6 * k * 10.;
+            let len = (shift[i].0 * shift[i].0 + shift[i].1 * shift[i].1).sqrt().max(1e-9);
+            let step = len.min(temperature);
+            pos[i].0 += shift[i].0 / len * step;
+            pos[i].1 += shift[i].1 / len * step;
+        }
+        temperature *= 0.985;
+    }
+    // Fitted to the square, keeping proportions.
+    let (min_x, max_x) = pos.iter().fold((f64::MAX, f64::MIN), |(a, b), p| (a.min(p.0), b.max(p.0)));
+    let (min_y, max_y) = pos.iter().fold((f64::MAX, f64::MIN), |(a, b), p| (a.min(p.1), b.max(p.1)));
+    let span = (max_x - min_x).max(max_y - min_y).max(1e-6);
+    pos.iter()
+        .map(|p| if n == 1 { (0.5, 0.5) } else { ((p.0 - min_x) / span + (1. - (max_x - min_x) / span) / 2., (p.1 - min_y) / span + (1. - (max_y - min_y) / span) / 2.) })
+        .collect()
+}

@@ -51,7 +51,17 @@ fn ago(t: f64) -> String {
 pub enum Tab {
     Memories,
     Tasks,
+    Insights,
     Activity,
+    Graph,
+}
+
+/// The memory as a map: active memories' IDs, their links as index pairs, their places (0…1).
+#[derive(Default)]
+struct Graph {
+    ids: Vec<String>,
+    edges: Vec<(usize, usize)>,
+    points: Vec<(f64, f64)>,
 }
 
 pub struct MemoryPage {
@@ -81,6 +91,10 @@ pub struct MemoryPage {
     pending_fill: Option<Memory>,
     /// What an import or export just did, under the title.
     notice: Option<String>,
+    stats: Option<yh_core::memory_stats::Stats>,
+    graph: Graph,
+    /// The graph's place, from its last paint: which dot a click is on.
+    graph_bounds: std::rc::Rc<std::cell::Cell<gpui_kit::Bounds<gpui_kit::Pixels>>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -140,6 +154,9 @@ impl MemoryPage {
             shown_version: None,
             pending_fill: None,
             notice: None,
+            stats: None,
+            graph: Graph::default(),
+            graph_bounds: Default::default(),
             _subscriptions: subscriptions,
         };
         page.reload(cx);
@@ -161,19 +178,30 @@ impl MemoryPage {
         self.loaded_revision = Some(revision);
         let scope = self.scope();
         cx.spawn(async move |this, cx| {
-            let (memories, events) = cx
+            let (memories, events, stats, graph) = cx
                 .background_executor()
                 .spawn(async move {
                     store.db.flush();
                     let mut all = store.memories(Some(&scope), None);
                     all.retain(|m| m.status != "proposed" || m.merged_into.is_none());
                     all.sort_by(|a, b| b.pinned.cmp(&a.pinned).then(b.updated_at.total_cmp(&a.updated_at)));
-                    (all, store.events(&scope, 300))
+                    let stats = yh_core::memory_stats::compute(&store, &scope, 30);
+                    let active: Vec<&Memory> = all.iter().filter(|m| m.status == "active").collect();
+                    let ids: Vec<String> = active.iter().map(|m| m.id.clone()).collect();
+                    let edges: Vec<(usize, usize)> = active
+                        .iter()
+                        .enumerate()
+                        .flat_map(|(i, m)| m.links.iter().filter_map(|(to, _)| ids.iter().position(|x| x == to)).map(move |j| (i, j)).collect::<Vec<_>>())
+                        .collect();
+                    let points = yh_core::memory_stats::graph_layout(&ids, &edges);
+                    (all, store.events(&scope, 300), stats, Graph { ids, edges, points })
                 })
                 .await;
             let _ = this.update(cx, |page, cx| {
                 page.memories = memories;
                 page.events = events;
+                page.stats = Some(stats);
+                page.graph = graph;
                 page.loaded = true;
                 page.after_reload(cx);
                 cx.notify();
@@ -546,7 +574,9 @@ impl MemoryPage {
                     .gap(px(2.))
                     .child(tab_button("tab-memories", "Memories", Tab::Memories, cx))
                     .child(tab_button("tab-tasks", if tasks > 0 { "Tasks ·" } else { "Tasks" }, Tab::Tasks, cx).when(tasks > 0, |b| b.label(format!("Tasks {tasks}"))))
-                    .child(tab_button("tab-activity", "Activity", Tab::Activity, cx)),
+                    .child(tab_button("tab-insights", "Insights", Tab::Insights, cx))
+                    .child(tab_button("tab-activity", "Activity", Tab::Activity, cx))
+                    .child(tab_button("tab-graph", "Graph", Tab::Graph, cx)),
             )
             .child({
                 let page = cx.entity().downgrade();
@@ -971,6 +1001,220 @@ impl MemoryPage {
         column
     }
 
+    /// How memory is doing, in sentences first and figures after.
+    fn insights(&self, theme: &Theme, _cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        use yh_core::memory_stats::Stats;
+        let Some(st) = &self.stats else { return div().p(px(24.)).text_color(theme.secondary).child("Reading…").into_any_element() };
+        let mut lines: Vec<(String, bool)> = vec![];
+        let index_tokens = Stats::tokens(st.average_injected_bytes);
+        lines.push((
+            if st.sessions == 0 {
+                "Every new thread here starts with an index of these memories: one line each, pinned ones in full.".into()
+            } else {
+                format!("Every session starts with an index of the memories, about {index_tokens} tokens. {} started in the last {} days.", if st.sessions == 1 { "1 session".into() } else { format!("{} sessions", st.sessions) }, st.window)
+            },
+            false,
+        ));
+        if st.recalls_in_window > 0 {
+            lines.push((format!("Agents read {} of {} memories in full, {} times in all, when the index said they were relevant.", st.recalled_in_window, st.active, st.recalls_in_window), false));
+        } else if st.sessions > 0 {
+            lines.push(("No memory was read in full lately. The index line may be all agents needed, or titles and descriptions don't say enough to tell.".into(), true));
+        }
+        if st.searches > 0 {
+            let missed = st.searches - st.searches_with_hits;
+            lines.push((format!("Agents searched memory {} times; {}.", st.searches, if missed == 0 { "every search found something".to_string() } else { format!("{missed} found nothing (listed below: things they expected to know)") }), missed > 0));
+        }
+        let count = |k: &str| st.tasks.iter().find(|(s, _)| s == k).map_or(0, |(_, c)| *c);
+        let open = count("active") + count("blocked") + count("todo");
+        if open > 0 {
+            let blocked = count("blocked");
+            lines.push((format!("{open} task{} open{}: every session starts knowing where they stand and what's next.", if open == 1 { " is" } else { "s are" }, if blocked > 0 { format!(", {blocked} blocked") } else { String::new() }), blocked > 0));
+        }
+        if !st.never_recalled.is_empty() {
+            let n = st.never_recalled.len();
+            lines.push((format!("{n} memor{} never been read in over a week. Each still costs a line in every session.", if n == 1 { "y has" } else { "ies have" }), true));
+        }
+        if !st.likely_duplicates.is_empty() {
+            let titles: Vec<String> = st.likely_duplicates.iter().take(2).map(|g| g.iter().take(3).map(|m| format!("“{}”", m.title)).collect::<Vec<_>>().join(", ")).collect();
+            lines.push((format!("{} group{} like the same memory twice: {}.", st.likely_duplicates.len(), if st.likely_duplicates.len() == 1 { " looks" } else { "s look" }, titles.join("; ")), true));
+        }
+        if st.active > 3 && st.orphans * 2 > st.active {
+            lines.push((format!("{} memories aren't linked to any other. Links let an agent that reads one find the rest.", st.orphans), false));
+        }
+        if let Some(l) = st.largest.first().filter(|l| l.bytes > 2_000) {
+            lines.push((format!("“{}” is the biggest at {} bytes; memories work best short and about one thing.", l.title, l.bytes), true));
+        }
+        let issues = lines.iter().any(|(_, issue)| *issue);
+        let mut how = div().p(px(14.)).rounded(px(8.)).bg(theme.card).flex().flex_col().gap(px(8.)).child(
+            div().flex().items_center().child(div().flex_1().font_weight(FontWeight::SEMIBOLD).child("How your memory is working")).when(issues, |d| {
+                let (ws, project) = (self.workspace.clone(), self.project.clone());
+                d.child(Button::new("insights-reconcile").small().primary().label("Reconcile").on_click(move |_, _, cx| {
+                    ws.update(cx, |ws, cx| ws.open_memory_agent("reconciler", &project, vec![], Some(yh_core::memory_agents::RECONCILE_REQUEST.to_string()), cx))
+                }))
+            }),
+        );
+        for (text, issue) in lines {
+            how = how.child(div().flex().gap(px(8.)).child(div().flex_none().w(px(8.)).h(px(8.)).mt(px(6.)).rounded_full().bg(if issue { theme.warning } else { theme.accent })).child(div().flex_1().whitespace_normal().child(text)));
+        }
+        let figure = |label: &str, value: String| {
+            div().flex_1().p(px(12.)).rounded(px(8.)).bg(theme.card).flex().flex_col().gap(px(2.)).child(div().text_size(px(11.)).text_color(theme.secondary).child(label.to_string())).child(div().text_size(px(18.)).font_weight(FontWeight::SEMIBOLD).child(value))
+        };
+        let figures = div()
+            .flex()
+            .gap(px(10.))
+            .child(figure("Memories", st.active.to_string()))
+            .child(figure("Index each session", format!("~{index_tokens} tokens")))
+            .child(figure("Read, last 30 days", match st.recall_rate() { Some(r) => format!("{:.0}%", r * 100.), None => "—".into() }))
+            .child(figure("Searches that found something", match st.search_hit_rate() { Some(r) => format!("{:.0}%", r * 100.), None => "—".into() }));
+        // Each day of the window: sessions, reads, searches as stacked bars.
+        let days = st.days.clone();
+        let max = days.iter().map(|d| d.sessions + d.recalled + d.searches).max().unwrap_or(0).max(1) as f32;
+        let colors: [Hsla; 3] = [theme.accent, gpui_kit::rgb(0x1BAF7A).into(), theme.warning];
+        let chart = gpui_kit::canvas(
+            |_, _, _| {},
+            move |bounds, _, window, _| {
+                let n = days.len().max(1);
+                let w = f32::from(bounds.size.width) / n as f32;
+                let h = f32::from(bounds.size.height);
+                for (i, d) in days.iter().enumerate() {
+                    let mut y = f32::from(bounds.origin.y) + h;
+                    for (k, v) in [d.sessions, d.recalled, d.searches].into_iter().enumerate() {
+                        let seg = v as f32 / max * (h - 4.);
+                        if seg < 0.5 {
+                            continue;
+                        }
+                        window.paint_quad(gpui_kit::fill(gpui_kit::Bounds::new(gpui_kit::point(bounds.origin.x + px(i as f32 * w + 1.), px(y - seg)), gpui_kit::size(px((w - 2.).max(1.)), px((seg - 1.).max(0.5)))), colors[k]));
+                        y -= seg;
+                    }
+                }
+            },
+        )
+        .size_full();
+        let legend = div().flex().gap(px(12.)).text_size(px(11.)).text_color(theme.secondary).children(
+            [("Sessions", colors[0]), ("Reads", colors[1]), ("Searches", colors[2])].into_iter().map(|(l, c)| div().flex().items_center().gap(px(4.)).child(div().w(px(8.)).h(px(8.)).rounded(px(2.)).bg(c)).child(l)),
+        );
+        let list = |title: &str, items: Vec<String>, empty: &str| {
+            let mut d = div().flex_1().p(px(12.)).rounded(px(8.)).bg(theme.card).flex().flex_col().gap(px(3.)).child(div().font_weight(FontWeight::SEMIBOLD).pb(px(3.)).child(title.to_string()));
+            if items.is_empty() {
+                d = d.child(div().text_size(px(12.)).text_color(theme.secondary).child(empty.to_string()));
+            }
+            for i in items {
+                d = d.child(div().text_size(px(12.)).child(i));
+            }
+            d
+        };
+        let by_kind: Vec<String> = st.by_kind.iter().map(|(k, c)| format!("{}: {c}", kind_label(k))).collect();
+        let ages: Vec<String> = st.age_buckets.iter().map(|(l, c)| format!("{l}: {c}")).collect();
+        div()
+            .id("memory-insights")
+            .size_full()
+            .overflow_y_scroll()
+            .p(px(24.))
+            .flex()
+            .flex_col()
+            .gap(px(16.))
+            .child(how)
+            .child(figures)
+            .child(div().flex().flex_col().gap(px(6.)).child(div().font_weight(FontWeight::SEMIBOLD).child(format!("Last {} days", st.window))).child(div().h(px(120.)).child(chart)).child(legend))
+            .child(div().flex().gap(px(10.)).child(list("By kind", by_kind, "No memories yet.")).child(list("By age", ages, "No memories yet.")))
+            .child(
+                div()
+                    .flex()
+                    .gap(px(10.))
+                    .child(list("Searched for, not found", st.missed_queries.iter().map(|q| format!("“{q}”")).collect(), "Every search found something."))
+                    .child(list("Never read, over a week old", st.never_recalled.iter().take(12).map(|m| m.title.clone()).collect(), "Everything gets read.")),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap(px(10.))
+                    .child(list("Read the most", st.top_recalled.iter().map(|m| format!("{} · {}×", m.title, m.recall_count)).collect(), "Nothing read yet."))
+                    .child(list("Look like duplicates", st.likely_duplicates.iter().map(|g| g.iter().map(|m| m.title.clone()).collect::<Vec<_>>().join(" · ")).collect(), "None.")),
+            )
+            .into_any_element()
+    }
+
+    /// The memory as a map: a dot a memory (its kind's color, bigger the more it's read), a
+    /// line a link. Click a dot to open it.
+    fn graph_view(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        if self.graph.ids.is_empty() {
+            return div().p(px(24.)).text_color(theme.secondary).child("No memories to map yet.").into_any_element();
+        }
+        let (points, edges) = (self.graph.points.clone(), self.graph.edges.clone());
+        let dots: Vec<(Hsla, f32, String)> = self
+            .graph
+            .ids
+            .iter()
+            .map(|id| {
+                let m = self.memories.iter().find(|m| &m.id == id);
+                let kind = m.map_or("project", |m| m.kind.as_str());
+                let reads = m.map_or(0, |m| m.recall_count) as f32;
+                (kind_color(kind, theme), 4. + reads.sqrt().min(8.) * 1.5, m.map(|m| m.title.clone()).unwrap_or_default())
+            })
+            .collect();
+        let selected = self.selection.as_ref().and_then(|s| self.graph.ids.iter().position(|i| i == s));
+        let (line, text, cell) = (theme.separator, theme.secondary, self.graph_bounds.clone());
+        let pad = 40.;
+        let canvas = gpui_kit::canvas(
+            move |bounds, _, _| cell.set(bounds),
+            move |bounds, _, window, cx| {
+                let (w, h) = (f32::from(bounds.size.width) - pad * 2., f32::from(bounds.size.height) - pad * 2.);
+                let side = w.min(h);
+                let (ox, oy) = (f32::from(bounds.origin.x) + pad + (w - side) / 2., f32::from(bounds.origin.y) + pad + (h - side) / 2.);
+                let at = |p: (f64, f64)| (ox + p.0 as f32 * side, oy + p.1 as f32 * side);
+                for &(a, b) in &edges {
+                    let (pa, pb) = (at(points[a]), at(points[b]));
+                    let mut path = gpui_kit::PathBuilder::stroke(px(1.));
+                    path.move_to(gpui_kit::point(px(pa.0), px(pa.1)));
+                    path.line_to(gpui_kit::point(px(pb.0), px(pb.1)));
+                    if let Ok(p) = path.build() {
+                        window.paint_path(p, line);
+                    }
+                }
+                for (i, (color, r, title)) in dots.iter().enumerate() {
+                    let (x, y) = at(points[i]);
+                    let r = if Some(i) == selected { r + 3. } else { *r };
+                    window.paint_quad(gpui_kit::fill(gpui_kit::Bounds::new(gpui_kit::point(px(x - r), px(y - r)), gpui_kit::size(px(r * 2.), px(r * 2.))), *color).corner_radii(px(r)));
+                    // Titles of the read and the picked, small, beside their dots.
+                    if Some(i) == selected || dots.len() <= 40 {
+                        let run = gpui_kit::TextRun { len: title.len(), font: window.text_style().font(), color: text, background_color: None, underline: None, strikethrough: None };
+                        let shaped = window.text_system().shape_line(title.clone().into(), px(11.), &[run], None);
+                        let _ = shaped.paint(gpui_kit::point(px(x + r + 3.), px(y - 7.)), px(14.), gpui_kit::TextAlign::Left, None, window, cx);
+                    }
+                }
+            },
+        )
+        .size_full();
+        let (cell, ids, pts) = (self.graph_bounds.clone(), self.graph.ids.clone(), self.graph.points.clone());
+        div()
+            .id("memory-graph")
+            .size_full()
+            .child(canvas)
+            .on_mouse_down(
+                gpui_kit::MouseButton::Left,
+                cx.listener(move |this, e: &gpui_kit::MouseDownEvent, _, cx| {
+                    let b = cell.get();
+                    let (w, h) = (f32::from(b.size.width) - pad * 2., f32::from(b.size.height) - pad * 2.);
+                    let side = w.min(h);
+                    let (ox, oy) = (f32::from(b.origin.x) + pad + (w - side) / 2., f32::from(b.origin.y) + pad + (h - side) / 2.);
+                    let (mx, my) = (f32::from(e.position.x), f32::from(e.position.y));
+                    let near = pts
+                        .iter()
+                        .enumerate()
+                        .map(|(i, p)| (i, (ox + p.0 as f32 * side - mx).powi(2) + (oy + p.1 as f32 * side - my).powi(2)))
+                        .min_by(|a, b| a.1.total_cmp(&b.1))
+                        .filter(|(_, d)| *d < 144.);
+                    if let Some((i, _)) = near {
+                        this.tab = Tab::Memories;
+                        this.archived = false;
+                        let id = ids[i].clone();
+                        this.select(&id, cx);
+                    }
+                }),
+            )
+            .into_any_element()
+    }
+
     fn activity(&self, theme: &Theme) -> impl IntoElement {
         let mut column = div().id("memory-activity").size_full().overflow_y_scroll().p(px(24.)).flex().flex_col().gap(px(4.));
         if self.events.is_empty() {
@@ -1017,6 +1261,8 @@ impl Render for MemoryPage {
             Tab::Memories => div().flex_1().min_h_0().flex().child(self.list(&theme, cx)).child(self.detail(&theme, cx)).into_any_element(),
             Tab::Tasks => div().flex_1().min_h_0().child(self.tasks(&theme, cx)).into_any_element(),
             Tab::Activity => div().flex_1().min_h_0().child(self.activity(&theme)).into_any_element(),
+            Tab::Insights => div().flex_1().min_h_0().child(self.insights(&theme, cx)).into_any_element(),
+            Tab::Graph => div().flex_1().min_h_0().child(self.graph_view(&theme, cx)).into_any_element(),
         };
         div()
             .key_context("MemoryPage")
