@@ -1,74 +1,37 @@
 #!/bin/zsh
-# Builds YourHarness.app (Apple Silicon only) into ./build.
-# Usage: scripts/bundle.sh [debug|release]   (default: release)
+# Builds the web experiment as build/YourHarness Next.app: the page (app/ui → Resources/ui)
+# and the host (release, arm64), signed ad hoc. Its own bundle ID, so it never shares
+# permissions, defaults or web data with YourHarness.
 set -euo pipefail
-
-CONFIG="${1:-release}"
 ROOT="${0:A:h:h}"
-APP="$ROOT/build/YourHarness.app"
-
-# Use full Xcode even when xcode-select points at the Command Line Tools.
-if [[ -z "${DEVELOPER_DIR:-}" && -d /Applications/Xcode.app ]]; then
-    export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
-fi
-
-cd "$ROOT"
-# The marketing version is VERSION (semver); the build number counts commits, so every
-# build of a later commit sorts after the last.
-VERSION="$(<"$ROOT/VERSION")"
-BUILD="$(git rev-list --count HEAD 2>/dev/null || echo 1)"
-# The commit, for telling exactly what a state file (Export State) was made with.
-COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
-[[ -n "$(git status --porcelain 2>/dev/null)" ]] && COMMIT="$COMMIT-dirty"
-
-swift build -c "$CONFIG" --arch arm64
-BIN="$(swift build -c "$CONFIG" --arch arm64 --show-bin-path)/YourHarness"
-
+export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+(cd "$ROOT/app/ui" && { [[ -d node_modules ]] || pnpm install --frozen-lockfile; } && pnpm build >/dev/null)
+(cd "$ROOT" && swift build -c release --product YourHarness 2>&1 | grep -E "error|warning: .*web/host|Compiling YourHarness|Build complete" || true)
+BIN="$ROOT/.build/release/YourHarness"
+[[ -x $BIN ]] || { echo "build failed" >&2; exit 1; }
+# APP=<path>: somewhere else, so a test build never replaces the copy you have open.
+APP="${APP:-$ROOT/build/YourHarness Next.app}"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/YourHarness"
-
-cat > "$APP/Contents/Info.plist" <<PLIST
+cp -R "$ROOT/app/ui/dist" "$APP/Contents/Resources/ui"
+VERSION=$(cat "$ROOT/VERSION")
+cat > "$APP/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key><string>YourHarness</string>
-    <key>CFBundleDisplayName</key><string>YourHarness</string>
-    <key>CFBundleIdentifier</key><string>com.mdovhopo.yourharness</string>
     <key>CFBundleExecutable</key><string>YourHarness</string>
+    <key>CFBundleIdentifier</key><string>com.mdovhopo.yourharness.next</string>
+    <key>CFBundleName</key><string>YourHarness Next</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>$VERSION</string>
-    <key>CFBundleVersion</key><string>$BUILD</string>
-    <key>YHGitCommit</key><string>$COMMIT</string>
+    <key>CFBundleVersion</key><string>1</string>
     <key>LSMinimumSystemVersion</key><string>26.0</string>
-    <key>LSArchitecturePriority</key><array><string>arm64</string></array>
-    <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
     <key>NSHighResolutionCapable</key><true/>
-    <key>NSSupportsAutomaticTermination</key><false/>
+    <key>NSPrincipalClass</key><string>NSApplication</string>
 </dict>
 </plist>
-PLIST
-
-# Signed with the app's own identity when it's here (YH_SIGN_IDENTITY and YH_SIGN_KEYCHAIN
-# from scripts/signing-keychain.sh, as the release workflow does, or ~/.yourharness/signing):
-# every build is then the same app to macOS, which keeps the permissions you gave it, and
-# the updater only installs builds signed the same way. Otherwise ad hoc.
-SIGNING="${YH_SIGNING_DIR:-$HOME/.yourharness/signing}"
-IDENTITY="${YH_SIGN_IDENTITY:-}"
-KEYCHAIN="${YH_SIGN_KEYCHAIN:-}"
-if [[ -z "$IDENTITY" && -f "$SIGNING/signing.p12" ]]; then
-    KEYCHAIN="$SIGNING/signing.keychain-db"
-    if ! security unlock-keychain -p "$(<"$SIGNING/keychain-password")" "$KEYCHAIN" 2>/dev/null; then
-        "$ROOT/scripts/signing-keychain.sh" "$SIGNING/signing.p12" "$(<"$SIGNING/p12-password")" "$KEYCHAIN" "$(<"$SIGNING/keychain-password")" >/dev/null
-    fi
-    IDENTITY="$(security find-certificate -a -Z "$KEYCHAIN" | awk '/SHA-1 hash:/ { print $3; exit }')"
-fi
-if [[ -n "$IDENTITY" ]]; then
-    codesign --force --sign "$IDENTITY" --keychain "$KEYCHAIN" "$APP" >/dev/null
-    SIGNED="signed as $(security find-certificate -a -Z "$KEYCHAIN" | awk -F'"' '/"labl"/ { print $4; exit }')"
-else
-    codesign --force --sign - "$APP" >/dev/null
-    SIGNED="signed ad hoc"
-fi
-echo "Built $APP ($VERSION, build $BUILD, $SIGNED)"
+EOF
+codesign --force --sign - "$APP" >/dev/null
+echo "$APP"

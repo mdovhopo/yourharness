@@ -154,6 +154,6 @@ kbd { font: 11px -apple-system, system-ui; opacity: 0.6; margin-left: 4px; }
   .hljs-addition { color: #7ee787; } .hljs-deletion { color: #ffa198; }
 }
 
-/* Measuring switches (YHW_FLAGS) */
+/* Measuring switches (YH_FLAGS) */
 .no-cv .item { content-visibility: visible; contain-intrinsic-size: none; }
 .no-pre-scroll .md .code pre, .no-pre-scroll .step-input, .no-pre-scroll .step-result { overflow: visible; max-height: none; white-space: pre-wrap; }

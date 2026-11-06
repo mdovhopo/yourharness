@@ -2,7 +2,7 @@ import AppKit
 import Darwin
 import WebKit
 
-/// The host's half of a performance run (`YHW_PERF=<results folder>`). The page drives the
+/// The host's half of a performance run (`YH_PERF=<results folder>`). The page drives the
 /// run (web/ui/src/probe.ts) and measures its own frames; this side sends it real events, as
 /// the window server would, reads memory and CPU of every process that draws it, says when a
 /// run can't be trusted, and writes the results.
@@ -28,7 +28,7 @@ final class HostProbe {
 
     func windowReady() {
         guard let screen = window.screen ?? NSScreen.main else { return }
-        if env["YHW_PERF_FRONT"] == "1" {
+        if env["YH_PERF_FRONT"] == "1" {
             // As you use it: in front, filling the screen, above everything.
             window.setFrame(screen.visibleFrame, display: true)
             window.level = .floating
@@ -42,17 +42,17 @@ final class HostProbe {
             window.setFrame(NSRect(x: screen.frame.minX, y: screen.frame.minY - size.height - 200, width: size.width, height: size.height), display: true)
             window.orderFrontRegardless()
         }
-        log("PERF window \(Int(window.frame.width))x\(Int(window.frame.height)), screen \(screen.maximumFramesPerSecond) Hz, front \(env["YHW_PERF_FRONT"] == "1")")
+        log("PERF window \(Int(window.frame.width))x\(Int(window.frame.height)), screen \(screen.maximumFramesPerSecond) Hz, front \(env["YH_PERF_FRONT"] == "1")")
     }
 
     func handle(_ method: String, _ p: [String: Any]) async throws -> Any? {
         switch method {
         case "config":
-            return ["seconds": Double(env["YHW_PERF_SECONDS"] ?? "") ?? 30,
-                    "phases": env["YHW_PERF_PHASES"] ?? "",
+            return ["seconds": Double(env["YH_PERF_SECONDS"] ?? "") ?? 30,
+                    "phases": env["YH_PERF_PHASES"] ?? "",
                     "screenHz": (window.screen ?? NSScreen.main)?.maximumFramesPerSecond ?? 60,
-                    "rate": env["YHW_PERF_RATE"] ?? "1",
-                    "front": env["YHW_PERF_FRONT"] == "1"]
+                    "rate": env["YH_PERF_RATE"] ?? "1",
+                    "front": env["YH_PERF_FRONT"] == "1"]
         case "now":
             return Self.epochMs()
         case "wheel":
@@ -82,7 +82,7 @@ final class HostProbe {
         case "done":
             write()
             log("PERF DONE")
-            if env["YHW_PERF_QUIT"] == "1" {
+            if env["YH_PERF_QUIT"] == "1" {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { NSApp.terminate(nil) }
             }
             return true

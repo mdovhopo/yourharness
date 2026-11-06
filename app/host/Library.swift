@@ -81,14 +81,14 @@ final class Library: @unchecked Sendable {
     private var archives: [(String, [WireEntry])] = []
 
     init() {
-        if let dir = env["YHW_DB_DIR"] {
+        if let dir = env["YH_DATA_DIR"] {
             db = HarnessDatabase(directory: URL(fileURLWithPath: dir, isDirectory: true), importLegacy: false)
         } else {
             db = nil
         }
-        if env["YHW_NO_CLAUDE"] == "1" {
+        if env["YH_NO_CLAUDE"] == "1" {
             claudeConfig = nil
-        } else if let dir = env["YHW_CLAUDE_CONFIG"] {
+        } else if let dir = env["YH_CLAUDE_CONFIG"] {
             claudeConfig = URL(fileURLWithPath: (dir as NSString).expandingTildeInPath, isDirectory: true)
         } else {
             claudeConfig = ClaudeSessionArchive.configDirectory(environment: env)
@@ -116,12 +116,12 @@ final class Library: @unchecked Sendable {
                                           sessionId: row.sessionID, source: "db"))
             }
         }
-        // `YHW_PROJECT=<folder>`: a project of its own, for trying live turns somewhere throwaway.
-        if let path = env["YHW_PROJECT"] {
+        // `YH_PROJECT=<folder>`: a project of its own, for trying live turns somewhere throwaway.
+        if let path = env["YH_PROJECT"] {
             projects.insert(ProjectMeta(id: "dir:" + path, name: (path as NSString).lastPathComponent, path: path, source: "dir"), at: 0)
         }
         if let claudeConfig {
-            let limit = Int(env["YHW_CLAUDE_LIMIT"] ?? "") ?? 400
+            let limit = Int(env["YH_CLAUDE_LIMIT"] ?? "") ?? 400
             var byPath: [String: Int] = [:]
             for file in ClaudeSessionArchive.sessionFiles(configDirectory: claudeConfig).prefix(limit) {
                 let peek = Self.peek(file.url)
@@ -171,7 +171,7 @@ final class Library: @unchecked Sendable {
             let rows = db.loadTranscriptPage(id, from: from, limit: end - from)
             let t2 = Date()
             page = Page(total: total, from: from, entries: rows.map(WireEntry.init))
-            if env["YHW_TIMING"] == "1" {
+            if env["YH_TIMING"] == "1" {
                 log(String(format: "page %@: count %.0f ms, rows %.0f ms, wire %.0f ms", thread, t1.timeIntervalSince(t0) * 1000, t2.timeIntervalSince(t1) * 1000, Date().timeIntervalSince(t2) * 1000))
             }
         }

@@ -47,7 +47,7 @@ final class Bridge: NSObject, WKScriptMessageHandlerWithReply {
             return
         }
         delivering = true
-        if env["YHW_EVENT_LOG"] == "1" { log("EVENTS " + String(decoding: data, as: UTF8.self).prefix(4000)) }
+        if env["YH_EVENT_LOG"] == "1" { log("EVENTS " + String(decoding: data, as: UTF8.self).prefix(4000)) }
         let script = "__yh.recv(" + String(decoding: data, as: UTF8.self) + ")"
         webView.evaluateJavaScript(script) { [weak self] _, error in
             if let error { log("recv failed: \(error)") }
@@ -105,16 +105,16 @@ final class Bridge: NSObject, WKScriptMessageHandlerWithReply {
             log(p["s"] as? String ?? "")
             return true
         case "config":
-            // `YHW_SELECT=<title>`: opens that thread at launch. `YHW_EXPAND=1`: unfolds work.
-            // `YHW_SEND=<text>`: sends it from a new thread in the first project (`YHW_MODEL`,
-            // `YHW_MODE`), and `YHW_ANSWER=allow|deny` answers what Claude asks; both logged.
-            return ["select": env["YHW_SELECT"] ?? "", "expand": env["YHW_EXPAND"] == "1",
-                    "send": env["YHW_SEND"] ?? "", "model": env["YHW_MODEL"] ?? "", "mode": env["YHW_MODE"] ?? "",
-                    "answer": env["YHW_ANSWER"] ?? "", "diagAfter": env["YHW_DIAG_AFTER"] ?? "",
-                    // `YHW_FLAGS=a,b`: classes on the page's root, for turning one thing off to measure it.
-                    "flags": env["YHW_FLAGS"] ?? "",
-                    // `YHW_QUIT=1`: quits once the `YHW_SEND` turn is done.
-                    "quit": env["YHW_QUIT"] == "1"]
+            // `YH_SELECT=<title>`: opens that thread at launch. `YH_EXPAND=1`: unfolds work.
+            // `YH_SEND=<text>`: sends it from a new thread in the first project (`YH_MODEL`,
+            // `YH_MODE`), and `YH_ANSWER=allow|deny` answers what Claude asks; both logged.
+            return ["select": env["YH_SELECT"] ?? "", "expand": env["YH_EXPAND"] == "1",
+                    "send": env["YH_SEND"] ?? "", "model": env["YH_MODEL"] ?? "", "mode": env["YH_MODE"] ?? "",
+                    "answer": env["YH_ANSWER"] ?? "", "diagAfter": env["YH_DIAG_AFTER"] ?? "",
+                    // `YH_FLAGS=a,b`: classes on the page's root, for turning one thing off to measure it.
+                    "flags": env["YH_FLAGS"] ?? "",
+                    // `YH_QUIT=1`: quits once the `YH_SEND` turn is done.
+                    "quit": env["YH_QUIT"] == "1"]
         default:
             if method.hasPrefix("probe."), let probe {
                 return try await probe.handle(String(method.dropFirst(6)), p)

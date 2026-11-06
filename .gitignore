@@ -12,6 +12,6 @@ DerivedData/
 
 test-harness-root/*
 
-# The web experiment's page
-/web/ui/node_modules
-/web/ui/dist
+# The page
+/app/ui/node_modules
+/app/ui/dist

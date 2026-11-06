@@ -39,10 +39,10 @@ web/scripts bundle.sh → build/YourHarnessWeb.app; perf-run.sh, the twin of scr
   row's last real height). The transcript follows the end in the same frame the content grows,
   and keeps what you're reading still when rows above it change height.
 - **120 Hz.** WebKit draws pages at 60 Hz even on a 120 Hz screen by default; the host turns
-  that off (`PreferPageRenderingUpdatesNear60FPSEnabled`, `YHW_60HZ=1` keeps it).
+  that off (`PreferPageRenderingUpdatesNear60FPSEnabled`, `YH_60HZ=1` keeps it).
 
 What's in: projects and threads (the harness database, your Claude Code history, or
-`YHW_PROJECT=<folder>`), transcripts with markdown, highlighted code and folded tool calls,
+`YH_PROJECT=<folder>`), transcripts with markdown, highlighted code and folded tool calls,
 the composer with model and permission mode, Stop (⌘.), approve and deny cards (⌘↩ / ⌘⌫), and
 new threads. What isn't: everything else the app does.
 
@@ -54,12 +54,12 @@ open build/YourHarnessWeb.app               # your Claude Code history, live tur
 web/scripts/perf-run.sh <results dir>       # the performance run (plugged in; FORCE=1 on battery)
 ```
 
-Launch options: `YHW_DB_DIR` (a folder with a `harness.sqlite`), `YHW_NO_CLAUDE=1`,
-`YHW_CLAUDE_CONFIG`, `YHW_CLAUDE_LIMIT` (newest sessions listed, 400), `YHW_PROJECT`,
-`YHW_SELECT=<title or id>`, `YHW_SEND`/`YHW_MODEL`/`YHW_MODE`/`YHW_ANSWER=allow|deny` (one real
-turn, logged), `YHW_SNAPSHOT=<png>` (+`_DELAY`, `_QUIT`), `YHW_BACKGROUND=1`, `YHW_TIMING=1`,
-`YHW_EVENT_LOG=1`, and for runs `YHW_PERF`, `YHW_PERF_SECONDS`, `YHW_PERF_PHASES`,
-`YHW_PERF_FRONT=1`. Use `YH_PATH` as for the app, so no login shell starts.
+Launch options: `YH_DATA_DIR` (a folder with a `harness.sqlite`), `YH_NO_CLAUDE=1`,
+`YH_CLAUDE_CONFIG`, `YH_CLAUDE_LIMIT` (newest sessions listed, 400), `YH_PROJECT`,
+`YH_SELECT=<title or id>`, `YH_SEND`/`YH_MODEL`/`YH_MODE`/`YH_ANSWER=allow|deny` (one real
+turn, logged), `YH_SNAPSHOT=<png>` (+`_DELAY`, `_QUIT`), `YH_BACKGROUND=1`, `YH_TIMING=1`,
+`YH_EVENT_LOG=1`, and for runs `YH_PERF`, `YH_PERF_SECONDS`, `YH_PERF_PHASES`,
+`YH_PERF_FRONT=1`. Use `YH_PATH` as for the app, so no login shell starts.
 
 ## Results (2026-11-06, first round)
 
@@ -92,7 +92,7 @@ time, frames of 450 ms) about five minutes in, with the page's own work small (e
 under 60 ms, CPU about 55%). Three shorter runs of the same phases, in the same orders, didn't
 do it: the ranges above are theirs. Not explained yet; the probe doesn't record per-second
 numbers like `seconds.csv`, which would tell the app from the machine. Next run plugged in,
-`YHW_PERF_FRONT=1`.
+`YH_PERF_FRONT=1`.
 
 What the round found:
 
@@ -108,7 +108,7 @@ What the round found:
   row number is a lookup (`HarnessDatabase.transcriptCount`).
 - **Synthetic events into a background window** stopped reaching WebKit partway through the
   night (they worked earlier). The probe then drives the page directly and says `DIRECT`; real
-  events are certain only with `YHW_PERF_FRONT=1`.
+  events are certain only with `YH_PERF_FRONT=1`.
 - **Not yet seen:** the pass bar's 99% of frames and no frame over 50 ms under 20 streams. The
   web side gets 95–98% with a few frames of 60–100 ms; the native app 84–90% with 88–161 ms.
 

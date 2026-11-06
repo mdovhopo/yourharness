@@ -2,7 +2,7 @@ import { call, hostLog } from "./host";
 import type { ThreadState } from "./model";
 import { ensureLoaded, recvTimes, select, selectedId, send, threadList } from "./store";
 
-// The performance run (`YHW_PERF=<folder>`), the web twin of the native app's PerfProbe:
+// The performance run (`YH_PERF=<folder>`), the web twin of the native app's PerfProbe:
 // the same phases on the same threads ("Huge …" in the extreme preset) under the same fake
 // `claude`, through the same paths a person takes (real wheel, click and key events from the
 // host). Frames are timed here with requestAnimationFrame: a frame that's late here is one

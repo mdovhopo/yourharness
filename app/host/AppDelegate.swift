@@ -26,13 +26,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         config.preferences.setValue(true, forKey: "developerExtrasEnabled")
 
         // WebKit draws pages at 60 Hz even on a 120 Hz screen unless told otherwise
-        // (`YHW_60HZ=1` keeps its default, for comparing).
-        if env["YHW_60HZ"] != "1" { Self.setFeature("PreferPageRenderingUpdatesNear60FPSEnabled", false, in: config.preferences) }
+        // (`YH_60HZ=1` keeps its default, for comparing).
+        if env["YH_60HZ"] != "1" { Self.setFeature("PreferPageRenderingUpdatesNear60FPSEnabled", false, in: config.preferences) }
 
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.isInspectable = true
         // A window parked below the screen still draws every frame, as the native app's probe expects.
-        if env["YHW_PERF"] != nil || env["YHW_BACKGROUND"] == "1" { webView.setValue(false, forKey: "windowOcclusionDetectionEnabled") }
+        if env["YH_PERF"] != nil || env["YH_BACKGROUND"] == "1" { webView.setValue(false, forKey: "windowOcclusionDetectionEnabled") }
         self.webView = webView
 
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, height: 820),
@@ -44,7 +44,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.minSize = NSSize(width: 640, height: 420)
         window.delegate = self
         // Test runs park the window off screen: they mustn't save where it was.
-        if env["YHW_PERF"] == nil && env["YHW_BACKGROUND"] != "1" { window.setFrameAutosaveName("web-main") }
+        if env["YH_PERF"] == nil && env["YH_BACKGROUND"] != "1" { window.setFrameAutosaveName("web-main") }
         if let screen = NSScreen.main, !screen.visibleFrame.intersects(window.frame) { window.center() }
         if window.frame.origin == .zero { window.center() }
 
@@ -70,23 +70,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         bridge = Bridge(webView: webView, window: window)
         controller.addScriptMessageHandler(bridge, contentWorld: .page, name: "host")
-        if let folder = env["YHW_PERF"] {
+        if let folder = env["YH_PERF"] {
             probe = HostProbe(folder: folder, bridge: bridge, window: window, webView: webView)
             bridge.probe = probe
         }
 
         webView.load(URLRequest(url: URL(string: "\(AppScheme.scheme)://app/index.html")!))
-        if env["YHW_BACKGROUND"] == "1" {
+        if env["YH_BACKGROUND"] == "1" {
             window.orderBack(nil)
         } else {
             window.makeKeyAndOrderFront(nil)
             NSApp.activate()
         }
         probe?.windowReady()
-        if let file = env["YHW_SNAPSHOT"] { snapshot(to: file, after: Double(env["YHW_SNAPSHOT_DELAY"] ?? "") ?? 4) }
+        if let file = env["YH_SNAPSHOT"] { snapshot(to: file, after: Double(env["YH_SNAPSHOT_DELAY"] ?? "") ?? 4) }
     }
 
-    /// `YHW_SNAPSHOT=<file.png>`: the page drawn into a PNG, for looking without capturing the screen.
+    /// `YH_SNAPSHOT=<file.png>`: the page drawn into a PNG, for looking without capturing the screen.
     func snapshot(to file: String, after delay: Double) {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [self] in
             webView.takeSnapshot(with: nil) { image, error in
@@ -94,7 +94,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                       let png = rep.representation(using: .png, properties: [:]) else { return log("snapshot failed: \(String(describing: error))") }
                 try? png.write(to: URL(fileURLWithPath: file))
                 log("SNAPSHOT \(file)")
-                if env["YHW_SNAPSHOT_QUIT"] == "1" { NSApp.terminate(nil) }
+                if env["YH_SNAPSHOT_QUIT"] == "1" { NSApp.terminate(nil) }
             }
         }
     }

@@ -1,5 +1,6 @@
 import Foundation
 import HarnessCore
+import HarnessBackend
 
 /// What changed since the last frame, for the page. Streamed text for the same row arrives
 /// as many small appends; they're joined here, so a frame carries one per row.

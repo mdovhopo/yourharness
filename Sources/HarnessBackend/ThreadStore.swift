@@ -1,4 +1,5 @@
 import Foundation
+import HarnessCore
 
 /// A thread's rows while Claude writes them, owned here rather than by whoever draws them:
 /// `AgentEvent`s go in, and what changed comes out as `ThreadPatch`es, for a view to mirror.

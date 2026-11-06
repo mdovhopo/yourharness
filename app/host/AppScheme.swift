@@ -9,19 +9,19 @@ final class AppScheme: NSObject, WKURLSchemeHandler, @unchecked Sendable {
     static let scheme = "yhw"
     static let shared = AppScheme()
 
-    /// `YHW_UI_DIR`, else the app's Resources/ui, else web/ui/dist next to the build.
+    /// `YH_UI_DIR`, else the app's Resources/ui, else app/ui/dist next to the build.
     let root: URL = {
-        if let dir = env["YHW_UI_DIR"] { return URL(fileURLWithPath: dir, isDirectory: true) }
+        if let dir = env["YH_UI_DIR"] { return URL(fileURLWithPath: dir, isDirectory: true) }
         if let bundled = Bundle.main.resourceURL?.appendingPathComponent("ui"),
            FileManager.default.fileExists(atPath: bundled.appendingPathComponent("index.html").path) { return bundled }
         let exe = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
         var dir = exe.deletingLastPathComponent()
         for _ in 0..<6 {
-            let candidate = dir.appendingPathComponent("web/ui/dist")
+            let candidate = dir.appendingPathComponent("app/ui/dist")
             if FileManager.default.fileExists(atPath: candidate.path) { return candidate }
             dir = dir.deletingLastPathComponent()
         }
-        return URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("web/ui/dist")
+        return URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("app/ui/dist")
     }()
 
     var api: ((String, [String: String]) -> Data?)?

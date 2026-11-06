@@ -32,7 +32,7 @@ loadLibrary().then(async () => {
   maybeRunProbe();
 });
 
-/** `YHW_SEND`: one real turn from a new thread, logged as it goes, for checking the live path. */
+/** `YH_SEND`: one real turn from a new thread, logged as it goes, for checking the live path. */
 function liveCheck(config: { send: string; model: string; mode: string; answer: string; quit: boolean }) {
   if (config.model) chooseModel(config.model);
   if (config.mode) chooseMode(config.mode);

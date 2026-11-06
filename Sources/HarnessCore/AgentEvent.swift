@@ -107,6 +107,12 @@ public struct ToolResult: Sendable, Equatable {
     public var toolUseID: String
     public var content: String
     public var isError: Bool
+
+    public init(toolUseID: String, content: String, isError: Bool) {
+        self.toolUseID = toolUseID
+        self.content = content
+        self.isError = isError
+    }
 }
 
 public struct SubagentStart: Sendable, Equatable {
