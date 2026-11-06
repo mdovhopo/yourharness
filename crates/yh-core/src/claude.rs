@@ -100,7 +100,8 @@ pub enum Event {
     Assistant { message: String, parent: Option<String>, blocks: Vec<Block> },
     ToolResults { parent: Option<String>, results: Vec<ToolResult> },
     SubagentStarted { tool_id: String, description: String },
-    SubagentFinished { tool_id: String, status: String },
+    /// A sub-agent's end, with its summary (a background one's report comes only here).
+    SubagentFinished { tool_id: String, status: String, summary: Option<String> },
     Permission { request_id: String, tool: String, description: String, input: String },
     Notice(String),
     Done { is_error: bool, text: String },
@@ -339,6 +340,7 @@ impl Parser {
                 "task_notification" => vec![Event::SubagentFinished {
                     tool_id: object["tool_use_id"].as_str().unwrap_or("").into(),
                     status: object["status"].as_str().unwrap_or("completed").into(),
+                    summary: object["summary"].as_str().map(str::to_string),
                 }],
                 "compact_boundary" => {
                     let trigger = object["compact_metadata"]["trigger"].as_str().unwrap_or("auto");

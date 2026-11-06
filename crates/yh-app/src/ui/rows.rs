@@ -12,6 +12,12 @@ use gpui_kit::{
 use std::collections::HashMap;
 use std::rc::Rc;
 
+/// `YH_EXPAND_WORK=1`: folded work and steps drawn open, for looking at them in snapshots.
+fn expand_all() -> bool {
+    static EXPAND: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *EXPAND.get_or_init(|| std::env::var("YH_EXPAND_WORK").as_deref() == Ok("1"))
+}
+
 pub fn render_item(thread: &Entity<ThreadState>, ix: usize, _window: &mut Window, cx: &mut App) -> AnyElement {
     let theme = Theme::get(cx);
     let state = thread.read(cx);
@@ -21,6 +27,7 @@ pub fn render_item(thread: &Entity<ThreadState>, ix: usize, _window: &mut Window
         ItemType::Text => text_row(&item.entries[0], &theme),
         ItemType::Notice => notice_row(&item.entries[0], &theme),
         ItemType::Work => work_row(thread, item, &theme),
+        ItemType::Agent => agent_row(thread, item, &theme),
     };
     // The column: centred, at most 820 wide, as the web transcript's.
     div()
@@ -98,9 +105,133 @@ fn notice_row(e: &EntryRef, theme: &Theme) -> AnyElement {
         .flex()
         .justify_center()
         .text_size(px(12.))
-        .text_color(theme.secondary)
+        .text_color(if b.data.is_error { theme.error } else { theme.secondary })
         .child(b.data.text.clone())
         .into_any_element()
+}
+
+/// A sub-agent's call: what it was asked, how it's going, then its report.
+fn agent_row(thread: &Entity<ThreadState>, item: &Item, theme: &Theme) -> AnyElement {
+    let e = item.entries[0].borrow();
+    let input: serde_json::Value = serde_json::from_str(e.data.tool_input.as_deref().unwrap_or("{}")).unwrap_or_default();
+    let title = e
+        .sub
+        .as_ref()
+        .map(|s| s.description.clone())
+        .filter(|d| !d.is_empty())
+        .or_else(|| input["description"].as_str().map(str::to_string))
+        .unwrap_or_else(|| "Sub-agent".into());
+    let kind = input["subagent_type"].as_str().unwrap_or("").to_string();
+    let status = e.sub.as_ref().map(|s| s.status.clone()).unwrap_or_else(|| match &e.data.tool_result {
+        Some(_) if e.data.is_error => "failed".into(),
+        Some(_) => "completed".into(),
+        None => "running".into(),
+    });
+    let steps = e.sub.as_ref().map_or(0, |s| s.steps);
+    let running = status == "running";
+    let prompt = input["prompt"].as_str().unwrap_or("").to_string();
+    let report = e.sub.as_ref().and_then(|s| s.report.clone()).or_else(|| e.data.tool_result.clone()).unwrap_or_default();
+    drop(e);
+    let (pos, open) = (item.pos, item.open || expand_all());
+    let handle = thread.clone();
+    let mut card = div()
+        .flex()
+        .flex_col()
+        .gap(px(6.))
+        .border_1()
+        .border_color(if running { theme.accent.opacity(0.5) } else { theme.separator })
+        .rounded(px(10.))
+        .bg(theme.card)
+        .px(px(12.))
+        .py(px(8.))
+        .child(
+            div()
+                .id(("agent", pos as u64 as usize))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(div().w(px(7.)).h(px(7.)).rounded_full().bg(if running { theme.accent } else { theme.secondary }))
+                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().font_weight(FontWeight::SEMIBOLD).child(title))
+                .when(!kind.is_empty(), |d| d.child(div().text_size(px(11.)).px(px(6.)).rounded(px(6.)).bg(theme.selected).child(kind)))
+                .child(div().text_size(px(11.)).text_color(theme.secondary).child(if steps > 0 {
+                    format!("{status} · {steps} steps")
+                } else {
+                    status.clone()
+                }))
+                .on_click(move |_, _, cx| {
+                    handle.update(cx, |t, cx| {
+                        t.toggle_item(pos);
+                        cx.notify();
+                    })
+                }),
+        );
+    if open {
+        if !prompt.is_empty() {
+            card = card
+                .child(div().text_size(px(11.)).text_color(theme.secondary).child("Asked"))
+                .child(div().text_size(px(12.)).child(prompt));
+        }
+        if !report.is_empty() {
+            let md = markdown::parse(&report);
+            card = card
+                .child(div().text_size(px(11.)).text_color(theme.secondary).child("Report"))
+                .child(div().text_size(px(12.)).child(markdown_view(&md, theme)));
+        }
+    }
+    card.into_any_element()
+}
+
+/// An edit's change as diff lines: what went, then what came (Edit, MultiEdit, Write).
+fn diff_of(e: &crate::state::thread::Entry) -> Option<Vec<(char, String)>> {
+    let name = e.data.tool_name.as_deref()?;
+    if !matches!(name, "Edit" | "MultiEdit" | "Write") {
+        return None;
+    }
+    let input: serde_json::Value = serde_json::from_str(e.data.tool_input.as_deref()?).ok()?;
+    let edits: Vec<(Option<String>, Option<String>)> = match name {
+        "MultiEdit" => input["edits"]
+            .as_array()?
+            .iter()
+            .map(|x| (x["old_string"].as_str().map(str::to_string), x["new_string"].as_str().map(str::to_string)))
+            .collect(),
+        "Write" => vec![(None, input["content"].as_str().map(str::to_string))],
+        _ => vec![(input["old_string"].as_str().map(str::to_string), input["new_string"].as_str().map(str::to_string))],
+    };
+    let mut lines = vec![];
+    if let Some(path) = input["file_path"].as_str() {
+        lines.push(('f', path.to_string()));
+    }
+    for (i, (old, new)) in edits.into_iter().enumerate() {
+        if i > 0 {
+            lines.push((' ', "⋯".into()));
+        }
+        for l in old.unwrap_or_default().lines() {
+            lines.push(('-', l.to_string()));
+        }
+        for l in new.unwrap_or_default().lines() {
+            lines.push(('+', l.to_string()));
+        }
+    }
+    if lines.len() > 400 {
+        let more = lines.len() - 400;
+        lines.truncate(400);
+        lines.push((' ', format!("⋯ {more} more lines")));
+    }
+    Some(lines)
+}
+
+fn diff_view(lines: Vec<(char, String)>, theme: &Theme) -> impl IntoElement {
+    let mut column = div().font_family(MONO).text_size(px(11.)).line_height(px(15.)).bg(theme.code).rounded(px(6.)).py(px(4.)).my(px(2.));
+    for (kind, text) in lines {
+        let row = div().px(px(8.)).whitespace_normal();
+        column = column.child(match kind {
+            '-' => row.bg(theme.error.opacity(0.12)).text_color(theme.text).child(format!("- {text}")),
+            '+' => row.bg(gpui_kit::Hsla::from(gpui_kit::rgb(0x34c759)).opacity(0.14)).text_color(theme.text).child(format!("+ {text}")),
+            'f' => row.text_color(theme.secondary).child(text),
+            _ => row.text_color(theme.secondary).child(text),
+        });
+    }
+    column
 }
 
 fn highlight_style(span: Span, theme: &Theme) -> HighlightStyle {
@@ -263,7 +394,7 @@ fn work_row(thread: &Entity<ThreadState>, item: &Item, theme: &Theme) -> AnyElem
         "Thinking…".to_string()
     };
     drop(last);
-    let open = item.open;
+    let open = item.open || expand_all();
     let handle = thread.clone();
     let head = div()
         .id(("work", pos as u64 as usize))
@@ -316,7 +447,7 @@ fn step(thread: &Entity<ThreadState>, pos: i64, n: usize, e: &EntryRef, theme: &
     let sub = b.sub.as_ref().map(|s| format!("{}{}", s.status, if s.steps > 0 { format!(" · {} steps", s.steps) } else { String::new() }));
     let name = if is_tool { b.data.tool_name.clone().unwrap_or_else(|| "Tool".into()) } else { "Thinking".into() };
     let name_color: Hsla = if b.data.is_error { theme.error } else { theme.text };
-    let open = b.open;
+    let open = b.open || expand_all();
     let handle = thread.clone();
     let entry = e.clone();
     let head = div()
@@ -340,7 +471,10 @@ fn step(thread: &Entity<ThreadState>, pos: i64, n: usize, e: &EntryRef, theme: &
     let mut column = div().flex().flex_col().child(head);
     if open {
         if is_tool {
-            column = column.child(mono_box(b.data.tool_input.clone().unwrap_or_default(), theme));
+            column = match diff_of(&b) {
+                Some(lines) => column.child(diff_view(lines, theme)),
+                None => column.child(mono_box(b.data.tool_input.clone().unwrap_or_default(), theme)),
+            };
             if let Some(result) = &b.data.tool_result {
                 let more = b.data.result_len.saturating_sub(result.len());
                 let text = if more > 0 { format!("{result}\n… {more} more characters") } else { result.clone() };

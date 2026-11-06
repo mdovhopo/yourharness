@@ -16,6 +16,8 @@ pub struct Subagent {
     pub description: String,
     pub status: String,
     pub steps: usize,
+    /// What it reported, when it came apart from the tool's result (a background sub-agent).
+    pub report: Option<String>,
 }
 
 pub struct Entry {
@@ -89,6 +91,8 @@ pub enum ItemType {
     User,
     Text,
     Work,
+    /// A sub-agent's call (`Agent`, `Task`): a card of its own, never folded into work.
+    Agent,
     Notice,
 }
 
@@ -101,12 +105,12 @@ pub struct Item {
     pub open: bool,
 }
 
-fn is_work(kind: Kind) -> bool {
-    matches!(kind, Kind::Thinking | Kind::Tool)
-}
+/// Tools whose call is a sub-agent: shown as a card of its own.
+pub const AGENT_TOOLS: &[&str] = &["Agent", "Task"];
 
-fn item_type(kind: Kind) -> ItemType {
-    match kind {
+fn item_type(data: &EntryData) -> ItemType {
+    match data.kind {
+        Kind::Tool if data.tool_name.as_deref().is_some_and(|n| AGENT_TOOLS.contains(&n)) => ItemType::Agent,
         Kind::Thinking | Kind::Tool => ItemType::Work,
         Kind::User => ItemType::User,
         Kind::Assistant => ItemType::Text,
@@ -197,11 +201,11 @@ impl ThreadState {
     pub fn prepend(&mut self, rows: Vec<EntryData>, before: usize) {
         let mut items: Vec<Item> = vec![];
         for (n, data) in rows.into_iter().enumerate() {
-            let kind = data.kind;
+            let ty = item_type(&data);
             let e = entry(data, before + n);
             match items.last_mut() {
-                Some(last) if is_work(kind) && last.ty == ItemType::Work => last.entries.push(e),
-                _ => items.push(Item { pos: 0, ty: item_type(kind), entries: vec![e], open: false }),
+                Some(last) if ty == ItemType::Work && last.ty == ItemType::Work => last.entries.push(e),
+                _ => items.push(Item { pos: 0, ty, entries: vec![e], open: false }),
             }
         }
         let first = self.items.first().map_or(0, |i| i.pos);
@@ -230,13 +234,14 @@ impl ThreadState {
     /// Puts a new entry at the end, folding work into the work row before it.
     fn append(&mut self, data: EntryData) -> EntryRef {
         let kind = data.kind;
+        let ty = item_type(&data);
         let seq = self.total.unwrap_or(0);
         self.total = Some(seq + 1);
         self.dirty.insert(seq);
         let e = entry(data, seq);
         e.borrow_mut().date = Some(yh_core::library::now_ms() / 1000.0);
         let pos = match self.items.last_mut() {
-            Some(last) if is_work(kind) && last.ty == ItemType::Work => {
+            Some(last) if ty == ItemType::Work && last.ty == ItemType::Work => {
                 last.entries.push(e.clone());
                 let pos = last.pos;
                 self.touch_pos(pos);
@@ -244,7 +249,7 @@ impl ThreadState {
             }
             _ => {
                 let pos = self.items.last().map_or(0, |i| i.pos + 1);
-                self.items.push(Item { pos, ty: item_type(kind), entries: vec![e.clone()], open: false });
+                self.items.push(Item { pos, ty, entries: vec![e.clone()], open: false });
                 let n = self.items.len();
                 self.list.splice(n - 1..n - 1, 1);
                 // Nobody is looking: keep the newest rows, the rest go back to "earlier".
@@ -513,18 +518,21 @@ impl ThreadState {
             }
             Event::SubagentStarted { tool_id, description } => {
                 if let Some((e, pos)) = self.tools.get(&tool_id).cloned() {
-                    e.borrow_mut().sub = Some(Subagent { description, status: "running".into(), steps: 0 });
+                    e.borrow_mut().sub = Some(Subagent { description, status: "running".into(), steps: 0, report: None });
                     e.borrow_mut().version += 1;
                     self.touch_pos(pos);
                 }
                 false
             }
-            Event::SubagentFinished { tool_id, status } => {
+            Event::SubagentFinished { tool_id, status, summary } => {
                 if let Some((e, pos)) = self.tools.get(&tool_id).cloned() {
                     {
                         let mut b = e.borrow_mut();
-                        let sub = b.sub.get_or_insert(Subagent { description: String::new(), status: String::new(), steps: 0 });
+                        let sub = b.sub.get_or_insert(Subagent { description: String::new(), status: String::new(), steps: 0, report: None });
                         sub.status = status;
+                        if summary.is_some() {
+                            sub.report = summary;
+                        }
                         b.version += 1;
                     }
                     self.touch_pos(pos);
@@ -561,7 +569,7 @@ impl ThreadState {
         self.dirty.insert(e.borrow().seq);
         {
             let mut b = e.borrow_mut();
-            let sub = b.sub.get_or_insert(Subagent { description: "Sub-agent".into(), status: "running".into(), steps: 0 });
+            let sub = b.sub.get_or_insert(Subagent { description: "Sub-agent".into(), status: "running".into(), steps: 0, report: None });
             sub.steps += 1;
             b.version += 1;
         }

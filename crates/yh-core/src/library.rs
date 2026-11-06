@@ -500,7 +500,8 @@ impl EntryData {
             .unwrap_or_else(|| row.tool_result.as_ref().map_or(0, |r| r.len()));
         entry.tool_input = row.tool_input.map(|s| head(&s, TOOL_TEXT_LIMIT));
         entry.tool_result = row.tool_result.map(|s| head(&s, TOOL_TEXT_LIMIT));
-        entry.is_error = row.tool_is_error == Some(true);
+        // A notice in the error style reads as one.
+        entry.is_error = row.tool_is_error == Some(true) || row.notice_style.as_deref() == Some("error");
         Some(entry)
     }
 }
