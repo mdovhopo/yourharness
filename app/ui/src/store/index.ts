@@ -34,6 +34,8 @@ onPatches((patches: Patch[]) => {
       switch (patch.t) {
         case "thread": {
           const known = byId.get(patch.th.id);
+          // A turn ending in the thread you're looking at is read already.
+          if (patch.th.unread && selectedId() === patch.th.id && document.hasFocus()) call("read", { th: patch.th.id }).catch(() => {});
           if (known) known.setSummary(patch.th);
           else {
             const t = new ThreadState(patch.th);
@@ -48,6 +50,15 @@ onPatches((patches: Patch[]) => {
           setThreadList((old) => old.filter((t) => t.id !== patch.th));
           setDeck((old) => old.filter((t) => t !== gone));
           if (selectedId() === patch.th) setSelectedId(null);
+          break;
+        }
+        case "reload": {
+          // Rows changed under it (a cut-off turn recovered): fetch them again.
+          const t = byId.get(patch.th);
+          if (t?.loaded) {
+            t.unload();
+            ensureLoaded(t);
+          }
           break;
         }
         case "project":
@@ -131,6 +142,7 @@ export function select(id: string) {
     }
   }
   ensureLoaded(t);
+  if (t.summary().unread) call("read", { th: id }).catch(() => {});
 }
 
 export async function newThread(p: ProjectWire) {

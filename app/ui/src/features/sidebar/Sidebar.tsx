@@ -99,7 +99,7 @@ function ThreadRow(props: { t: ThreadState }) {
     <div
       class="thread-row"
       data-thread={t.id}
-      classList={{ selected: selectedId() === t.id }}
+      classList={{ selected: selectedId() === t.id, unread: !!t.summary().unread && selectedId() !== t.id }}
       onClick={() => !editing() && select(t.id)}
       onDblClick={() => setEditing(true)}
       onContextMenu={menu}

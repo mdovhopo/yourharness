@@ -13,6 +13,8 @@ export type WireEntry = {
   e?: number;
   d?: number;
   live?: number;
+  /** Sent while Claude works, waiting for the current step to end. */
+  q?: number;
   sa?: { d: string; s: string; c?: number };
 };
 
@@ -30,6 +32,7 @@ export type ThreadWire = {
   model?: string;
   effort?: string;
   draft?: string;
+  unread?: boolean;
 };
 
 export type ModelWire = { value: string; displayName: string; description?: string; supportedEffortLevels: string[]; resolvedModel?: string };
@@ -57,6 +60,7 @@ export type Patch =
   | { t: "perm"; th: string; rv: number; p: PermissionWire | null }
   | { t: "thread"; th: ThreadWire }
   | { t: "threadGone"; th: string }
+  | { t: "reload"; th: string }
   | { t: "project"; p: ProjectWire }
   | { t: "models"; v: ModelWire[] };
 

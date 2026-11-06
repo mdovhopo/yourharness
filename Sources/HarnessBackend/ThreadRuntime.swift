@@ -28,11 +28,12 @@ final class ThreadRuntime {
 
     func send(_ text: String, now: Bool) async throws {
         idleReap?.cancel()
-        backend.emit(backend.store.userMessage(text, thread: id), thread: id)
+        let messageID = UUID().uuidString
+        backend.emit(backend.store.userMessage(text, id: messageID, queued: running && !now, thread: id), thread: id)
         setRunning(true)
         do {
             let session = try await ensureSession()
-            try await session.send(text: text, id: UUID().uuidString, priority: now ? .now : nil)
+            try await session.send(text: text, id: messageID, priority: now ? .now : nil)
         } catch {
             backend.emit(backend.store.notice("Couldn't send: \(error)", thread: id), thread: id)
             setRunning(false)
@@ -103,6 +104,7 @@ final class ThreadRuntime {
         case .turnCompleted, .processExited:
             backend.emit(backend.store.apply(event, thread: id), thread: id)
             setRunning(false)
+            backend.turnEnded(id)
             scheduleIdleReap()
             return
         default:

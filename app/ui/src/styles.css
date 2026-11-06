@@ -157,3 +157,25 @@ kbd { font: 11px -apple-system, system-ui; opacity: 0.6; margin-left: 4px; }
 /* Measuring switches (YH_FLAGS) */
 .no-cv .item { content-visibility: visible; contain-intrinsic-size: none; }
 .no-pre-scroll .md .code pre, .no-pre-scroll .step-input, .no-pre-scroll .step-result { overflow: visible; max-height: none; white-space: pre-wrap; }
+
+/* Chunk 1 additions */
+.thread-row { cursor: default; user-select: none; }
+.thread-row.unread .thread-title { font-weight: 600; }
+.thread-row .pin { font-size: 7px; color: var(--secondary); flex: none; }
+.thread-row.selected .pin { color: white; }
+.rename { flex: 1; min-width: 0; font: inherit; border: 1px solid var(--accent); border-radius: 4px; padding: 1px 4px; background: var(--canvas); color: var(--text); outline: none; }
+.chip { font-size: 10px; font-weight: 600; padding: 1px 7px; border-radius: 8px; background: var(--selected); color: var(--secondary); align-self: center; margin-right: 6px; flex: none; }
+.bubble.queued { opacity: 0.6; }
+.card { border: 1px solid var(--separator); border-radius: 12px; background: var(--card); padding: 10px 12px; margin-bottom: 8px; }
+.card.waiting { border-color: #ff9f0a; }
+.card-head { margin-bottom: 6px; }
+.card-detail { color: var(--secondary); margin-left: 8px; }
+.card-input { font: 11px/1.4 ui-monospace, "SF Mono", Menlo, monospace; background: var(--code); padding: 6px 8px; border-radius: 6px; margin: 0 0 8px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 30vh; overflow: auto; }
+.card-actions { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+.question + .question { margin-top: 10px; }
+.options { display: flex; flex-direction: column; gap: 4px; margin-bottom: 6px; }
+.option { display: flex; flex-direction: column; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--separator); background: var(--canvas); }
+.option.on { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.option-detail { font-size: 11px; color: var(--secondary); }
+.other { width: 100%; font: inherit; border: 1px solid var(--separator); border-radius: 8px; padding: 5px 8px; background: var(--canvas); color: var(--text); margin-bottom: 8px; resize: none; }
+.plan-body { max-height: 40vh; overflow: auto; margin-bottom: 8px; }

@@ -25,6 +25,7 @@ extension ThreadStore.Entry {
         if let resultLength { o["rl"] = resultLength }
         if isError { o["e"] = 1 }
         if live { o["live"] = 1 }
+        if queued { o["q"] = 1 }
         if let date { o["d"] = date.timeIntervalSince1970 * 1000 }
         if let subagent { o["sa"] = ["d": subagent.description, "s": subagent.status, "c": subagent.steps] }
         return o

@@ -34,3 +34,15 @@ input, `r` result head, `rl` its full length, `e` error, `sa` sub-agent, `live`.
 | `run` | `th`, `v` | Running or not |
 | `perm` | `th`, `id`?, `n`, `d`, `i` | Waiting for permission; no `id`: answered |
 | `session` | `th`, `sid` | The Claude session ID |
+
+## Since chunk 1
+
+Requests: `library`, `subscribe {th, limit}` → `{total, from, entries, rv, perm, running}`,
+`unsubscribe`, `page {th, before, limit}`, `send {th, text, now}`, `interrupt`,
+`respond {th, id, allow}`, `answer {th, id, answers}`, `plan {th, id, approve, feedback}`,
+`setMode`, `setModel`, `setEffort`, `newThread {projectId}`, `rename`, `pin`, `settle`,
+`delete`, `draft`, `read`, `addProject {path}`; host-only: `menu`, `confirm`.
+
+Patches: row patches (`add`, `app`, `upd`, `run`, `perm {p}`) carry `rv`, only for subscribed
+threads; `thread` (a summary, with `running`, `waiting`, `unread`), `threadGone`, `reload`
+(fetch the rows again), `project`, `models`. Rows may carry `q` (queued).

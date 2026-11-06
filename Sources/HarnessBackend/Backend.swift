@@ -23,6 +23,26 @@ public final class Backend {
     public init(dataDirectory: URL) {
         self.dataDirectory = dataDirectory
         library = Library(directory: dataDirectory)
+        Task { await recoverCutOffTurns() }
+    }
+
+    /// Threads unread since their last turn ended, until the page says you've seen them.
+    private var unread = Set<String>()
+
+    /// Turns a quit or crash cut off: finished from the session files, in the background.
+    private func recoverCutOffTurns() async {
+        let cut = library.threads.filter { $0["turnInProgress"] as? Bool == true }
+        guard !cut.isEmpty else { return }
+        let environment = (try? await cli().0) ?? ProcessInfo.processInfo.environment
+        for meta in cut {
+            guard let id = meta["id"] as? String, let uuid = UUID(uuidString: id) else { continue }
+            let plan = await Recovery.plan(db: library.db, thread: uuid, sessionID: meta["sessionID"] as? String, environment: environment)
+            // Talked to meanwhile: what's there now counts.
+            guard runtimes[id] == nil, store.base(id) == nil else { continue }
+            library.db.saveTranscriptChanges(uuid, count: plan.count, changes: plan.changes)
+            library.updateThread(id) { $0["turnInProgress"] = nil }
+            if subscribed.contains(id) { sink(["t": "reload", "th": id]) }
+        }
     }
 
     // MARK: Requests
@@ -128,6 +148,9 @@ public final class Backend {
             let id = library.addProject(path: p["path"] as? String ?? "")
             if let project = library.project(id) { sink(["t": "project", "p": library.projectWire(project)]) }
             return id
+        case "read":
+            if unread.remove(th) != nil { threadChanged(th) }
+            return true
         case "draft":
             let text = p["text"] as? String ?? ""
             library.updateThread(th) { $0["draft"] = text.isEmpty ? nil : text }
@@ -159,10 +182,18 @@ public final class Backend {
 
     private func threadWire(_ t: [String: Any]) -> Wire {
         let id = t["id"] as? String ?? ""
-        return library.threadWire(t, running: runtimes[id]?.running ?? false, waiting: store.pendingPermission(id) != nil)
+        var wire = library.threadWire(t, running: runtimes[id]?.running ?? false, waiting: store.pendingPermission(id) != nil)
+        if unread.contains(id) { wire["unread"] = true }
+        return wire
     }
 
     /// Something about a thread's summary changed: the sidebar gets its new state.
+    /// A turn ended: the thread is unread until the page says it's been seen.
+    func turnEnded(_ id: String) {
+        unread.insert(id)
+        threadChanged(id)
+    }
+
     func threadChanged(_ id: String) {
         guard let t = library.thread(id) else { return }
         sink(["t": "thread", "th": threadWire(t)])

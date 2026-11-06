@@ -31,10 +31,17 @@ function whileShown<T>(props: { item: Item; shown: Accessor<boolean> }, compute:
 }
 
 function UserRow(props: { item: Item; shown: Accessor<boolean> }) {
-  const text = whileShown(props, () => props.item.entries[0].text);
+  const view = whileShown(props, () => ({ text: props.item.entries[0].text, queued: props.item.entries[0].queued }));
   return (
     <div class="row user">
-      <div class="bubble">{text()}</div>
+      <Show when={view().queued}>
+        <span class="chip queued" title="Claude reads it once the current step ends">
+          Queued
+        </span>
+      </Show>
+      <div class="bubble" classList={{ queued: view().queued }}>
+        {view().text}
+      </div>
     </div>
   );
 }

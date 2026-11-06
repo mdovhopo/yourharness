@@ -18,6 +18,8 @@ public final class ThreadStore {
         public var live = false
         public var subagent: Subagent?
         public var date: Date?
+        /// Your message, sent while Claude works, waiting for the current step to end.
+        public var queued = false
 
         public struct Subagent: Sendable, Equatable {
             public var description: String
@@ -149,10 +151,12 @@ public final class ThreadStore {
         return .update(thread: thread, entry: t.entries[i])
     }
 
-    /// Your message, as sent.
-    public func userMessage(_ text: String, thread: String) -> [ThreadPatch] {
+    /// Your message, as sent; `queued` while Claude finishes its current step.
+    public func userMessage(_ text: String, id: String? = nil, queued: Bool = false, thread: String) -> [ThreadPatch] {
         let t = state(thread)
-        return [add(Entry(id: nextID("u"), kind: .user, text: text), to: t, thread: thread), .running(thread: thread, true)]
+        var entry = Entry(id: id ?? nextID("u"), kind: .user, text: text)
+        entry.queued = queued
+        return [add(entry, to: t, thread: thread), .running(thread: thread, true)]
     }
 
     public func notice(_ text: String, thread: String) -> [ThreadPatch] {
@@ -265,6 +269,16 @@ public final class ThreadStore {
                 $0.subagent = Entry.Subagent(description: $0.subagent?.description ?? "", status: end.status,
                                              steps: end.usage.toolUses ?? $0.subagent?.steps ?? 0)
             }.map { [$0] } ?? []
+
+        case .messageLifecycle(let id, let state):
+            switch state {
+            case .queued: return update(id, in: t, thread: thread) { $0.queued = true }.map { [$0] } ?? []
+            case .started, .completed: return update(id, in: t, thread: thread) { $0.queued = false }.map { [$0] } ?? []
+            case .cancelled:
+                var patches = update(id, in: t, thread: thread) { $0.queued = false }.map { [$0] } ?? []
+                patches += notice("That message was withdrawn before Claude read it.", thread: thread)
+                return patches
+            }
 
         case .permissionRequest(let request):
             t.permission = request

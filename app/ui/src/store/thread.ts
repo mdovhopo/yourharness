@@ -20,6 +20,8 @@ export class Entry {
   sub?: { d: string; s: string; c?: number };
   /** Still being written by Claude. */
   live = false;
+  /** Your message, waiting for Claude's current step. */
+  queued = false;
   /** Rendered markdown, kept while the text doesn't change. */
   html?: string;
   htmlFor = -1;
@@ -46,6 +48,7 @@ export class Entry {
     this.date = w.d;
     this.sub = w.sa;
     this.live = w.live === 1;
+    this.queued = w.q === 1;
   }
 }
 
