@@ -294,6 +294,33 @@ impl Store {
         let _ = self.db.write(move |c, rev| save_memory(c, rev, &memory, &actor, event, detail));
     }
 
+    /// Saves several memories in one transaction: every memory first, then their links, so
+    /// links between them have both ends (Swift's `saveMemories`).
+    pub fn save_all(&self, memories: Vec<Memory>, actor: &Actor) {
+        let actor = actor.clone();
+        let _ = self.db.write(move |c, rev| {
+            for m in &memories {
+                let unlinked = Memory { links: vec![], ..m.clone() };
+                save_memory(c, rev, &unlinked, &actor, None, None)?;
+            }
+            for m in &memories {
+                for (to, relation) in m.links.iter().filter(|(to, _)| *to != m.id) {
+                    c.execute(
+                        "INSERT OR IGNORE INTO memory_links(from_id, to_id, relation, created_at) SELECT ?, id, ?, ? FROM memories WHERE id = ?",
+                        params![m.id, relation, now(), to],
+                    )?;
+                }
+            }
+            Ok(())
+        });
+    }
+
+    /// An event in the activity log that isn't about one memory (an import, say).
+    pub fn record_event(&self, scope: &str, kind: &str, actor: &Actor, count: Option<i64>, detail: Option<String>) {
+        let (scope, kind, actor) = (scope.to_string(), kind.to_string(), actor.clone());
+        let _ = self.db.write(move |c, _| log_event(c, &scope, None, &kind, &actor, None, count, detail));
+    }
+
     pub fn set_status(&self, id: &str, status: &str, actor: &Actor, reason: Option<String>) {
         let Some(mut m) = self.memory(id) else { return };
         if m.status == status {
