@@ -148,6 +148,7 @@ fn main() {
                 }
             });
         }
+        // `YH_SEND_FILES=<a.png:b.jpg>` goes with it, through the composer as if attached.
         if let Some(text) = env("YH_SEND") {
             workspace.update(cx, |ws, cx| {
                 if ws.selected.is_none() {
@@ -155,10 +156,31 @@ fn main() {
                         ws.new_thread(&project, cx);
                     }
                 }
-                if let Some(t) = ws.selected_thread() {
-                    ws.send(&t, &text, false, cx);
-                }
             });
+            match env("YH_SEND_FILES") {
+                Some(files) => {
+                    let paths: Vec<std::path::PathBuf> = files.split(':').map(std::path::PathBuf::from).collect();
+                    let composer = root.read(cx).composer.clone();
+                    composer.update(cx, |c, cx| c.add_files(&paths, cx));
+                    let root = root.clone();
+                    cx.spawn(async move |cx| {
+                        cx.background_executor().timer(Duration::from_millis(800)).await;
+                        let _ = window.update(cx, |_, window, cx| {
+                            let composer = root.read(cx).composer.clone();
+                            composer.update(cx, |c, cx| {
+                                c.type_draft(&text, window, cx);
+                                c.submit(false, window, cx);
+                            });
+                        });
+                    })
+                    .detach();
+                }
+                None => workspace.update(cx, |ws, cx| {
+                    if let Some(t) = ws.selected_thread() {
+                        ws.send(&t, &text, false, cx);
+                    }
+                }),
+            }
         }
         // `YH_DRAFT=<text>`: typed into the composer after `YH_DRAFT_DELAY` seconds (`/co` opens the
         // command menu, `@na` the file menu).

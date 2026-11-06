@@ -282,11 +282,19 @@ impl ClaudeProcess {
 
     /// Your message. `id` comes back in the CLI's message lifecycle; `priority` `now`
     /// interrupts the turn for it, none waits for the current step (steering).
-    pub fn send(&self, text: &str, id: &str, priority: Option<&str>) {
+    pub fn send(&self, text: &str, images: &[(String, String)], id: &str, priority: Option<&str>) {
+        // Images first, as the Swift app sends them: (media type, base64).
+        let mut content: Vec<Value> = images
+            .iter()
+            .map(|(media, data)| json!({ "type": "image", "source": { "type": "base64", "media_type": media, "data": data } }))
+            .collect();
+        if !text.is_empty() || content.is_empty() {
+            content.push(json!({ "type": "text", "text": text }));
+        }
         let mut message = json!({
             "type": "user",
             "uuid": id,
-            "message": { "role": "user", "content": [{ "type": "text", "text": text }] },
+            "message": { "role": "user", "content": content },
         });
         if let Some(priority) = priority {
             message["priority"] = priority.into();

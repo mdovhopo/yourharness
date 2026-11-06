@@ -31,6 +31,8 @@ pub struct Composer {
     plan_open: bool,
     /// The menu under the caret: slash commands at the start, files after an `@`.
     suggest: Option<Suggest>,
+    /// Images waiting to go with the next message: names in `attachments/`.
+    images: Vec<String>,
     _mentions: Option<gpui_kit::Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -66,6 +68,7 @@ impl Composer {
             card: None,
             plan_open: false,
             suggest: None,
+            images: vec![],
             _mentions: None,
             _subscriptions: subscriptions,
         }
@@ -107,12 +110,70 @@ impl Composer {
 
     pub fn submit(&mut self, now: bool, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.input.read(cx).value().to_string();
-        if text.trim().is_empty() {
+        if text.trim().is_empty() && self.images.is_empty() {
             return;
         }
         let Some(thread) = self.thread(cx) else { return };
+        let images = std::mem::take(&mut self.images);
         self.input.update(cx, |i, cx| i.set_value("", window, cx));
-        self.workspace.update(cx, |ws, cx| ws.send(&thread, &text, now, cx));
+        self.workspace.update(cx, |ws, cx| ws.send_with_images(&thread, &text, images, now, cx));
+        cx.notify();
+    }
+
+    /// Images (any common format) prepared and kept for the next message, off the main thread.
+    pub fn add_images(&mut self, sources: Vec<Vec<u8>>, cx: &mut Context<Self>) {
+        let Some(thread) = self.current.clone().or_else(|| self.workspace.read(cx).selected.clone()) else { return };
+        let dir = self.workspace.read(cx).data_dir.clone();
+        cx.spawn(async move |this, cx| {
+            let names: Vec<String> = cx
+                .background_executor()
+                .spawn(async move { sources.iter().filter_map(|b| yh_core::attachments::save(&dir, &thread, b)).collect() })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.images.extend(names);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub fn add_files(&mut self, paths: &[std::path::PathBuf], cx: &mut Context<Self>) {
+        let sources: Vec<Vec<u8>> =
+            paths.iter().filter(|p| yh_core::attachments::is_image_path(p)).filter_map(|p| std::fs::read(p).ok()).collect();
+        if !sources.is_empty() {
+            self.add_images(sources, cx);
+        }
+    }
+
+    /// ⌘V with an image (or image files) on the clipboard attaches it; text goes to the field.
+    fn paste_image(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(item) = cx.read_from_clipboard() else { return false };
+        let mut sources = vec![];
+        let mut paths = vec![];
+        for entry in item.entries() {
+            match entry {
+                gpui_kit::ClipboardEntry::Image(image) => sources.push(image.bytes.clone()),
+                gpui_kit::ClipboardEntry::ExternalPaths(p) => paths.extend(p.paths().iter().cloned()),
+                _ => {}
+            }
+        }
+        paths.retain(|p| yh_core::attachments::is_image_path(p));
+        if sources.is_empty() && paths.is_empty() {
+            return false;
+        }
+        sources.extend(paths.iter().filter_map(|p| std::fs::read(p).ok()));
+        self.add_images(sources, cx);
+        true
+    }
+
+    fn attach(&mut self, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(gpui_kit::PathPromptOptions { files: true, directories: false, multiple: true, prompt: Some("Attach".into()) });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = paths.await {
+                let _ = this.update(cx, |this, cx| this.add_files(&paths, cx));
+            }
+        })
+        .detach();
     }
 
     /// The card follows the open thread's pending request.
@@ -309,8 +370,41 @@ impl Render for Composer {
             inner = inner.child(menu);
         }
         let stop_thread = thread.clone();
+        let thumbs = (!self.images.is_empty()).then(|| {
+            let dir = self.workspace.read(cx).data_dir.join("attachments");
+            div().flex().flex_wrap().gap(px(6.)).children(self.images.iter().enumerate().map(|(i, name)| {
+                div()
+                    .relative()
+                    .child(gpui_kit::img(dir.join(name)).h(px(56.)).max_w(px(120.)).rounded(px(6.)))
+                    .child(
+                        div()
+                            .id(("remove-image", i))
+                            .absolute()
+                            .top(px(-4.))
+                            .right(px(-4.))
+                            .w(px(16.))
+                            .h(px(16.))
+                            .rounded_full()
+                            .bg(theme.secondary)
+                            .text_color(gpui_kit::white())
+                            .text_size(px(11.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child("×")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if i < this.images.len() {
+                                    this.images.remove(i);
+                                }
+                                cx.notify();
+                            })),
+                    )
+            }))
+        });
         let composer = div()
             .capture_key_down(cx.listener(Self::on_key))
+            .on_drop(cx.listener(|this, paths: &gpui_kit::ExternalPaths, _, cx| this.add_files(paths.paths(), cx)))
+            .children(thumbs)
             .relative()
             .border_1()
             .border_color(theme.separator)
@@ -329,6 +423,9 @@ impl Render for Composer {
                     .flex()
                     .items_center()
                     .gap(px(8.))
+                    .child(
+                        Button::new("attach").ghost().xsmall().label("+").tooltip("Attach images").on_click(cx.listener(|this, _, _, cx| this.attach(cx))),
+                    )
                     .child(self.pickers(&thread, &theme, cx))
                     .child(div().flex_1())
                     .when(running, |d| {
@@ -492,6 +589,11 @@ impl Composer {
 
     /// ↑↓ move through the menu, ↩ or ⇥ take an item, ⎋ closes it; before the field sees them.
     fn on_key(&mut self, event: &gpui_kit::KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let k = &event.keystroke;
+        if k.key == "v" && k.modifiers.platform && !k.modifiers.shift && self.paste_image(cx) {
+            cx.stop_propagation();
+            return;
+        }
         let Some(s) = &mut self.suggest else { return };
         let n = s.items.len();
         match event.keystroke.key.as_str() {

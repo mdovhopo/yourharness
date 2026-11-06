@@ -81,6 +81,7 @@ impl Entry {
             tool_is_error: (self.data.kind == Kind::Tool && self.data.tool_result.is_some()).then_some(self.data.is_error),
             date: self.date,
             delivery: self.delivery.clone(),
+            attachments: (!self.data.attachments.is_empty()).then(|| serde_json::to_string(&self.data.attachments).unwrap_or_default()),
             ..Default::default()
         }
     }
@@ -367,8 +368,10 @@ impl ThreadState {
     }
 
     /// Your message, as sent: `id` is what the CLI's lifecycle events name it by.
-    pub fn add_user(&mut self, text: &str, id: &str, queued: bool, delivery: Option<&str>) {
-        let e = self.append(EntryData::new(id, Kind::User, text));
+    pub fn add_user(&mut self, text: &str, images: &[String], id: &str, queued: bool, delivery: Option<&str>) {
+        let mut data = EntryData::new(id, Kind::User, text);
+        data.attachments = images.to_vec();
+        let e = self.append(data);
         let mut b = e.borrow_mut();
         b.queued = queued;
         b.delivery = delivery.map(str::to_string);

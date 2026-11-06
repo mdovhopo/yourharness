@@ -40,9 +40,16 @@ pub fn render_item(thread: &Entity<ThreadState>, ix: usize, _window: &mut Window
         .into_any_element()
 }
 
+/// Where sent images are kept.
+fn attachments_dir() -> &'static std::path::Path {
+    static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| yh_core::library::data_directory().join("attachments"))
+}
+
 fn user_row(item: &Item, theme: &Theme) -> AnyElement {
     let e = item.entries[0].borrow();
     let text = e.data.text.clone();
+    let images = e.data.attachments.clone();
     // Sent while Claude worked: waiting for the current step, or how it got in.
     let note = if e.queued {
         Some("Queued")
@@ -71,7 +78,12 @@ fn user_row(item: &Item, theme: &Theme) -> AnyElement {
                 .py(px(8.))
                 .rounded(px(14.))
                 .when(queued, |d| d.opacity(0.6))
-                .child(text),
+                .when(!images.is_empty(), |d| {
+                    d.child(div().flex().flex_wrap().gap(px(6.)).mb(px(4.)).children(images.iter().map(|name| {
+                        gpui_kit::img(attachments_dir().join(name)).max_w(px(240.)).max_h(px(180.)).rounded(px(8.))
+                    })))
+                })
+                .when(!text.is_empty(), |d| d.child(text)),
         )
         .into_any_element()
 }

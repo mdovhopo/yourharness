@@ -395,8 +395,13 @@ impl Workspace {
     /// Sends your message. While Claude works it waits for the current step (steering), or
     /// with `now` stops the turn for it.
     pub fn send(&mut self, thread: &Entity<ThreadState>, text: &str, now: bool, cx: &mut Context<Self>) {
+        self.send_with_images(thread, text, vec![], now, cx)
+    }
+
+    /// With images already saved in `attachments/` (by name).
+    pub fn send_with_images(&mut self, thread: &Entity<ThreadState>, text: &str, images: Vec<String>, now: bool, cx: &mut Context<Self>) {
         let text = text.trim().to_string();
-        if text.is_empty() {
+        if text.is_empty() && images.is_empty() {
             return;
         }
         let (id, running, title, chosen) = {
@@ -411,7 +416,7 @@ impl Workspace {
         let message_id = yh_core::library::new_uuid();
         let delivery = running.then_some(if now { "interrupted" } else { "steered" });
         thread.update(cx, |t, cx| {
-            t.add_user(&text, &message_id, running && !now, delivery);
+            t.add_user(&text, &images, &message_id, running && !now, delivery);
             t.running = true;
             t.meta.turn_in_progress = true;
             t.meta.draft = None;
@@ -441,7 +446,14 @@ impl Workspace {
         }
         if let Some(rt) = self.runtimes.get_mut(&id) {
             rt.idle = None;
-            rt.process.send(&text, &message_id, now.then_some("now"));
+            let blocks: Vec<(String, String)> = images
+                .iter()
+                .filter_map(|name| {
+                    let bytes = std::fs::read(yh_core::attachments::path(&self.data_dir, name)).ok()?;
+                    Some((yh_core::attachments::media_type(name).to_string(), yh_core::attachments::base64(&bytes)))
+                })
+                .collect();
+            rt.process.send(&text, &blocks, &message_id, now.then_some("now"));
         }
         self.save_rows(thread, cx);
         cx.notify();

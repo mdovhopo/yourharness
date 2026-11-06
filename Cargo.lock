@@ -8595,6 +8595,7 @@ name = "yh-core"
 version = "0.0.1"
 dependencies = [
  "flume 0.11.1",
+ "image",
  "libc",
  "pulldown-cmark",
  "rusqlite",

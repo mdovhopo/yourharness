@@ -50,6 +50,8 @@ pub struct EntryData {
     pub tool_result: Option<String>,
     pub result_len: usize,
     pub is_error: bool,
+    /// Images sent with your message: names in the data folder's `attachments/`.
+    pub attachments: Vec<String>,
 }
 
 impl EntryData {
@@ -63,6 +65,7 @@ impl EntryData {
             tool_result: None,
             result_len: 0,
             is_error: false,
+            attachments: vec![],
         }
     }
 }
@@ -500,6 +503,7 @@ impl EntryData {
             .unwrap_or_else(|| row.tool_result.as_ref().map_or(0, |r| r.len()));
         entry.tool_input = row.tool_input.map(|s| head(&s, TOOL_TEXT_LIMIT));
         entry.tool_result = row.tool_result.map(|s| head(&s, TOOL_TEXT_LIMIT));
+        entry.attachments = row.attachments.as_deref().and_then(|a| serde_json::from_str(a).ok()).unwrap_or_default();
         // A notice in the error style reads as one.
         entry.is_error = row.tool_is_error == Some(true) || row.notice_style.as_deref() == Some("error");
         Some(entry)
