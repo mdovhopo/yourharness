@@ -44,7 +44,8 @@ pub struct RootView {
 
 impl RootView {
     pub fn new(workspace: Entity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let sidebar = cx.new(|cx| Sidebar::new(workspace.clone(), window, cx));
+        let updater = cx.new(crate::state::updater::Updater::new);
+        let sidebar = cx.new(|cx| Sidebar::new(workspace.clone(), updater, window, cx));
         let composer = cx.new(|cx| Composer::new(workspace.clone(), window, cx));
         let find = cx.new(|cx| FindBar::new(workspace.clone(), window, cx));
         let spotlight = cx.new(|cx| Spotlight::new(workspace.clone(), window, cx));

@@ -19,3 +19,4 @@ pub mod memory_tools;
 pub mod plan;
 pub mod usage;
 pub mod state_archive;
+pub mod updates;

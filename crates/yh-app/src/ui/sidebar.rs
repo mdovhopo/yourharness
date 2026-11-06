@@ -9,7 +9,8 @@ use crate::state::workspace::Workspace;
 use crate::theme::Theme;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt, PopupMenuItem};
-use gpui_kit::component::WindowExt;
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::{Sizable, WindowExt};
 use gpui_kit::{div, prelude::*, px, App, Context, Entity, FontWeight, ScrollHandle, SharedString, Subscription, Window};
 use std::collections::{HashMap, HashSet};
 use yh_core::library::ProjectMeta;
@@ -18,6 +19,9 @@ const SHOWN_PER_PROJECT: usize = 12;
 
 pub struct Sidebar {
     workspace: Entity<Workspace>,
+    /// A new version, when there's one: said at the bottom.
+    updater: Entity<crate::state::updater::Updater>,
+    _observe_updater: Subscription,
     /// Projects showing all their threads, and those with their Settled shelf open.
     expanded: HashSet<String>,
     shelves: HashSet<String>,
@@ -35,9 +39,12 @@ enum SidebarRow {
 }
 
 impl Sidebar {
-    pub fn new(workspace: Entity<Workspace>, _window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(workspace: Entity<Workspace>, updater: Entity<crate::state::updater::Updater>, _window: &mut Window, cx: &mut Context<Self>) -> Self {
         let observe = cx.observe(&workspace, |_, _, cx| cx.notify());
+        let observe_updater = cx.observe(&updater, |_, _, cx| cx.notify());
         Sidebar {
+            updater,
+            _observe_updater: observe_updater,
             workspace,
             expanded: HashSet::new(),
             shelves: HashSet::new(),
@@ -247,6 +254,39 @@ impl Sidebar {
 
 impl Sidebar {
     /// Claude's 5-hour and weekly limits as it last reported them, and the way to Settings.
+    /// A new version: download it, how far along, then Restart.
+    fn update_row(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
+        use crate::state::updater::Phase;
+        let phase = self.updater.read(cx).phase.clone();
+        let (text, action): (String, Option<(&'static str, bool)>) = match &phase {
+            Phase::Available(r) => (format!("YourHarness {} is out", r.version), Some(("Update", false))),
+            Phase::Downloading(r, p) => (format!("Downloading {}… {:.0}%", r.version, p * 100.), None),
+            Phase::Preparing(r) => (format!("Checking {}…", r.version), None),
+            Phase::Ready(v) => (format!("{v} is ready"), Some(("Restart", true))),
+            Phase::Failed(e, Some(_)) => (e.clone(), Some(("Retry", false))),
+            _ => return None,
+        };
+        let updater = self.updater.clone();
+        Some(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .px(px(12.))
+                .py(px(6.))
+                .border_t_1()
+                .border_color(theme.separator)
+                .text_size(px(11.))
+                .child(div().flex_1().min_w_0().text_color(theme.secondary).line_clamp(2).child(text))
+                .when_some(action, |d, (label, restart)| {
+                    d.child(Button::new("update-action").xsmall().primary().label(label).on_click(move |_, _, cx| {
+                        updater.update(cx, |u, cx| if restart { u.restart(cx) } else { u.download(cx) })
+                    }))
+                })
+                .into_any_element(),
+        )
+    }
+
     fn footer(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let limits = self.workspace.read(cx).limits.clone();
         let mut bars = div().flex_1().flex().flex_col().gap(px(3.));
@@ -420,6 +460,7 @@ impl Render for Sidebar {
             .border_color(theme.separator)
             .child(div().h(px(44.)).flex_none())
             .child(column)
+            .children(self.update_row(&theme, cx))
             .child(self.footer(&theme, cx))
     }
 }
