@@ -7,22 +7,24 @@ screen, 30 s phases, App Nap held off, GPUI's inactive-window 30 fps cap off (a 
 window is never active). Frames on time at 120 Hz · worst frame; peak footprint over the run.
 Same MacBook, on battery unless noted.
 
-| Phase | Chunk 0 (2026-11-06) |
-|---|---|
-| open-huge | 100.0% · 12 ms |
-| idle-huge | 99.9% · 27 ms |
-| scroll-huge | 98.1% · 17 ms |
-| scroll-huge-fast | 98.5% · 15 ms |
-| switch-huge | 99.5% · 20 ms |
-| switch-all-idle | 99.4% · 25 ms |
-| stream-1 | 100.0% · 11 ms |
-| stream-all | 100.0% · 12 ms |
-| stream-all-scroll | 98.7% · 15 ms |
-| stream-all-switch | 99.8% · 18 ms |
-| stream-all-typing | 98.4% · 23 ms |
-| Peak memory | 160 MB |
-| Switch click (median / worst, streaming) | 32 / 37 ms |
-| Key to screen (median / worst) | 14 / 22 ms |
+| Phase | Chunk 0 (2026-11-06) | Chunk 1 |
+|---|---|---|
+| open-huge | 100.0% · 12 ms | 100.0% · 9 ms |
+| idle-huge | 99.9% · 27 ms | 99.9% · 24 ms |
+| scroll-huge | 98.1% · 17 ms | 99.1% · 17 ms |
+| scroll-huge-fast | 98.5% · 15 ms | 99.1% · 15 ms |
+| switch-huge | 99.5% · 20 ms | 99.5% · 23 ms |
+| switch-all-idle | 99.4% · 25 ms | 99.2% · 26 ms |
+| stream-1 | 100.0% · 11 ms | — |
+| stream-all | 100.0% · 12 ms | 99.8% · 64 ms |
+| stream-all-scroll | 98.7% · 15 ms | 99.8% · 26 ms |
+| stream-all-switch | 99.8% · 18 ms | 99.8% · 18 ms |
+| stream-all-typing | 98.4% · 23 ms | 94.3% · 26 ms |
+| Peak memory | 160 MB | 192 MB |
+| Switch click (median / worst, streaming) | 32 / 37 ms | 34 / 51 ms |
+| Key to screen (median / worst) | 14 / 22 ms | 18 / 29 ms |
+
+Perf runs are now kept for the end of big chunks (two left: one after the rewrite is whole). Chunk 1 notes: typing varied between runs (94–99%; it redrew the transcript per key until the transcript view was cached); one 1,010 ms frame in one fast-scroll run didn't come back in two more, and long frames are now logged with their phase (`PERF stall`).
 
 Chunk 0 notes: GPUI 0.3.11 caps an inactive window at 30 fps (and Low Power Mode too). The
 first chunk-0 run, without turning that off, ran every phase without input at a steady 30 fps.
