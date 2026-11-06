@@ -49,6 +49,11 @@ struct Record {
 
 /// The whole session as rows. Long tool text is cut to a head.
 pub fn load(path: &Path) -> Vec<EntryData> {
+    load_with_limit(path, TOOL_TEXT_LIMIT)
+}
+
+/// The same, with tool text cut at `limit` (`usize::MAX`: whole, for saving).
+pub fn load_with_limit(path: &Path, limit: usize) -> Vec<EntryData> {
     let Ok(data) = std::fs::read(path) else { return vec![] };
     let mut records: HashMap<String, Record> = HashMap::new();
     let mut last_message: Option<String> = None;
@@ -147,7 +152,7 @@ pub fn load(path: &Path) -> Vec<EntryData> {
                             "",
                         );
                         entry.tool_name = block["name"].as_str().map(str::to_string);
-                        entry.tool_input = Some(head(&block["input"].to_string(), TOOL_TEXT_LIMIT));
+                        entry.tool_input = Some(head(&block["input"].to_string(), limit));
                         tools.insert(tool_id, entries.len());
                         entries.push(entry);
                     }
@@ -174,7 +179,7 @@ pub fn load(path: &Path) -> Vec<EntryData> {
                             let content = tool_result_text(&block["content"]);
                             let entry = &mut entries[index];
                             entry.result_len = content.len();
-                            entry.tool_result = Some(head(&content, TOOL_TEXT_LIMIT));
+                            entry.tool_result = Some(head(&content, limit));
                             entry.is_error = block["is_error"] == true;
                         }
                         _ => {}
@@ -245,4 +250,19 @@ fn tag_contents(tag: &str, text: &str) -> Option<String> {
     let start = text.find(&open)? + open.len();
     let end = text[start..].find(&format!("</{tag}>"))?;
     Some(text[start..start + end].trim().to_string())
+}
+
+/// A session's file under `<config>/projects/*/<session>.jsonl`.
+pub fn locate(config: &Path, session_id: &str) -> Option<std::path::PathBuf> {
+    let name = format!("{session_id}.jsonl");
+    std::fs::read_dir(config.join("projects")).ok()?.flatten().map(|d| d.path().join(&name)).find(|p| p.is_file())
+}
+
+/// Claude Code's config folder: `CLAUDE_CONFIG_DIR`, else `~/.claude`.
+pub fn config_directory() -> std::path::PathBuf {
+    std::env::var("CLAUDE_CONFIG_DIR")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| Path::new(&std::env::var("HOME").unwrap_or_default()).join(".claude"))
 }

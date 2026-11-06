@@ -41,8 +41,59 @@ pub struct ToolResult {
     pub full: Option<String>,
 }
 
+/// How a permission request is settled.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Decision {
+    /// Run the tool, with changed input (answers to questions) and a permission mode for the
+    /// rest of the session (approving a plan into Auto) when given.
+    Allow { updated_input: Option<String>, mode: Option<String> },
+    /// Don't; the message goes back to Claude (feedback on a plan).
+    Deny { message: String },
+}
+
+impl Decision {
+    pub fn allow() -> Decision {
+        Decision::Allow { updated_input: None, mode: None }
+    }
+
+    pub fn deny() -> Decision {
+        Decision::Deny { message: "The user denied this action.".into() }
+    }
+}
+
+/// A model as the CLI's catalog lists it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModelInfo {
+    /// What `--model` takes: an alias (`opus`) or a full ID.
+    pub value: String,
+    pub display_name: String,
+    pub description: Option<String>,
+    pub efforts: Vec<String>,
+}
+
+impl ModelInfo {
+    pub fn from_json(v: &Value) -> Option<ModelInfo> {
+        Some(ModelInfo {
+            value: v["value"].as_str()?.to_string(),
+            display_name: v["displayName"].as_str()?.to_string(),
+            description: v["description"].as_str().map(str::to_string),
+            efforts: v["supportedEffortLevels"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|e| e.as_str().map(str::to_string)).collect())
+                .unwrap_or_default(),
+        })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum Event {
+    /// The CLI's catalog, as JSON: `models` (see `ModelInfo`) and `commands`.
+    Catalog { models: Value, commands: Value },
+    /// Where your message is: `queued` (waiting for the current step), `started`,
+    /// `completed`, `cancelled`.
+    Lifecycle { id: String, state: String },
+    /// Usage limits as the CLI reported them (`rate_limit_info`).
+    Limits(Value),
     Session { id: String },
     BlockStart { message: String, index: u64, parent: Option<String>, kind: BlockKind },
     Delta { message: String, index: u64, parent: Option<String>, kind: DeltaKind, text: String },
@@ -76,7 +127,12 @@ pub struct LaunchOptions {
     pub cwd: String,
     pub session_id: Option<String>,
     pub model: Option<String>,
-    pub mode: String,
+    /// The CLI's `--permission-mode`, none for its default (asking).
+    pub mode: Option<String>,
+    pub effort: Option<String>,
+    /// More folders it may read without asking (the app's attachments).
+    pub add_dirs: Vec<String>,
+    pub env: Vec<(String, String)>,
 }
 
 pub struct ClaudeProcess {
@@ -119,7 +175,15 @@ impl ClaudeProcess {
         if let Some(model) = options.model.filter(|m| !m.is_empty()) {
             args.extend(["--model".into(), model]);
         }
-        args.extend(["--permission-mode".into(), options.mode]);
+        if let Some(mode) = options.mode {
+            args.extend(["--permission-mode".into(), mode]);
+        }
+        if let Some(effort) = options.effort.filter(|e| !e.is_empty()) {
+            args.extend(["--effort".into(), effort]);
+        }
+        for dir in options.add_dirs {
+            args.extend(["--add-dir".into(), dir]);
+        }
         if let Some(session) = options.session_id {
             args.extend(["--resume".into(), session]);
         }
@@ -127,6 +191,9 @@ impl ClaudeProcess {
         command.args(&args).current_dir(&options.cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         if let Ok(path) = std::env::var("YH_PATH") {
             command.env("PATH", path);
+        }
+        for (k, v) in &options.env {
+            command.env(k, v);
         }
         let mut child = command.spawn().map_err(|e| format!("couldn't start claude: {e}"))?;
         let pid = child.id();
@@ -192,11 +259,23 @@ impl ClaudeProcess {
         Ok(ClaudeProcess { child, writer, counter: 0, pid })
     }
 
-    pub fn send(&self, text: &str) {
-        let _ = self.writer.send(json!({
+    /// Your message. `id` comes back in the CLI's message lifecycle; `priority` `now`
+    /// interrupts the turn for it, none waits for the current step (steering).
+    pub fn send(&self, text: &str, id: &str, priority: Option<&str>) {
+        let mut message = json!({
             "type": "user",
+            "uuid": id,
             "message": { "role": "user", "content": [{ "type": "text", "text": text }] },
-        }));
+        });
+        if let Some(priority) = priority {
+            message["priority"] = priority.into();
+        }
+        let _ = self.writer.send(message);
+    }
+
+    /// Asks for the catalog (models, efforts, slash commands): answered with `Event::Catalog`.
+    pub fn initialize(&mut self) {
+        self.control(json!({ "subtype": "initialize" }));
     }
 
     fn control(&mut self, request: Value) {
@@ -216,12 +295,17 @@ impl ClaudeProcess {
         self.control(json!({ "subtype": "set_model", "model": if model.is_empty() { "default" } else { model } }));
     }
 
-    pub fn respond(&self, request_id: &str, input: &str, allow: bool) {
-        let body = if allow {
-            let input: Value = serde_json::from_str(input).unwrap_or(json!({}));
-            json!({ "behavior": "allow", "updatedInput": input })
-        } else {
-            json!({ "behavior": "deny", "message": "The user denied this action." })
+    pub fn respond(&self, request_id: &str, input: &str, decision: &Decision) {
+        let body = match decision {
+            Decision::Allow { updated_input, mode } => {
+                let input: Value = serde_json::from_str(updated_input.as_deref().unwrap_or(input)).unwrap_or(json!({}));
+                let mut allow = json!({ "behavior": "allow", "updatedInput": input });
+                if let Some(mode) = mode {
+                    allow["updatedPermissions"] = json!([{ "type": "setMode", "mode": mode, "destination": "session" }]);
+                }
+                allow
+            }
+            Decision::Deny { message } => json!({ "behavior": "deny", "message": message }),
         };
         let _ = self.writer.send(json!({
             "type": "control_response",
@@ -355,6 +439,19 @@ impl Parser {
                     input: head(&request["input"].to_string(), TOOL_TEXT_LIMIT),
                 }]
             }
+            "command_lifecycle" => match (object["command_uuid"].as_str(), object["state"].as_str()) {
+                (Some(id), Some(state)) => vec![Event::Lifecycle { id: id.into(), state: state.into() }],
+                _ => vec![],
+            },
+            "control_response" => {
+                let payload = &object["response"]["response"];
+                if payload["models"].is_array() {
+                    vec![Event::Catalog { models: payload["models"].clone(), commands: payload["commands"].clone() }]
+                } else {
+                    vec![]
+                }
+            }
+            "rate_limit_event" => vec![Event::Limits(object["rate_limit_info"].clone())],
             "result" => vec![Event::Done {
                 is_error: object["is_error"] == true,
                 text: object["result"].as_str().or(object["subtype"].as_str()).unwrap_or("").into(),

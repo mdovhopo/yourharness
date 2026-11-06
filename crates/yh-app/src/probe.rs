@@ -1,13 +1,15 @@
+#![allow(deprecated)]
 //! The performance run (`YH_PERF=<folder>`), the twin of web/ui/src/probe.ts and the native
 //! app's PerfProbe: the same phases on the same threads ("Huge …" in the extreme preset) under
 //! the same fake `claude`, through the paths a person takes (real wheel, click and key events
 //! sent to the NSWindow). Frames are timed at the display link: a callback per vsync, run on
 //! the main thread, so a late one is a frame where the app couldn't show what changed.
 
-use crate::app::HarnessApp;
-use crate::model::{ItemType, ThreadState};
+use crate::state::workspace::Workspace;
+use crate::ui::root::RootView;
+use crate::state::thread::{ItemType, ThreadState};
 use crate::platform;
-use gpui_kit::{canvas, prelude::*, AsyncApp, Bounds, Entity, Pixels, Window, WindowHandle};
+use gpui_kit::{canvas, prelude::*, AnyWindowHandle, AsyncApp, Bounds, Entity, Pixels, Window};
 use serde_json::{json, Value};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -18,6 +20,8 @@ thread_local! {
     static ENABLED: Cell<bool> = const { Cell::new(false) };
     static BOUNDS: RefCell<HashMap<String, Bounds<Pixels>>> = RefCell::new(HashMap::new());
     static BATCHES: RefCell<Vec<f64>> = const { RefCell::new(Vec::new()) };
+    static PHASE: RefCell<String> = const { RefCell::new(String::new()) };
+    static STARTED: Instant = Instant::now();
 }
 
 pub fn enabled() -> bool {
@@ -68,7 +72,13 @@ fn tick(frames: Rc<RefCell<Frames>>, generation: u64, window: &Window) {
             }
             let now = Instant::now();
             if let Some(last) = f.last {
-                f.deltas.push((now - last).as_secs_f64() * 1000.0);
+                let ms = (now - last).as_secs_f64() * 1000.0;
+                // A long frame says when and in what phase, to line up with what was happening.
+                if ms > 250.0 {
+                    let phase = PHASE.with(|p| p.borrow().clone());
+                    eprintln!("PERF stall {ms:.0} ms in {phase} at {:.1} s", STARTED.with(|s| s.elapsed().as_secs_f64()));
+                }
+                f.deltas.push(ms);
             }
             f.last = Some(now);
         }
@@ -110,7 +120,8 @@ fn frame_stats(deltas: &[f64], period: f64) -> Value {
 }
 
 struct Probe {
-    handle: WindowHandle<HarnessApp>,
+    handle: AnyWindowHandle,
+    root: Entity<RootView>,
     cx: AsyncApp,
     started: Instant,
     folder: String,
@@ -132,19 +143,31 @@ fn ms_since(start: Instant) -> f64 {
 }
 
 impl Probe {
-    fn with<R>(&mut self, f: impl FnOnce(&mut HarnessApp, &mut Window, &mut gpui_kit::Context<HarnessApp>) -> R) -> R {
-        self.handle.update(&mut self.cx, f).expect("window gone")
+    /// In the window: for sending events and changing state.
+    fn with<R>(&mut self, f: impl FnOnce(&Entity<RootView>, &mut Window, &mut gpui_kit::App) -> R) -> R {
+        let root = self.root.clone();
+        self.handle.update(&mut self.cx, |_, window, cx| f(&root, window, cx)).expect("window gone")
     }
 
-    /// A read, not an update: the app entity isn't leased, so views reading it (the sidebar) can.
-    fn read<R>(&mut self, f: impl FnOnce(&HarnessApp, &gpui_kit::App) -> R) -> R {
-        let handle = self.handle;
-        self.cx
-            .update(|cx| {
-                let cx: &gpui_kit::App = cx;
-                handle.read(cx).map(|app| f(app, cx))
-            })
-            .expect("window gone")
+    fn ws(&mut self) -> Entity<Workspace> {
+        let root = self.root.clone();
+        self.cx.update(|cx| root.read(cx).workspace.clone())
+    }
+
+    /// Changes the workspace (selection, sending…), as the views' own calls do.
+    fn ws_update<R>(&mut self, f: impl FnOnce(&mut Workspace, &mut gpui_kit::Context<Workspace>) -> R) -> R {
+        let ws = self.ws();
+        self.cx.update(|cx| ws.update(cx, f))
+    }
+
+    /// A read, not an update: nothing is leased, so views reading the same entities can.
+    fn read<R>(&mut self, f: impl FnOnce(&RootView, &Workspace, &gpui_kit::App) -> R) -> R {
+        let root = self.root.clone();
+        self.cx.update(|cx| {
+            let cx: &gpui_kit::App = cx;
+            let r = root.read(cx);
+            f(r, r.workspace.read(cx), cx)
+        })
     }
 
     async fn sleep(&self, ms: u64) {
@@ -178,7 +201,7 @@ impl Probe {
     }
 
     fn selected(&mut self) -> Option<String> {
-        self.read(|app, _| app.selected.clone())
+        self.read(|_, ws, _| ws.selected.clone())
     }
 
     async fn click_key(&mut self, key: &str) -> Option<Instant> {
@@ -192,14 +215,14 @@ impl Probe {
 
     /// The thread's sidebar row in view, behind its project's "Show more" as for a person.
     async fn reveal(&mut self, t: &Entity<ThreadState>) -> bool {
-        let (id, project) = self.read(|_, cx| {
+        let (id, project) = self.read(|_, _, cx| {
             let t = t.read(cx);
             (t.id().to_string(), t.meta.project_id.clone())
         });
-        let mut index = self.read(|app, cx| app.sidebar.read(cx).row_index(&id, cx));
+        let mut index = self.read(|r, _, cx| r.sidebar.read(cx).row_index(&id, cx));
         if index.is_none() {
-            if let Some(more) = self.read(|app, cx| app.sidebar.read(cx).more_index(&project, cx)) {
-                self.with(|app, _, cx| app.sidebar.update(cx, |s, cx| {
+            if let Some(more) = self.read(|r, _, cx| r.sidebar.read(cx).more_index(&project, cx)) {
+                self.with(|r, _, cx| r.read(cx).sidebar.clone().update(cx, |s, cx| {
                     s.scroll.scroll_to_item(more);
                     cx.notify();
                 }));
@@ -207,7 +230,7 @@ impl Probe {
                 let key = format!("more:{project}");
                 let clicked = if self.real_events { self.click_key(&key).await.is_some() } else { false };
                 self.painted().await;
-                index = self.read(|app, cx| app.sidebar.read(cx).row_index(&id, cx));
+                index = self.read(|r, _, cx| r.sidebar.read(cx).row_index(&id, cx));
                 if index.is_none() && clicked {
                     self.direct("clicks don't reach the window");
                 }
@@ -217,7 +240,7 @@ impl Probe {
             }
         }
         let Some(index) = index else { return false };
-        self.with(|app, _, cx| app.sidebar.update(cx, |s, cx| {
+        self.with(|r, _, cx| r.read(cx).sidebar.clone().update(cx, |s, cx| {
             s.scroll.scroll_to_item(index);
             cx.notify();
         }));
@@ -226,8 +249,8 @@ impl Probe {
     }
 
     async fn switch_to(&mut self, t: &Entity<ThreadState>) {
-        let id = self.read(|_, cx| t.read(cx).id().to_string());
-        let title = self.read(|_, cx| t.read(cx).title.clone());
+        let id = self.read(|_, _, cx| t.read(cx).id().to_string());
+        let title = self.read(|_, _, cx| t.read(cx).title.clone());
         if !self.reveal(t).await {
             log(&format!("FAIL: no sidebar row for {title}"));
         }
@@ -258,19 +281,19 @@ impl Probe {
             }
             sent = Instant::now();
             let id2 = id.clone();
-            self.with(move |app, window, cx| app.select(&id2, window, cx));
+            self.ws_update(move |ws, cx| ws.select(&id2, cx));
         }
-        let was_loaded = self.read(|_, cx| t.read(cx).loaded);
+        let was_loaded = self.read(|_, _, cx| t.read(cx).loaded);
         let answered = self.painted().await;
         let mut done = answered;
         if !was_loaded {
             let start = Instant::now();
-            while !self.read(|_, cx| t.read(cx).loaded) && start.elapsed() < Duration::from_secs(30) {
+            while !self.read(|_, _, cx| t.read(cx).loaded) && start.elapsed() < Duration::from_secs(30) {
                 self.frame().await;
             }
             done = self.painted().await;
         }
-        let rows = self.read(|_, cx| t.read(cx).items.len());
+        let rows = self.read(|_, _, cx| t.read(cx).items.len());
         let phase = self.phase.clone();
         self.clicks.push(json!({
             "phase": phase, "click": "switch",
@@ -289,9 +312,7 @@ impl Probe {
     }
 
     fn scroll_offset(&mut self) -> f32 {
-        self.read(|app, cx| {
-            app.selected_thread().map(|t| f32::from(t.read(cx).list.scroll_px_offset_for_scrollbar().y)).unwrap_or(0.0)
-        })
+        self.read(|_, ws, cx| ws.selected_thread().map(|t| f32::from(t.read(cx).list.scroll_px_offset_for_scrollbar().y)).unwrap_or(0.0))
     }
 
     async fn scrolling(&mut self, until: Instant, speed: i32) {
@@ -305,8 +326,8 @@ impl Probe {
                 }
             } else {
                 let dy = (speed * direction) as f32;
-                self.with(move |app, window, cx| {
-                    if let Some(t) = app.selected_thread() {
+                self.with(move |r, window, cx| {
+                    if let Some(t) = r.read(cx).workspace.read(cx).selected_thread() {
                         t.read(cx).list.scroll_by(gpui_kit::px(-dy));
                     }
                     window.refresh();
@@ -324,7 +345,7 @@ impl Probe {
                 direction = -direction;
             }
         }
-        let top = self.read(|app, cx| app.selected_thread().map(|t| t.read(cx).list.logical_scroll_top().item_ix).unwrap_or(0));
+        let top = self.read(|_, ws, cx| ws.selected_thread().map(|t| t.read(cx).list.logical_scroll_top().item_ix).unwrap_or(0));
         log(&format!("scroll: {count} steps, ended at row {top}"));
         if highest - lowest < 100.0 {
             log(&format!("FAIL: scrolling moved the transcript only {} px", (highest - lowest).round()));
@@ -335,7 +356,7 @@ impl Probe {
 
     async fn switching(&mut self, list: &[Entity<ThreadState>], until: Instant, every: u64) {
         let selected = self.selected();
-        let mut index = list.iter().position(|t| self.read(|_, cx| Some(t.read(cx).id().to_string())) == selected).unwrap_or(0);
+        let mut index = list.iter().position(|t| self.read(|_, _, cx| Some(t.read(cx).id().to_string())) == selected).unwrap_or(0);
         while Instant::now() < until {
             index = (index + 1) % list.len();
             self.switch_to(&list[index]).await;
@@ -359,13 +380,13 @@ impl Probe {
         while Instant::now() < until {
             let ch = letters[i % letters.len()];
             i += 1;
-            let before = self.read(|app, cx| app.composer.read(cx).input.read(cx).value().len());
+            let before = self.read(|r, _, cx| r.composer.read(cx).input.read(cx).value().len());
             let sent = Instant::now();
             if self.real_events {
                 platform::key(self.ns, &ch.to_string());
             } else {
-                self.with(move |app, window, cx| {
-                    let input = app.composer.read(cx).input.clone();
+                self.with(move |r, window, cx| {
+                    let input = r.read(cx).composer.read(cx).input.clone();
                     input.update(cx, |i, cx| {
                         let text = format!("{}{ch}", i.value());
                         i.set_value(text, window, cx);
@@ -375,7 +396,7 @@ impl Probe {
             let start = Instant::now();
             let mut landed = false;
             while start.elapsed() < Duration::from_secs(1) {
-                if self.read(|app, cx| app.composer.read(cx).input.read(cx).value().len()) != before {
+                if self.read(|r, _, cx| r.composer.read(cx).input.read(cx).value().len()) != before {
                     landed = true;
                     break;
                 }
@@ -391,27 +412,27 @@ impl Probe {
             self.clicks.push(json!({ "phase": phase, "click": "key", "answeredMs": ms, "doneMs": ms }));
             self.sleep(90).await;
             if i % 60 == 0 {
-                self.with(|app, window, cx| app.composer.read(cx).input.clone().update(cx, |i, cx| i.set_value("", window, cx)));
+                self.with(|r, window, cx| r.read(cx).composer.read(cx).input.clone().update(cx, |i, cx| i.set_value("", window, cx)));
             }
         }
-        self.with(|app, window, cx| app.composer.read(cx).input.clone().update(cx, |i, cx| i.set_value("", window, cx)));
+        self.with(|r, window, cx| r.read(cx).composer.read(cx).input.clone().update(cx, |i, cx| i.set_value("", window, cx)));
     }
 
     async fn start_turns(&mut self, list: &[Entity<ThreadState>], seconds: f64, rate: &str) -> Instant {
         let begin = Instant::now();
-        let marks: Vec<usize> = list.iter().map(|t| self.read(|_, cx| t.read(cx).items.len())).collect();
+        let marks: Vec<usize> = list.iter().map(|t| self.read(|_, _, cx| t.read(cx).items.len())).collect();
         for t in list {
             let t = t.clone();
             let message = format!("PERF seconds={} rate={rate}", seconds.round());
-            self.with(move |app, _, cx| {
+            self.ws_update(move |ws, cx| {
                 if !t.read(cx).running {
-                    app.send(&t, &message, cx);
+                    ws.send(&t, &message, false, cx);
                 }
             });
         }
         let streaming = |p: &mut Probe| {
             list.iter().zip(&marks).all(|(t, mark)| {
-                p.read(|_, cx| {
+                p.read(|_, _, cx| {
                     let t = t.read(cx);
                     t.running && t.items.len() > mark + 1 && t.items.last().is_some_and(|i| i.ty != ItemType::User)
                 })
@@ -426,7 +447,7 @@ impl Probe {
 
     async fn wait_for_turns(&mut self) {
         let limit = Instant::now() + Duration::from_secs(60);
-        while self.read(|app, cx| app.running_count(cx)) > 0 && Instant::now() < limit {
+        while self.read(|_, ws, cx| ws.running_count(cx)) > 0 && Instant::now() < limit {
             self.sleep(250).await;
         }
     }
@@ -441,12 +462,13 @@ impl Probe {
     }
 }
 
-pub fn start(handle: WindowHandle<HarnessApp>, folder: String, cx: &mut gpui_kit::App) {
+pub fn start(handle: AnyWindowHandle, root: Entity<RootView>, folder: String, cx: &mut gpui_kit::App) {
     ENABLED.with(|e| e.set(true));
     let _ = std::fs::create_dir_all(&folder);
     cx.spawn(async move |cx| {
         let mut p = Probe {
             handle,
+            root,
             cx: cx.clone(),
             started: Instant::now(),
             folder,
@@ -465,7 +487,8 @@ pub fn start(handle: WindowHandle<HarnessApp>, folder: String, cx: &mut gpui_kit
         if std::env::var("YH_PERF_QUIT").as_deref() == Ok("1") {
             p.sleep(500).await;
             let _ = p.cx.update(|cx| {
-                if let Ok(()) = p.handle.update(cx, |app, _, _| app.stop_all()) {}
+                let ws = p.root.read(cx).workspace.clone();
+                ws.update(cx, |ws, cx| ws.prepare_for_quit(cx));
                 cx.quit()
             });
         }
@@ -486,8 +509,8 @@ async fn run(p: &mut Probe) {
     log(&format!("window {size}, screen {screen_hz} Hz, front {front}"));
     p.sleep(500).await;
 
-    let mut threads: Vec<(String, Entity<ThreadState>)> = p.read(|app, cx| {
-        app.threads.iter().map(|t| (t.read(cx).title.clone(), t.clone())).filter(|(title, _)| title.starts_with("Huge")).collect()
+    let mut threads: Vec<(String, Entity<ThreadState>)> = p.read(|_, ws, cx| {
+        ws.threads.iter().map(|t| (t.read(cx).title.clone(), t.clone())).filter(|(title, _)| title.starts_with("Huge")).collect()
     });
     threads.sort_by(|a, b| a.0.cmp(&b.0));
     let threads: Vec<Entity<ThreadState>> = threads.into_iter().map(|(_, t)| t).collect();
@@ -561,6 +584,7 @@ async fn run(p: &mut Probe) {
             continue;
         }
         p.phase = name.to_string();
+        PHASE.with(|ph| *ph.borrow_mut() = name.to_string());
         if name.starts_with("stream") {
             p.wait_for_turns().await;
         }
@@ -600,7 +624,7 @@ async fn run(p: &mut Probe) {
             "switch-all-idle" => {
                 for t in &threads {
                     let t2 = t.clone();
-                    p.with(move |app, _, cx| app.ensure_loaded(&t2, cx));
+                    p.ws_update(move |ws, cx| ws.ensure_loaded(&t2, cx));
                 }
                 p.switching(&threads, Instant::now() + s, 1500).await;
             }

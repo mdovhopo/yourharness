@@ -2,7 +2,7 @@
 //! it's on screen (or about to be), and measures it again only when it was spliced.
 
 use yh_core::markdown::{self, MdBlock, Span, Styled as Text};
-use crate::model::{EntryRef, Item, ItemType, ThreadState};
+use crate::state::thread::{EntryRef, Item, ItemType, ThreadState};
 use yh_core::library::Kind;
 use crate::theme::{Theme, MONO};
 use gpui_kit::{
@@ -34,12 +34,28 @@ pub fn render_item(thread: &Entity<ThreadState>, ix: usize, _window: &mut Window
 }
 
 fn user_row(item: &Item, theme: &Theme) -> AnyElement {
-    let text = item.entries[0].borrow().data.text.clone();
+    let e = item.entries[0].borrow();
+    let text = e.data.text.clone();
+    // Sent while Claude worked: waiting for the current step, or how it got in.
+    let note = if e.queued {
+        Some("Queued")
+    } else {
+        match e.delivery.as_deref() {
+            Some("steered") => Some("Steered"),
+            Some("interrupted") => Some("Interrupted and sent"),
+            _ => None,
+        }
+    };
+    let queued = e.queued;
+    drop(e);
     div()
         .w_full()
         .flex()
-        .justify_end()
+        .flex_col()
+        .items_end()
+        .gap(px(2.))
         .py(px(4.))
+        .when_some(note, |d, n| d.child(div().text_size(px(11.)).text_color(theme.secondary).child(n)))
         .child(
             div()
                 .max_w(gpui_kit::relative(0.8))
@@ -47,6 +63,7 @@ fn user_row(item: &Item, theme: &Theme) -> AnyElement {
                 .px(px(12.))
                 .py(px(8.))
                 .rounded(px(14.))
+                .when(queued, |d| d.opacity(0.6))
                 .child(text),
         )
         .into_any_element()
@@ -111,7 +128,7 @@ fn styled_text(styled: &Text, theme: &Theme) -> StyledText {
     StyledText::new(text).with_highlights(styled.spans.iter().map(|(r, s)| (r.clone(), highlight_style(*s, theme))))
 }
 
-fn markdown_view(md: &markdown::Markdown, theme: &Theme) -> impl IntoElement {
+pub fn markdown_view(md: &markdown::Markdown, theme: &Theme) -> impl IntoElement {
     let mut column = div().flex().flex_col().gap(px(8.)).w_full();
     for block in &md.blocks {
         let element: AnyElement = match block {
@@ -187,7 +204,7 @@ fn markdown_view(md: &markdown::Markdown, theme: &Theme) -> impl IntoElement {
 }
 
 /// A tool call's one-line gist: the command, the file, the pattern.
-pub fn tool_gist(e: &crate::model::Entry) -> String {
+pub fn tool_gist(e: &crate::state::thread::Entry) -> String {
     if let Some(sub) = &e.sub {
         if !sub.description.is_empty() {
             return sub.description.clone();

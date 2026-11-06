@@ -9,10 +9,17 @@ and what each chunk covers. The SwiftUI app this replaces is frozen in `legacy/Y
 
 ## Layout
 
-- `crates/yh-core`: storage (`harness.sqlite`), `claude` processes and stream-json, Claude Code
-  history, markdown, and later memory, git, forge, MCP servers. No GPUI.
-- `crates/yh-app`: the app. `app.rs`, `model.rs` (state), `rows.rs` (transcript rows),
-  `platform.rs` (AppKit), `probe.rs` (the perf run), `theme.rs`.
+- `crates/yh-core`: storage (`db.rs`, `harness.sqlite` in the Swift app's format; `library.rs`,
+  project and thread records), `claude` processes and stream-json (`claude.rs`), Claude Code
+  history (`history.rs`), crash recovery (`recovery.rs`), markdown, and later memory, git, forge,
+  MCP servers. No GPUI. `cargo test -p yh-core` reads the `extreme` preset when it's there.
+- `crates/yh-app`: the app.
+  - `state/`: what it knows, no drawing. `workspace.rs` owns projects, threads, selection,
+    each thread's `claude` and every request (send, stop, allow, pin, rename…), and emits
+    `WorkspaceEvent`s; `thread.rs` holds a thread's rows.
+  - `ui/`: `root.rs` (window, transcript deck), `sidebar.rs`, `transcript.rs`, `rows.rs`,
+    `composer.rs` (with the permission, question and plan cards).
+  - `platform.rs` (AppKit), `probe.rs` (the perf run), `theme.rs`.
 - `patches/`, `scripts/vendor.sh`: GPUI crates we patch, unpacked into `vendor/` (not
   committed). Today only `gpui-pre-macos`: `GPUI_KEEP_DRAWING=1` draws a window parked off
   screen.
@@ -41,9 +48,11 @@ run must never put a macOS privacy prompt on screen: never run `screencapture`. 
 `FEATURES=snapshots` build and `YH_SNAPSHOT=<png>` (`Window::render_to_image`). Use Haiku and a
 throwaway folder for real turns.
 
-Launch options: `YH_DATA_DIR`, `YH_NO_CLAUDE=1` (no Claude Code history), `YH_CLAUDE_CONFIG`,
-`YH_CLAUDE_LIMIT`, `YH_PROJECT=<folder>`, `YH_SELECT=<title or id>`, and `YH_SEND` / `YH_MODEL` /
-`YH_MODE` / `YH_ANSWER=allow|deny` (one real turn, prompts answered by themselves). Also
+Launch options: `YH_DATA_DIR`, `YH_CLAUDE_HISTORY=1` (also list Claude Code's own sessions,
+`YH_CLAUDE_CONFIG`, `YH_CLAUDE_LIMIT`), `YH_PROJECT=<folder>` (a project of its own, its mode
+`YH_MODE`: `ask` shows permission cards, `plan` plan cards), `YH_SELECT=<title or id>`, and
+`YH_SEND` / `YH_MODEL` / `YH_EFFORT` / `YH_ANSWER=allow|deny` (one real turn, prompts answered by
+themselves). Also
 `YH_SNAPSHOT=<png>` (`_DELAY`, `_QUIT`), `YH_BACKGROUND=1`, `YH_TIMING=1` and `YH_EVENT_LOG=1`.
 
 ## Performance is the product

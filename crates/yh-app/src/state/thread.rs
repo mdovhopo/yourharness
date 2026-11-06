@@ -32,12 +32,27 @@ pub struct Entry {
     pub seq: usize,
     /// When it was written (seconds since 1970), for rows made here.
     pub date: Option<f64>,
+    /// Your message, sent while Claude works, waiting for the current step to end.
+    pub queued: bool,
+    /// How your message reached Claude: `steered` (joined the turn), `interrupted` (stopped it).
+    pub delivery: Option<String>,
 }
 
 pub type EntryRef = Rc<RefCell<Entry>>;
 
 fn entry(data: EntryData, seq: usize) -> EntryRef {
-    Rc::new(RefCell::new(Entry { data, live: false, sub: None, version: 0, open: false, markdown: None, seq, date: None }))
+    Rc::new(RefCell::new(Entry {
+        data,
+        live: false,
+        sub: None,
+        version: 0,
+        open: false,
+        markdown: None,
+        seq,
+        date: None,
+        queued: false,
+        delivery: None,
+    }))
 }
 
 fn kind_name(kind: Kind) -> &'static str {
@@ -63,6 +78,7 @@ impl Entry {
             tool_result: full_result.or_else(|| self.data.tool_result.clone()),
             tool_is_error: (self.data.kind == Kind::Tool && self.data.tool_result.is_some()).then_some(self.data.is_error),
             date: self.date,
+            delivery: self.delivery.clone(),
             ..Default::default()
         }
     }
@@ -112,6 +128,8 @@ pub struct ThreadState {
     pub items: Vec<Item>,
     pub list: ListState,
     pub running: bool,
+    /// A turn ended while you were elsewhere.
+    pub unread: bool,
     pub permission: Option<Permission>,
     /// Rows of the history before the first one held.
     pub before: usize,
@@ -144,6 +162,7 @@ impl ThreadState {
             items: vec![],
             list: ListState::new(0, ListAlignment::Bottom, px(800.)),
             running: false,
+            unread: false,
             permission: None,
             before: 0,
             loaded: false,
@@ -338,10 +357,26 @@ impl ThreadState {
         self.touch_pos(pos);
     }
 
-    pub fn add_user(&mut self, text: &str) {
-        self.next_note += 1;
-        let id = format!("u{}", self.next_note);
-        self.append(EntryData::new(id, Kind::User, text));
+    /// Your message, as sent: `id` is what the CLI's lifecycle events name it by.
+    pub fn add_user(&mut self, text: &str, id: &str, queued: bool, delivery: Option<&str>) {
+        let e = self.append(EntryData::new(id, Kind::User, text));
+        let mut b = e.borrow_mut();
+        b.queued = queued;
+        b.delivery = delivery.map(str::to_string);
+    }
+
+    /// The CLI says where your message is.
+    fn lifecycle(&mut self, id: &str, state: &str) {
+        let found = self.items.iter().rev().take(40).flat_map(|i| i.entries.iter()).find(|e| e.borrow().data.id == id).cloned();
+        let Some(e) = found else { return };
+        let queued = state == "queued";
+        if e.borrow().queued != queued {
+            e.borrow_mut().queued = queued;
+            self.touch(&e);
+        }
+        if state == "cancelled" {
+            self.notice("That message was withdrawn before Claude read it.");
+        }
     }
 
     pub fn notice(&mut self, text: &str) {
@@ -357,6 +392,11 @@ impl ThreadState {
                 self.session_id = Some(id);
                 false
             }
+            Event::Lifecycle { id, state } => {
+                self.lifecycle(&id, &state);
+                false
+            }
+            Event::Catalog { .. } | Event::Limits(_) => false,
             Event::BlockStart { message, index, parent, kind } => {
                 if let Some(parent) = parent {
                     self.subagent_step(&parent);

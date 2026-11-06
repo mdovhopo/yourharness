@@ -1,0 +1,351 @@
+//! Projects with their threads: Home first, then as saved; in each, pinned threads, then the
+//! newest; settled ones on a shelf of their own. Right-click a thread for Rename, Pin, Settle
+//! and Delete; double-click renames. One flat column of rows, so a row can be scrolled to by
+//! index. A cached view: it redraws when the workspace says something changed, not per delta.
+
+use crate::probe;
+use crate::state::thread::ThreadState;
+use crate::state::workspace::Workspace;
+use crate::theme::Theme;
+use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::menu::{ContextMenuExt, PopupMenuItem};
+use gpui_kit::component::WindowExt;
+use gpui_kit::{div, prelude::*, px, App, Context, Entity, FontWeight, ScrollHandle, SharedString, Subscription, Window};
+use std::collections::{HashMap, HashSet};
+use yh_core::library::ProjectMeta;
+
+const SHOWN_PER_PROJECT: usize = 12;
+
+pub struct Sidebar {
+    workspace: Entity<Workspace>,
+    /// Projects showing all their threads, and those with their Settled shelf open.
+    expanded: HashSet<String>,
+    shelves: HashSet<String>,
+    pub scroll: ScrollHandle,
+    renaming: Option<(String, Entity<InputState>, Subscription)>,
+    _observe: Subscription,
+}
+
+enum SidebarRow {
+    Project(ProjectMeta, bool),
+    Thread(Entity<ThreadState>),
+    More(String, usize, bool),
+    Shelf(String, usize, bool),
+    AddProject,
+}
+
+impl Sidebar {
+    pub fn new(workspace: Entity<Workspace>, _window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let observe = cx.observe(&workspace, |_, _, cx| cx.notify());
+        Sidebar {
+            workspace,
+            expanded: HashSet::new(),
+            shelves: HashSet::new(),
+            scroll: ScrollHandle::new(),
+            renaming: None,
+            _observe: observe,
+        }
+    }
+
+    fn rows(&self, cx: &App) -> Vec<SidebarRow> {
+        let ws = self.workspace.read(cx);
+        let home = ws.home_project();
+        let mut by_project: HashMap<&str, Vec<&Entity<ThreadState>>> = HashMap::new();
+        for t in &ws.threads {
+            by_project.entry(t.read(cx).meta.project_id.as_str()).or_default().push(t);
+        }
+        let mut projects: Vec<&ProjectMeta> = ws.projects.iter().collect();
+        projects.sort_by_key(|p| Some(&p.id) != home.as_ref());
+        let mut rows = vec![];
+        for project in projects {
+            rows.push(SidebarRow::Project(project.clone(), Some(&project.id) == home.as_ref()));
+            let threads = by_project.get(project.id.as_str()).cloned().unwrap_or_default();
+            let (mut live, mut settled): (Vec<_>, Vec<_>) = threads.into_iter().partition(|t| t.read(cx).meta.settled_at.is_none());
+            live.sort_by(|a, b| {
+                let (a, b) = (&a.read(cx).meta, &b.read(cx).meta);
+                b.pinned.cmp(&a.pinned).then(b.updated_at.total_cmp(&a.updated_at))
+            });
+            settled.sort_by(|a, b| b.read(cx).meta.settled_at.unwrap_or(0.).total_cmp(&a.read(cx).meta.settled_at.unwrap_or(0.)));
+            let all = self.expanded.contains(&project.id);
+            let shown = if all { live.len() } else { live.len().min(SHOWN_PER_PROJECT) };
+            rows.extend(live[..shown].iter().map(|t| SidebarRow::Thread((*t).clone())));
+            if live.len() > SHOWN_PER_PROJECT {
+                rows.push(SidebarRow::More(project.id.clone(), live.len() - SHOWN_PER_PROJECT, all));
+            }
+            if !settled.is_empty() {
+                let open = self.shelves.contains(&project.id);
+                rows.push(SidebarRow::Shelf(project.id.clone(), settled.len(), open));
+                if open {
+                    rows.extend(settled.iter().map(|t| SidebarRow::Thread((*t).clone())));
+                }
+            }
+        }
+        rows.push(SidebarRow::AddProject);
+        rows
+    }
+
+    /// The thread's row, for scrolling it into view as a person would before clicking.
+    pub fn row_index(&self, id: &str, cx: &App) -> Option<usize> {
+        self.rows(cx).iter().position(|r| matches!(r, SidebarRow::Thread(t) if t.read(cx).id() == id))
+    }
+
+    pub fn more_index(&self, project_id: &str, cx: &App) -> Option<usize> {
+        self.rows(cx).iter().position(|r| matches!(r, SidebarRow::More(p, _, false) if p == project_id))
+    }
+
+    fn start_rename(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(thread) = self.workspace.read(cx).thread(id) else { return };
+        let title = thread.read(cx).title.clone();
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(title));
+        input.update(cx, |i, cx| {
+            i.focus(window, cx);
+            i.select_all(window, cx);
+        });
+        let id2 = id.to_string();
+        let sub = cx.subscribe_in(&input, window, move |this, input, event: &InputEvent, _, cx| match event {
+            InputEvent::PressEnter { .. } | InputEvent::Blur => {
+                let title = input.read(cx).value().to_string();
+                this.renaming = None;
+                let id = id2.clone();
+                this.workspace.update(cx, |ws, cx| ws.rename(&id, &title, cx));
+                cx.notify();
+            }
+            _ => {}
+        });
+        self.renaming = Some((id.to_string(), input, sub));
+        cx.notify();
+    }
+
+    fn confirm_delete(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(thread) = self.workspace.read(cx).thread(id) else { return };
+        let title = thread.read(cx).title.clone();
+        let ws = self.workspace.downgrade();
+        let id = id.to_string();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let (ws, id) = (ws.clone(), id.clone());
+            alert
+                .title(format!("Delete “{title}”?"))
+                .description("Its history is removed from YourHarness. Claude Code's own session file stays.")
+                .ok_text("Delete")
+                .show_cancel(true)
+                .on_ok(move |_, _, cx| {
+                    let _ = ws.update(cx, |ws, cx| ws.delete(&id, cx));
+                    true
+                })
+        });
+    }
+
+    fn add_project(&mut self, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Add Project".into()),
+        });
+        let ws = self.workspace.downgrade();
+        cx.spawn(async move |_, cx| {
+            if let Ok(Ok(Some(paths))) = paths.await {
+                if let Some(path) = paths.first() {
+                    let path = path.to_string_lossy().to_string();
+                    let _ = ws.update(cx, |ws, cx| ws.add_project(&path, cx));
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn thread_row(&self, thread: &Entity<ThreadState>, selected: Option<&str>, theme: &Theme, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let t = thread.read(cx);
+        let id = t.id().to_string();
+        let is_selected = selected == Some(id.as_str());
+        if let Some((rid, input, _)) = &self.renaming {
+            if *rid == id {
+                return div().px(px(4.)).py(px(2.)).child(Input::new(input)).into_any_element();
+            }
+        }
+        let waiting = t.permission.is_some();
+        let running = t.running && !waiting;
+        let unread = t.unread && !is_selected;
+        let pinned = t.meta.pinned;
+        let settled = t.meta.settled_at.is_some();
+        let tracking = probe::enabled();
+        let ws = self.workspace.clone();
+        let click_id = id.clone();
+        let menu_id = id.clone();
+        let this = cx.entity().downgrade();
+        div()
+            .id(SharedString::from(format!("thread-{id}")))
+            .relative()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .w_full()
+            .h(px(28.))
+            .px(px(8.))
+            .rounded(px(6.))
+            .when(is_selected, |d| d.bg(theme.accent).text_color(gpui_kit::white()))
+            .when(!is_selected, |d| d.hover(|s| s.bg(theme.selected)))
+            .when(settled && !is_selected, |d| d.text_color(theme.secondary))
+            .when(pinned, |d| d.child(div().text_size(px(8.)).opacity(0.7).child("●")))
+            .child(
+                div()
+                    .flex_1()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .when(unread, |d| d.font_weight(FontWeight::SEMIBOLD))
+                    .child(t.title.clone()),
+            )
+            .when(waiting, |d| {
+                d.child(
+                    div()
+                        .text_size(px(10.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .px(px(6.))
+                        .rounded(px(8.))
+                        .bg(theme.warning)
+                        .text_color(gpui_kit::white())
+                        .child("waiting"),
+                )
+            })
+            .when(running, |d| {
+                d.child(div().w(px(7.)).h(px(7.)).rounded_full().bg(if is_selected { gpui_kit::white() } else { theme.accent }))
+            })
+            .when(unread && !running && !waiting, |d| d.child(div().w(px(7.)).h(px(7.)).rounded_full().bg(theme.accent)))
+            .when(tracking, |d| d.child(probe::tracker(format!("thread:{id}"))))
+            .on_click(move |event, window, cx| {
+                let id = click_id.clone();
+                if event.click_count() == 2 {
+                    let _ = this.update(cx, |s, cx| s.start_rename(&id, window, cx));
+                    return;
+                }
+                ws.update(cx, |ws, cx| ws.select(&id, cx));
+            })
+            .context_menu({
+                let this = cx.entity().downgrade();
+                let ws = self.workspace.downgrade();
+                move |menu, _, _| {
+                    let (a, b, c, d) = (this.clone(), ws.clone(), ws.clone(), this.clone());
+                    let (i1, i2, i3, i4) = (menu_id.clone(), menu_id.clone(), menu_id.clone(), menu_id.clone());
+                    menu.item(PopupMenuItem::new("Rename…").on_click(move |_, window, cx| {
+                        let _ = a.update(cx, |s, cx| s.start_rename(&i1, window, cx));
+                    }))
+                    .item(PopupMenuItem::new(if pinned { "Unpin" } else { "Pin" }).on_click(move |_, _, cx| {
+                        let _ = b.update(cx, |ws, cx| ws.set_pinned(&i2, !pinned, cx));
+                    }))
+                    .item(PopupMenuItem::new(if settled { "Bring Back" } else { "Settle" }).on_click(move |_, _, cx| {
+                        let _ = c.update(cx, |ws, cx| ws.set_settled(&i3, !settled, cx));
+                    }))
+                    .separator()
+                    .item(PopupMenuItem::new("Delete…").on_click(move |_, window, cx| {
+                        let _ = d.update(cx, |s, cx| s.confirm_delete(&i4, window, cx));
+                    }))
+                }
+            })
+            .into_any_element()
+    }
+}
+
+fn small_row(id: SharedString, label: String, theme: &Theme) -> gpui_kit::Stateful<gpui_kit::Div> {
+    div()
+        .id(id)
+        .relative()
+        .px(px(8.))
+        .py(px(3.))
+        .text_size(px(11.))
+        .text_color(theme.secondary)
+        .rounded(px(5.))
+        .hover(|s| s.bg(theme.selected))
+        .child(label)
+}
+
+impl Render for Sidebar {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::get(cx);
+        let selected = self.workspace.read(cx).selected.clone();
+        let tracking = probe::enabled();
+        let mut column = div()
+            .id("sidebar-scroll")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .track_scroll(&self.scroll)
+            .px(px(8.))
+            .pb(px(16.));
+        for row in self.rows(cx) {
+            let element = match row {
+                SidebarRow::Project(project, home) => {
+                    let ws = self.workspace.clone();
+                    let pid = project.id.clone();
+                    div()
+                        .flex()
+                        .items_center()
+                        .px(px(6.))
+                        .pt(px(10.))
+                        .pb(px(2.))
+                        .text_color(theme.secondary)
+                        .text_size(px(11.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(div().flex_1().overflow_hidden().whitespace_nowrap().child(if home { "Home".to_string() } else { project.name.clone() }))
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("new-{}", project.id)))
+                                .w(px(20.))
+                                .h(px(20.))
+                                .rounded(px(5.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_size(px(15.))
+                                .hover(|s| s.bg(theme.selected))
+                                .child("+")
+                                .on_click(move |_, _, cx| {
+                                    let pid = pid.clone();
+                                    ws.update(cx, |ws, cx| {
+                                        ws.new_thread(&pid, cx);
+                                    });
+                                }),
+                        )
+                        .into_any_element()
+                }
+                SidebarRow::Thread(thread) => self.thread_row(&thread, selected.as_deref(), &theme, cx),
+                SidebarRow::More(project, count, all) => {
+                    let key = project.clone();
+                    small_row(SharedString::from(format!("more-{project}")), if all { "Show less".into() } else { format!("Show {count} more") }, &theme)
+                        .when(tracking, |d| d.child(probe::tracker(format!("more:{project}"))))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if !this.expanded.remove(&key) {
+                                this.expanded.insert(key.clone());
+                            }
+                            cx.notify();
+                        }))
+                        .into_any_element()
+                }
+                SidebarRow::Shelf(project, count, open) => {
+                    let key = project.clone();
+                    small_row(SharedString::from(format!("shelf-{project}")), if open { "Hide settled".into() } else { format!("Settled ({count})") }, &theme)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if !this.shelves.remove(&key) {
+                                this.shelves.insert(key.clone());
+                            }
+                            cx.notify();
+                        }))
+                        .into_any_element()
+                }
+                SidebarRow::AddProject => small_row("add-project".into(), "+ Add Project…".into(), &theme)
+                    .mt(px(8.))
+                    .on_click(cx.listener(|this, _, _, cx| this.add_project(cx)))
+                    .into_any_element(),
+            };
+            column = column.child(element);
+        }
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(theme.sidebar)
+            .border_r_1()
+            .border_color(theme.separator)
+            .child(div().h(px(44.)).flex_none())
+            .child(column)
+    }
+}

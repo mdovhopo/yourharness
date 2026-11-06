@@ -72,6 +72,36 @@ pub struct ProjectMeta {
     pub id: String,
     pub name: String,
     pub path: String,
+    /// The app's permission mode for the project's threads: `auto`, `ask`, `acceptEdits`,
+    /// `plan`, `bypass` (see `cli_mode`).
+    pub mode: String,
+}
+
+/// The app's permission mode as the CLI's `--permission-mode` (none for `ask`: the default).
+pub fn cli_mode(mode: &str) -> Option<&'static str> {
+    match mode {
+        "ask" | "default" => None,
+        "bypass" | "bypassPermissions" => Some("bypassPermissions"),
+        "acceptEdits" => Some("acceptEdits"),
+        "plan" => Some("plan"),
+        _ => Some("auto"),
+    }
+}
+
+/// As `set_permission_mode` names it, mid-session.
+pub fn control_mode(mode: &str) -> &'static str {
+    cli_mode(mode).unwrap_or("default")
+}
+
+impl ProjectMeta {
+    fn from_record(id: String, o: &Map<String, Value>) -> ProjectMeta {
+        ProjectMeta {
+            id,
+            name: o.get("name").and_then(Value::as_str).unwrap_or("Project").to_string(),
+            path: o.get("path").and_then(Value::as_str).unwrap_or("").to_string(),
+            mode: o.get("permissionMode").and_then(Value::as_str).unwrap_or("auto").to_string(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -79,8 +109,63 @@ pub struct ThreadMeta {
     pub id: String,
     pub project_id: String,
     pub title: String,
+    /// Milliseconds since 1970: the later of last activity and when it was brought back.
     pub updated_at: f64,
     pub session_id: Option<String>,
+    pub pinned: bool,
+    /// When it was put on its project's Settled shelf (ms).
+    pub settled_at: Option<f64>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub draft: Option<String>,
+    /// Renamed by hand: generated titles leave it alone.
+    pub title_chosen: bool,
+    /// A turn was running when the app last saved: a quit or crash cut it off.
+    pub turn_in_progress: bool,
+    /// Where its `claude` runs, when not the project's folder (a worktree).
+    pub working_directory: Option<String>,
+}
+
+impl ThreadMeta {
+    pub fn new(id: String, project_id: String, title: String) -> ThreadMeta {
+        ThreadMeta {
+            id,
+            project_id,
+            title,
+            updated_at: now_ms(),
+            session_id: None,
+            pinned: false,
+            settled_at: None,
+            model: None,
+            effort: None,
+            draft: None,
+            title_chosen: false,
+            turn_in_progress: false,
+            working_directory: None,
+        }
+    }
+
+    /// From a thread's record as the Swift app writes it.
+    pub fn from_record(id: String, project_id: String, updated_at: Option<f64>, session_id: Option<String>, o: &Map<String, Value>) -> ThreadMeta {
+        let s = |k: &str| o.get(k).and_then(Value::as_str).map(str::to_string);
+        let ms = |k: &str| o.get(k).and_then(Value::as_str).and_then(parse_iso).map(|t| t * 1000.0);
+        let updated = updated_at.map(|t| t * 1000.0).or_else(|| ms("updatedAt")).unwrap_or(0.0);
+        ThreadMeta {
+            id,
+            project_id,
+            title: s("title").unwrap_or_else(|| "Thread".into()),
+            updated_at: updated.max(ms("reactivatedAt").unwrap_or(0.0)),
+            session_id: session_id.or_else(|| s("sessionID")),
+            pinned: o.get("isPinned").and_then(Value::as_bool).unwrap_or(false),
+            settled_at: ms("settledAt"),
+            model: s("model").filter(|m| !m.is_empty()),
+            effort: s("effort").filter(|m| !m.is_empty()),
+            draft: s("draft").filter(|m| !m.is_empty()),
+            title_chosen: o.get("titleChosen").and_then(Value::as_bool).unwrap_or(false),
+            turn_in_progress: o.get("turnInProgress").and_then(Value::as_bool).unwrap_or(false),
+            working_directory: s("workingDirectory"),
+        }
+    }
 }
 
 pub struct Page {
@@ -152,32 +237,21 @@ impl Library {
             let mut records = Records { values: state.values, ..Default::default() };
             for (id, json) in state.projects {
                 let Ok(Value::Object(object)) = serde_json::from_slice::<Value>(&json) else { continue };
-                self.projects.push(ProjectMeta {
-                    id,
-                    name: object.get("name").and_then(Value::as_str).unwrap_or("Project").to_string(),
-                    path: object.get("path").and_then(Value::as_str).unwrap_or("").to_string(),
-                });
+                self.projects.push(ProjectMeta::from_record(id, &object));
                 records.projects.push(object);
             }
             for t in state.threads {
                 let Ok(Value::Object(object)) = serde_json::from_slice::<Value>(&t.json) else { continue };
-                self.threads.push(ThreadMeta {
-                    id: t.id,
-                    project_id: t.project_id,
-                    title: object.get("title").and_then(Value::as_str).unwrap_or("Thread").to_string(),
-                    updated_at: t.updated_at.map(|s| s * 1000.0).unwrap_or(0.0),
-                    session_id: t.session_id,
-                });
+                self.threads.push(ThreadMeta::from_record(t.id, t.project_id, t.updated_at, t.session_id, &object));
                 records.threads.push(object);
             }
             *self.records.lock().unwrap() = records;
         }
         // `YH_PROJECT=<folder>`: a project of its own, for trying live turns somewhere throwaway.
         if let Some(path) = env("YH_PROJECT") {
-            self.projects.insert(
-                0,
-                ProjectMeta { id: format!("dir:{path}"), name: last_component(&path), path },
-            );
+            // `YH_MODE` sets its permission mode (`ask` to see permission cards).
+            let mode = env("YH_MODE").unwrap_or_else(|| "auto".into());
+            self.projects.insert(0, ProjectMeta { id: format!("dir:{path}"), name: last_component(&path), path, mode });
         }
         if let Some(config) = self.claude_config.clone() {
             let limit = env("YH_CLAUDE_LIMIT").and_then(|v| v.parse().ok()).unwrap_or(400);
@@ -188,17 +262,14 @@ impl Library {
                 let path = cwd.unwrap_or_else(|| file.folder.clone());
                 let project_id = format!("cc:{path}");
                 if by_path.insert(path.clone(), ()).is_none() {
-                    self.projects.push(ProjectMeta { id: project_id.clone(), name: last_component(&path), path });
+                    self.projects.push(ProjectMeta { id: project_id.clone(), name: last_component(&path), path, mode: "auto".into() });
                 }
                 let id = format!("cc:{}", file.session_id);
                 self.session_files.insert(id.clone(), file.path);
-                self.threads.push(ThreadMeta {
-                    id,
-                    project_id,
-                    title,
-                    updated_at: file.modified,
-                    session_id: Some(file.session_id),
-                });
+                let mut meta = ThreadMeta::new(id, project_id, title);
+                meta.updated_at = file.modified;
+                meta.session_id = Some(file.session_id);
+                self.threads.push(meta);
             }
         }
         eprintln!(
@@ -245,7 +316,57 @@ impl Library {
         object.insert("updatedAt".into(), now.into());
         self.records.lock().unwrap().threads.insert(0, object);
         self.save();
-        ThreadMeta { id, project_id: project_id.into(), title: title.into(), updated_at: now_ms(), session_id: None }
+        ThreadMeta::new(id, project_id.into(), title.into())
+    }
+
+    /// Removes a thread and its transcript.
+    pub fn remove_thread(&self, id: &str) {
+        self.records.lock().unwrap().threads.retain(|t| t.get("id").and_then(Value::as_str) != Some(id));
+        if let Some(db) = &self.db {
+            db.delete_transcript(id);
+        }
+        self.save();
+    }
+
+    /// Changes a project's record (`permissionMode`…) and saves.
+    pub fn update_project(&self, id: &str, change: impl FnOnce(&mut Map<String, Value>)) {
+        let mut records = self.records.lock().unwrap();
+        let Some(p) = records.projects.iter_mut().find(|p| p.get("id").and_then(Value::as_str) == Some(id)) else { return };
+        change(p);
+        drop(records);
+        self.save();
+    }
+
+    /// A folder as a project; the one already there if it's known.
+    pub fn add_project(&self, path: &str) -> ProjectMeta {
+        let mut records = self.records.lock().unwrap();
+        if let Some(p) = records.projects.iter().find(|p| p.get("path").and_then(Value::as_str) == Some(path)) {
+            let id = p.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+            return ProjectMeta::from_record(id, p);
+        }
+        let id = new_uuid();
+        let mut object = Map::new();
+        object.insert("id".into(), id.clone().into());
+        object.insert("name".into(), last_component(path).into());
+        object.insert("path".into(), path.into());
+        object.insert("permissionMode".into(), "auto".into());
+        let meta = ProjectMeta::from_record(id, &object);
+        records.projects.push(object);
+        drop(records);
+        self.save();
+        meta
+    }
+
+    /// A setting as JSON (`defaults`, `claudeModels`, `homeProjectID`…).
+    pub fn setting(&self, key: &str) -> Option<Value> {
+        let records = self.records.lock().unwrap();
+        records.values.get(key).and_then(|v| serde_json::from_slice(v).ok())
+    }
+
+    pub fn set_setting(&self, key: &str, value: &Value) {
+        let bytes = serde_json::to_vec(value).unwrap_or_default();
+        self.records.lock().unwrap().values.insert(key.to_string(), bytes);
+        self.save();
     }
 
     /// Changes a thread's record (`title`, `sessionID`, `updatedAt`…) and saves.

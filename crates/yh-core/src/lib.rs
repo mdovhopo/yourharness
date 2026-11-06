@@ -7,4 +7,5 @@ pub mod db;
 pub mod schema;
 pub mod history;
 pub mod library;
+pub mod recovery;
 pub mod markdown;
