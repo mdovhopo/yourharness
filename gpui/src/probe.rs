@@ -345,9 +345,14 @@ impl Probe {
     }
 
     async fn typing(&mut self, until: Instant) {
-        if self.real_events && self.click_key("composer").await.is_none() {
+        // Into the field itself (the composer's first line), as you'd click to type.
+        let Some(b) = bounds("composer") else {
             log("FAIL: no composer");
             return;
+        };
+        if self.real_events {
+            let (x, y) = (f32::from(b.origin.x) + 60.0, f32::from(b.origin.y) + 20.0);
+            platform::click(self.ns, x, y);
         }
         self.painted().await;
         let letters: Vec<char> = "the quick brown fox jumps over the lazy dog ".chars().collect();

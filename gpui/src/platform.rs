@@ -268,3 +268,17 @@ pub fn run_is_valid() -> bool {
         !locked && !asleep
     }
 }
+
+/// Keeps macOS from napping the app (App Nap: timers and the display link slowed down for an
+/// app in the background that nobody seems to watch). A parked test window is exactly that, and
+/// a run collapsed to 9 fps with the main thread idle about five minutes in until this was on.
+pub fn hold_off_app_nap() {
+    unsafe {
+        let info: id = msg_send![class!(NSProcessInfo), processInfo];
+        // NSActivityUserInitiated | NSActivityLatencyCritical
+        let options: u64 = 0x00FFFFFF | 0xFF00000000;
+        let reason = NSString::alloc(nil).init_str("Performance run");
+        let token: id = msg_send![info, beginActivityWithOptions: options reason: reason];
+        let _: id = msg_send![token, retain];
+    }
+}

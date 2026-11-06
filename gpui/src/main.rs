@@ -33,6 +33,9 @@ fn main() {
     if env("YHG_PERF").is_some() || env("YHG_BACKGROUND").as_deref() == Some("1") {
         std::env::set_var("GPUI_KEEP_DRAWING", "1");
     }
+    if env("YHG_PERF").is_some() && env("YHG_APP_NAP").as_deref() != Some("1") {
+        platform::hold_off_app_nap();
+    }
     if env("YHG_SNAPSHOT").is_some() {
         std::env::set_var("GPUI_SNAPSHOTS", "1");
     }
