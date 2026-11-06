@@ -1,0 +1,591 @@
+import Foundation
+import HarnessCore
+
+/// `mcp__threads__…`: an agent looks through the app's threads (list, read, search), tidies
+/// them (rename, settle, pin) and brings in Claude Code sessions, the way you would from the
+/// sidebar and the Resume sheet. It can't delete anything. A thread in Home reaches every
+/// project; a thread anywhere else only its own project's threads, and only sessions that ran
+/// in that project's folder. With title updates on, it can also have its own thread's title
+/// rewritten by the title model when the subject changes.
+///
+/// Names, schemas and result text are the frozen app's (`legacy/YourHarness/Support/ThreadTools.swift`):
+/// agents already use them.
+struct ThreadToolServer: MCPToolServer {
+    let name = "threads"
+    let tools: [MCPTool]
+    let threads: ThreadTools
+
+    init(threads: ThreadTools, updatesTitle: Bool) {
+        self.threads = threads
+        tools = ThreadTools.definitions + (updatesTitle ? [ThreadTools.updateTitle] : [])
+    }
+
+    /// Calls come from the session's reader, off the main actor: they hop to it here.
+    func call(_ tool: String, arguments: JSONValue, toolUseID: String?) async -> MCPToolResult {
+        await threads.call(tool, arguments)
+    }
+}
+
+extension Backend {
+    /// The `threads` server for a thread's session: what it reaches depends on its project.
+    public func threadToolServer(for threadID: String) -> any MCPToolServer {
+        ThreadToolServer(threads: ThreadTools(caller: threadID, backend: self), updatesTitle: agentTitleUpdatesOn)
+    }
+
+    /// What the thread's agent is told about the thread tools, for its system prompt.
+    public func threadInstructions(for threadID: String) -> String {
+        let projectID = library.thread(threadID)?["projectID"] as? String
+        let project = projectID.flatMap { library.project($0) }
+        let isHome = projectID != nil && projectID == library.setting("homeProjectID") as? String
+        return AgentInstructions.threads(project: isHome ? nil : (project?["name"] as? String ?? "this one"),
+                                         updatesTitle: agentTitleUpdatesOn)
+    }
+
+    /// Whether a thread's agent gets `update_title`: the setting is on (it is unless turned
+    /// off) and titles are generated at all.
+    var agentTitleUpdatesOn: Bool {
+        let titles = library.setting("titleGeneration") as? [String: Any]
+        return (library.setting("agentUpdatesTitles") as? Bool ?? true) && titles?["provider"] != nil
+    }
+
+    /// A thread's user and finished assistant messages, oldest first: what a regenerated
+    /// title reads. Saved rows are read off the main thread.
+    func titleMessages(_ th: String) async -> [ThreadTitlePrompt.Message] {
+        let entries = await transcriptForReading(th, includeStreaming: false)
+        return entries.compactMap { entry in
+            switch entry.kind {
+            case .user: ThreadTitlePrompt.Message(role: .user, text: entry.text)
+            case .assistant: ThreadTitlePrompt.Message(role: .assistant, text: entry.text)
+            default: nil
+            }
+        }
+    }
+
+    /// The whole transcript as saved, plus the rows held live past it (a streaming answer as
+    /// it stands, unless `includeStreaming` is off). Saved rows are read off the main thread.
+    func transcriptForReading(_ th: String, includeStreaming: Bool = true) async -> [EntrySnapshot] {
+        guard let uuid = UUID(uuidString: th) else { return [] }
+        let base = store.base(th)
+        let held = store.entries(th).filter { includeStreaming || !$0.live || $0.kind != .assistant }.map { $0.snapshot(fullResult: nil) }
+        let db = library.db
+        let saved = await Task.detached(priority: .userInitiated) { () -> [EntrySnapshot] in
+            guard let base else { return db.loadTranscript(uuid) }
+            return db.loadTranscriptPage(uuid, from: 0, limit: base)
+        }.value
+        return saved + held
+    }
+
+    /// The thread's title written again from the whole conversation, with the agent's hint,
+    /// on the title model from Settings; kept if still accurate, never over a chosen one.
+    /// Left out next to the frozen app: linked PR/issue context (`TitleLinkedContext`, needs `gh`).
+    func regenerateTitle(_ th: String, messages: [ThreadTitlePrompt.Message], hint: String?) {
+        let settings = library.setting("titleGeneration") as? [String: Any] ?? [:]
+        guard let providerName = settings["provider"] as? String, let provider = TitleGenerationSettings.Provider(rawValue: providerName),
+              messages.contains(where: { $0.role == .user }) else { return }
+        let model = settings["model"] as? String ?? provider.defaultModel
+        let rules = (library.setting("titlePrompt") as? String).flatMap { $0.isEmpty || $0 == ThreadTitlePrompt.defaultRules ? nil : $0 }
+        let previousTitle = library.thread(th)?["title"] as? String ?? ""
+        titlesBeingRewritten.insert(th)
+        Task {
+            defer { titlesBeingRewritten.remove(th) }
+            guard let (environment, executable) = try? await cli() else { return }
+            let prompt = ThreadTitlePrompt.regenerate(contents: ThreadTitlePrompt.context(for: messages), previousTitle: previousTitle,
+                                                      rules: rules, hint: hint)
+            let result = await TitleGenerator.generate(prompt: prompt, provider: provider, model: model, executable: executable, environment: environment)
+            guard case .success(let generated) = result, !generated.title.isEmpty else { return }
+            // A title you chose meanwhile stays.
+            guard library.thread(th)?["titleChosen"] as? Bool != true, generated.title != library.thread(th)?["title"] as? String else { return }
+            library.updateThread(th) { $0["title"] = generated.title }
+            threadChanged(th)
+        }
+    }
+}
+
+@MainActor
+final class ThreadTools {
+    /// The thread whose agent calls: its project decides what it reaches.
+    let caller: String
+    private weak var backend: Backend?
+
+    init(caller: String, backend: Backend) {
+        self.caller = caller
+        self.backend = backend
+    }
+
+    nonisolated static let definitions: [MCPTool] = {
+        let threadID: JSONValue = ["type": "string", "description": "The thread's id from list_threads or search_threads (its first 8 characters are enough)."]
+        return [
+            MCPTool(
+                name: "list_threads",
+                description: "List the user's threads in YourHarness that you can reach, most recent first, with their id, project, state and when they last changed.",
+                inputSchema: MCPTool.schema([
+                    "query": ["type": "string", "description": "Only threads whose title has all these words."],
+                    "project": ["type": "string", "description": "Only this project's threads (name or id). From Home only."],
+                    "include_settled": ["type": "boolean", "description": "Include settled threads (finished work on the shelf). Default false."],
+                    "limit": ["type": "integer", "minimum": 1, "maximum": 200, "description": "Default 50."],
+                ]),
+                readOnly: true),
+            MCPTool(
+                name: "read_thread",
+                description: "Read a thread's conversation: messages, Claude's replies and its tool calls, numbered. Without offset, the last entries.",
+                inputSchema: MCPTool.schema([
+                    "thread_id": threadID,
+                    "offset": ["type": "integer", "minimum": 0, "description": "The entry number to start at (from a search hit, say)."],
+                    "limit": ["type": "integer", "minimum": 1, "maximum": 100, "description": "How many entries. Default 30."],
+                ], required: ["thread_id"]),
+                readOnly: true),
+            MCPTool(
+                name: "search_threads",
+                description: "Search what was said in the threads you can reach (messages, replies, commands). Each hit gives the thread and entry number for read_thread.",
+                inputSchema: MCPTool.schema([
+                    "query": ["type": "string", "description": "Words to find; the last one may be a prefix."],
+                    "limit": ["type": "integer", "minimum": 1, "maximum": 50, "description": "Default 20."],
+                ], required: ["query"]),
+                readOnly: true),
+            MCPTool(
+                name: "rename_thread",
+                description: "Rename a thread, as the user would in the sidebar.",
+                inputSchema: MCPTool.schema([
+                    "thread_id": threadID,
+                    "title": ["type": "string", "description": "The new title: short, says what the thread is about."],
+                ], required: ["thread_id", "title"])),
+            MCPTool(
+                name: "settle_thread",
+                description: "Settle a thread (move finished work to its project's Settled shelf; the conversation stays and can be picked up again), or bring a settled one back.",
+                inputSchema: MCPTool.schema([
+                    "thread_id": threadID,
+                    "settled": ["type": "boolean", "description": "False brings it back. Default true."],
+                ], required: ["thread_id"])),
+            MCPTool(
+                name: "pin_thread",
+                description: "Pin a thread to the top of its project in the sidebar, or unpin it.",
+                inputSchema: MCPTool.schema([
+                    "thread_id": threadID,
+                    "pinned": ["type": "boolean", "description": "False unpins. Default true."],
+                ], required: ["thread_id"])),
+            MCPTool(
+                name: "list_claude_code_sessions",
+                description: "List sessions from Claude Code's own history (claude in a terminal or an editor) that you can import, most recent first, with the folder each ran in.",
+                inputSchema: MCPTool.schema([
+                    "query": ["type": "string", "description": "Only sessions whose title or first message has all these words."],
+                    "include_imported": ["type": "boolean", "description": "Include sessions that already have a thread. Default false."],
+                    "limit": ["type": "integer", "minimum": 1, "maximum": 50, "description": "Default 20."],
+                ]),
+                readOnly: true),
+            MCPTool(
+                name: "import_claude_code_session",
+                description: "Import a Claude Code session as a thread: its history shows in the thread, which continues the session (claude --resume) when the user sends a message. The user isn't taken to it.",
+                inputSchema: MCPTool.schema([
+                    "session_id": ["type": "string", "description": "From list_claude_code_sessions."],
+                    "project": ["type": "string", "description": "From Home only: the project to put it in (name or id). Default: the project for the folder it ran in, else Home."],
+                ], required: ["session_id"])),
+        ]
+    }()
+
+    nonisolated static let updateTitle = MCPTool(
+        name: "update_title",
+        description: "Have this thread's title rewritten because what the thread is about has changed: the user turned to a different task, or a vague start turned out to be about something specific. YourHarness's title model writes it from the conversation, in the background, and keeps the current title if it's still accurate. Not for progress on the same subject, and not for other threads.",
+        inputSchema: MCPTool.schema([
+            "hint": ["type": "string", "description": "What the thread is about now, in a few words: a hint for the title model, not the title itself."],
+        ]),
+        // Called on the spot when a message changes the subject: having to look it up first
+        // was enough for an agent to skip it.
+        alwaysLoad: true)
+
+    func call(_ tool: String, _ args: JSONValue) async -> MCPToolResult {
+        guard let backend, let scope = scope(backend) else { return .error("This thread is gone.") }
+        let context = Context(backend: backend, scope: scope, caller: caller)
+        do {
+            switch tool {
+            case "list_threads": return try context.list(args)
+            case "read_thread": return try await context.read(args)
+            case "search_threads": return try await context.search(args)
+            case "rename_thread": return try await context.rename(args)
+            case "settle_thread": return try await context.settle(args)
+            case "pin_thread": return try await context.pin(args)
+            case "list_claude_code_sessions": return await context.sessions(args)
+            case "import_claude_code_session": return try await context.importSession(args)
+            case "update_title": return try await context.updateTitle(args)
+            default: return .error("No tool named \(tool).")
+            }
+        } catch {
+            return .error(error.message)
+        }
+    }
+
+    /// What a thread reaches: everything from Home, else its own project.
+    private func scope(_ backend: Backend) -> Scope? {
+        guard let projectID = backend.library.thread(caller)?["projectID"] as? String,
+              let project = backend.library.project(projectID) else { return nil }
+        return projectID == backend.library.setting("homeProjectID") as? String ? .everything : .project(project)
+    }
+
+    enum Scope {
+        case everything
+        case project([String: Any])
+
+        func contains(_ thread: [String: Any]) -> Bool {
+            switch self {
+            case .everything: true
+            case .project(let project): thread["projectID"] as? String == project["id"] as? String
+            }
+        }
+    }
+
+    struct Failure: Error {
+        var message: String
+    }
+}
+
+/// One call's view of the backend: what the calling thread reaches, and the text it reads.
+@MainActor
+private struct Context {
+    typealias Failure = ThreadTools.Failure
+    typealias Record = [String: Any]
+    let backend: Backend
+    let scope: ThreadTools.Scope
+    let caller: String
+    var library: Library { backend.library }
+
+    // MARK: Reach
+
+    /// Threads the agent may see.
+    func reachable() -> [Record] {
+        library.threads.filter { scope.contains($0) }
+    }
+
+    /// A thread by id or the start of one. One outside the scope reads as not there.
+    func thread(_ args: JSONValue) throws(Failure) -> Record {
+        let given = (args["thread_id"]?.string ?? "").trimmingCharacters(in: .whitespaces).lowercased()
+        guard given.count >= 6 else { throw Failure(message: "Give thread_id: the id from list_threads (8 characters are enough).") }
+        let matches = reachable().filter { id($0).lowercased().hasPrefix(given) }
+        guard let match = matches.first else { throw Failure(message: "No thread \(given) that you can reach. list_threads shows them.") }
+        guard matches.count == 1 else { throw Failure(message: "\(given) matches \(matches.count) threads; give more of the id.") }
+        return match
+    }
+
+    /// A project named in the arguments, from Home; elsewhere only the thread's own.
+    func project(_ args: JSONValue) throws(Failure) -> Record? {
+        guard let given = args["project"]?.string?.trimmingCharacters(in: .whitespaces), !given.isEmpty else { return nil }
+        let projects = library.projects
+        let found = projects.first { ($0["id"] as? String ?? "").lowercased().hasPrefix(given.lowercased()) && given.count >= 6 }
+            ?? projects.first { name($0).localizedCaseInsensitiveCompare(given) == .orderedSame }
+        guard let found else { throw Failure(message: "No project \(given). Projects: \(projects.map(name).joined(separator: ", ")).") }
+        if case .project(let own) = scope, own["id"] as? String != found["id"] as? String {
+            throw Failure(message: "From a thread in \(name(own)) you can only reach \(name(own)). Work across projects from a thread in Home.")
+        }
+        return found
+    }
+
+    // MARK: Looking
+
+    func list(_ args: JSONValue) throws(Failure) -> MCPToolResult {
+        let project = try project(args)
+        let words = Self.words(args["query"]?.string)
+        let includeSettled = args["include_settled"]?.bool ?? false
+        let limit = max(1, min(args["limit"]?.int ?? 50, 200))
+        let found = reachable()
+            .filter { project == nil || $0["projectID"] as? String == project?["id"] as? String }
+            .filter { includeSettled || !isSettled($0) }
+            .filter { Self.matches(title($0), words) }
+            .sorted { sortDate($0) > sortDate($1) }
+        guard !found.isEmpty else { return .text("No threads match.") }
+        var lines = [(project.map { "\(name($0)):" } ?? header()) + " \(found.count) thread\(found.count == 1 ? "" : "s")\(found.count > limit ? ", the \(limit) most recent" : ""):"]
+        lines += found.prefix(limit).map { describe($0) }
+        return .text(lines.joined(separator: "\n"))
+    }
+
+    func read(_ args: JSONValue) async throws(Failure) -> MCPToolResult {
+        let thread = try thread(args)
+        let entries = await backend.transcriptForReading(id(thread))
+        let limit = max(1, min(args["limit"]?.int ?? 30, 100))
+        let start = args["offset"]?.int.map { max(0, min($0, entries.count)) } ?? max(0, entries.count - limit)
+        let end = min(entries.count, start + limit)
+        var lines = [describe(thread), "Entries \(start)–\(max(start, end - 1)) of \(entries.count)" + (start > 0 ? " (offset to read earlier ones)" : "") + ":"]
+        var budget = 60_000
+        for index in start..<end {
+            let line = Self.render(entries[index], index: index)
+            budget -= line.count
+            if budget < 0 {
+                lines.append("… stopped at entry \(index) to keep this short; read on with offset \(index).")
+                break
+            }
+            lines.append(line)
+        }
+        return .text(lines.joined(separator: "\n"))
+    }
+
+    func search(_ args: JSONValue) async throws(Failure) -> MCPToolResult {
+        guard let query = args["query"]?.string, !query.trimmingCharacters(in: .whitespaces).isEmpty else {
+            throw Failure(message: "Give query: the words to find.")
+        }
+        let limit = max(1, min(args["limit"]?.int ?? 20, 50))
+        let database = library.db
+        let projectID: String? = if case .project(let project) = scope { project["id"] as? String } else { nil }
+        // More than asked for: hits in threads it can't reach are dropped.
+        let hits = await Task.detached(priority: .userInitiated) { database.search(query, projectID: projectID, limit: limit * 3) }.value
+        let byID = Dictionary(reachable().map { (id($0), $0) }) { first, _ in first }
+        let kept = hits.compactMap { hit in byID[hit.threadID].map { (hit, $0) } }.prefix(limit)
+        guard !kept.isEmpty else { return .text("Nothing found for “\(query)”.") }
+        var lines: [String] = []
+        var lastThread: String?
+        for (hit, thread) in kept {
+            if id(thread) != lastThread {
+                lines.append(describe(thread))
+                lastThread = id(thread)
+            }
+            lines.append("    entry \(hit.seq) (\(hit.kind.rawValue)): \(hit.snippet.replacingOccurrences(of: "\n", with: " "))")
+        }
+        return .text(lines.joined(separator: "\n"))
+    }
+
+    // MARK: Tidying (through the page's own requests, so the sidebar hears of it)
+
+    func rename(_ args: JSONValue) async throws(Failure) -> MCPToolResult {
+        let thread = try thread(args)
+        let title = (args["title"]?.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { throw Failure(message: "Give title: the new name.") }
+        guard title.count <= 120 else { throw Failure(message: "That title is \(title.count) characters; keep it under 120.") }
+        let old = self.title(thread)
+        try await request("rename", ["th": id(thread), "title": title])
+        return .text("Renamed “\(old)” to “\(library.thread(id(thread)).map(self.title) ?? title)”.")
+    }
+
+    func settle(_ args: JSONValue) async throws(Failure) -> MCPToolResult {
+        let thread = try thread(args)
+        let settled = args["settled"]?.bool ?? true
+        guard isSettled(thread) != settled else { return .text("“\(title(thread))” is already \(settled ? "settled" : "active").") }
+        try await request("settle", ["th": id(thread), "on": settled])
+        return .text(settled ? "Settled “\(title(thread))”: it's on the Settled shelf of \(projectName(thread)), and comes back when the user sends it a message."
+                             : "Brought “\(title(thread))” back to the active threads of \(projectName(thread)).")
+    }
+
+    func pin(_ args: JSONValue) async throws(Failure) -> MCPToolResult {
+        let thread = try thread(args)
+        let pinned = args["pinned"]?.bool ?? true
+        guard isPinned(thread) != pinned else { return .text("“\(title(thread))” is already \(pinned ? "pinned" : "unpinned").") }
+        guard !(pinned && isSettled(thread)) else { throw Failure(message: "“\(title(thread))” is settled; bring it back with settle_thread first.") }
+        try await request("pin", ["th": id(thread), "on": pinned])
+        return .text("\(pinned ? "Pinned" : "Unpinned") “\(title(thread))”.")
+    }
+
+    private func request(_ method: String, _ p: [String: Any]) async throws(Failure) {
+        do { _ = try await backend.handle(method, p) } catch { throw Failure(message: "\(error)") }
+    }
+
+    /// The caller's own title, written by the title model with Settings' rules.
+    func updateTitle(_ args: JSONValue) async throws(Failure) -> MCPToolResult {
+        guard backend.agentTitleUpdatesOn else { throw Failure(message: "Title updates are turned off in Settings → General → Thread Titles.") }
+        guard let thread = library.thread(caller) else { throw Failure(message: "This thread is gone.") }
+        if thread["titleChosen"] as? Bool == true {
+            return .text("The user chose this thread's title, “\(title(thread))”, so it stays. Rename it only if they ask.")
+        }
+        guard !backend.titlesBeingRewritten.contains(caller) else { return .text("The title is already being rewritten.") }
+        let messages = await backend.titleMessages(caller)
+        let sent = messages.filter { $0.role == .user }.count
+        guard backend.titleRequestedAt[caller] != sent else {
+            return .text("The title was already updated since the user's last message; once per change of subject is enough.")
+        }
+        backend.titleRequestedAt[caller] = sent
+        let hint = args["hint"]?.string.map { Self.oneLine($0, max: 300) }
+        backend.regenerateTitle(caller, messages: messages, hint: hint)
+        return .text("The title (“\(title(thread))” now) is being rewritten from the conversation; it stays as it is if it's still accurate. No need to mention it to the user.")
+    }
+
+    // MARK: Claude Code sessions
+
+    func sessions(_ args: JSONValue) async -> MCPToolResult {
+        let words = Self.words(args["query"]?.string)
+        let includeImported = args["include_imported"]?.bool ?? false
+        let limit = max(1, min(args["limit"]?.int ?? 20, 50))
+        let config = await backend.claudeConfigDirectory()
+        let imported = Set(library.threads.compactMap { ($0["sessionID"] as? String)?.lowercased() })
+        let folder: String? = if case .project(let project) = scope { project["path"] as? String } else { nil }
+        let found = await Task.detached(priority: .userInitiated) {
+            Self.findSessions(config: config, inside: folder, words: words, skipping: includeImported ? [] : imported, limit: limit)
+        }.value
+        guard !found.isEmpty else {
+            return .text(folder.map { "No Claude Code sessions to import from \($0)." } ?? "No Claude Code sessions to import.")
+        }
+        var lines = ["\(found.count) Claude Code session\(found.count == 1 ? "" : "s"), most recent first:"]
+        for archive in found {
+            var line = "- \(archive.sessionID) · “\(Self.oneLine(archive.title ?? archive.firstMessage ?? "Untitled", max: 90))”"
+            line += " · \(archive.messageCount) message\(archive.messageCount == 1 ? "" : "s")"
+            if let updated = archive.updatedAt { line += " · \(Self.ago(updated))" }
+            line += " · in \(archive.cwd ?? "an unknown folder")"
+            if let thread = backend.thread(forSession: archive.sessionID) {
+                line += scope.contains(thread) ? " · already thread \(shortID(thread))" : " · already imported"
+            }
+            lines.append(line)
+        }
+        return .text(lines.joined(separator: "\n"))
+    }
+
+    /// The newest sessions that ran in `folder` (or anywhere, when nil) and match `words`,
+    /// read one at a time until there are enough.
+    nonisolated static func findSessions(config: URL, inside folder: String?, words: [String], skipping: Set<String>, limit: Int) -> [ClaudeSessionArchive] {
+        var found: [ClaudeSessionArchive] = []
+        var read = 0
+        for file in ClaudeSessionArchive.sessionFiles(configDirectory: config) {
+            guard found.count < limit, read < 300 else { break }
+            guard !skipping.contains(file.sessionID.lowercased()) else { continue }
+            if let folder, !ClaudeSessionArchive.folderName(file.folderName, mayBeInside: folder) { continue }
+            read += 1
+            guard let archive = try? ClaudeSessionArchive.load(from: file.url, sessionID: file.sessionID) else { continue }
+            if let folder, !isInside(archive.cwd, folder) { continue }
+            guard matches([archive.title, archive.firstMessage].compactMap(\.self).joined(separator: " "), words) else { continue }
+            found.append(archive)
+        }
+        return found
+    }
+
+    /// `path` is `folder` or somewhere inside it.
+    nonisolated static func isInside(_ path: String?, _ folder: String) -> Bool {
+        guard let path else { return false }
+        let inner = standardized(path), outer = standardized(folder)
+        return inner == outer || inner.hasPrefix(outer.hasSuffix("/") ? outer : outer + "/")
+    }
+
+    nonisolated static func standardized(_ path: String) -> String {
+        URL(fileURLWithPath: path).standardizedFileURL.path
+    }
+
+    func importSession(_ args: JSONValue) async throws(Failure) -> MCPToolResult {
+        guard let sessionID = args["session_id"]?.string.flatMap(ClaudeSessionArchive.sessionID(in:)) else {
+            throw Failure(message: "Give session_id: one from list_claude_code_sessions.")
+        }
+        let chosen = try project(args)
+        if let existing = backend.thread(forSession: sessionID) {
+            guard scope.contains(existing) else { throw Failure(message: "That session is already a thread, in a project you can't reach from here.") }
+            return .text("Already imported: \(describe(existing, listed: false))")
+        }
+        let archive: ClaudeSessionArchive
+        do { archive = try await backend.loadClaudeSession(sessionID) } catch { throw Failure(message: "\(error)") }
+        let destination: Record
+        switch scope {
+        case .project(let own):
+            let path = own["path"] as? String ?? ""
+            guard Self.isInside(archive.cwd, path) else {
+                throw Failure(message: "That session ran in \(archive.cwd ?? "an unknown folder"), outside \(name(own)) (\(path)). Import it from a thread in Home.")
+            }
+            destination = own
+        case .everything:
+            // Never a new project: the one for its folder, else Home, where it still runs in its folder.
+            guard let found = chosen ?? suggestedProject(forSessionFolder: archive.cwd) else {
+                throw Failure(message: "There's no project to put it in.")
+            }
+            destination = found
+        }
+        let id = backend.importSession(archive, into: id(destination))
+        guard let thread = library.thread(id) else { throw Failure(message: "Couldn't import that session.") }
+        let messages = archive.messageCount == 1 ? "1 message is" : "\(archive.messageCount) messages are"
+        return .text("Imported as \(describe(thread, listed: false))\n\(messages) in the thread; it continues the session when the user sends it a message.")
+    }
+
+    /// The project for the folder a session ran in (that folder, or the closest one around it
+    /// other than Home), else Home.
+    func suggestedProject(forSessionFolder cwd: String?) -> Record? {
+        let homeID = library.setting("homeProjectID") as? String
+        let home = homeID.flatMap { library.project($0) } ?? library.projects.first
+        guard let cwd else { return home }
+        let path = Self.standardized(cwd)
+        func projectPath(_ p: Record) -> String { Self.standardized(p["path"] as? String ?? "/nonexistent") }
+        if let exact = library.projects.first(where: { projectPath($0) == path }) { return exact }
+        return library.projects
+            .filter { $0["id"] as? String != homeID && path.hasPrefix(projectPath($0) + "/") }
+            .max { projectPath($0).count < projectPath($1).count } ?? home
+    }
+
+    // MARK: Text
+
+    func id(_ thread: Record) -> String { thread["id"] as? String ?? "" }
+    func title(_ thread: Record) -> String { thread["title"] as? String ?? "Thread" }
+    func name(_ project: Record) -> String { project["name"] as? String ?? "Project" }
+    func isSettled(_ thread: Record) -> Bool { thread["settledAt"] != nil && !(thread["settledAt"] is NSNull) }
+    func isPinned(_ thread: Record) -> Bool { thread["isPinned"] as? Bool ?? false }
+
+    /// When it last changed, or was brought back from the Settled shelf.
+    func sortDate(_ thread: Record) -> Date {
+        max(library.date(thread["updatedAt"]) ?? .distantPast, library.date(thread["reactivatedAt"]) ?? .distantPast)
+    }
+
+    func header() -> String {
+        switch scope {
+        case .everything: "All projects:"
+        case .project(let project): "\(name(project)):"
+        }
+    }
+
+    func projectName(_ thread: Record) -> String {
+        (thread["projectID"] as? String).flatMap { library.project($0) }.map(name) ?? "its project"
+    }
+
+    /// One line: id, title, project and state. `listed` starts it as an item of a list.
+    func describe(_ thread: Record, listed: Bool = true) -> String {
+        let th = id(thread)
+        var states: [String] = []
+        if th == caller { states.append("this thread") }
+        if backend.isRunning(th) { states.append("working") }
+        if backend.store.pendingPermission(th) != nil { states.append("waiting for the user") }
+        if backend.isUnread(th) { states.append("unread") }
+        if isPinned(thread) { states.append("pinned") }
+        if isSettled(thread) { states.append("settled") }
+        if thread["sessionID"] == nil && thread["updatedAt"] as? String == thread["createdAt"] as? String { states.append("empty") }
+        var line = (listed ? "- " : "") + "\(shortID(thread)) · “\(Self.oneLine(title(thread), max: 100))” · \(projectName(thread))"
+        if !states.isEmpty { line += " · " + states.joined(separator: ", ") }
+        return line + " · \(Self.ago(sortDate(thread)))"
+    }
+
+    /// The first 8 characters of its id, or all of it when another thread starts the same.
+    func shortID(_ thread: Record) -> String {
+        let full = id(thread).lowercased()
+        let short = String(full.prefix(8))
+        let shared = library.threads.contains { id($0).lowercased() != full && id($0).lowercased().hasPrefix(short) }
+        return shared ? full : short
+    }
+
+    /// An entry as a line or a few: who said it and what, tools in brief.
+    nonisolated static func render(_ entry: EntrySnapshot, index: Int) -> String {
+        let when = entry.date.map { " " + $0.formatted(date: .abbreviated, time: .shortened) } ?? ""
+        switch entry.kind {
+        case .user:
+            return "[\(index)] user\(when): \(clip(entry.text, 4000))"
+        case .assistant:
+            return "[\(index)] claude\(when): \(clip(entry.text, 4000))"
+        case .thinking:
+            return "[\(index)] (thinking, \(entry.text.count) characters)"
+        case .tool:
+            var line = "[\(index)] tool \(entry.toolName ?? "?"): \(oneLine(entry.toolInput ?? "", max: 300))"
+            if let result = entry.toolResult {
+                line += "\n      → \(entry.toolIsError == true ? "error: " : "")\(oneLine(result, max: 400))"
+            }
+            return line
+        case .notice:
+            return "[\(index)] notice: \(oneLine(entry.text, max: 400))"
+        case .commandOutput:
+            return "[\(index)] command output: \(clip(entry.text, 1500))"
+        }
+    }
+
+    nonisolated static func clip(_ text: String, _ max: Int) -> String {
+        text.count <= max ? text : text.prefix(max) + "… (\(text.count - max) more characters)"
+    }
+
+    nonisolated static func oneLine(_ text: String, max: Int) -> String {
+        let flat = text.split(whereSeparator: \.isNewline).joined(separator: " ")
+        return flat.count <= max ? flat : flat.prefix(max) + "…"
+    }
+
+    nonisolated static func ago(_ date: Date) -> String {
+        date.formatted(.relative(presentation: .named))
+    }
+
+    nonisolated static func words(_ query: String?) -> [String] {
+        (query ?? "").lowercased().split(whereSeparator: \.isWhitespace).map(String.init)
+    }
+
+    nonisolated static func matches(_ text: String, _ words: [String]) -> Bool {
+        let text = text.lowercased()
+        return words.allSatisfy(text.contains)
+    }
+}

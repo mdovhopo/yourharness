@@ -26,15 +26,28 @@ public final class Backend {
     public var attention: (Attention) -> Void = { _ in }
     /// The latest usage limits Claude reported.
     var limits: Any?
+    /// Tools other parts add to every thread's launch (the thread tools, the browser later).
+    var launchExtras: ((String) -> LaunchExtras)?
 
     public init(dataDirectory: URL) {
         self.dataDirectory = dataDirectory
         library = Library(directory: dataDirectory)
+        // Every thread gets the thread tools (they touch only the app's own list, delete
+        // nothing, and don't ask), with what the agent is told about them.
+        launchExtras = { [unowned self] th in
+            LaunchExtras(servers: [threadToolServer(for: th)], allowedTools: ["mcp__threads"], prompt: [threadInstructions(for: th)])
+        }
         Task { await recoverCutOffTurns() }
     }
 
     /// Threads unread since their last turn ended, until the page says you've seen them.
     private var unread = Set<String>()
+    func isUnread(_ th: String) -> Bool { unread.contains(th) }
+    func isRunning(_ th: String) -> Bool { runtimes[th]?.running ?? false }
+    /// `update_title`: threads whose title is being rewritten, and how many messages the
+    /// user had sent when each thread's agent last asked (once per change of subject).
+    var titlesBeingRewritten = Set<String>()
+    var titleRequestedAt: [String: Int] = [:]
 
     /// Turns a quit or crash cut off: finished from the session files, in the background.
     private func recoverCutOffTurns() async {

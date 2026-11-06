@@ -120,26 +120,52 @@ extension Backend {
     /// its own folder, with its history. Read from `~/.claude/projects`, never written.
     func resumeSession(_ text: String) async throws -> String {
         guard let sessionID = ClaudeSessionArchive.sessionID(in: text) else { throw BackendError("That isn't a session ID.") }
-        if let known = library.threads.first(where: { $0["sessionID"] as? String == sessionID }), let id = known["id"] as? String { return id }
+        if let known = thread(forSession: sessionID), let id = known["id"] as? String { return id }
+        let archive = try await loadClaudeSession(sessionID)
+        let folder = archive.cwd.flatMap { FileManager.default.fileExists(atPath: $0) ? $0 : nil }
+        let projectID = folder.map { library.addProject(path: $0) }
+            ?? (library.setting("homeProjectID") as? String) ?? library.projects.first?["id"] as? String ?? ""
+        if let project = library.project(projectID) { sink(["t": "project", "p": library.projectWire(project)]) }
+        return importSession(archive, into: projectID)
+    }
+
+    /// The thread that already continues this Claude Code session, if any.
+    func thread(forSession sessionID: String) -> [String: Any]? {
+        let wanted = sessionID.lowercased()
+        return library.threads.first { ($0["sessionID"] as? String)?.lowercased() == wanted }
+    }
+
+    /// Where Claude Code keeps its sessions for this user.
+    func claudeConfigDirectory() async -> URL {
         let environment = (try? await cli().0) ?? ProcessInfo.processInfo.environment
-        let config = ClaudeSessionArchive.configDirectory(environment: environment)
-        let archive: ClaudeSessionArchive = try await Task.detached(priority: .userInitiated) {
+        return ClaudeSessionArchive.configDirectory(environment: environment)
+    }
+
+    /// A session's history from Claude Code's files, read off the main thread.
+    func loadClaudeSession(_ sessionID: String) async throws -> ClaudeSessionArchive {
+        let config = await claudeConfigDirectory()
+        return try await Task.detached(priority: .userInitiated) {
             guard let url = ClaudeSessionArchive.locate(sessionID: sessionID, configDirectory: config) else {
                 throw BackendError("No Claude Code session with this ID.")
             }
             do { return try ClaudeSessionArchive.load(from: url, sessionID: sessionID) } catch { throw BackendError("Couldn't read this session's history.") }
         }.value
-        let folder = archive.cwd.flatMap { FileManager.default.fileExists(atPath: $0) ? $0 : nil }
-        let projectID = folder.map { library.addProject(path: $0) }
-            ?? (library.setting("homeProjectID") as? String) ?? library.projects.first?["id"] as? String ?? ""
-        if let project = library.project(projectID) { sink(["t": "project", "p": library.projectWire(project)]) }
+    }
+
+    /// A loaded session as a new thread in `projectID`, with its history. When the session ran
+    /// somewhere other than the project's folder (a folder inside it, or Home), the thread
+    /// keeps running there.
+    func importSession(_ archive: ClaudeSessionArchive, into projectID: String) -> String {
         let id = library.addThread(projectID: projectID)
         let title = archive.title ?? archive.firstMessage.map { String($0.split(separator: "\n").first ?? "").prefix(60).description } ?? "Resumed session"
+        let projectPath = library.project(projectID)?["path"] as? String
+        let folder = archive.cwd.flatMap { FileManager.default.fileExists(atPath: $0) ? $0 : nil }
         library.updateThread(id) {
-            $0["sessionID"] = sessionID
+            $0["sessionID"] = archive.sessionID
             $0["title"] = title
             if archive.hasCustomTitle { $0["titleChosen"] = true }
             if let date = archive.updatedAt { $0["updatedAt"] = Library.iso.string(from: date) }
+            if let folder, folder != projectPath { $0["workingDirectory"] = folder }
         }
         if let uuid = UUID(uuidString: id) {
             let rows = archive.items.enumerated().map { Recovery.snapshot($1, id: "h\($0)") }

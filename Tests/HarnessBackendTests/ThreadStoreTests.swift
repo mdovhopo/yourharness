@@ -29,4 +29,24 @@ import HarnessCore
         let appends = patches.filter { if case .append = $0 { true } else { false } }.count
         #expect(adds == 3 && appends == 3)
     }
+
+    /// The whole message leaves out the thinking that was streamed: the text still lands on
+    /// the text row, and the thinking row keeps what it had.
+    @Test func wholeMessageWithoutThinking() {
+        let store = ThreadStore()
+        let m = "m"
+        for event: AgentEvent in [
+            .blockStarted(BlockRef(messageID: m, index: 0), .thinking),
+            .thinkingDelta(BlockRef(messageID: m, index: 0), "Let me look."),
+            .blockStarted(BlockRef(messageID: m, index: 1), .toolUse(id: "T", name: "mcp__threads__list_threads")),
+            .blockStarted(BlockRef(messageID: m, index: 2), .text),
+            .textDelta(BlockRef(messageID: m, index: 2), "Two threads."),
+            .assistantMessage(messageID: m, blocks: [.toolUse(id: "T", name: "mcp__threads__list_threads", inputJSON: "{}"), .text("Two threads.")], parentToolUseID: nil),
+        ] { _ = store.apply(event, thread: "t") }
+        let rows = store.entries("t")
+        #expect(rows.map(\.kind) == [.thinking, .tool, .assistant])
+        #expect(rows[0].text == "Let me look." && rows[0].toolName == nil)
+        #expect(rows[1].toolName == "mcp__threads__list_threads" && rows[1].text.isEmpty && rows[1].toolInput == "{}")
+        #expect(rows[2].text == "Two threads.")
+    }
 }

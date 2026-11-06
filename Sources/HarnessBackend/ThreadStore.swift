@@ -223,10 +223,25 @@ public final class ThreadStore {
                 }
             }
             var patches: [ThreadPatch] = []
+            // The whole message can leave out blocks that were streamed (thinking, often), so
+            // its positions needn't match the stream's: a tool call is found by its ID, text and
+            // thinking by kind, in order, among this message's streamed rows not yet matched.
+            var streamed = t.blocks.filter { $0.key.hasPrefix(messageID + ":") }
+                .sorted { Int($0.key.split(separator: ":").last ?? "") ?? 0 < Int($1.key.split(separator: ":").last ?? "") ?? 0 }
+                .map(\.value)
             for (index, block) in blocks.enumerated() {
                 let key = "\(messageID):\(index)"
-                var id = t.blocks[key]
-                if id == nil, case .toolUse(let toolID, _, _) = block, t.index[toolID] != nil { id = toolID }
+                var id: String?
+                switch block {
+                case .toolUse(let toolID, _, _):
+                    if t.index[toolID] != nil { id = toolID }
+                case .text, .thinking:
+                    let kind: EntryKind = { if case .thinking = block { return .thinking } else { return .assistant } }()
+                    if let at = streamed.firstIndex(where: { candidate in t.index[candidate].map { t.entries[$0].kind == kind } ?? false }) {
+                        id = streamed.remove(at: at)
+                    }
+                }
+                if let id { streamed.removeAll { $0 == id } }
                 if id == nil {
                     let entry: Entry
                     switch block {

@@ -75,10 +75,11 @@ final class ThreadRuntime {
         let folder = (meta["workingDirectory"] as? String).flatMap { FileManager.default.fileExists(atPath: $0) ? $0 : nil }
             ?? backend.library.folder(ofProject: projectID, dataDirectory: backend.dataDirectory)
         let mode = PermissionModes.cli(backend.library.project(projectID)?["permissionMode"] as? String)
-        let options = ClaudeLaunchOptions(executable: executable, workingDirectory: URL(fileURLWithPath: folder, isDirectory: true),
+        var options = ClaudeLaunchOptions(executable: executable, workingDirectory: URL(fileURLWithPath: folder, isDirectory: true),
                                           environment: environment, model: backend.model(of: id), permissionMode: mode,
                                           effort: effort, resumeSessionID: meta["sessionID"] as? String)
-        let session = try ClaudeSession(options: options)
+        let servers = await backend.prepareLaunch(&options, thread: id, projectID: projectID)
+        let session = try ClaudeSession(options: options, servers: servers)
         try? await session.initialize()
         self.session = session
         startedEffort = effort
