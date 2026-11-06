@@ -1,0 +1,62 @@
+diff -ru gpui-pre-macos/src/window.rs gpui-pre-macos/src/window.rs
+--- gpui-pre-macos/src/window.rs	2026-11-06 16:18:20
++++ gpui-pre-macos/src/window.rs	2026-11-06 16:18:20
+@@ -828,7 +828,8 @@
+     /// weakly to deliver frames.
+     fn start_display_link(&mut self, window_state: &Rc<Mutex<MacWindowState>>) {
+         self.stop_display_link();
+-        if !self
++        if !keep_drawing()
++            && !self
+             .native_window()
+             .occlusionState()
+             .contains(NSWindowOcclusionState::Visible)
+@@ -855,7 +856,10 @@
+             }
+             FrameSource::DisplayLink(frame_source) => {
+                 let screen: *mut AnyObject = unsafe { msg_send![self.native_window, screen] };
+-                let Some(display_id) = display_id_for_screen(screen) else {
++                let Some(display_id) = display_id_for_screen(screen).or_else(|| {
++                    // YourHarness patch: off screen there's no screen; time by the main display.
++                    keep_drawing().then(|| core_graphics::display::CGDisplay::main().id)
++                }) else {
+                     // AppKit can temporarily report no screen while displays are being reconfigured.
+                     return;
+                 };
+@@ -1108,7 +1112,10 @@
+             let native_view: *mut AnyObject = msg_send![native_view, initWithFrame: content_bounds];
+             assert!(!native_view.is_null());
+ 
+-            let metal_frames = MetalFrameSource::is_available().then(Rc::<MetalFrames>::default);
++            // YourHarness patch: `GPUI_KEEP_DRAWING=1` (test runs, the window parked off screen)
++            // paces frames with CVDisplayLink, which runs without the window being visible.
++            let metal_frames = (MetalFrameSource::is_available() && !keep_drawing())
++                .then(Rc::<MetalFrames>::default);
+             let state = Rc::new(Mutex::new(MacWindowState {
+                 handle,
+                 foreground_executor,
+@@ -3008,8 +3015,14 @@
+     }
+ }
+ 
++/// YourHarness patch: test runs park the window off screen and still want it drawn.
++fn keep_drawing() -> bool {
++    static KEEP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
++    *KEEP.get_or_init(|| std::env::var_os("GPUI_KEEP_DRAWING").is_some())
++}
++
+ fn visibility(state: &MacWindowState) -> WindowVisibility {
+-    let is_visible = state
++    let is_visible = keep_drawing() || state
+         .native_window()
+         .occlusionState()
+         .contains(NSWindowOcclusionState::Visible);
+@@ -3062,7 +3075,7 @@
+     {
+         lock.move_traffic_light();
+         lock.start_display_link(&window_state);
+-    } else {
++    } else if !keep_drawing() {
+         lock.stop_display_link();
+     }
+     drop(lock);

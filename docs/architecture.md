@@ -1,90 +1,82 @@
-# Architecture and the UI rewrite
+# Architecture and the rewrite
 
-The SwiftUI/AppKit app is frozen (tag `swift-app-frozen`, sources in `legacy/`, not built).
-Its features are the reference for what the app does, not for how: nothing is ported one for
-one. The new UI is web, drawn by one `WKWebView`; why, and the measurements behind it, are in
-[web-experiment.md](web-experiment.md). The backend stays Swift for now and is meant to become
-Rust later, so everything here keeps the line between the two clean.
+The SwiftUI/AppKit app is frozen (tag `swift-app-frozen`, sources in `legacy/YourHarness`, not
+built). Its features are the reference for what the app does, not for how. The app is being
+rewritten **in Rust on GPUI**, Zed's GPU-drawn UI framework, as one process. Why: under 20
+threads streaming at once, GPUI was the only stack that held 99% of frames on time, at about
+160 MB (docs/gpui-experiment.md). A web UI was tried first (docs/web-experiment.md, and the
+work in `legacy/web`, `legacy/Sources/HarnessBackend`). That work is superseded, but it's kept as a
+reference: its protocol, stores and features describe the same app.
 
 ## Layers
 
 ```mermaid
 flowchart TB
-  subgraph UI["app/ui · SolidJS + TypeScript"]
-    Features["features/: sidebar, transcript, composer, cards, panels…"]
-    Mirror["store/: mirror of backend topics + view state"]
-    Features --> Mirror
+  subgraph App["crates/yh-app · GPUI"]
+    UI["ui: sidebar, transcript, composer, cards, panels, pages"]
+    State["state: entities that own what the app knows (threads, rows, sessions, settings)"]
+    Mac["platform: what only AppKit does (browser views, Quick Look, notifications, Dock)"]
+    UI --> State
   end
-  subgraph Host["app/host · AppKit, thin"]
-    Window["window, WKWebView, menus, native-only pieces"]
-    Bridge["bridge: requests in, patches out, one batch per frame"]
-  end
-  subgraph Backend["Sources/HarnessBackend · no UI"]
-    Services["services: library, threads, sessions, titles, memory, tools…"]
-    Stores["stores: own the state, emit patches"]
-  end
-  Core["Sources/HarnessCore · CLI adapters, parsers, storage, git, forge"]
-  Mirror <-- "protocol (docs/protocol.md)" --> Bridge
-  Bridge --> Services --> Stores
-  Services --> Core
+  Core["crates/yh-core · no GPUI: harness.sqlite, claude processes and stream-json, Claude Code history, markdown, memory, git, forge, MCP servers"]
+  State --> Core
+  Legacy["legacy/Sources/HarnessCore, legacy/Sources/HarnessBackend · Swift: the spec"]
+  Core -. "ported from" .-> Legacy
 ```
 
-- **HarnessCore** drives CLIs and stores things. Unchanged by the rewrite but for additions.
-- **HarnessBackend** owns everything the app knows: projects, threads, their rows, sessions,
-  permissions, queued messages, plans, settings. It has no UI imports and talks only in the
-  protocol: **requests** in (send, allow, rename…), **patches** out (what changed). It's the
-  one place state changes, so saving, search, the tools agents call and the screen all see the
-  same thing. This is what Rust replaces later.
-- **app/host** is as small as it can be: the window, the web view, menus, and what only native
-  code can do (agents' browser views, Quick Look, file pickers, notifications, Dock badge). It
-  carries the protocol between page and backend, batching patches to one delivery a frame.
-- **app/ui** shows the backend's state and keeps only view state of its own (scroll positions,
-  what's open, hover, drafts until sent). It never works out domain state from raw events.
+- **yh-core** is everything that isn't drawing, with no GPUI: storage, `claude` processes and
+  their stream-json parsing, Claude Code's session files, markdown, memory, git and forge
+  clients, and the MCP servers agents call. It's testable on its own (`cargo test -p yh-core`).
+  Long or blocking work runs on background threads and hands results back through channels.
+- **yh-app/state** owns what the app knows, as GPUI entities with no rendering: the library
+  (projects, threads), each thread's rows and runtime (session, queue, permissions, plans),
+  settings. Every change goes through it, so saving, search, agents' tools and the screen all
+  see the same thing. Changes notify the entities that care. Nothing is computed in a view.
+- **yh-app/ui** draws state and keeps only view state (scroll positions, what's open, hover,
+  drafts until sent).
+- **yh-app/platform** is the AppKit edge: windows GPUI doesn't own, agents' browser views
+  (WKWebView over the GPUI window), Quick Look, notifications, the Dock badge.
 
-## The protocol
+**Data stays the user's.** `harness.sqlite` keeps the Swift app's format (docs/storage.md):
+same tables, same JSON in `projects` and `threads`, rows in `entries`, big tool output in
+`blobs` (LZFSE). The rewrite reads the user's existing data and writes what the Swift app can
+still read, until the switch.
 
-One contract, written down in [protocol.md](protocol.md), with types on both sides
-(`app/ui/src/protocol.ts`, `Sources/HarnessBackend/Protocol*.swift`) checked against the same
-recorded messages in tests. Rules that keep it scalable:
+## What we learned that the app must keep
 
-- **Topics, not screens.** State is split into topics (`library`, `thread/<id>`, `settings`,
-  `usage`…). The page subscribes to what's on screen and unsubscribes when it isn't, so a
-  hundred threads cost nothing until opened.
-- **Patches carry revisions.** Each topic has a revision; a patch says which it applies to. A
-  page that missed one asks for a snapshot. Big things (history pages, file contents) are
-  fetched, not pushed.
-- **Requests are intents** ("send this", "allow that"), never "set field X". The backend
-  decides what changes and says so in patches.
-- **No language in the wire.** Plain JSON, short stable keys, no Swift or JS types in it, so a
-  Rust backend speaks it unchanged.
+From the experiments (details in gpui-experiment.md):
 
-## What we learned that the UI must keep
-
-From the experiment (details in web-experiment.md):
-
-- One batch of patches per display frame, never while the page is still taking the last.
-- Rows redraw one at a time: each has its own version; streamed text changes a row in place.
-- Only the newest rows of a thread are held; earlier pages are fetched while you scroll up.
-  Transcripts you leave are parked (no redraw) and let go of after a few.
-- Off-screen rows skip layout (`content-visibility: auto`); the transcript follows the end in
-  the same frame it grows and keeps your place when rows above change.
-- **No box that scrolls inside a row.** WebKit gives each its own layer: three times the
-  memory and 90 ms frames. Code wraps. One scroller per column.
-- WebKit's 60 Hz default is turned off (`PreferPageRenderingUpdatesNear60FPSEnabled`).
-- Animate only opacity and transform; no layout-changing hover.
+- **The transcript is GPUI's `list`, bottom-aligned**, so it follows the end. Rows are measured
+  once and again only when spliced: a streamed delta re-measures exactly the row it changed.
+  Off-screen rows cost nothing.
+- **Cache views that change rarely** (`AnyView::cached`): the sidebar redraws only when told
+  to. A frame under streaming draws the transcript and little else. A view that grows (the
+  composer with its cards) isn't cached, because a cached view needs a fixed size.
+- **Claude's events are parsed off the main thread.** The main thread takes what's arrived at
+  most once a frame (8 ms), with consecutive deltas of a block joined.
+- **Hold little.** Keep the newest 160 rows of a thread, and read earlier pages while
+  scrolling up. Six transcripts stay made for going back and forth. A running thread nobody
+  is looking at keeps its newest 300 rows.
+- **Nothing that changes often in a view that's always there**, and nothing slow on the main
+  thread from a click: answer the click in the next frame and do the work after.
+- **Events into GPUI dispatch synchronously.** Never send one to the window from inside an
+  entity update, because it re-enters.
+- **Test runs hold off App Nap.** A background app nobody watches gets its timers and display
+  link slowed down, which looks exactly like a frozen app.
 
 ## Plan
 
 Each chunk ends with the perf run (`scripts/perf-run.sh`) against the last chunk's numbers, a
 live Haiku turn, and a push to `rewrite`. Nothing is released from `rewrite` until it's the
-whole app; the user's app stays the frozen 0.0.16 until then.
+whole app; the user's app stays the frozen 0.0.16 until then. The web rewrite's chunks 1–4
+(`legacy/Sources/HarnessBackend`, `legacy/web`) are the closest spec for chunks 1–4 here.
 
 | Chunk | What | Status |
 |---|---|---|
-| 0 | Repo on the new stack: layout, frozen legacy, docs, scripts, store experiment kept | done |
-| 1 | **Backend owns threads.** Projects and threads from the app's own `harness.sqlite` (the user's data, same folder, same format), thread runtime (sessions, resume, idle reap, saving rows as they change, crash recovery), the protocol with topics and revisions. UI: sidebar with pin, settle, rename, delete, new thread; transcript; composer with model, effort and mode from the CLI's catalog; queue and steer; stop; permission, question and plan cards. Crash recovery, queued messages, unread. | done |
-| 2 | Transcript parity: markdown details, Edit diffs, sub-agent cards, plan checklist, notices and compaction, slash commands, @ mentions, images and files in messages, find in thread. | done (markdown polish ongoing) |
-| 3 | App shell: titles (generated, renamed), notifications and badge, Home project, ⌘K search, settings, usage limits, resume a Claude Code session. | done |
-| 4 | Agents' tools served by the backend: memory, threads, and their views (Memory page, tasks). | |
-| 5 | Right sidebar: side chat, sub-agents, files, pull requests and workspaces, the agents' browser (native views placed by the page). | |
+| 0 | Repo on the new stack: Cargo workspace (`yh-core`, `yh-app`), GPUI through gpui-kit with gpui-component, patches, scripts (bundle, perf, limits), docs; the POC as the starting point | done |
+| 1 | **The app owns threads.** Read and write `harness.sqlite` in the Swift app's format (projects, threads, rows, blobs), the user's data folder. Thread runtime: sessions, resume, idle reap, saving rows as they change, crash recovery. Sidebar: pin, settle, rename, delete, new thread. Composer: model, effort and mode from the CLI's catalog; queue and steer; stop. Permission, question and plan cards. Unread. | |
+| 2 | Transcript parity: markdown details (tree-sitter code, tables, links), Edit diffs, sub-agent cards, plan checklist, notices and compaction, slash commands, @ mentions, images and files in messages, find in thread. | |
+| 3 | App shell: titles (generated, renamed), notifications and badge, Home project, ⌘K search, settings, usage limits, resume a Claude Code session. | |
+| 4 | Agents' tools served by the app: memory and thread MCP servers, their views (Memory page, tasks). | |
+| 5 | Right sidebar: side chat, sub-agents, files, pull requests and workspaces, the agents' browser (a WKWebView placed over the GPUI window). | |
 | 6 | The rest: usage view, MCP sheet, state export and import, updater, release pipeline; then the switch. | |

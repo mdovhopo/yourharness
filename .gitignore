@@ -13,5 +13,7 @@ DerivedData/
 test-harness-root/*
 
 # The page
-/app/ui/node_modules
-/app/ui/dist
+/legacy/web/ui/node_modules
+/legacy/web/ui/dist
+/target
+/vendor

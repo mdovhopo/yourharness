@@ -1,0 +1,28 @@
+[package]
+name = "yh-app"
+version = "0.0.1"
+edition.workspace = true
+publish.workspace = true
+description = "YourHarness: the app on GPUI."
+
+[[bin]]
+name = "YourHarness"
+path = "src/main.rs"
+
+[dependencies]
+yh-core.workspace = true
+gpui-kit = "=0.9.0"
+serde_json.workspace = true
+flume.workspace = true
+libc.workspace = true
+objc = "0.2"
+cocoa = "0.26"
+core-foundation = "0.10"
+raw-window-handle = "0.6"
+# Only for the snapshots feature: the same GPUI gpui-kit pins, with its test support turned on.
+gpui = { package = "gpui-pre", version = "=0.3.11", optional = true }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.11", optional = true }
+
+[features]
+# Test builds: `Window::render_to_image` for YH_SNAPSHOT (screencapture would prompt the user).
+snapshots = ["dep:gpui", "dep:gpui_platform", "gpui/test-support", "gpui_platform/test-support"]

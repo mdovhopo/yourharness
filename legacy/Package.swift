@@ -23,7 +23,7 @@ let package = Package(
         .executableTarget(
             name: "YourHarness",
             dependencies: ["HarnessCore", "HarnessBackend"],
-            path: "app/host"
+            path: "web/host"
         ),
         .testTarget(
             name: "HarnessCoreTests",

@@ -1,4 +1,39 @@
-# Performance under heavy parallel use
+# Performance
+
+## The rewrite on GPUI: numbers per chunk
+
+`scripts/perf-run.sh`: the `extreme` preset, 20 fake turns at rate 1, window parked below the
+screen, 30 s phases, App Nap held off, GPUI's inactive-window 30 fps cap off (a perf run's
+window is never active). Frames on time at 120 Hz · worst frame; peak footprint over the run.
+Same MacBook, on battery unless noted.
+
+| Phase | Chunk 0 (2026-11-06) |
+|---|---|
+| open-huge | 100.0% · 12 ms |
+| idle-huge | 99.9% · 27 ms |
+| scroll-huge | 98.1% · 17 ms |
+| scroll-huge-fast | 98.5% · 15 ms |
+| switch-huge | 99.5% · 20 ms |
+| switch-all-idle | 99.4% · 25 ms |
+| stream-1 | 100.0% · 11 ms |
+| stream-all | 100.0% · 12 ms |
+| stream-all-scroll | 98.7% · 15 ms |
+| stream-all-switch | 99.8% · 18 ms |
+| stream-all-typing | 98.4% · 23 ms |
+| Peak memory | 160 MB |
+| Switch click (median / worst, streaming) | 32 / 37 ms |
+| Key to screen (median / worst) | 14 / 22 ms |
+
+Chunk 0 notes: GPUI 0.3.11 caps an inactive window at 30 fps (and Low Power Mode too). The
+first chunk-0 run, without turning that off, ran every phase without input at a steady 30 fps.
+That's power saving, not stalls: worst frames stayed under 52 ms. The app keeps the cap for
+real use, where a background window at 30 fps is fine.
+
+---
+
+# Performance of the frozen Swift app (for reference)
+
+# Performance under heavy parallel use (the Swift app)
 
 The requirement: 10 to 20 threads working at once, with huge histories, and no visible freezes, hangs or crashes; every click instant, or a loading indicator for what's asynchronous. A lower framerate is acceptable. Measure with `scripts/perf-run.sh <results> YH_PERF_FRONT=1` (see CLAUDE.md), on an M1 Max.
 

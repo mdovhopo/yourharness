@@ -1,77 +1,90 @@
 # YourHarness
 
-Native macOS (26+, Apple Silicon only) harness over AI coding CLIs. Being rewritten: the UI is
-web (SolidJS in one `WKWebView`), the backend Swift for now (Rust later). Read
-docs/architecture.md first: layers, the protocol, the plan and what each chunk covers. The
-SwiftUI app this replaces is frozen in `legacy/` (tag `swift-app-frozen`): read it for what a
-feature does, never port it one for one. `legacy/CLAUDE.md` has its notes.
+Native macOS (26+, Apple Silicon only) harness over AI coding CLIs. Being rewritten in **Rust on
+GPUI**, one process. Read docs/architecture.md first: layers, what the app must keep, the plan
+and what each chunk covers. The SwiftUI app this replaces is frozen in `legacy/YourHarness`
+(tag `swift-app-frozen`), and its Swift core and the superseded web rewrite are in
+`legacy/Sources`, `legacy/web`. Read them for what a feature does, never port them one for one.
+`legacy/CLAUDE.md` has the old app's notes.
 
 ## Layout
 
-- `Sources/HarnessCore`: CLI adapters, parsers, storage (`harness.sqlite`), git, forge. No UI imports.
-- `Sources/HarnessBackend`: everything the app knows and does, no UI. Owns state, emits patches.
-- `app/host`: the AppKit window, the web view, the bridge, native-only pieces. Thin.
-- `app/ui`: the page (SolidJS + TypeScript, Vite). Mirrors backend topics, holds view state only.
-- `docs/protocol.md`: the contract between page and backend.
+- `crates/yh-core`: storage (`harness.sqlite`), `claude` processes and stream-json, Claude Code
+  history, markdown, and later memory, git, forge, MCP servers. No GPUI.
+- `crates/yh-app`: the app. `app.rs`, `model.rs` (state), `rows.rs` (transcript rows),
+  `platform.rs` (AppKit), `probe.rs` (the perf run), `theme.rs`.
+- `patches/`, `scripts/vendor.sh`: GPUI crates we patch, unpacked into `vendor/` (not
+  committed). Today only `gpui-pre-macos`: `GPUI_KEEP_DRAWING=1` draws a window parked off
+  screen.
+- UI building blocks come from **gpui-kit** (GPUI 0.3.11 + gpui-component, Apache-2.0):
+  inputs, selects, popovers, dialogs, tables, charts, menus. Zed's own crates (ui, editor,
+  markdown) are reference code only: GPL, and tied to Zed.
 
 ## Build and run
 
-`xcode-select` may point at the Command Line Tools, which can't build. Always:
-
 ```sh
-export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
-swift build && swift test
-(cd app/ui && pnpm typecheck)
-scripts/bundle.sh                 # → build/YourHarness Next.app (APP=<path> for elsewhere)
+export PATH="$HOME/.cargo/bin:$PATH" DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+scripts/vendor.sh && cargo build --release && cargo test
+scripts/bundle.sh                 # → build/YourHarness Next.app
+APP=test-harness-root/next-test/app/"YourHarness Next.app" FEATURES=snapshots scripts/bundle.sh
 ```
 
 The bundle ID is `com.mdovhopo.yourharness.next` until the switch, so it never shares
 permissions or data with the user's app (`/Applications/YourHarness.app`, the frozen 0.0.16).
 **Never point a development run at the user's real data folder**: pass `YH_DATA_DIR=<scratch>`
 (a folder with a `harness.sqlite`, e.g. an APFS clone `cp -c` of `test-harness-root/extreme`),
-and `YH_PATH="$PATH"` so no login shell starts (the user's `.zshrc` reads from `~/Downloads`
-and macOS would ask them for access). Launch in the background, never taking focus:
+and `YH_PATH="$PATH"` so no login shell starts and `claude` is found. Launch in the
+background, never taking focus:
 `open -g -n --env YH_DATA_DIR=… --env YH_PATH="$PATH" --stderr <log> "<app>"`. Test builds go
-to their own folder (`APP=test-harness-root/web-test/… scripts/bundle.sh`), never `build/`,
-which may be the copy the user has open; quit test copies by their own PID or `YH_QUIT=1`,
-never by name or path pattern. A test run must never put a macOS privacy prompt on screen;
-never run `screencapture`, use `YH_SNAPSHOT=<png>`.
+to their own folder (`APP=…`), never `build/`, which may be the copy the user has open. A test
+run must never put a macOS privacy prompt on screen: never run `screencapture`. Use a
+`FEATURES=snapshots` build and `YH_SNAPSHOT=<png>` (`Window::render_to_image`). Use Haiku and a
+throwaway folder for real turns.
 
-Launch options (see `app/host` and `app/ui/src/main.tsx`): `YH_DATA_DIR`, `YH_NO_CLAUDE=1`,
-`YH_CLAUDE_CONFIG`, `YH_PROJECT=<folder>`, `YH_SELECT=<title or id>`, `YH_SEND`/`YH_MODEL`/
-`YH_MODE`/`YH_ANSWER=allow|deny`/`YH_QUIT=1` (one real turn, logged, use Haiku and a throwaway
-folder), `YH_SNAPSHOT=<png>` (`_DELAY`, `_QUIT`), `YH_BACKGROUND=1`, `YH_TIMING=1`,
-`YH_EVENT_LOG=1`, `YH_FLAGS=<classes>` (turn one thing off to measure it).
+Launch options: `YH_DATA_DIR`, `YH_NO_CLAUDE=1` (no Claude Code history), `YH_CLAUDE_CONFIG`,
+`YH_CLAUDE_LIMIT`, `YH_PROJECT=<folder>`, `YH_SELECT=<title or id>`, and `YH_SEND` / `YH_MODEL` /
+`YH_MODE` / `YH_ANSWER=allow|deny` (one real turn, prompts answered by themselves). Also
+`YH_SNAPSHOT=<png>` (`_DELAY`, `_QUIT`), `YH_BACKGROUND=1`, `YH_TIMING=1` and `YH_EVENT_LOG=1`.
 
 ## Performance is the product
 
-Every chunk ends with `scripts/perf-run.sh <results>` (the `extreme` preset, a fake `claude`
-streaming 20 huge threads, the native probe's phases; `YH_PERF_PHASES`, `YH_PERF_SECONDS`,
-`SKIP_BUILD=1`, `FORCE=1` on battery) compared with the last chunk's numbers in
-docs/performance.md. Judge by frames on time, worst frames and clicks, not averages. Before
-trusting a run: no `INVALID` lines; `DIRECT` means synthetic events didn't reach the window and
-the page was driven directly (fine for comparing, but `YH_PERF_FRONT=1` is the real test and
-takes over the screen: only when the user is away). A slowdown counts once a baseline build
-shows it isn't there under the same conditions; a fix once the test fails without it, over
-several runs. Rules from measurements (docs/web-experiment.md):
+Every chunk ends with `scripts/perf-run.sh <results>`: the `extreme` preset, a fake `claude`
+streaming 20 huge threads, the probe's phases. Options are `YH_PERF_PHASES`,
+`YH_PERF_SECONDS`, `SKIP_BUILD=1`, and `FORCE=1` on battery. Compare with the last chunk's
+numbers in docs/performance.md, by frames on time, worst frames and clicks, not averages.
+Before trusting a run: no `INVALID` lines. `DIRECT` means synthetic events didn't reach the
+window and the app was driven directly. `YH_PERF_FRONT=1` is the real test and takes over the
+screen, so run it only when the user is away. A slowdown counts once a baseline build shows
+it isn't there under the same conditions; a fix counts once the test fails without it, over
+several runs. Rules from measurements (docs/architecture.md):
 
-- Nothing that scrolls inside a row; code wraps. One scroller per column.
-- Rows redraw alone (a version per row); parked transcripts don't redraw; hold only recent rows.
-- Patches reach the page once a frame, batched; the page never reduces raw events.
-- Animate opacity and transform only; hover never changes layout.
-- Check memory of all processes (host, web content, GPU), not just the app's.
+- The transcript is GPUI's `list`; a change splices exactly the rows it touched.
+- Views that change rarely are cached; nothing that changes often lives in a view that's always there.
+- Parsing and I/O off the main thread; Claude's events applied at most once a frame.
+- Hold only recent rows; parked transcripts don't redraw.
+- Animate only what fades; hover never changes layout.
+- Never send events to the window from inside an entity update; hold off App Nap in test runs.
 
 ## Principles
 
-- **Apple-quality look**, drawn on the web: system font, macOS colors in light and dark,
-  native-feeling controls, SF Symbols as SVG where needed. Shared tokens in one stylesheet.
-- **The backend owns state; the page mirrors it.** Requests are intents, patches say what
-  changed. Keep the wire language-neutral (Rust later).
+- **Performance and memory over looks.** The user gave up Liquid Glass and native controls for
+  stable frames. Still clean and Mac-like: system font, macOS colors in light and dark, standard
+  shortcuts.
+- **State lives in entities, views draw it.** No domain logic in views.
+- **The user's data is sacred.** Keep `harness.sqlite`'s format. Never write to the real data
+  folder from a test.
 - **CLI protocols change often.** Parsers ignore unknown events and never crash on new fields;
-  capture real sessions, sanitized, under `Tests/HarnessCoreTests/Fixtures/`.
+  test them against the recorded sessions in `legacy/Tests/HarnessCoreTests/Fixtures/`.
 - **Never extract or reuse CLI credentials.** Always drive the official binary.
+
+## Working autonomously
+
+Push to `rewrite` after each finished feature. Watch the Claude session limit with
+`scripts/limits.sh` (it costs one tiny Haiku request). When `five_hour` nears its limit,
+commit, push, note the next step in the task, schedule a wake-up just after its reset, and
+pause.
 
 ## Versions
 
-Work happens on `rewrite`, pushed after each feature. Nothing is released from it until it is
-the whole app. `main` keeps the frozen app and its release scripts (`legacy/scripts` here).
+Nothing is released from `rewrite` until it's the whole app. `main` keeps the frozen app and its
+release scripts (`legacy/scripts` here).

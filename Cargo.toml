@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = ["crates/yh-core", "crates/yh-app"]
+
+[workspace.package]
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+yh-core = { path = "crates/yh-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.37", features = ["bundled"] }
+flume = "0.11"
+libc = "0.2"
+
+[profile.release]
+debug = 1
+lto = "thin"
+codegen-units = 8
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[patch.crates-io]
+# scripts/vendor.sh: crates.io's copy plus patches/ (see there for what each patch does).
+gpui-pre-macos = { path = "vendor/gpui-pre-macos" }

@@ -1,11 +1,10 @@
 # YourHarness
 
-> **Being rewritten** on this branch (`rewrite`): the UI moves to the web (SolidJS in one
-> WKWebView) for smoothness under heavy load, over the same Swift core. See
-> [docs/architecture.md](docs/architecture.md) for the plan and
-> [docs/web-experiment.md](docs/web-experiment.md) for why. The feature list below describes
-> the frozen SwiftUI app (`legacy/`, tag `swift-app-frozen`), the reference for what the
-> rewrite covers.
+> **Being rewritten** on this branch (`rewrite`) in Rust on GPUI, one process, for stable
+> frames and low memory under heavy load. See [docs/architecture.md](docs/architecture.md) for
+> the plan and [docs/gpui-experiment.md](docs/gpui-experiment.md) for why. The feature list
+> below describes the frozen SwiftUI app (`legacy/`, tag `swift-app-frozen`), the reference for
+> what the rewrite covers.
 
 A fast, native macOS home for AI coding agents. Bring your own subscription: YourHarness drives the official CLI you're already logged into (Claude Code first, others later) and builds a better day-to-day experience on top. It doesn't touch your credentials.
 
