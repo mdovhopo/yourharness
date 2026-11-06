@@ -68,7 +68,9 @@ chat after `YH_DRAFT_DELAY`) (the right sidebar open on it), `YH_OPEN_FILE=<path
 `YH_MCP_ADD_URL`, `YH_MCP_ADD_SCOPE=local|project|user`, `YH_MCP_ADD_SUBMIT=1`, `YH_MCP_REMOVE=<name>`: they write
 Claude Code's config, so project scope in a scratch project, or a scratch `CLAUDE_CONFIG_DIR`; `YH_MCP_BROWSER=log`
 prints sign-in pages instead of opening them), `YH_MCP_ELICIT_ANSWER=accept|decline` (what an MCP server asks
-mid-call, answered with the form's defaults), `YH_OPEN_USAGE=1` (Usage; `YH_USAGE_RANGE=week|month|quarter|halfYear|year`, `YH_USAGE_METRIC=cost`,
+mid-call, answered with the form's defaults), `YH_MCP_SIGN_IN_ANSWER=allow|deny` (the card Claude puts up to sign in
+to a server; with `YH_MCP_BROWSER=log` each such call prints `MCP sign-in asked: <server>` and the page; never
+finish a real sign-in from a test), `YH_OPEN_USAGE=1` (Usage; `YH_USAGE_RANGE=week|month|quarter|halfYear|year`, `YH_USAGE_METRIC=cost`,
 `YH_USAGE_HOVER=<days ago>`; test it on a clone of `test-harness-root/usage` with `CLAUDE_CONFIG_DIR` at its
 `claude-config`, never the real `~/.claude`), `YH_OPEN_MEMORY=1` (the project's Memory page,
 `YH_MEMORY_TAB=memories|tasks|activity`, after `YH_DRAFT_DELAY`), `YH_SPOTLIGHT=<words>` (⌘K typed;

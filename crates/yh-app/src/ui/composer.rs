@@ -448,6 +448,45 @@ impl Render for Composer {
         if let Some((_, card)) = &self.elicit {
             inner = inner.child(card.clone());
         }
+        if let Some(ask) = thread.read(cx).sign_in.clone() {
+            // Claude asks you to sign in to an MCP server: in your default browser, from here.
+            let (t1, t2, t3) = (thread.clone(), thread.clone(), thread.clone());
+            let answer = |t: &Entity<ThreadState>, yes: bool, cx: &mut App| {
+                t.update(cx, |t, cx| {
+                    if let Some(a) = t.sign_in.as_mut() {
+                        if let Some(d) = a.decision.take() {
+                            let _ = d.send(yes);
+                        }
+                    }
+                    cx.notify();
+                })
+            };
+            let asking = ask.decision.is_some();
+            let cancelled = ask.cancelled.clone();
+            inner = inner.child(
+                card_frame(&theme)
+                    .child(div().flex().gap(px(4.)).child("Claude needs you to sign in to").child(div().font_weight(FontWeight::BOLD).child(ask.server.clone())))
+                    .when_some(ask.reason.clone(), |d, r| d.child(div().text_color(theme.secondary).child(r)))
+                    .child(if asking {
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap(px(6.))
+                            .child(Button::new("sign-in-no").small().label("Not Now").on_click(move |_, _, cx| answer(&t1, false, cx)))
+                            .child(Button::new("sign-in-yes").small().primary().label("Sign In").on_click(move |_, _, cx| answer(&t2, true, cx)))
+                    } else {
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .child(div().flex_1().text_color(theme.secondary).child("Waiting for you to finish in your browser…"))
+                            .child(Button::new("sign-in-cancel").small().label("Cancel").on_click(move |_, _, cx| {
+                                cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+                                t3.update(cx, |_, cx| cx.notify());
+                            }))
+                    }),
+            );
+        }
         if let (Some(p), Some((_, card))) = (&permission, &self.card) {
             inner = inner.child(match card {
                 Card::Question(q) => q.clone().into_any_element(),

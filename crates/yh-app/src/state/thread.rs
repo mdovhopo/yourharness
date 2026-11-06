@@ -140,6 +140,17 @@ fn item_type(data: &EntryData) -> ItemType {
     }
 }
 
+/// Claude asks you to sign in to an MCP server (`mcp__harness__sign_in_to_mcp_server`).
+#[derive(Clone, Debug)]
+pub struct SignInAsk {
+    pub server: String,
+    pub reason: Option<String>,
+    /// Your answer goes here; None once given.
+    pub decision: Option<flume::Sender<bool>>,
+    /// Set by Cancel while the browser page is open.
+    pub cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
 /// An MCP server's question mid-call, waiting for you.
 #[derive(Clone, Debug)]
 pub struct Elicitation {
@@ -174,6 +185,7 @@ pub struct ThreadState {
     pub find_hit: Option<i64>,
     pub permission: Option<Permission>,
     pub elicitation: Option<Elicitation>,
+    pub sign_in: Option<SignInAsk>,
     /// Rows of the history before the first one held.
     pub before: usize,
     pub loaded: bool,
@@ -214,6 +226,7 @@ impl ThreadState {
             find_hit: None,
             permission: None,
             elicitation: None,
+            sign_in: None,
             before: 0,
             loaded: false,
             loading: false,

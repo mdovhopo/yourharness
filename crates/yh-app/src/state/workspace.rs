@@ -633,6 +633,10 @@ impl Workspace {
                 }),
             }));
         }
+        // Claude asks you to sign in to an MCP server, from a card in the thread.
+        prompt.push(crate::state::harness_tools::INSTRUCTIONS.to_string());
+        allowed.push("mcp__harness".to_string());
+        servers.push(std::sync::Arc::new(crate::state::harness_tools::HarnessTools { caller: t.id().to_string(), requests: self.tool_requests.clone() }));
         // The thread tools: list, read and tidy threads; this thread's title.
         if let Some(project) = project.as_ref() {
             let titles = self.library.setting("titleGeneration");
@@ -1328,6 +1332,37 @@ impl Workspace {
                 let _ = reply.send(snapshot);
             }
             ToolRequest::MemoryChanged => self.memory_changed(cx),
+            ToolRequest::Mcp { caller, request, reply } => {
+                let Some(thread) = self.thread(&caller) else {
+                    let _ = reply.send(Err("This thread is gone.".into()));
+                    return;
+                };
+                let task = self.mcp(&thread, request, cx);
+                cx.spawn(async move |_, _| {
+                    let _ = reply.send(task.await);
+                })
+                .detach();
+            }
+            ToolRequest::SignInCard { caller, ask } => {
+                if let Some(thread) = self.thread(&caller) {
+                    let attention = ask.is_some();
+                    thread.update(cx, |t, cx| {
+                        t.sign_in = ask;
+                        cx.notify();
+                    });
+                    if attention {
+                        self.note_attention(&thread, cx);
+                    }
+                    cx.notify();
+                }
+            }
+            ToolRequest::OpenUrl(url) => {
+                if std::env::var("YH_MCP_BROWSER").as_deref() == Ok("log") {
+                    eprintln!("MCP sign-in page: {url}");
+                } else {
+                    cx.open_url(&url);
+                }
+            }
             ToolRequest::Rename { id, title, reply } => {
                 self.rename(&id, &title, cx);
                 let _ = reply.send(());
