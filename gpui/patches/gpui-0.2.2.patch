@@ -1,0 +1,102 @@
+diff -ru -x . gpui-orig/src/gpui.rs gpui/src/gpui.rs
+--- gpui-orig/src/gpui.rs	2006-07-24 04:21:28
++++ gpui/src/gpui.rs	2026-11-06 11:19:21
+@@ -30,6 +30,11 @@
+ mod path_builder;
+ mod platform;
+ pub mod prelude;
++
++/// YourHarness patch: a path here makes the next drawn frame go to that PNG as well
++/// (needs `GPUI_SNAPSHOTS=1` at launch, which keeps drawables readable).
++#[doc(hidden)]
++pub static SNAPSHOT_REQUEST: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+ mod scene;
+ mod shared_string;
+ mod shared_uri;
+diff -ru -x . gpui-orig/src/platform/mac/metal_renderer.rs gpui/src/platform/mac/metal_renderer.rs
+--- gpui-orig/src/platform/mac/metal_renderer.rs	2006-07-24 04:21:28
++++ gpui/src/platform/mac/metal_renderer.rs	2026-11-06 11:19:21
+@@ -144,6 +144,10 @@
+         layer.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
+         layer.set_opaque(false);
+         layer.set_maximum_drawable_count(3);
++        // YourHarness patch: snapshots read the drawable back.
++        if std::env::var_os("GPUI_SNAPSHOTS").is_some() {
++            layer.set_framebuffer_only(false);
++        }
+         unsafe {
+             let _: () = msg_send![&*layer, setAllowsNextDrawableTimeout: NO];
+             let _: () = msg_send![&*layer, setNeedsDisplayOnBoundsChange: YES];
+@@ -393,6 +397,12 @@
+                         command_buffer.present_drawable(drawable);
+                         command_buffer.commit();
+                     }
++                    // YourHarness patch: the frame into a PNG when asked.
++                    let request = crate::SNAPSHOT_REQUEST.lock().ok().and_then(|mut r| r.take());
++                    if let Some(path) = request {
++                        command_buffer.wait_until_completed();
++                        write_snapshot(drawable.texture(), &path);
++                    }
+                     return;
+                 }
+                 Err(err) => {
+@@ -1352,4 +1362,24 @@
+ pub struct SurfaceBounds {
+     pub bounds: Bounds<ScaledPixels>,
+     pub content_mask: ContentMask<ScaledPixels>,
++}
++
++/// YourHarness patch: a drawable's pixels (BGRA) as a PNG.
++fn write_snapshot(texture: &metal::TextureRef, path: &std::path::Path) {
++    let (width, height) = (texture.width() as u32, texture.height() as u32);
++    let mut bytes = vec![0u8; (width * height * 4) as usize];
++    texture.get_bytes(
++        bytes.as_mut_ptr() as *mut c_void,
++        (width * 4) as u64,
++        metal::MTLRegion::new_2d(0, 0, width as u64, height as u64),
++        0,
++    );
++    for pixel in bytes.chunks_exact_mut(4) {
++        pixel.swap(0, 2);
++        pixel[3] = 255;
++    }
++    match image::RgbaImage::from_raw(width, height, bytes).map(|img| img.save(path)) {
++        Some(Ok(())) => eprintln!("SNAPSHOT {}", path.display()),
++        other => eprintln!("snapshot failed: {:?}", other.map(|r| r.err())),
++    }
+ }
+diff -ru -x . gpui-orig/src/platform/mac/window.rs gpui/src/platform/mac/window.rs
+--- gpui-orig/src/platform/mac/window.rs	2006-07-24 04:21:28
++++ gpui/src/platform/mac/window.rs	2026-11-06 11:32:28
+@@ -476,7 +476,9 @@
+     fn start_display_link(&mut self) {
+         self.stop_display_link();
+         unsafe {
+-            if !self
++            // YourHarness patch: GPUI_KEEP_DRAWING draws hidden windows too.
++            if std::env::var_os("GPUI_KEEP_DRAWING").is_none()
++                && !self
+                 .native_window
+                 .occlusionState()
+                 .contains(NSWindowOcclusionState::NSWindowOcclusionStateVisible)
+@@ -1915,7 +1917,8 @@
+         {
+             lock.move_traffic_light();
+             lock.start_display_link();
+-        } else {
++        } else if std::env::var_os("GPUI_KEEP_DRAWING").is_none() {
++            // YourHarness patch: a test run parks the window off screen and still wants frames.
+             lock.stop_display_link();
+         }
+     }
+@@ -2488,6 +2491,10 @@
+ }
+ 
+ unsafe fn display_id_for_screen(screen: id) -> CGDirectDisplayID {
++    // YourHarness patch: a window parked off screen has no screen; time it by the main display.
++    if screen == nil {
++        return core_graphics::display::CGDisplay::main().id;
++    }
+     unsafe {
+         let device_description = NSScreen::deviceDescription(screen);
+         let screen_number_key: id = NSString::alloc(nil).init_str("NSScreenNumber");

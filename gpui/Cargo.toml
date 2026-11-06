@@ -1,0 +1,32 @@
+[package]
+name = "yourharness-gpui"
+version = "0.0.1"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "yourharness-gpui"
+path = "src/main.rs"
+
+[dependencies]
+# The Metal toolchain doesn't come with Xcode 26+: shaders compile at launch instead.
+gpui = { version = "0.2.2", default-features = false, features = ["font-kit", "runtime_shaders"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde_json = "1"
+pulldown-cmark = { version = "0.13", default-features = false }
+flume = "0.11"
+libc = "0.2"
+objc = "0.2"
+cocoa = "0.26"
+core-foundation = "0.10"
+raw-window-handle = "0.6"
+unicode-segmentation = "1"
+
+[patch.crates-io]
+# scripts/vendor.sh: GPUI 0.2.2 plus patches/gpui-0.2.2.patch.
+gpui = { path = "vendor/gpui" }
+
+[profile.release]
+debug = 1
+lto = "thin"
+codegen-units = 4
