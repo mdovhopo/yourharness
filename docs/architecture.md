@@ -66,8 +66,9 @@ From the experiments (details in gpui-experiment.md):
 
 ## Plan
 
-Each chunk ends with the perf run (`scripts/perf-run.sh`) against the last chunk's numbers, a
-live Haiku turn, and a push to `rewrite`. Nothing is released from `rewrite` until it's the
+Each feature ends with a live Haiku turn that uses it, checked, and a push to `rewrite`. Full
+perf runs (`scripts/perf-run.sh`) are kept for the end of big chunks: one more at most, and one
+when the rewrite is whole. Nothing is released from `rewrite` until it's the
 whole app; the user's app stays the frozen 0.0.16 until then. The web rewrite's chunks 1–4
 (`legacy/Sources/HarnessBackend`, `legacy/web`) are the closest spec for chunks 1–4 here.
 
@@ -75,7 +76,7 @@ whole app; the user's app stays the frozen 0.0.16 until then. The web rewrite's 
 |---|---|---|
 | 0 | Repo on the new stack: Cargo workspace (`yh-core`, `yh-app`), GPUI through gpui-kit with gpui-component, patches, scripts (bundle, perf, limits), docs; the POC as the starting point | done |
 | 1 | **The app owns threads.** Read and write `harness.sqlite` in the Swift app's format (projects, threads, rows, blobs), the user's data folder. Thread runtime: sessions, resume, idle reap, saving rows as they change, crash recovery. Sidebar: pin, settle, rename, delete, new thread. Composer: model, effort and mode from the CLI's catalog; queue and steer; stop. Permission, question and plan cards. Unread. | done |
-| 2 | Transcript parity: markdown details (tree-sitter code, tables, links), Edit diffs, sub-agent cards, plan checklist, notices and compaction, slash commands, @ mentions, images and files in messages, find in thread. | |
+| 2 | Transcript parity: markdown details (tree-sitter code, tables, links), Edit diffs, sub-agent cards, plan checklist, notices and compaction, slash commands, @ mentions, images and files in messages, find in thread. | done |
 | 3 | App shell: titles (generated, renamed), notifications and badge, Home project, ⌘K search, settings, usage limits, resume a Claude Code session. | |
 | 4 | Agents' tools served by the app: memory and thread MCP servers, their views (Memory page, tasks). | |
 | 5 | Right sidebar: side chat, sub-agents, files, pull requests and workspaces, the agents' browser (a WKWebView placed over the GPUI window). | |

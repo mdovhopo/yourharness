@@ -53,19 +53,24 @@ Launch options: `YH_DATA_DIR`, `YH_CLAUDE_HISTORY=1` (also list Claude Code's ow
 `YH_MODE`: `ask` shows permission cards, `plan` plan cards), `YH_SELECT=<title or id>`, and
 `YH_SEND` / `YH_MODEL` / `YH_EFFORT` / `YH_ANSWER=allow|deny` (one real turn, prompts answered by
 themselves). Also
-`YH_SNAPSHOT=<png>` (`_DELAY`, `_QUIT`), `YH_BACKGROUND=1`, `YH_TIMING=1` and `YH_EVENT_LOG=1`.
+`YH_SEND_FILES=<a.png:b.jpg>` (images with it), `YH_DRAFT=<text>` (typed in the composer:
+`/co` opens the command menu, `@no` the file menu; `YH_DRAFT_DELAY`), `YH_FIND=<words>` (Find
+opened), `YH_EXPAND_WORK=1` (folded work drawn open), `YH_ACTIONS_PROBE=1` (pin, rename, settle,
+delete on the first threads). Also `YH_SNAPSHOT=<png>` (`_DELAY`, `_QUIT`), `YH_BACKGROUND=1`,
+`YH_TIMING=1` and `YH_EVENT_LOG=1` (every event, and each plan rebuild).
 
 ## Performance is the product
 
-Every chunk ends with `scripts/perf-run.sh <results>`: the `extreme` preset, a fake `claude`
-streaming 20 huge threads, the probe's phases. Options are `YH_PERF_PHASES`,
-`YH_PERF_SECONDS`, `SKIP_BUILD=1`, and `FORCE=1` on battery. Compare with the last chunk's
-numbers in docs/performance.md, by frames on time, worst frames and clicks, not averages.
-Before trusting a run: no `INVALID` lines. `DIRECT` means synthetic events didn't reach the
-window and the app was driven directly. `YH_PERF_FRONT=1` is the real test and takes over the
-screen, so run it only when the user is away. A slowdown counts once a baseline build shows
-it isn't there under the same conditions; a fix counts once the test fails without it, over
-several runs. Rules from measurements (docs/architecture.md):
+Every feature ends with a real Claude turn on Haiku that uses it (a throwaway `YH_PROJECT`,
+`YH_MODEL=haiku`), checked by snapshot or the saved data, then a push. Full perf runs
+(`scripts/perf-run.sh <results>`: the `extreme` preset, a fake `claude` streaming 20 huge threads,
+the probe's phases; `YH_PERF_PHASES`, `YH_PERF_SECONDS`, `SKIP_BUILD=1`, `FORCE=1` on battery)
+take ten minutes, so they're kept for the end of big chunks: the user allows one more at most
+and one when the rewrite is whole. Judge by frames on time, worst frames and clicks (docs/
+performance.md), not averages; no `INVALID` lines; `PERF stall` lines say when and in what
+phase a frame ran long. `YH_PERF_FRONT=1` takes over the screen, so only when the user is away. A
+slowdown counts once a baseline build shows it isn't there under the same conditions; a fix once
+the test fails without it, over several runs. Rules from measurements (docs/architecture.md):
 
 - The transcript is GPUI's `list`; a change splices exactly the rows it touched.
 - Views that change rarely are cached; nothing that changes often lives in a view that's always there.

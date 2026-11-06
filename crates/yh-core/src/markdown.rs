@@ -22,6 +22,8 @@ pub enum Span {
 pub struct Styled {
     pub text: String,
     pub spans: Vec<(Range<usize>, Span)>,
+    /// Links: where they are in `text`, and where they go.
+    pub links: Vec<(Range<usize>, String)>,
 }
 
 #[derive(Clone, Debug)]
@@ -53,6 +55,8 @@ struct Builder {
     code: Option<String>,
     table: Option<(Vec<Styled>, Vec<Vec<Styled>>, bool)>,
     row: Vec<Styled>,
+    /// Links open: where each starts and where it goes.
+    links: Vec<(usize, String)>,
 }
 
 impl Builder {
@@ -127,7 +131,10 @@ pub fn parse(source: &str) -> Markdown {
                 Tag::Emphasis => b.open.push((Span::Italic, b.current.text.len())),
                 Tag::Strong => b.open.push((Span::Bold, b.current.text.len())),
                 Tag::Strikethrough => b.open.push((Span::Strike, b.current.text.len())),
-                Tag::Link { .. } => b.open.push((Span::Link, b.current.text.len())),
+                Tag::Link { dest_url, .. } => {
+                    b.open.push((Span::Link, b.current.text.len()));
+                    b.links.push((b.current.text.len(), dest_url.to_string()));
+                }
                 _ => {}
             },
             Event::End(tag) => match tag {
@@ -177,7 +184,21 @@ pub fn parse(source: &str) -> Markdown {
                         b.blocks.push(MdBlock::Table { header, rows });
                     }
                 }
-                TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough | TagEnd::Link => {
+                TagEnd::Link => {
+                    if let Some((start, url)) = b.links.pop() {
+                        let end = b.current.text.len();
+                        if end > start {
+                            b.current.links.push((start..end, url));
+                        }
+                    }
+                    if let Some((span, start)) = b.open.pop() {
+                        let end = b.current.text.len();
+                        if end > start {
+                            b.current.spans.push((start..end, span));
+                        }
+                    }
+                }
+                TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough => {
                     if let Some((span, start)) = b.open.pop() {
                         let end = b.current.text.len();
                         if end > start {
@@ -289,5 +310,5 @@ pub fn highlight(text: &str, _lang: &str) -> Styled {
     }
     // Ranges must fall on character boundaries.
     spans.retain(|(r, _): &(Range<usize>, Span)| text.is_char_boundary(r.start) && text.is_char_boundary(r.end));
-    Styled { text: text.to_string(), spans }
+    Styled { text: text.to_string(), spans, links: vec![] }
 }

@@ -265,12 +265,29 @@ fn highlight_style(span: Span, theme: &Theme) -> HighlightStyle {
     }
 }
 
-fn styled_text(styled: &Text, theme: &Theme) -> StyledText {
+fn styled_text(styled: &Text, theme: &Theme) -> AnyElement {
     let text: SharedString = styled.text.clone().into();
-    if styled.spans.is_empty() {
-        return StyledText::new(text);
+    let shaped = if styled.spans.is_empty() {
+        StyledText::new(text)
+    } else {
+        StyledText::new(text).with_highlights(styled.spans.iter().map(|(r, s)| (r.clone(), highlight_style(*s, theme))))
+    };
+    if styled.links.is_empty() {
+        return shaped.into_any_element();
     }
-    StyledText::new(text).with_highlights(styled.spans.iter().map(|(r, s)| (r.clone(), highlight_style(*s, theme))))
+    // Links open in the browser; the paragraph's text and place name it.
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hash::hash(&styled.text, &mut hasher);
+    let id = std::hash::Hasher::finish(&hasher) as usize;
+    let ranges: Vec<std::ops::Range<usize>> = styled.links.iter().map(|(r, _)| r.clone()).collect();
+    let urls: Vec<String> = styled.links.iter().map(|(_, u)| u.clone()).collect();
+    gpui_kit::InteractiveText::new(("link-text", id), shaped)
+        .on_click(ranges, move |ix, _, cx| {
+            if let Some(url) = urls.get(ix) {
+                cx.open_url(url);
+            }
+        })
+        .into_any_element()
 }
 
 pub fn markdown_view(md: &markdown::Markdown, theme: &Theme) -> impl IntoElement {
