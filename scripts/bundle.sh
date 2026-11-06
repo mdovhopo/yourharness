@@ -10,7 +10,7 @@ ROOT="${0:A:h:h}"
 export DEVELOPER_DIR=${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}
 export PATH="$HOME/.cargo/bin:$PATH"
 "$ROOT/scripts/vendor.sh"
-(cd "$ROOT" && cargo build --release -p yh-app ${FEATURES:+--features $FEATURES} 2>&1 | grep -E "^(error|warning: unused)|Finished" -A6 || true)
+(cd "$ROOT" && cargo build --release -p yh-app ${FEATURES:+--features=$FEATURES} 2>&1 | grep -E "^(error|warning: unused)|Finished" -A6 || true)
 BIN="$ROOT/target/release/YourHarness"
 [[ -x $BIN ]] || { echo "build failed" >&2; exit 1; }
 APP="${APP:-$ROOT/build/YourHarness Next.app}"

@@ -1,9 +1,11 @@
-//! What there is to show: the harness's own database (a copy: the extreme preset for load
-//! tests) and Claude Code's history in `~/.claude/projects`, read-only. The twin of
-//! web/host/Library.swift, without HarnessCore: the same tables and files, read directly.
+//! Projects and threads: the app's own `harness.sqlite` (the user's data folder, or
+//! `YH_DATA_DIR`), through `db::Database`, in the Swift app's format. Records are kept as the
+//! JSON they were read as and changed field by field, so whatever the Swift app wrote stays.
+//! With `YH_CLAUDE_HISTORY=1`, Claude Code's own sessions are listed too, read-only.
 
 use crate::history;
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use crate::db::{Database, Row, StateRows, ThreadRecord};
+use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -87,8 +89,17 @@ pub struct Page {
     pub entries: Vec<EntryData>,
 }
 
+/// The records as read, changed in place, saved whole (the database writes what differs).
+#[derive(Default)]
+struct Records {
+    values: std::collections::BTreeMap<String, Vec<u8>>,
+    projects: Vec<Map<String, Value>>,
+    threads: Vec<Map<String, Value>>,
+}
+
 pub struct Library {
-    db: Option<Mutex<Connection>>,
+    pub db: Option<Arc<Database>>,
+    records: Mutex<Records>,
     claude_config: Option<PathBuf>,
     pub projects: Vec<ProjectMeta>,
     pub threads: Vec<ThreadMeta>,
@@ -103,17 +114,14 @@ fn env(key: &str) -> Option<String> {
 
 impl Library {
     pub fn open() -> Library {
-        let db = env("YH_DATA_DIR").and_then(|dir| {
-            let path = Path::new(&dir).join("harness.sqlite");
-            match Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX) {
-                Ok(c) => Some(Mutex::new(c)),
-                Err(e) => {
-                    eprintln!("can't open {}: {e}", path.display());
-                    None
-                }
+        let db = match Database::open(&data_directory()) {
+            Ok(db) => Some(Arc::new(db)),
+            Err(e) => {
+                eprintln!("{e}");
+                None
             }
-        });
-        let claude_config = if env("YH_NO_CLAUDE").as_deref() == Some("1") {
+        };
+        let claude_config = if env("YH_CLAUDE_HISTORY").as_deref() != Some("1") {
             None
         } else if let Some(dir) = env("YH_CLAUDE_CONFIG").or_else(|| env("CLAUDE_CONFIG_DIR")) {
             Some(PathBuf::from(expand_tilde(&dir)))
@@ -122,6 +130,7 @@ impl Library {
         };
         let mut library = Library {
             db,
+            records: Mutex::new(Records::default()),
             claude_config,
             projects: vec![],
             threads: vec![],
@@ -139,43 +148,29 @@ impl Library {
     fn scan(&mut self) {
         let started = Instant::now();
         if let Some(db) = &self.db {
-            let db = db.lock().unwrap();
-            let mut statement = db.prepare("SELECT id, json FROM projects ORDER BY position").unwrap();
-            let rows = statement
-                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)))
-                .unwrap();
-            for (id, json) in rows.flatten() {
-                let Ok(object) = serde_json::from_slice::<serde_json::Value>(&json) else { continue };
+            let state = db.load_state();
+            let mut records = Records { values: state.values, ..Default::default() };
+            for (id, json) in state.projects {
+                let Ok(Value::Object(object)) = serde_json::from_slice::<Value>(&json) else { continue };
                 self.projects.push(ProjectMeta {
                     id,
-                    name: object["name"].as_str().unwrap_or("Project").to_string(),
-                    path: object["path"].as_str().unwrap_or("").to_string(),
+                    name: object.get("name").and_then(Value::as_str).unwrap_or("Project").to_string(),
+                    path: object.get("path").and_then(Value::as_str).unwrap_or("").to_string(),
                 });
+                records.projects.push(object);
             }
-            let mut statement = db
-                .prepare("SELECT id, project_id, updated_at, session_id, json FROM threads ORDER BY position")
-                .unwrap();
-            let rows = statement
-                .query_map([], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, Option<f64>>(2)?,
-                        row.get::<_, Option<String>>(3)?,
-                        row.get::<_, Vec<u8>>(4)?,
-                    ))
-                })
-                .unwrap();
-            for (id, project_id, updated_at, session_id, json) in rows.flatten() {
-                let Ok(object) = serde_json::from_slice::<serde_json::Value>(&json) else { continue };
+            for t in state.threads {
+                let Ok(Value::Object(object)) = serde_json::from_slice::<Value>(&t.json) else { continue };
                 self.threads.push(ThreadMeta {
-                    id,
-                    project_id,
-                    title: object["title"].as_str().unwrap_or("Thread").to_string(),
-                    updated_at: updated_at.map(|s| s * 1000.0).unwrap_or(0.0),
-                    session_id,
+                    id: t.id,
+                    project_id: t.project_id,
+                    title: object.get("title").and_then(Value::as_str).unwrap_or("Thread").to_string(),
+                    updated_at: t.updated_at.map(|s| s * 1000.0).unwrap_or(0.0),
+                    session_id: t.session_id,
                 });
+                records.threads.push(object);
             }
+            *self.records.lock().unwrap() = records;
         }
         // `YH_PROJECT=<folder>`: a project of its own, for trying live turns somewhere throwaway.
         if let Some(path) = env("YH_PROJECT") {
@@ -224,60 +219,69 @@ impl Library {
             return Page { total: entries.len(), from, entries: entries[from..end].to_vec() };
         }
         let Some(db) = &self.db else { return Page { total: 0, from: 0, entries: vec![] } };
-        let db = db.lock().unwrap();
         let t0 = Instant::now();
-        // Rows are numbered from 0 without gaps: the last number is a lookup, a count a scan.
-        let total: usize = db
-            .query_row("SELECT max(seq) FROM entries WHERE thread_id = ?", [thread], |r| r.get::<_, Option<i64>>(0))
-            .optional()
-            .ok()
-            .flatten()
-            .flatten()
-            .map(|n| n as usize + 1)
-            .unwrap_or(0);
-        let t1 = Instant::now();
+        let total = db.transcript_count(thread);
         let end = before.unwrap_or(total).min(total);
         let from = end.saturating_sub(limit);
-        let mut statement = db
-            .prepare_cached(
-                "SELECT id, kind, text, tool_name, tool_input, tool_result, tool_result_length, tool_is_error \
-                 FROM entries WHERE thread_id = ? AND seq >= ? ORDER BY seq LIMIT ?",
-            )
-            .unwrap();
-        let rows = statement
-            .query_map(rusqlite::params![thread, from as i64, (end - from) as i64], |row| {
-                let kind = match row.get::<_, String>(1)?.as_str() {
-                    "user" => Some(Kind::User),
-                    "assistant" => Some(Kind::Assistant),
-                    "thinking" => Some(Kind::Thinking),
-                    "tool" => Some(Kind::Tool),
-                    "notice" => Some(Kind::Notice),
-                    "commandOutput" => Some(Kind::Command),
-                    _ => None,
-                };
-                let Some(kind) = kind else { return Ok(None) };
-                let result: Option<String> = row.get(5)?;
-                let mut entry = EntryData::new(row.get::<_, String>(0)?, kind, row.get::<_, String>(2)?);
-                entry.tool_name = row.get(3)?;
-                entry.tool_input = row.get::<_, Option<String>>(4)?.map(|s| head(&s, TOOL_TEXT_LIMIT));
-                entry.result_len = row
-                    .get::<_, Option<i64>>(6)?
-                    .map(|n| n as usize)
-                    .unwrap_or_else(|| result.as_ref().map_or(0, |r| r.len()));
-                entry.tool_result = result.map(|s| head(&s, TOOL_TEXT_LIMIT));
-                entry.is_error = row.get::<_, Option<i64>>(7)? == Some(1);
-                Ok(Some(entry))
-            })
-            .unwrap();
-        let entries: Vec<EntryData> = rows.flatten().flatten().collect();
+        let rows = db.read_rows(thread, from, end - from);
+        let entries: Vec<EntryData> = rows.into_iter().filter_map(EntryData::from_row).collect();
         if env("YH_TIMING").as_deref() == Some("1") {
-            eprintln!(
-                "page {thread}: count {:.0} ms, rows {:.0} ms",
-                (t1 - t0).as_secs_f64() * 1000.0,
-                t1.elapsed().as_secs_f64() * 1000.0
-            );
+            eprintln!("page {thread}: {} rows in {:.0} ms", entries.len(), t0.elapsed().as_secs_f64() * 1000.0);
         }
         Page { total, from, entries }
+    }
+
+    // MARK: Changing
+
+    /// A new thread at the top of its project, saved. Its ID is a UUID, as the Swift app's are.
+    pub fn add_thread(&self, project_id: &str, title: &str) -> ThreadMeta {
+        let id = new_uuid();
+        let now = iso_now();
+        let mut object = Map::new();
+        object.insert("id".into(), id.clone().into());
+        object.insert("projectID".into(), project_id.into());
+        object.insert("title".into(), title.into());
+        object.insert("createdAt".into(), now.clone().into());
+        object.insert("updatedAt".into(), now.into());
+        self.records.lock().unwrap().threads.insert(0, object);
+        self.save();
+        ThreadMeta { id, project_id: project_id.into(), title: title.into(), updated_at: now_ms(), session_id: None }
+    }
+
+    /// Changes a thread's record (`title`, `sessionID`, `updatedAt`…) and saves.
+    pub fn update_thread(&self, id: &str, change: impl FnOnce(&mut Map<String, Value>)) {
+        let mut records = self.records.lock().unwrap();
+        let Some(t) = records.threads.iter_mut().find(|t| t.get("id").and_then(Value::as_str) == Some(id)) else { return };
+        change(t);
+        drop(records);
+        self.save();
+    }
+
+    /// The records into the database, which writes what differs, in the background.
+    pub fn save(&self) {
+        let Some(db) = &self.db else { return };
+        let records = self.records.lock().unwrap();
+        let json = |o: &Map<String, Value>| serde_json::to_vec(o).unwrap_or_else(|_| b"{}".to_vec());
+        let state = StateRows {
+            values: records.values.clone(),
+            projects: records
+                .projects
+                .iter()
+                .map(|p| (p.get("id").and_then(Value::as_str).unwrap_or("").to_string(), json(p)))
+                .collect(),
+            threads: records
+                .threads
+                .iter()
+                .map(|t| ThreadRecord {
+                    id: t.get("id").and_then(Value::as_str).unwrap_or("").to_string(),
+                    project_id: t.get("projectID").and_then(Value::as_str).unwrap_or("").to_string(),
+                    updated_at: t.get("updatedAt").and_then(Value::as_str).and_then(parse_iso),
+                    session_id: t.get("sessionID").and_then(Value::as_str).map(str::to_string),
+                    json: json(t),
+                })
+                .collect(),
+        };
+        db.save_state(state);
     }
 
     fn archive(&self, thread: &str) -> Arc<Vec<EntryData>> {
@@ -345,4 +349,123 @@ fn expand_tilde(path: &str) -> String {
 
 pub fn now_ms() -> f64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64() * 1000.0).unwrap_or(0.0)
+}
+
+/// The user's data folder, or `YH_DATA_DIR` (development runs: never the real one).
+pub fn data_directory() -> PathBuf {
+    if let Some(dir) = env("YH_DATA_DIR") {
+        return PathBuf::from(expand_tilde(&dir));
+    }
+    Path::new(&env("HOME").unwrap_or_default()).join("Library/Application Support/YourHarness")
+}
+
+impl EntryData {
+    /// A stored row as the transcript shows it; `None` for a kind this app doesn't know.
+    pub fn from_row(row: Row) -> Option<EntryData> {
+        let kind = match row.kind.as_str() {
+            "user" => Kind::User,
+            "assistant" => Kind::Assistant,
+            "thinking" => Kind::Thinking,
+            "tool" => Kind::Tool,
+            "notice" => Kind::Notice,
+            "commandOutput" => Kind::Command,
+            _ => return None,
+        };
+        let mut entry = EntryData::new(row.id, kind, row.text);
+        entry.tool_name = row.tool_name;
+        entry.result_len = row
+            .tool_result_length
+            .map(|n| n as usize)
+            .unwrap_or_else(|| row.tool_result.as_ref().map_or(0, |r| r.len()));
+        entry.tool_input = row.tool_input.map(|s| head(&s, TOOL_TEXT_LIMIT));
+        entry.tool_result = row.tool_result.map(|s| head(&s, TOOL_TEXT_LIMIT));
+        entry.is_error = row.tool_is_error == Some(true);
+        Some(entry)
+    }
+}
+
+/// A random (v4) UUID, upper case as Foundation writes them.
+pub fn new_uuid() -> String {
+    let mut b = [0u8; 16];
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        use std::io::Read;
+        let _ = f.read_exact(&mut b);
+    }
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let h: String = b.iter().map(|x| format!("{x:02X}")).collect();
+    format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32])
+}
+
+/// Now as the Swift app writes dates in its JSON (ISO 8601, seconds, `Z`).
+pub fn iso_now() -> String {
+    iso(SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0))
+}
+
+pub fn iso(seconds: i64) -> String {
+    let (days, secs) = (seconds.div_euclid(86_400), seconds.rem_euclid(86_400));
+    // Civil from days (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", secs / 3600, secs % 3600 / 60, secs % 60)
+}
+
+/// Seconds since 1970 from `2026-10-28T01:00:00Z` (fractions and offsets tolerated).
+pub fn parse_iso(s: &str) -> Option<f64> {
+    let b = s.as_bytes();
+    if b.len() < 19 {
+        return None;
+    }
+    let n = |r: std::ops::Range<usize>| s.get(r)?.parse::<i64>().ok();
+    let (y, m, d, hh, mm, ss) = (n(0..4)?, n(5..7)?, n(8..10)?, n(11..13)?, n(14..16)?, n(17..19)?);
+    let (y2, m2) = if m <= 2 { (y - 1, m + 9) } else { (y, m - 3) };
+    let era = y2.div_euclid(400);
+    let yoe = y2 - era * 400;
+    let doy = (153 * m2 + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let mut t = (days * 86_400 + hh * 3600 + mm * 60 + ss) as f64;
+    let rest = &s[19..];
+    let rest = if let Some(frac) = rest.strip_prefix('.') {
+        let digits: String = frac.chars().take_while(|c| c.is_ascii_digit()).collect();
+        t += format!("0.{digits}").parse::<f64>().unwrap_or(0.0);
+        &frac[digits.len()..]
+    } else {
+        rest
+    };
+    if let Some(sign) = rest.chars().next().filter(|c| *c == '+' || *c == '-') {
+        let (oh, om) = (rest.get(1..3)?.parse::<i64>().ok()?, rest.get(rest.len() - 2..)?.parse::<i64>().ok()?);
+        let offset = (oh * 3600 + om * 60) as f64;
+        t += if sign == '+' { -offset } else { offset };
+    }
+    Some(t)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn iso_dates_round_trip() {
+        assert_eq!(iso(1_793_149_200), "2026-10-28T01:00:00Z");
+        assert_eq!(parse_iso("2026-10-28T01:00:00Z"), Some(1_793_149_200.0));
+        assert_eq!(parse_iso("2026-10-28T03:00:00+02:00"), Some(1_793_149_200.0));
+        assert_eq!(parse_iso("2026-10-28T01:00:00.5Z"), Some(1_793_149_200.5));
+    }
+
+    #[test]
+    fn uuids_look_like_foundations() {
+        let u = new_uuid();
+        assert_eq!(u.len(), 36);
+        assert_eq!(&u[14..15], "4");
+        assert_eq!(u, u.to_uppercase());
+    }
 }

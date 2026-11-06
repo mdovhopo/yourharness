@@ -195,19 +195,40 @@ impl HarnessApp {
 
     pub fn new_thread(&mut self, project: &ProjectMeta, window: &mut Window, cx: &mut Context<Self>) {
         self.new_count += 1;
-        let meta = ThreadMeta {
-            id: format!("new:{}", self.new_count),
-            project_id: project.id.clone(),
-            title: "New thread".into(),
-            updated_at: yh_core::library::now_ms(),
-            session_id: None,
+        // Saved in harness.sqlite right away, as the Swift app does; `new:` only without one.
+        let meta = if self.library.db.is_some() && !project.id.starts_with("dir:") {
+            self.library.add_thread(&project.id, "New thread")
+        } else {
+            ThreadMeta {
+                id: format!("new:{}", self.new_count),
+                project_id: project.id.clone(),
+                title: "New thread".into(),
+                updated_at: yh_core::library::now_ms(),
+                session_id: None,
+            }
         };
+        let fresh = meta.id.clone();
         let thread = Self::make_thread(meta, cx.entity().downgrade(), cx);
         let id = thread.read(cx).id().to_string();
         let at = self.threads.iter().position(|t| t.read(cx).meta.project_id == project.id).unwrap_or(0);
         self.threads.insert(at, thread.clone());
+        thread.update(cx, |t, _| t.loaded = true);
         self.by_id.insert(id.clone(), thread);
+        let _ = fresh;
         self.select(&id, window, cx);
+    }
+
+    /// What the thread's record keeps (title, session, last activity), saved.
+    fn persist_thread(&self, thread: &Entity<ThreadState>, cx: &App) {
+        let t = thread.read(cx);
+        let (id, title, session) = (t.id().to_string(), t.title.clone(), t.session_id.clone());
+        self.library.update_thread(&id, |record| {
+            record.insert("title".into(), title.into());
+            if let Some(session) = session {
+                record.insert("sessionID".into(), session.into());
+            }
+            record.insert("updatedAt".into(), yh_core::library::iso_now().into());
+        });
     }
 
     pub fn send(&mut self, thread: &Entity<ThreadState>, text: &str, cx: &mut Context<Self>) {
@@ -293,6 +314,7 @@ impl HarnessApp {
                         if exited {
                             app.live.remove(&id);
                         }
+                        app.persist_thread(&thread, cx);
                         app.refresh_chrome(cx);
                         // `YH_ANSWER=allow|deny`: answer permission prompts by themselves, for tests.
                         if let Ok(answer) = std::env::var("YH_ANSWER") {
