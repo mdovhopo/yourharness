@@ -113,3 +113,34 @@ What the round found:
   web side gets 95–98% with a few frames of 60–100 ms; the native app 84–90% with 88–161 ms.
 
 Runs are in `test-harness-root/web-perf/` (`web-final`, `native-30`, `mem*`, `repro*`).
+
+## App Nap (2026-11-06, second round)
+
+The GPUI experiment found its own five-minute collapse to be App Nap (gpui/README.md), so the
+web host now holds off App Nap for a run too (`YHW_APP_NAP=1` lets it nap). Two full runs the
+same afternoon, same conditions as above:
+
+| Phase | Nap allowed | | No nap | |
+|---|---|---|---|---|
+| open-huge | 99.2% | 14 ms | 99.3% | 15 ms |
+| scroll-huge | 73.1% | 308 ms | 99.4% | 30 ms |
+| scroll-huge-fast | 4.0% | 295 ms | 99.2% | 30 ms |
+| switch-huge | 4.0% | 401 ms | 98.0% | 72 ms |
+| switch-all-idle | 7.7% | 309 ms | 98.7% | 29 ms |
+| stream-1 | 10.9% | 311 ms | 99.4% | 38 ms |
+| stream-all | 3.7% | 593 ms | 26.0% | 119 ms |
+| stream-all-scroll | 3.8% | 553 ms | 22.7% | 120 ms |
+| stream-all-switch | 3.6% | 554 ms | 95.9% | 114 ms |
+| stream-all-typing | 3.7% | 878 ms | 97.2% | 59 ms |
+
+- **App Nap was most of it.** Allowed to nap, the app collapsed three minutes in and never came
+  back, with CPU at 8–17%. Held off, everything up to `stream-1` is at 98–99.4%.
+- **Something else remains in `stream-all` and `stream-all-scroll`:** 23–26% on time, a steady
+  ~119 ms a frame, CPU around 50%. It isn't napping (the CPU is busy) and it isn't the page's own
+  work (event batches under 5 ms). It goes away in the phases with clicks and keys
+  (`stream-all-switch`, `-typing`). One guess is WebKit throttling its content process, which the
+  host's activity doesn't cover. Not explained yet.
+- The no-nap run drove the page directly from the first click (`DIRECT`), as some runs above did;
+  the napped one used real events until `switch-huge`.
+
+Runs: `test-harness-root/web-perf/nap` and `nonap` in the experiment/gpui worktree.

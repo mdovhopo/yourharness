@@ -116,8 +116,10 @@ What the round found:
   naps a background app that nobody seems to watch, slowing its timers and display link, and a
   parked test window is exactly that. Holding an `NSActivity` (user-initiated, latency-critical)
   for the run fixed it (`platform::hold_off_app_nap`; `YHG_APP_NAP=1` turns it back on). The web
-  runs' unexplained collapse "about five minutes in" has the same signature, and the web host
-  doesn't hold off App Nap. That is worth re-running before trusting its stream-all numbers.
+  runs' unexplained collapse "about five minutes in" was mostly the same thing: re-run with App
+  Nap held off, the web app holds 98–99% through `stream-1`. Its `stream-all` and
+  `stream-all-scroll` still drop to 23–26% with the CPU busy, which isn't explained yet (see
+  web/README.md, "App Nap").
 - **GPUI's list measures what it shows.** Rows above what's been drawn have no height yet, so
   pixel scroll offsets undercount. That's fine for following and for the wheel, which only reach
   the next rows. The probe reports rows crossed as well as pixels.

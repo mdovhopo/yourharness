@@ -13,8 +13,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var webView: WKWebView!
     var bridge: Bridge!
     var probe: HostProbe?
+    /// Holds off App Nap for a performance run: macOS slows the timers and display link of a
+    /// background app nobody seems to watch, and a parked test window is exactly that. Runs
+    /// collapsed to a few frames a second with the main thread idle five minutes in without it
+    /// (gpui/README.md). `YHW_APP_NAP=1` lets it nap, for comparing.
+    var noNap: NSObjectProtocol?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if env["YHW_PERF"] != nil && env["YHW_APP_NAP"] != "1" {
+            noNap = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .latencyCritical], reason: "Performance run")
+        }
         NSApp.mainMenu = Self.makeMenu()
 
         let config = WKWebViewConfiguration()
