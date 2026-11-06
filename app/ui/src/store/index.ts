@@ -61,6 +61,12 @@ onPatches((patches: Patch[]) => {
           }
           break;
         }
+        case "commands":
+          byId.get(patch.th)?.setCommands(patch.v);
+          break;
+        case "plan":
+          byId.get(patch.th)?.setPlan(patch.v);
+          break;
         case "project":
           setProjects((old) => (old.some((p) => p.id === patch.p.id) ? old.map((p) => (p.id === patch.p.id ? patch.p : p)) : [...old, patch.p]));
           break;
@@ -100,7 +106,7 @@ export function ensureLoaded(t: ThreadState): Promise<void> {
       const started = performance.now();
       const snap = await call<ThreadSnapshot>("subscribe", { th: t.id, limit: PAGE });
       const fetched = performance.now();
-      t.loadSnapshot(snap.entries, snap.from, snap.rv, snap.perm ?? null, snap.running);
+      t.loadSnapshot(snap.entries, snap.from, snap.rv, snap.perm ?? null, snap.running, snap.commands, snap.plan);
       if (timing) hostLog(`UI load ${t.title()}: fetch ${(fetched - started).toFixed(0)} ms, rows ${(performance.now() - fetched).toFixed(0)} ms (${snap.entries.length} rows)`);
     })();
   }
@@ -152,11 +158,15 @@ export async function newThread(p: ProjectWire) {
   select(id);
 }
 
-export function send(t: ThreadState, text: string, now = false) {
+/** `images` are base64, as pasted or dropped. */
+export function send(t: ThreadState, text: string, now = false, images: string[] = []) {
   const trimmed = text.trim();
-  if (!trimmed) return;
-  call("send", { th: t.id, text: trimmed, now }).catch((error) => hostLog(`send failed: ${error}`));
+  if (!trimmed && !images.length) return;
+  call("send", { th: t.id, text: trimmed, now, images }).catch((error) => hostLog(`send failed: ${error}`));
 }
+
+/** Files in the thread's folder matching what follows an @. */
+export const mentionFiles = (t: ThreadState, q: string) => call<{ v: string[] }>("files", { th: t.id, q }).then((r) => r.v);
 
 export const interrupt = (t: ThreadState) => call("interrupt", { th: t.id }).catch(() => {});
 export const respond = (t: ThreadState, allow: boolean) => {

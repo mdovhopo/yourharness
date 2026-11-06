@@ -15,6 +15,8 @@ export type WireEntry = {
   live?: number;
   /** Sent while Claude works, waiting for the current step to end. */
   q?: number;
+  /** Images sent with your message (names under the data folder's attachments). */
+  a?: string[];
   sa?: { d: string; s: string; c?: number };
 };
 
@@ -48,7 +50,18 @@ export type QuestionWire = { q: string; h: string; multi: boolean; options: { la
 export type PermissionWire = { id: string; n: string; d: string; i: string; questions?: QuestionWire[]; plan?: string };
 
 /** A thread's rows as fetched: `entries` are rows `from..<total`, at revision `rv`. */
-export type ThreadSnapshot = { total: number; from: number; entries: WireEntry[]; rv: number; perm?: PermissionWire; running: boolean };
+export type CommandWire = { name: string; d: string; hint: string };
+export type PlanItemWire = { s: string; a: string; st: "pending" | "in_progress" | "completed" | string };
+export type ThreadSnapshot = {
+  total: number;
+  from: number;
+  entries: WireEntry[];
+  rv: number;
+  perm?: PermissionWire;
+  running: boolean;
+  commands?: CommandWire[];
+  plan?: PlanItemWire[];
+};
 export type Page = { total: number; from: number; entries: WireEntry[] };
 
 /** Patches, one batch per frame. Row patches carry their thread's revision. */
@@ -61,6 +74,8 @@ export type Patch =
   | { t: "thread"; th: ThreadWire }
   | { t: "threadGone"; th: string }
   | { t: "reload"; th: string }
+  | { t: "commands"; th: string; v: CommandWire[] }
+  | { t: "plan"; th: string; v: PlanItemWire[] }
   | { t: "project"; p: ProjectWire }
   | { t: "models"; v: ModelWire[] };
 

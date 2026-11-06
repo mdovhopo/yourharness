@@ -26,14 +26,14 @@ final class ThreadRuntime {
 
     var hasSession: Bool { session != nil }
 
-    func send(_ text: String, now: Bool) async throws {
+    func send(_ text: String, images: [(ImageAttachment, String)] = [], now: Bool) async throws {
         idleReap?.cancel()
         let messageID = UUID().uuidString
-        backend.emit(backend.store.userMessage(text, id: messageID, queued: running && !now, thread: id), thread: id)
+        backend.emit(backend.store.userMessage(text, id: messageID, queued: running && !now, attachments: images.map(\.1), thread: id), thread: id)
         setRunning(true)
         do {
             let session = try await ensureSession()
-            try await session.send(text: text, id: messageID, priority: now ? .now : nil)
+            try await session.send(text: text, images: images.map(\.0), id: messageID, priority: now ? .now : nil)
         } catch {
             backend.emit(backend.store.notice("Couldn't send: \(error)", thread: id), thread: id)
             setRunning(false)
@@ -101,6 +101,9 @@ final class ThreadRuntime {
             backend.library.updateThread(id) { $0["sessionID"] = info.sessionID }
         case .catalog(let catalog):
             backend.noteCatalog(catalog)
+            backend.noteCommands(catalog.commands, thread: id)
+        case .commandsChanged(let commands):
+            backend.noteCommands(commands, thread: id)
         case .turnCompleted, .processExited:
             backend.emit(backend.store.apply(event, thread: id), thread: id)
             setRunning(false)
@@ -114,6 +117,7 @@ final class ThreadRuntime {
         guard !patches.isEmpty else { return }
         backend.emit(patches, thread: id)
         if case .permissionRequest = event { backend.threadChanged(id) }
+        if case .toolResults = event { backend.planMayHaveChanged(id) }
         scheduleSave()
     }
 

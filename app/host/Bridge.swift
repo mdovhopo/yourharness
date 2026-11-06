@@ -20,6 +20,7 @@ final class Bridge: NSObject, WKScriptMessageHandlerWithReply {
         self.webView = webView
         self.window = window
         backend = Backend(dataDirectory: Self.dataDirectory())
+        AppScheme.shared.attachments = Self.dataDirectory().appendingPathComponent("attachments", isDirectory: true)
         super.init()
         backend.sink = { [weak self] patch in self?.outbox.push(patch) }
         // `YH_PROJECT=<folder>`: that folder as a project, for trying things somewhere throwaway.
@@ -98,7 +99,9 @@ final class Bridge: NSObject, WKScriptMessageHandlerWithReply {
             // answers what Claude asks, `YH_QUIT=1` quits after; `YH_FLAGS` adds classes.
             return ["select": env["YH_SELECT"] ?? "", "send": env["YH_SEND"] ?? "", "model": env["YH_MODEL"] ?? "",
                     "mode": env["YH_MODE"] ?? "", "answer": env["YH_ANSWER"] ?? "", "quit": env["YH_QUIT"] == "1",
-                    "flags": env["YH_FLAGS"] ?? "", "diagAfter": env["YH_DIAG_AFTER"] ?? "", "project": env["YH_PROJECT_NAME"] ?? ""]
+                    "flags": env["YH_FLAGS"] ?? "", "diagAfter": env["YH_DIAG_AFTER"] ?? "", "project": env["YH_PROJECT_NAME"] ?? "",
+                    // `YH_SEND_IMAGE=<file>`: sent with `YH_SEND`.
+                    "image": env["YH_SEND_IMAGE"].flatMap { try? Data(contentsOf: URL(fileURLWithPath: $0)).base64EncodedString() } ?? ""]
         default:
             if method.hasPrefix("probe."), let probe {
                 return try await probe.handle(String(method.dropFirst(6)), p)

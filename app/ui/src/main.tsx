@@ -33,7 +33,7 @@ loadLibrary().then(async () => {
 });
 
 /** `YH_SEND`: one real turn from a new thread, logged as it goes, for checking the live path. */
-async function liveCheck(config: { send: string; model: string; mode: string; answer: string; quit: boolean; project: string }) {
+async function liveCheck(config: { send: string; model: string; mode: string; answer: string; quit: boolean; project: string; image: string }) {
   const project = projects().find((p) => !config.project || p.name === config.project) ?? projects()[0];
   if (!project) return hostLog("LIVE FAIL: no project");
   await newThread(project);
@@ -54,5 +54,5 @@ async function liveCheck(config: { send: string; model: string; mode: string; an
       }
     }));
   });
-  send(t, config.send);
+  send(t, config.send, false, config.image ? [config.image] : []);
 }

@@ -22,6 +22,8 @@ final class AppScheme: NSObject, WKURLSchemeHandler, @unchecked Sendable {
         return URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("app/ui/dist")
     }()
 
+    /// The data folder's attachments; set by the bridge.
+    var attachments = URL(fileURLWithPath: "/nonexistent")
     private let queue = DispatchQueue(label: "yhw.scheme", qos: .userInitiated, attributes: .concurrent)
     private let stopped = NSHashTable<AnyObject>.weakObjects()
     private let lock = NSLock()
@@ -29,12 +31,15 @@ final class AppScheme: NSObject, WKURLSchemeHandler, @unchecked Sendable {
     func webView(_ webView: WKWebView, start task: any WKURLSchemeTask) {
         guard let url = task.request.url else { return }
         let path = url.path
-        let root = self.root
+        let root = self.root, attachments = self.attachments
         let taskBox = TaskBox(task)
         queue.async { [self] in
             let data: Data?, mime: String
             do {
-                let file = root.appendingPathComponent(path == "/" ? "index.html" : String(path.dropFirst()))
+                // Images sent with messages live next to the database; the rest is the page.
+                let file = path.hasPrefix("/attachments/") && !path.contains("..")
+                    ? attachments.appendingPathComponent(String(path.dropFirst("/attachments/".count)))
+                    : root.appendingPathComponent(path == "/" ? "index.html" : String(path.dropFirst()))
                 data = try? Data(contentsOf: file)
                 mime = UTType(filenameExtension: file.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
             }

@@ -20,6 +20,8 @@ public final class ThreadStore {
         public var date: Date?
         /// Your message, sent while Claude works, waiting for the current step to end.
         public var queued = false
+        /// Images sent with your message: names in the data folder's attachments.
+        public var attachments: [String] = []
 
         public struct Subagent: Sendable, Equatable {
             public var description: String
@@ -152,10 +154,11 @@ public final class ThreadStore {
     }
 
     /// Your message, as sent; `queued` while Claude finishes its current step.
-    public func userMessage(_ text: String, id: String? = nil, queued: Bool = false, thread: String) -> [ThreadPatch] {
+    public func userMessage(_ text: String, id: String? = nil, queued: Bool = false, attachments: [String] = [], thread: String) -> [ThreadPatch] {
         let t = state(thread)
         var entry = Entry(id: id ?? nextID("u"), kind: .user, text: text)
         entry.queued = queued
+        entry.attachments = attachments
         return [add(entry, to: t, thread: thread), .running(thread: thread, true)]
     }
 

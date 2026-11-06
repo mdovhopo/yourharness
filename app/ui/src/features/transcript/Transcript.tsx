@@ -1,5 +1,6 @@
 import { createEffect, For, on, onCleanup, onMount, Show, type Accessor } from "solid-js";
 import { Row } from "./Rows";
+import { findCurrent, hits } from "./Find";
 import { loadEarlier } from "../../store";
 import type { ThreadState } from "../../store/thread";
 
@@ -120,7 +121,7 @@ export function Transcript(props: { t: ThreadState; shown: Accessor<boolean> }) 
         </Show>
         <For each={props.t.items()}>
           {(item) => (
-            <div class="item" ref={observe}>
+            <div class="item" ref={observe} data-item={item.key} classList={{ "find-hit": hits().has(item), "find-current": findCurrent() === item }}>
               <Row item={item} shown={props.shown} />
             </div>
           )}

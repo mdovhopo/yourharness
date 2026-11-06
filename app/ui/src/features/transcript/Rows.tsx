@@ -16,6 +16,8 @@ export function Row(props: { item: Item; shown: Accessor<boolean> }) {
       return <TextRow item={item} shown={props.shown} />;
     case "work":
       return <WorkRow item={item} shown={props.shown} />;
+    case "agent":
+      return <AgentRow item={item} shown={props.shown} />;
     default:
       return <NoticeRow item={item} shown={props.shown} />;
   }
@@ -31,7 +33,7 @@ function whileShown<T>(props: { item: Item; shown: Accessor<boolean> }, compute:
 }
 
 function UserRow(props: { item: Item; shown: Accessor<boolean> }) {
-  const view = whileShown(props, () => ({ text: props.item.entries[0].text, queued: props.item.entries[0].queued }));
+  const view = whileShown(props, () => ({ text: props.item.entries[0].text, queued: props.item.entries[0].queued, images: props.item.entries[0].attachments ?? [] }));
   return (
     <div class="row user">
       <Show when={view().queued}>
@@ -40,6 +42,11 @@ function UserRow(props: { item: Item; shown: Accessor<boolean> }) {
         </span>
       </Show>
       <div class="bubble" classList={{ queued: view().queued }}>
+        <Show when={view().images.length}>
+          <div class="bubble-images">
+            <For each={view().images}>{(name) => <img src={`yhw://app/attachments/${encodeURIComponent(name)}`} loading="lazy" alt="" />}</For>
+          </div>
+        </Show>
         {view().text}
       </div>
     </div>
@@ -143,13 +150,89 @@ function WorkEntry(props: { entry: Entry; item: Item; shown: Accessor<boolean> }
       </button>
       <Show when={open()}>
         <Show when={e.kind === "tool"} fallback={<div class="md thinking" innerHTML={entryHTML(e)} />}>
-          <pre class="step-input">{e.toolInput}</pre>
+          <Show when={diffOf(e)} fallback={<pre class="step-input">{e.toolInput}</pre>}>
+            {(lines) => (
+              <pre class="step-input diff">
+                <For each={lines()}>{(l) => <span class={l.kind}>{l.text + "\n"}</span>}</For>
+              </pre>
+            )}
+          </Show>
           <Show when={view().result !== undefined}>
             <pre class="step-result">
               {view().result}
               {(e.resultLength ?? 0) > (view().result?.length ?? 0) ? `\n… ${(e.resultLength! - view().result!.length).toLocaleString()} more characters` : ""}
             </pre>
           </Show>
+        </Show>
+      </Show>
+    </div>
+  );
+}
+
+/** An edit's change as diff lines: what went, then what came (Edit, MultiEdit, Write). */
+function diffOf(e: Entry): { kind: string; text: string }[] | null {
+  if (e.toolName !== "Edit" && e.toolName !== "MultiEdit" && e.toolName !== "Write") return null;
+  let input: any;
+  try {
+    input = JSON.parse(e.toolInput ?? "");
+  } catch {
+    return null;
+  }
+  const lines: { kind: string; text: string }[] = [];
+  const add = (kind: string, prefix: string, text: string) => {
+    for (const line of text.split("\n")) lines.push({ kind, text: prefix + line });
+  };
+  const edits: { old_string?: string; new_string?: string }[] =
+    e.toolName === "MultiEdit" ? input.edits ?? [] : e.toolName === "Write" ? [{ new_string: input.content ?? "" }] : [input];
+  if (input.file_path) lines.push({ kind: "file", text: input.file_path });
+  edits.forEach((edit, i) => {
+    if (i) lines.push({ kind: "gap", text: "⋯" });
+    if (edit.old_string) add("del", "- ", edit.old_string);
+    if (edit.new_string !== undefined) add("add", "+ ", edit.new_string);
+  });
+  return lines.length > 400 ? lines.slice(0, 400).concat({ kind: "gap", text: `⋯ ${lines.length - 400} more lines` }) : lines;
+}
+
+/** A sub-agent's call: what it was asked, how it's going, and its steps. */
+function AgentRow(props: { item: Item; shown: Accessor<boolean> }) {
+  const [open, setOpen] = createSignal(false);
+  const e = props.item.entries[0];
+  const view = whileShown(props, () => {
+    let input: any = {};
+    try {
+      input = JSON.parse(e.toolInput ?? "{}");
+    } catch {}
+    const status = e.sub?.s ?? (e.toolResult !== undefined ? (e.isError ? "failed" : "completed") : "running");
+    return {
+      title: e.sub?.d || input.description || "Sub-agent",
+      type: input.subagent_type ?? "",
+      status,
+      steps: e.sub?.c ?? 0,
+      prompt: input.prompt ?? "",
+      report: e.toolResult ?? "",
+    };
+  });
+  return (
+    <div class="row agent-card" classList={{ running: view().status === "running" }}>
+      <button class="agent-head" onClick={() => setOpen(!open())}>
+        <span class="agent-dot" />
+        <span class="agent-title">{view().title}</span>
+        <Show when={view().type}>
+          <span class="chip">{view().type}</span>
+        </Show>
+        <span class="agent-status">
+          {view().status}
+          {view().steps ? ` · ${view().steps} steps` : ""}
+        </span>
+      </button>
+      <Show when={open()}>
+        <Show when={view().prompt}>
+          <div class="agent-label">Asked</div>
+          <div class="agent-text">{view().prompt}</div>
+        </Show>
+        <Show when={view().report}>
+          <div class="agent-label">Report</div>
+          <div class="md agent-text" innerHTML={entryHTML({ ...e, text: view().report, live: false, html: undefined, htmlFor: -1 } as Entry)} />
         </Show>
       </Show>
     </div>

@@ -14,6 +14,9 @@ public final class Backend {
     let store = ThreadStore(resultLimit: WireLimits.liveResult, inputLimit: WireLimits.toolText)
     private var runtimes: [String: ThreadRuntime] = [:]
     private var subscribed = Set<String>()
+    var subscribedThreads: Set<String> { subscribed }
+    var fileIndexes: [String: (at: Date, index: FileIndex)] = [:]
+    private var lastPlanCount: [String: Int] = [:]
     private var revisions: [String: Int] = [:]
     private var environment: [String: String]?
     private var executable: URL?
@@ -76,8 +79,11 @@ public final class Backend {
                 }
             }
             threadChanged(th)
-            try await runtime(th).send(text, now: p["now"] as? Bool ?? false)
+            let images = prepareImages(p["images"] as? [String] ?? [], thread: th)
+            try await runtime(th).send(text, images: images, now: p["now"] as? Bool ?? false)
             return true
+        case "files":
+            return ["v": await mentionFiles(th, query: p["q"] as? String ?? "")]
         case "interrupt":
             await runtimes[th]?.interrupt()
             return true
@@ -188,6 +194,15 @@ public final class Backend {
     }
 
     /// Something about a thread's summary changed: the sidebar gets its new state.
+    /// After tool results: a task tool may have moved the plan on.
+    func planMayHaveChanged(_ th: String) {
+        guard subscribed.contains(th) else { return }
+        let items = plan(th)
+        guard !items.isEmpty || lastPlanCount[th, default: 0] > 0 else { return }
+        lastPlanCount[th] = items.count
+        sink(["t": "plan", "th": th, "v": items])
+    }
+
     /// A turn ended: the thread is unread until the page says it's been seen.
     func turnEnded(_ id: String) {
         unread.insert(id)
@@ -211,6 +226,8 @@ public final class Backend {
         snapshot["rv"] = revisions[th] ?? 0
         if let request = store.pendingPermission(th) { snapshot["perm"] = request.wire }
         snapshot["running"] = runtimes[th]?.running ?? false
+        snapshot["commands"] = commands(ofThread: th)
+        snapshot["plan"] = plan(th)
         return snapshot
     }
 

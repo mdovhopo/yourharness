@@ -26,6 +26,7 @@ extension ThreadStore.Entry {
         if isError { o["e"] = 1 }
         if live { o["live"] = 1 }
         if queued { o["q"] = 1 }
+        if !attachments.isEmpty { o["a"] = attachments }
         if let date { o["d"] = date.timeIntervalSince1970 * 1000 }
         if let subagent { o["sa"] = ["d": subagent.description, "s": subagent.status, "c": subagent.steps] }
         return o
@@ -34,7 +35,8 @@ extension ThreadStore.Entry {
     /// As the database keeps it, with the whole tool result when it was cut.
     func snapshot(fullResult: String?) -> EntrySnapshot {
         var s = EntrySnapshot(id: id, kind: kind, text: text, toolName: toolName, toolInput: toolInput,
-                              toolResult: fullResult ?? toolResult, toolIsError: kind == .tool ? isError : nil, date: date)
+                              toolResult: fullResult ?? toolResult, toolIsError: kind == .tool ? isError : nil,
+                              attachments: attachments.isEmpty ? nil : attachments, date: date)
         if let subagent {
             s.subagent = SubagentSnapshot(description: subagent.description, agentType: nil, prompt: "", isBackground: nil,
                                           status: SubagentStatus(rawValue: subagent.status) ?? .completed, toolUses: subagent.steps,
@@ -52,6 +54,7 @@ extension EntrySnapshot {
         if let toolResult { o["r"] = WireLimits.head(toolResult) }
         if let length = toolResultLength ?? toolResult.map(\.count) { o["rl"] = length }
         if toolIsError == true { o["e"] = 1 }
+        if let attachments, !attachments.isEmpty { o["a"] = attachments }
         if let date { o["d"] = date.timeIntervalSince1970 * 1000 }
         if let subagent { o["sa"] = ["d": subagent.description, "s": subagent.status.rawValue, "c": subagent.toolUses ?? 0] }
         return o

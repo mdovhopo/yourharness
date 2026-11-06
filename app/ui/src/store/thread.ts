@@ -1,5 +1,5 @@
 import { batch, createSignal, type Accessor, type Setter } from "solid-js";
-import type { Patch, PermissionWire, ThreadWire, WireEntry } from "../protocol";
+import type { CommandWire, Patch, PermissionWire, PlanItemWire, ThreadWire, WireEntry } from "../protocol";
 
 // A thread as the page mirrors it: its summary (always), and while it's open, its newest rows
 // at the backend's revision. Earlier rows are fetched as you scroll up. Streaming changes a row
@@ -22,6 +22,7 @@ export class Entry {
   live = false;
   /** Your message, waiting for Claude's current step. */
   queued = false;
+  attachments?: string[];
   /** Rendered markdown, kept while the text doesn't change. */
   html?: string;
   htmlFor = -1;
@@ -49,6 +50,7 @@ export class Entry {
     this.sub = w.sa;
     this.live = w.live === 1;
     this.queued = w.q === 1;
+    this.attachments = w.a;
   }
 }
 
@@ -56,7 +58,7 @@ export class Entry {
 export class Item {
   static next = 0;
   key = Item.next++;
-  type: "user" | "text" | "work" | "notice";
+  type: "user" | "text" | "work" | "agent" | "notice";
   entries: Entry[];
   version: Accessor<number>;
   private setVersion: Setter<number>;
@@ -70,15 +72,18 @@ export class Item {
   }
 }
 
-const isWork = (k: Kind) => k === "thinking" || k === "tool";
-const itemType = (k: Kind): Item["type"] => (isWork(k) ? "work" : k === "user" ? "user" : k === "assistant" ? "text" : "notice");
+/** A sub-agent's call gets a card of its own rather than folding into the work row. */
+const isAgent = (e: Entry) => e.kind === "tool" && (e.toolName === "Agent" || e.toolName === "Task");
+const isWork = (e: Entry) => (e.kind === "thinking" || e.kind === "tool") && !isAgent(e);
+const itemType = (e: Entry): Item["type"] =>
+  isAgent(e) ? "agent" : isWork(e) ? "work" : e.kind === "user" ? "user" : e.kind === "assistant" ? "text" : "notice";
 
 export function itemsFrom(entries: Entry[]): Item[] {
   const items: Item[] = [];
   for (const e of entries) {
     const last = items[items.length - 1];
-    if (isWork(e.kind) && last?.type === "work") last.entries.push(e);
-    else items.push(new Item(itemType(e.kind), [e]));
+    if (isWork(e) && last?.type === "work") last.entries.push(e);
+    else items.push(new Item(itemType(e), [e]));
   }
   return items;
 }
@@ -98,6 +103,12 @@ export class ThreadState {
   private setOpenRunning: Setter<boolean | null>;
   isLoaded: Accessor<boolean>;
   private setLoaded: Setter<boolean>;
+  /** The project's slash commands and skills. */
+  commands: Accessor<CommandWire[]>;
+  setCommands: Setter<CommandWire[]>;
+  /** Claude's checklist for this thread, from its task tools. */
+  plan: Accessor<PlanItemWire[]>;
+  setPlan: Setter<PlanItemWire[]>;
   /** Bumped on anything that changes what the transcript shows. */
   changed: Accessor<number>;
   private setChanged: Setter<number>;
@@ -119,6 +130,8 @@ export class ThreadState {
     [this.permission, this.setPermission] = createSignal<PermissionWire | null>(null);
     [this.openRunning, this.setOpenRunning] = createSignal<boolean | null>(null);
     [this.isLoaded, this.setLoaded] = createSignal(false);
+    [this.commands, this.setCommands] = createSignal<CommandWire[]>([]);
+    [this.plan, this.setPlan] = createSignal<PlanItemWire[]>([]);
     [this.changed, this.setChanged] = createSignal(0, { equals: false });
   }
 
@@ -134,9 +147,11 @@ export class ThreadState {
   waitingForYou = () => (this.isLoaded() ? this.permission() !== null : this.summary().waiting);
 
   /** The snapshot the backend gave on subscribing; patches that came first are applied after. */
-  loadSnapshot(entries: WireEntry[], from: number, rv: number, perm: PermissionWire | null, running: boolean) {
+  loadSnapshot(entries: WireEntry[], from: number, rv: number, perm: PermissionWire | null, running: boolean, commands: CommandWire[] = [], plan: PlanItemWire[] = []) {
     this.rv = rv;
     batch(() => {
+      this.setCommands(commands);
+      this.setPlan(plan);
       this.prepend(entries.map(Entry.from), from);
       this.setPermission(perm);
       this.setOpenRunning(running);
@@ -172,12 +187,12 @@ export class ThreadState {
   private append(e: Entry) {
     const items = this.items();
     const last = items[items.length - 1];
-    if (isWork(e.kind) && last?.type === "work") {
+    if (isWork(e) && last?.type === "work") {
       last.entries.push(e);
       this.track(e, last);
       last.bump();
     } else {
-      const item = new Item(itemType(e.kind), [e]);
+      const item = new Item(itemType(e), [e]);
       this.track(e, item);
       this.setItems(items.concat(item));
       if (!this.inDeck && items.length > 300) this.trim(200);

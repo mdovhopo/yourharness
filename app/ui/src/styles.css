@@ -179,3 +179,43 @@ kbd { font: 11px -apple-system, system-ui; opacity: 0.6; margin-left: 4px; }
 .option-detail { font-size: 11px; color: var(--secondary); }
 .other { width: 100%; font: inherit; border: 1px solid var(--separator); border-radius: 8px; padding: 5px 8px; background: var(--canvas); color: var(--text); margin-bottom: 8px; resize: none; }
 .plan-body { max-height: 40vh; overflow: auto; margin-bottom: 8px; }
+
+/* Chunk 2 */
+.bubble-images { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+.bubble-images img { max-width: 240px; max-height: 180px; border-radius: 8px; display: block; }
+.step-input.diff { white-space: pre-wrap; }
+.diff .del { color: #cf222e; background: rgba(207, 34, 46, 0.08); display: block; }
+.diff .add { color: #1a7f37; background: rgba(26, 127, 55, 0.08); display: block; }
+.diff .file { color: var(--secondary); display: block; }
+.diff .gap { color: var(--secondary); display: block; }
+@media (prefers-color-scheme: dark) { .diff .del { color: #ffa198; } .diff .add { color: #7ee787; } }
+.agent-card { border: 1px solid var(--separator); border-radius: var(--radius); padding: 6px 10px; margin: 4px 0; background: var(--card); }
+.agent-head { display: flex; align-items: center; gap: 8px; width: 100%; font-size: 12px; }
+.agent-dot { width: 7px; height: 7px; border-radius: 50%; background: #34c759; flex: none; }
+.agent-card.running .agent-dot { background: var(--accent); animation: pulse 1.2s ease-in-out infinite alternate; }
+.agent-title { font-weight: 600; flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.agent-status { color: var(--secondary); flex: none; }
+.agent-label { font-size: 11px; color: var(--secondary); margin-top: 6px; }
+.agent-text { font-size: 12px; white-space: pre-wrap; }
+.suggestions { border: 1px solid var(--separator); border-radius: 10px; background: var(--card); margin-bottom: 6px; padding: 4px; box-shadow: 0 6px 24px rgba(0, 0, 0, 0.12); max-height: 280px; overflow-y: auto; }
+.suggestion { display: flex; gap: 10px; width: 100%; padding: 4px 8px; border-radius: 6px; align-items: baseline; }
+.suggestion.on { background: var(--accent); color: white; }
+.suggestion.on .suggestion-detail { color: rgba(255, 255, 255, 0.8); }
+.suggestion-label { font-weight: 500; flex: none; }
+.suggestion-detail { color: var(--secondary); font-size: 11px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.composer-images { display: flex; gap: 6px; margin-bottom: 6px; flex-wrap: wrap; }
+.thumb { position: relative; }
+.thumb img { width: 64px; height: 64px; object-fit: cover; border-radius: 8px; display: block; }
+.thumb-remove { position: absolute; top: -6px; right: -6px; width: 18px; height: 18px; border-radius: 50%; background: rgba(0, 0, 0, 0.6); color: white; text-align: center; line-height: 18px; font-size: 12px; }
+.plan-strip { border: 1px solid var(--separator); border-radius: 10px; background: var(--card); margin-bottom: 6px; padding: 4px 10px; font-size: 12px; }
+.plan-strip-head { display: flex; gap: 8px; width: 100%; align-items: baseline; }
+.plan-progress { color: var(--secondary); flex: none; font-variant-numeric: tabular-nums; }
+.plan-current { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.plan-list { margin: 4px 0 2px; padding-left: 18px; }
+.plan-list .completed { color: var(--secondary); text-decoration: line-through; }
+.plan-list .in_progress { font-weight: 600; }
+.find-bar { position: absolute; top: 8px; right: 16px; z-index: 5; display: flex; align-items: center; gap: 4px; padding: 4px 6px; border-radius: 10px; background: var(--card); border: 1px solid var(--separator); box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12); }
+.find-bar input { font: inherit; border: 0; outline: 0; background: transparent; color: var(--text); width: 200px; }
+.find-count { color: var(--secondary); font-size: 11px; min-width: 64px; text-align: right; }
+.item.find-hit { box-shadow: inset 3px 0 0 rgba(255, 204, 0, 0.6); }
+.item.find-current { box-shadow: inset 3px 0 0 #ffcc00; background: rgba(255, 204, 0, 0.08); }

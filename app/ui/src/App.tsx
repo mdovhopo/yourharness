@@ -2,6 +2,7 @@ import { createMemo, For, Show } from "solid-js";
 import { Composer } from "./features/composer/Composer";
 import { Sidebar } from "./features/sidebar/Sidebar";
 import { Transcript } from "./features/transcript/Transcript";
+import { FindBar } from "./features/transcript/Find";
 import { deck, selectedId, thread } from "./store";
 
 export function App() {
@@ -14,6 +15,7 @@ export function App() {
           <span class="title">{selected()?.title() ?? "YourHarness"}</span>
         </header>
         <div class="deck">
+          <FindBar />
           <For each={deck()}>
             {(t) => {
               const shown = () => selectedId() === t.id;
