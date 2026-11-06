@@ -68,8 +68,12 @@ pub struct StateRows {
     pub threads: Vec<ThreadRecord>,
 }
 
+/// A write of its own (memories), run on the writer thread in a transaction.
+pub type WriteFn = Box<dyn FnOnce(&Connection, &mut i64) -> rusqlite::Result<()> + Send>;
+
 enum Job {
     State(StateRows),
+    Exec(WriteFn, flume::Sender<rusqlite::Result<()>>),
     Rows { thread: String, count: usize, rows: Vec<(usize, Row)> },
     DeleteTranscript(String),
     Flush(flume::Sender<()>),
@@ -189,6 +193,19 @@ impl Database {
         let result = body(&connection);
         self.readers.lock().unwrap().push(connection);
         result
+    }
+
+    /// Runs `f` on the writer thread in a transaction and waits for it. `rev` is the change
+    /// counter rows and memories share: take the next with `*rev += 1`.
+    pub fn write(&self, f: impl FnOnce(&Connection, &mut i64) -> rusqlite::Result<()> + Send + 'static) -> rusqlite::Result<()> {
+        let (tx, rx) = flume::bounded(1);
+        self.jobs.send(Job::Exec(Box::new(f), tx)).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        rx.recv().map_err(|_| rusqlite::Error::InvalidQuery)?
+    }
+
+    /// A read on a connection of the pool.
+    pub fn read_with<T>(&self, f: impl FnOnce(&Connection) -> rusqlite::Result<T>) -> rusqlite::Result<T> {
+        self.read(f)
     }
 
     /// Waits until everything sent so far is on disk.
@@ -437,6 +454,20 @@ impl Writer {
                     deletes.push(thread);
                 }
                 Job::Flush(tx) => flushes.push(tx),
+                Job::Exec(f, reply) => {
+                    // Its own transaction, in the order it came.
+                    let result = (|| {
+                        self.c.execute_batch("BEGIN IMMEDIATE")?;
+                        match f(&self.c, &mut self.rev) {
+                            Ok(()) => self.c.execute_batch("COMMIT"),
+                            Err(e) => {
+                                let _ = self.c.execute_batch("ROLLBACK");
+                                Err(e)
+                            }
+                        }
+                    })();
+                    let _ = reply.send(result);
+                }
             }
         }
         if state.is_none() && transcripts.is_empty() && deletes.is_empty() {

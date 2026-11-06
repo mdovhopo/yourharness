@@ -154,6 +154,12 @@ pub struct LaunchOptions {
     /// More folders it may read without asking (the app's attachments).
     pub add_dirs: Vec<String>,
     pub env: Vec<(String, String)>,
+    /// What the agent is told on top of Claude Code's own prompt (the memory index…).
+    pub append_system_prompt: Option<String>,
+    /// Tools that never ask (`mcp__memory`: they touch only the app's own database).
+    pub allowed_tools: Vec<String>,
+    /// Tools served from inside the app.
+    pub servers: Vec<std::sync::Arc<dyn crate::mcp::ToolServer>>,
 }
 
 pub struct ClaudeProcess {
@@ -161,6 +167,8 @@ pub struct ClaudeProcess {
     writer: flume::Sender<Value>,
     counter: u64,
     pub pid: u32,
+    /// The app's own tool servers, named in `initialize`.
+    server_names: Vec<String>,
 }
 
 /// `claude` on `YH_PATH` (as the app's test runs pass it), else `PATH` and the usual places.
@@ -205,6 +213,16 @@ impl ClaudeProcess {
         for dir in options.add_dirs {
             args.extend(["--add-dir".into(), dir]);
         }
+        if let Some(prompt) = options.append_system_prompt.filter(|p| !p.is_empty()) {
+            args.extend(["--append-system-prompt".into(), prompt]);
+        }
+        if !options.allowed_tools.is_empty() {
+            args.extend(["--allowedTools".into(), options.allowed_tools.join(",")]);
+        }
+        let servers: std::collections::HashMap<String, std::sync::Arc<dyn crate::mcp::ToolServer>> =
+            options.servers.into_iter().map(|s| (s.name().to_string(), s)).collect();
+        let mut server_names: Vec<String> = servers.keys().cloned().collect();
+        server_names.sort();
         if let Some(session) = options.session_id {
             args.extend(["--resume".into(), session]);
         }
@@ -255,6 +273,7 @@ impl ClaudeProcess {
         }
         {
             let child = child.clone();
+            let mcp_writer = writer.clone();
             std::thread::spawn(move || {
                 let mut parser = Parser::default();
                 let mut reader = BufReader::with_capacity(1 << 20, stdout);
@@ -266,6 +285,25 @@ impl ClaudeProcess {
                         Ok(_) => {}
                     }
                     let Ok(object) = serde_json::from_slice::<Value>(&line) else { continue };
+                    // A call to one of the app's own tools: answered on a thread of its own, so a
+                    // slow one doesn't hold up the rest.
+                    if object["type"] == "control_request" && object["request"]["subtype"] == "mcp_message" {
+                        let request_id = object["request_id"].clone();
+                        let server = object["request"]["server_name"].as_str().unwrap_or("").to_string();
+                        let message = object["request"]["message"].clone();
+                        let (servers, w) = (servers.clone(), mcp_writer.clone());
+                        std::thread::spawn(move || {
+                            let reply = match servers.get(&server) {
+                                Some(s) => crate::mcp::handle(s.as_ref(), &message).unwrap_or(json!({ "jsonrpc": "2.0", "result": {} })),
+                                None => json!({ "jsonrpc": "2.0", "id": message["id"], "error": { "code": -32601, "message": format!("No server {server}") } }),
+                            };
+                            let _ = w.send(json!({
+                                "type": "control_response",
+                                "response": { "subtype": "success", "request_id": request_id, "response": { "mcp_response": reply } },
+                            }));
+                        });
+                        continue;
+                    }
                     for event in parser.parse(&object) {
                         if events.send(event).is_err() {
                             return;
@@ -277,7 +315,7 @@ impl ClaudeProcess {
                 let _ = events.send(Event::Exit { code, tail });
             });
         }
-        Ok(ClaudeProcess { child, writer, counter: 0, pid })
+        Ok(ClaudeProcess { child, writer, counter: 0, pid, server_names })
     }
 
     /// Your message. `id` comes back in the CLI's message lifecycle; `priority` `now`
@@ -304,7 +342,11 @@ impl ClaudeProcess {
 
     /// Asks for the catalog (models, efforts, slash commands): answered with `Event::Catalog`.
     pub fn initialize(&mut self) {
-        self.control(json!({ "subtype": "initialize" }));
+        let mut request = json!({ "subtype": "initialize" });
+        if !self.server_names.is_empty() {
+            request["sdkMcpServers"] = json!(self.server_names);
+        }
+        self.control(request);
     }
 
     fn control(&mut self, request: Value) {

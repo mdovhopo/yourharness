@@ -12,4 +12,7 @@ pub mod library;
 pub mod recovery;
 pub mod titles;
 pub mod markdown;
+pub mod mcp;
+pub mod memory;
+pub mod memory_tools;
 pub mod plan;

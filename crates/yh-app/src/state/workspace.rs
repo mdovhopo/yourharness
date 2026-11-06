@@ -510,6 +510,25 @@ impl Workspace {
         if self.library.setting("planChecklist").and_then(|v| v.as_bool()).unwrap_or(true) {
             env.push(("CLAUDE_CODE_ENABLE_TODO_TOOLS".to_string(), "1".to_string()));
         }
+        // The app's memory: its tools, and the index every agent here is given.
+        let mut servers: Vec<std::sync::Arc<dyn yh_core::mcp::ToolServer>> = vec![];
+        let mut prompt: Vec<String> = vec![];
+        let mut allowed = vec![];
+        let memory_on = self.library.setting("memoryEnabled").and_then(|v| v.as_bool()).unwrap_or(true);
+        if let (true, Some(db), Some(project)) = (memory_on, self.library.db.clone(), project.as_ref()) {
+            // One memory, the app's: Claude Code's own files would compete with it.
+            if self.library.setting("claudeCodeMemoryOff").and_then(|v| v.as_bool()).unwrap_or(true) {
+                env.push(("CLAUDE_CODE_DISABLE_AUTO_MEMORY".into(), "1".into()));
+            }
+            let store = yh_core::memory::Store { db };
+            let scope = yh_core::memory::scope_of(&project.id);
+            let actor = yh_core::memory::Actor { kind: "agent".into(), thread: Some(t.id().to_string()) };
+            let (text, listed) = yh_core::memory::prompt(&store.memories(Some(&scope), Some("active")), &project.name);
+            store.note_injection(&scope, listed, text.len(), &actor);
+            prompt.push(text);
+            allowed.push("mcp__memory".to_string());
+            servers.push(std::sync::Arc::new(yh_core::memory_tools::MemoryTools { store, scope, actor, on_change: Box::new(|| {}) }));
+        }
         let options = LaunchOptions {
             cwd,
             session_id: t.session_id.clone(),
@@ -518,6 +537,9 @@ impl Workspace {
             effort: effort.clone(),
             add_dirs: vec![attachments.to_string_lossy().into_owned()],
             env,
+            append_system_prompt: (!prompt.is_empty()).then(|| prompt.join("\n\n")),
+            allowed_tools: allowed,
+            servers,
         };
         let (tx, rx) = flume::unbounded();
         let mut process = ClaudeProcess::spawn(options, tx)?;
