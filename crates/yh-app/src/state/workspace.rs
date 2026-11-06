@@ -192,7 +192,7 @@ impl Workspace {
         .detach();
     }
 
-    fn load_earlier(&mut self, thread: &Entity<ThreadState>, cx: &mut Context<Self>) {
+    pub fn load_earlier(&mut self, thread: &Entity<ThreadState>, cx: &mut Context<Self>) {
         let (id, before) = {
             let t = thread.read(cx);
             if !t.loaded || t.loading_earlier || t.before == 0 {

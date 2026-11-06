@@ -137,6 +137,8 @@ pub struct ThreadState {
     pub unread: bool,
     /// The checklist Claude keeps with its task tools, from the rows held.
     pub plan: yh_core::plan::Plan,
+    /// The row Find is on, by its number.
+    pub find_hit: Option<i64>,
     pub permission: Option<Permission>,
     /// Rows of the history before the first one held.
     pub before: usize,
@@ -171,6 +173,7 @@ impl ThreadState {
             running: false,
             unread: false,
             plan: Default::default(),
+            find_hit: None,
             permission: None,
             before: 0,
             loaded: false,
@@ -395,6 +398,33 @@ impl ThreadState {
         self.next_note += 1;
         let id = format!("n{}", self.next_note);
         self.append(EntryData::new(id, Kind::Notice, text));
+    }
+
+    /// Rows whose text, tool input or result has `query` (lower case), oldest first, by number.
+    pub fn find(&self, query: &str) -> Vec<i64> {
+        self.items
+            .iter()
+            .filter(|item| {
+                item.entries.iter().any(|e| {
+                    let b = e.borrow();
+                    let has = |s: &str| s.to_lowercase().contains(query);
+                    has(&b.data.text) || b.data.tool_input.as_deref().is_some_and(has) || b.data.tool_result.as_deref().is_some_and(has)
+                })
+            })
+            .map(|i| i.pos)
+            .collect()
+    }
+
+    /// Find moves to a row: it's shown and marked.
+    pub fn show_hit(&mut self, pos: Option<i64>) {
+        let old = self.find_hit;
+        self.find_hit = pos;
+        for p in [old, pos].into_iter().flatten() {
+            self.touch_pos(p);
+        }
+        if let Some(ix) = pos.and_then(|p| self.index(p)) {
+            self.list.scroll_to_reveal_item(ix);
+        }
     }
 
     /// Rebuilds the checklist from the task tool calls held, in order.

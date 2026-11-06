@@ -17,7 +17,7 @@ use state::workspace::Workspace;
 use std::sync::Arc;
 use std::time::Duration;
 use theme::Theme;
-use ui::root::{Allow, Deny, NewThread, Quit, RootView, Stop};
+use ui::root::{Allow, Deny, Find, FindNext, FindPrevious, NewThread, Quit, RootView, Stop};
 
 fn env(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
@@ -65,6 +65,9 @@ fn main() {
             KeyBinding::new("cmd-enter", Allow, Some("Harness")),
             KeyBinding::new("cmd-backspace", Deny, Some("Harness")),
             KeyBinding::new("cmd-n", NewThread, None),
+            KeyBinding::new("cmd-f", Find, None),
+            KeyBinding::new("cmd-g", FindNext, None),
+            KeyBinding::new("cmd-shift-g", FindPrevious, None),
             KeyBinding::new("cmd-q", Quit, None),
         ]);
         cx.on_action(|_: &Quit, cx| cx.quit());
@@ -192,6 +195,23 @@ fn main() {
                 let _ = window.update(cx, |_, window, cx| {
                     let composer = root.read(cx).composer.clone();
                     composer.update(cx, |c, cx| c.type_draft(&text, window, cx));
+                });
+            })
+            .detach();
+        }
+        // `YH_FIND=<words>`: Find opened with them typed, after `YH_DRAFT_DELAY`.
+        if let Some(words) = env("YH_FIND") {
+            let delay: f64 = env("YH_DRAFT_DELAY").and_then(|v| v.parse().ok()).unwrap_or(1.0);
+            let root = root.clone();
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(Duration::from_secs_f64(delay)).await;
+                let _ = window.update(cx, |_, window, cx| {
+                    let find = root.read(cx).find.clone();
+                    find.update(cx, |f, cx| {
+                        f.show(window, cx);
+                        f.input.update(cx, |i, cx| i.set_value(words.clone(), window, cx));
+                        f.search(cx);
+                    });
                 });
             })
             .detach();

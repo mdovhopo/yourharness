@@ -5,6 +5,7 @@
 use crate::state::workspace::{Workspace, WorkspaceEvent};
 use crate::theme::{Theme, UI};
 use crate::ui::composer::Composer;
+use crate::ui::find::FindBar;
 use crate::ui::sidebar::Sidebar;
 use crate::ui::transcript::TranscriptView;
 use gpui_kit::{
@@ -13,7 +14,7 @@ use gpui_kit::{
 };
 use yh_core::claude::Decision;
 
-actions!(harness, [Stop, Allow, Deny, Quit, NewThread]);
+actions!(harness, [Stop, Allow, Deny, Quit, NewThread, Find, FindNext, FindPrevious]);
 
 /// Transcripts kept made for going back and forth.
 const KEPT_TRANSCRIPTS: usize = 6;
@@ -22,6 +23,7 @@ pub struct RootView {
     pub workspace: Entity<Workspace>,
     pub sidebar: Entity<Sidebar>,
     pub composer: Entity<Composer>,
+    pub find: Entity<FindBar>,
     deck: Vec<(String, Entity<TranscriptView>)>,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
@@ -31,6 +33,7 @@ impl RootView {
     pub fn new(workspace: Entity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let sidebar = cx.new(|cx| Sidebar::new(workspace.clone(), window, cx));
         let composer = cx.new(|cx| Composer::new(workspace.clone(), window, cx));
+        let find = cx.new(|cx| FindBar::new(workspace.clone(), window, cx));
         let subscriptions = vec![
             cx.subscribe_in(&workspace, window, |this, _, event, window, cx| match event {
                 WorkspaceEvent::Selected(id) => this.show(id, window, cx),
@@ -41,7 +44,7 @@ impl RootView {
             }),
             cx.observe(&workspace, |_, _, cx| cx.notify()),
         ];
-        RootView { workspace, sidebar, composer, deck: vec![], focus: cx.focus_handle(), _subscriptions: subscriptions }
+        RootView { workspace, sidebar, composer, find, deck: vec![], focus: cx.focus_handle(), _subscriptions: subscriptions }
     }
 
     fn show(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -119,6 +122,9 @@ impl Render for RootView {
             .on_action(cx.listener(|this, _: &Allow, _, cx| this.respond(Decision::allow(), cx)))
             .on_action(cx.listener(|this, _: &Deny, _, cx| this.respond(Decision::deny(), cx)))
             .on_action(cx.listener(Self::on_new_thread))
+            .on_action(cx.listener(|this, _: &Find, window, cx| this.find.update(cx, |f, cx| f.show(window, cx))))
+            .on_action(cx.listener(|this, _: &FindNext, _, cx| this.find.update(cx, |f, cx| f.step(true, cx))))
+            .on_action(cx.listener(|this, _: &FindPrevious, _, cx| this.find.update(cx, |f, cx| f.step(false, cx))))
             .size_full()
             .flex()
             .font_family(UI)
@@ -145,6 +151,7 @@ impl Render for RootView {
                             .border_color(theme.separator)
                             .child(div().font_weight(FontWeight::SEMIBOLD).overflow_hidden().whitespace_nowrap().child(title)),
                     )
+                    .child(self.find.clone())
                     .child(match transcript {
                         // Cached: typing in the composer or a sidebar change doesn't redraw the
                         // transcript; its own thread changing does.

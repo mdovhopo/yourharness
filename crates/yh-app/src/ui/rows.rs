@@ -29,8 +29,10 @@ pub fn render_item(thread: &Entity<ThreadState>, ix: usize, _window: &mut Window
         ItemType::Work => work_row(thread, item, &theme),
         ItemType::Agent => agent_row(thread, item, &theme),
     };
+    let hit = state.find_hit == Some(item.pos);
     // The column: centred, at most 820 wide, as the web transcript's.
     div()
+        .when(hit, |d| d.bg(theme.accent.opacity(0.10)))
         .w_full()
         .flex()
         .justify_center()
