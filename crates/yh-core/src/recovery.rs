@@ -127,7 +127,7 @@ fn kind_name(kind: Kind) -> &'static str {
     }
 }
 
-fn row_of(e: &EntryData, id: String, date: Option<f64>) -> Row {
+pub fn row_of(e: &EntryData, id: String, date: Option<f64>) -> Row {
     Row {
         id,
         kind: kind_name(e.kind).into(),

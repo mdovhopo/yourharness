@@ -159,6 +159,18 @@ impl Database {
                     for f in flushes {
                         let _ = f.send(());
                     }
+                    // Idle: bring the full-text index up to date, a batch at a time, so a write
+                    // that arrives waits for one batch at most.
+                    while inbox.is_empty() {
+                        match w.index_batch(500) {
+                            Ok(true) => continue,
+                            Ok(false) => break,
+                            Err(e) => {
+                                eprintln!("harness.sqlite: indexing failed: {e}");
+                                break;
+                            }
+                        }
+                    }
                 }
             })
             .map_err(|e| e.to_string())?;
@@ -233,10 +245,48 @@ impl Database {
         })
     }
 
+    /// Transcript rows matching `query` (every word, the last as a prefix), best first.
+    pub fn search(&self, query: &str, limit: usize) -> Vec<SearchHit> {
+        let Some(expression) = match_expression(query) else { return vec![] };
+        self.read(|c| {
+            let mut s = c.prepare(
+                "SELECT e.thread_id, e.seq, snippet(entries_fts, 0, '[', ']', '…', 12)
+                 FROM entries_fts JOIN entries e ON e.rowid = entries_fts.rowid
+                 WHERE entries_fts MATCH ?1 ORDER BY bm25(entries_fts) LIMIT ?2",
+            )?;
+            let rows = s.query_map(params![expression, limit as i64], |r| {
+                Ok(SearchHit { thread: r.get(0)?, seq: r.get::<_, i64>(1)? as usize, snippet: r.get(2)? })
+            })?;
+            rows.collect()
+        })
+        .unwrap_or_else(|e| {
+            eprintln!("harness.sqlite: search failed: {e}");
+            vec![]
+        })
+    }
+
     /// A whole tool result kept as a blob.
     pub fn blob_string(&self, hash: &str) -> Option<String> {
         self.read(|c| blob(c, hash)).ok().flatten().map(|b| String::from_utf8_lossy(&b).into_owned())
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct SearchHit {
+    pub thread: String,
+    pub seq: usize,
+    /// The match in context, the words in `[brackets]`.
+    pub snippet: String,
+}
+
+/// FTS5 syntax for what was typed: each word quoted, all required, the last as a prefix.
+pub fn match_expression(query: &str) -> Option<String> {
+    let words: Vec<&str> = query.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
+    if words.is_empty() {
+        return None;
+    }
+    let last = words.len() - 1;
+    Some(words.iter().enumerate().map(|(i, w)| format!("\"{w}\"{}", if i == last { "*" } else { "" })).collect::<Vec<_>>().join(" "))
 }
 
 fn read_state(c: &Connection) -> rusqlite::Result<StateRows> {
@@ -587,6 +637,57 @@ impl Writer {
     }
 }
 
+impl Writer {
+    /// One batch of the change feed into the full-text index (what was said; for a tool call
+    /// its name, input and the start of its result). True if there's more.
+    fn index_batch(&mut self, limit: usize) -> rusqlite::Result<bool> {
+        let from: i64 = self
+            .c
+            .query_row("SELECT rev FROM index_state WHERE indexer = 'fts'", [], |r| r.get(0))
+            .optional()?
+            .unwrap_or(0);
+        let changes: Vec<(i64, String, String, Option<String>, Option<String>, Option<String>, i64)> = {
+            let mut s = self.c.prepare_cached(
+                "SELECT rowid, kind, text, tool_name, substr(tool_input, 1, 4096), substr(tool_result, 1, 2048), rev
+                 FROM entries WHERE rev > ? ORDER BY rev LIMIT ?",
+            )?;
+            let rows = s.query_map(params![from, limit as i64], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get::<_, Option<String>>(2)?.unwrap_or_default(), r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))
+            })?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        let Some(last) = changes.last().map(|c| c.6) else { return Ok(false) };
+        self.c.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            for (rowid, kind, text, name, input, result, _) in &changes {
+                self.c.execute("DELETE FROM entries_fts WHERE rowid = ?", [rowid])?;
+                let body = match kind.as_str() {
+                    "user" | "assistant" | "notice" | "commandOutput" => text.clone(),
+                    "tool" => [name, input, result].iter().filter_map(|x| x.as_deref()).collect::<Vec<_>>().join("\n"),
+                    _ => String::new(),
+                };
+                if !body.is_empty() {
+                    self.c.execute("INSERT INTO entries_fts(rowid, body) VALUES (?, ?)", params![rowid, body])?;
+                }
+            }
+            self.c.execute(
+                "INSERT INTO index_state(indexer, rev, updated_at) VALUES ('fts', ?, ?)
+                 ON CONFLICT(indexer) DO UPDATE SET rev = excluded.rev, updated_at = excluded.updated_at",
+                params![last, now()],
+            )?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => self.c.execute_batch("COMMIT")?,
+            Err(e) => {
+                let _ = self.c.execute_batch("ROLLBACK");
+                return Err(e);
+            }
+        }
+        Ok(changes.len() == limit)
+    }
+}
+
 fn sha256_hex(data: &[u8]) -> String {
     let digest = sha256::digest(data);
     digest.iter().map(|b| format!("{b:02x}")).collect()
@@ -702,6 +803,30 @@ mod tests {
         db.save_state(s.clone());
         db.flush();
         assert_eq!(db.load_state(), s);
+    }
+
+    #[test]
+    fn rows_are_indexed_and_found() {
+        let dir = scratch("search");
+        let db = Database::open(&dir).unwrap();
+        let mut tool = row("t1", "tool", "");
+        tool.tool_name = Some("Bash".into());
+        tool.tool_input = Some(r#"{"command":"cargo build"}"#.into());
+        db.save_rows("T", 2, vec![(0, row("u1", "user", "Why is the sourdough flat?")), (1, tool)]);
+        db.flush();
+        // The writer indexes when idle: wait for it.
+        for _ in 0..50 {
+            if !db.search("sourdo", 10).is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let hits = db.search("sourdo", 10);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].seq, 0);
+        assert!(hits[0].snippet.contains("[sourdough]"));
+        assert_eq!(db.search("cargo build", 10)[0].seq, 1);
+        assert!(db.search("??", 10).is_empty());
     }
 
     #[test]

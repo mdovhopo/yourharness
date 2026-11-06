@@ -6,4 +6,5 @@ pub mod root;
 pub mod settings;
 pub mod rows;
 pub mod sidebar;
+pub mod spotlight;
 pub mod transcript;

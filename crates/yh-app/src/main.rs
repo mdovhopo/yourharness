@@ -16,7 +16,7 @@ use state::workspace::Workspace;
 use std::sync::Arc;
 use std::time::Duration;
 use theme::Theme;
-use ui::root::{Allow, Deny, Find, FindNext, FindPrevious, NewThread, OpenSettings, Quit, RootView, Stop};
+use ui::root::{Allow, Deny, Find, FindNext, FindPrevious, NewThread, OpenSettings, OpenSpotlight, Quit, RootView, Stop};
 
 fn env(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
@@ -43,6 +43,7 @@ fn main() {
             KeyBinding::new("cmd-n", NewThread, None),
             KeyBinding::new("cmd-f", Find, None),
             KeyBinding::new("cmd-,", OpenSettings, None),
+            KeyBinding::new("cmd-k", OpenSpotlight, None),
             KeyBinding::new("cmd-g", FindNext, None),
             KeyBinding::new("cmd-shift-g", FindPrevious, None),
             KeyBinding::new("cmd-q", Quit, None),
@@ -194,6 +195,35 @@ fn main() {
                         f.search(cx);
                     });
                 });
+            })
+            .detach();
+        }
+        // `YH_SPOTLIGHT=<words>`: ⌘K with them typed, after `YH_DRAFT_DELAY` (a session ID
+        // and `YH_SPOTLIGHT_ENTER=1` resumes it).
+        if let Some(words) = env("YH_SPOTLIGHT") {
+            let delay: f64 = env("YH_DRAFT_DELAY").and_then(|v| v.parse().ok()).unwrap_or(1.0);
+            let enter = env("YH_SPOTLIGHT_ENTER").as_deref() == Some("1");
+            let root = root.clone();
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(Duration::from_secs_f64(delay)).await;
+                let _ = window.update(cx, |_, window, cx| {
+                    let s = root.read(cx).spotlight.clone();
+                    s.update(cx, |s, cx| {
+                        s.show(window, cx);
+                        s.input.update(cx, |i, cx| i.set_value(words.clone(), window, cx));
+                        s.query(window, cx);
+                    });
+                });
+                if enter {
+                    cx.background_executor().timer(Duration::from_millis(600)).await;
+                    let _ = window.update(cx, |_, window, cx| {
+                        let s = root.read(cx).spotlight.clone();
+                        s.update(cx, |s, cx| s.input.update(cx, |i, cx| { let _ = (i, window, cx); }));
+                        let ws = root.read(cx).workspace.clone();
+                        let words = words.clone();
+                        let _ = ws.update(cx, |ws, cx| ws.resume_session(&words, cx)).map_err(|e| eprintln!("resume: {e}"));
+                    });
+                }
             })
             .detach();
         }

@@ -853,6 +853,90 @@ impl Workspace {
         }
     }
 
+    // MARK: Search and resuming
+
+    /// Threads whose title has `query`, then rows that do (the full-text index), off the main
+    /// thread: (thread, title, snippet; empty for a title match).
+    pub fn search(&self, query: String, cx: &mut Context<Self>) -> Task<Vec<(String, String, String)>> {
+        let q = query.trim().to_lowercase();
+        let titles: Vec<(String, String)> = self
+            .threads
+            .iter()
+            .map(|t| (t.read(cx).id().to_string(), t.read(cx).title.clone()))
+            .collect();
+        let db = self.library.db.clone();
+        cx.background_executor().spawn(async move {
+            if q.chars().count() < 2 {
+                return vec![];
+            }
+            let mut out: Vec<(String, String, String)> =
+                titles.iter().filter(|(_, title)| title.to_lowercase().contains(&q)).take(8).map(|(id, t)| (id.clone(), t.clone(), String::new())).collect();
+            let mut seen: std::collections::HashSet<String> = out.iter().map(|(id, ..)| id.clone()).collect();
+            if let Some(db) = db {
+                for hit in db.search(&q, 60) {
+                    if seen.insert(hit.thread.clone()) {
+                        if let Some((_, title)) = titles.iter().find(|(id, _)| *id == hit.thread) {
+                            let snippet = hit.snippet.split_whitespace().collect::<Vec<_>>().join(" ");
+                            out.push((hit.thread, title.clone(), snippet));
+                        }
+                    }
+                    if out.len() >= 30 {
+                        break;
+                    }
+                }
+            }
+            out
+        })
+    }
+
+    /// A Claude Code session started elsewhere, as a thread that continues it (`--resume`) in
+    /// its own folder, with its history. Read from `~/.claude/projects`, never written.
+    pub fn resume_session(&mut self, text: &str, cx: &mut Context<Self>) -> Result<(), String> {
+        let session = session_id_in(text).ok_or("That isn't a session ID.")?;
+        let known = self.threads.iter().find(|t| t.read(cx).session_id.as_deref().is_some_and(|s| s.eq_ignore_ascii_case(&session))).cloned();
+        if let Some(t) = known {
+            let id = t.read(cx).id().to_string();
+            self.select(&id, cx);
+            return Ok(());
+        }
+        let path = yh_core::history::locate(&yh_core::history::config_directory(), &session).ok_or("No Claude Code session with this ID.")?;
+        let (cwd, first) = yh_core::history::peek(&path);
+        let rows = yh_core::history::load_with_limit(&path, usize::MAX);
+        let folder = cwd.filter(|c| std::path::Path::new(c).is_dir());
+        let project = match &folder {
+            Some(f) => self.add_project(f, cx),
+            None => self.home_project().or_else(|| self.projects.first().map(|p| p.id.clone())).ok_or("No project to put it in.")?,
+        };
+        let title = first.unwrap_or_else(|| "Resumed session".into());
+        let id = self.new_thread(&project, cx);
+        let project_path = self.project(&project).map(|p| p.path.clone());
+        self.update_meta(&id, cx, |m, r| {
+            m.title = title.clone();
+            r.insert("title".into(), title.clone().into());
+            r.insert("sessionID".into(), session.clone().into());
+            if let Some(f) = folder.clone().filter(|f| Some(f) != project_path.as_ref()) {
+                m.working_directory = Some(f.clone());
+                r.insert("workingDirectory".into(), f.into());
+            }
+        });
+        if let Some(thread) = self.thread(&id) {
+            thread.update(cx, |t, _| {
+                t.session_id = Some(session.clone());
+                t.meta.session_id = Some(session.clone());
+            });
+            if let Some(db) = &self.library.db {
+                let now = yh_core::library::now_ms() / 1000.0;
+                let saved: Vec<(usize, yh_core::db::Row)> =
+                    rows.iter().enumerate().map(|(i, e)| (i, yh_core::recovery::row_of(e, if e.kind == yh_core::library::Kind::Tool { e.id.clone() } else { format!("h{i}") }, Some(now)))).collect();
+                db.save_rows(&id, saved.len(), saved);
+            }
+            // Read back from what was saved, as any history.
+            thread.update(cx, |t, _| t.unload());
+            self.ensure_loaded(&thread, cx);
+        }
+        Ok(())
+    }
+
     // MARK: Recovery
 
     /// Turns a quit or crash cut off (`turnInProgress` still set at launch): finished from
@@ -915,4 +999,15 @@ fn make_thread(meta: ThreadMeta, workspace: WeakEntity<Workspace>, cx: &mut Cont
         });
     });
     thread
+}
+
+/// A Claude Code session ID in what was pasted: the ID, a `claude --resume <id>`, a path.
+pub fn session_id_in(text: &str) -> Option<String> {
+    let bytes: Vec<char> = text.chars().collect();
+    let hex = |c: &char| c.is_ascii_hexdigit();
+    (0..bytes.len().saturating_sub(35)).find_map(|i| {
+        let s: String = bytes[i..i + 36].iter().collect();
+        let ok = s.chars().enumerate().all(|(n, c)| if [8, 13, 18, 23].contains(&n) { c == '-' } else { hex(&c) });
+        ok.then_some(s.to_lowercase())
+    })
 }
