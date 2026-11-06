@@ -32,6 +32,20 @@ fn main() {
     if env("YH_PERF").is_some() && env("YH_APP_NAP").as_deref() != Some("1") {
         platform::hold_off_app_nap();
     }
+    // A state imported (Settings → Import, or `YH_STATE_IMPORT=<file>` on a development run's
+    // data folder) is swapped in now, before the database opens.
+    {
+        let dir = yh_core::library::data_directory();
+        if let (Some(file), true) = (env("YH_STATE_IMPORT"), env("YH_DATA_DIR").is_some()) {
+            match yh_core::state_archive::open(std::path::Path::new(&file)).and_then(|o| yh_core::state_archive::stage(o, &dir)) {
+                Ok(()) => eprintln!("STATE staged {file}"),
+                Err(e) => eprintln!("STATE import failed: {e}"),
+            }
+        }
+        if let Some(manifest) = yh_core::state_archive::apply_pending(&dir) {
+            eprintln!("STATE imported: {}", ui::state_transfer::summary(&manifest["contents"]));
+        }
+    }
     let library = Arc::new(yh_core::library::Library::open());
     theme::set_chosen_appearance(library.setting("appearance").and_then(|v| v.as_str().map(str::to_string)));
 
@@ -380,6 +394,10 @@ fn main() {
                 let _ = cx.update(|cx| eprintln!("MCP servers later: {}", sheet.read(cx).describe()));
             })
             .detach();
+        }
+        // `YH_STATE_EXPORT=<file.yhstate>`: the whole state exported at launch, its manifest printed.
+        if let Some(file) = env("YH_STATE_EXPORT") {
+            ui::state_transfer::export_to(&workspace, std::path::PathBuf::from(file), cx);
         }
         // `YH_OPEN_SETTINGS=1`: Settings opened after `YH_DRAFT_DELAY`.
         if env("YH_OPEN_SETTINGS").as_deref() == Some("1") {

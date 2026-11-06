@@ -10,5 +10,6 @@ pub mod settings;
 pub mod rows;
 pub mod sidebar;
 pub mod spotlight;
+pub mod state_transfer;
 pub mod transcript;
 pub mod usage;

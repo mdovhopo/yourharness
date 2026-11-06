@@ -26,7 +26,9 @@ fn picker(id: &'static str, current: String, options: Vec<(String, String)>, on_
 
 /// Opens the dialog; each change is saved at once.
 pub fn open(workspace: Entity<Workspace>, window: &mut Window, cx: &mut App) {
+    let (ws_export, ws_import) = (workspace.clone(), workspace.clone());
     window.open_dialog(cx, move |dialog, _, cx| {
+        let (ws_export, ws_import) = (ws_export.clone(), ws_import.clone());
         let ws = workspace.read(cx);
         let lib = ws.library.clone();
         let defaults = lib.setting("defaults").unwrap_or(json!({}));
@@ -99,6 +101,21 @@ pub fn open(workspace: Entity<Workspace>, window: &mut Window, cx: &mut App) {
                                 cx.refresh_windows();
                             },
                         ),
+                    ))
+                    .child(div().pt(px(8.)).text_size(px(11.)).font_weight(gpui_kit::FontWeight::SEMIBOLD).child("State"))
+                    .child(row(
+                        "Everything the app keeps, as one file",
+                        div()
+                            .flex()
+                            .gap(px(6.))
+                            .child(Button::new("state-export").small().outline().label("Export…").on_click({
+                                let ws = ws_export.clone();
+                                move |_, _, cx| crate::ui::state_transfer::export(ws.clone(), cx)
+                            }))
+                            .child(Button::new("state-import").small().outline().label("Import…").on_click({
+                                let ws = ws_import.clone();
+                                move |_, window, cx| crate::ui::state_transfer::import(ws.clone(), window, cx)
+                            })),
                     )),
             )
     });
