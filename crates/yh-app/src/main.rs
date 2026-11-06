@@ -391,12 +391,13 @@ fn main() {
         // (`YH_MCP_ADD_SCOPE=local|project|user`), `YH_MCP_ADD_SUBMIT=1` adds it, `YH_MCP_REMOVE=<name>`
         // removes one; the list is printed again later (`MCP servers later:`). They write Claude
         // Code's config: project scope in a scratch project, or a scratch `CLAUDE_CONFIG_DIR`.
-        if env("YH_OPEN_MCP").as_deref() == Some("1") {
+        if matches!(env("YH_OPEN_MCP").as_deref(), Some("1") | Some("everywhere")) {
             let delay: f64 = env("YH_DRAFT_DELAY").and_then(|v| v.parse().ok()).unwrap_or(1.0);
             let sheet = root.read(cx).mcp.clone();
             cx.spawn(async move |cx| {
                 cx.background_executor().timer(Duration::from_secs_f64(delay)).await;
-                let _ = cx.update(|cx| sheet.update(cx, |s, cx| s.show(cx)));
+                let everywhere = env("YH_OPEN_MCP").as_deref() == Some("everywhere");
+                let _ = cx.update(|cx| sheet.update(cx, |s, cx| if everywhere { s.show_everywhere(cx) } else { s.show(cx) }));
                 cx.background_executor().timer(Duration::from_secs(4)).await;
                 let source = env("YH_MCP_ADD_URL").or_else(|| env("YH_MCP_ADD_COMMAND"));
                 if let Some(source) = source {

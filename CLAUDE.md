@@ -64,7 +64,7 @@ prints notifications and the Dock badge instead (always in tests: a real one ask
 `YH_APPEARANCE=light|dark`, `YH_OPEN_SETTINGS=1`, `YH_INSPECTOR_PANEL=prs|sideChat|subagents|files|browser`, `YH_MOCK_PULLS=<file.json>` (PRs read from
 `{"<url>": {…gh pr view's JSON…}}` instead of `gh`), `YH_SIDE_ASK=<text>` (asked in the selected thread's side
 chat after `YH_DRAFT_DELAY`) (the right sidebar open on it), `YH_OPEN_FILE=<path[:line[-end]]>`
-(opened in the Files tab as a link does, after `YH_DRAFT_DELAY`), `YH_OPEN_MCP=1` (the `/mcp` sheet, its servers printed; `YH_MCP_ADD_COMMAND=<command line>` or
+(opened in the Files tab as a link does, after `YH_DRAFT_DELAY`), `YH_OPEN_MCP=1` (the `/mcp` sheet, its servers printed; `=everywhere` for Settings → MCP; `YH_MCP_ADD_COMMAND=<command line>` or
 `YH_MCP_ADD_URL`, `YH_MCP_ADD_SCOPE=local|project|user`, `YH_MCP_ADD_SUBMIT=1`, `YH_MCP_REMOVE=<name>`: they write
 Claude Code's config, so project scope in a scratch project, or a scratch `CLAUDE_CONFIG_DIR`; `YH_MCP_BROWSER=log`
 prints sign-in pages instead of opening them), `YH_MCP_ELICIT_ANSWER=accept|decline` (what an MCP server asks

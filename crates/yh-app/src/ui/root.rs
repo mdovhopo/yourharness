@@ -45,12 +45,13 @@ pub struct RootView {
 impl RootView {
     pub fn new(workspace: Entity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let updater = cx.new(crate::state::updater::Updater::new);
-        let sidebar = cx.new(|cx| Sidebar::new(workspace.clone(), updater, window, cx));
+        let sidebar = cx.new(|cx| Sidebar::new(workspace.clone(), updater.clone(), window, cx));
         let composer = cx.new(|cx| Composer::new(workspace.clone(), window, cx));
         let find = cx.new(|cx| FindBar::new(workspace.clone(), window, cx));
         let spotlight = cx.new(|cx| Spotlight::new(workspace.clone(), window, cx));
         let inspector = cx.new(|cx| Inspector::new(workspace.clone(), window, cx));
         let mcp = cx.new(|cx| crate::ui::mcp::McpSheet::new(workspace.clone(), window, cx));
+        cx.set_global(crate::ui::settings::SettingsLinks { mcp: mcp.clone(), updater: updater.clone() });
         let links = inspector.downgrade();
         cx.set_global(crate::ui::inspector::FileLinks(std::rc::Rc::new(move |path, lines, cx| {
             let _ = links.update(cx, |i, cx| i.open_file(path, lines, cx));

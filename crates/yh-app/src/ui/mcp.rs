@@ -87,6 +87,9 @@ pub struct McpSheet {
     add_name: Entity<InputState>,
     add_scope: &'static str,
     busy: Option<String>,
+    /// Settings → MCP: only what applies everywhere, asked in Home's folder; no on/off
+    /// (Claude Code keeps that per folder), and Add adds everywhere.
+    everywhere: bool,
     _poll: Option<Task<()>>,
 }
 
@@ -105,12 +108,15 @@ impl McpSheet {
             add_name: cx.new(|cx| InputState::new(window, cx).placeholder("Name (from the URL or command)")),
             add_scope: "local",
             busy: None,
+            everywhere: false,
             _poll: None,
         }
     }
 
     /// Opens for the selected thread, and asks again every 2 s while open.
     pub fn show(&mut self, cx: &mut Context<Self>) {
+        self.everywhere = false;
+        self.add_scope = "local";
         self.thread = self.workspace.read(cx).selected_thread();
         self.open = true;
         self.page = None;
@@ -124,6 +130,18 @@ impl McpSheet {
                 break;
             }
         }));
+        cx.notify();
+    }
+
+    /// Settings → MCP: the servers that apply everywhere, through a session in Home's folder.
+    pub fn show_everywhere(&mut self, cx: &mut Context<Self>) {
+        let Some(thread) = self.workspace.update(cx, |ws, cx| ws.settings_thread(cx)) else { return };
+        self.show(cx);
+        self.everywhere = true;
+        self.add_scope = "user";
+        self.thread = Some(thread);
+        self.loaded = false;
+        self.refresh(cx);
         cx.notify();
     }
 
@@ -356,15 +374,17 @@ impl McpSheet {
         if self.servers.is_empty() {
             column = column.child(div().py(px(16.)).text_color(theme.secondary).child("No MCP servers here. Add one with a URL, a command or JSON."));
         }
+        let everywhere = self.everywhere;
+        let shown: Vec<&Server> = self.servers.iter().filter(|s| !everywhere || ["user", "claudeai", "enterprise", "managed"].contains(&s.scope.as_str())).collect();
         let mut scopes: Vec<String> = vec![];
-        for s in &self.servers {
+        for s in &shown {
             if !scopes.contains(&s.scope) {
                 scopes.push(s.scope.clone());
             }
         }
         for scope in scopes {
             column = column.child(div().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.secondary).child(scope_label(&scope).to_uppercase()));
-            for s in self.servers.iter().filter(|s| s.scope == scope) {
+            for s in shown.iter().copied().filter(|s| s.scope == scope) {
                 let (open, name) = (s.name.clone(), s.name.clone());
                 let action: Option<(&str, &str)> = match s.status.as_str() {
                     "needs-auth" => Some(("Sign In", "mcp_authenticate")),
@@ -401,7 +421,7 @@ impl McpSheet {
                             })))
                         })
                         // The app's own servers (browser, memory, threads) aren't Claude Code's to turn off.
-                        .when(s.scope != "claudeai" && s.scope != "dynamic", |d| {
+                        .when(!everywhere && s.scope != "claudeai" && s.scope != "dynamic", |d| {
                             d.child(Button::new(SharedString::from(format!("mcp-toggle-{name}"))).xsmall().ghost().label(if on { "Turn Off" } else { "Turn On" }).on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
                                 this.act("mcp_toggle", &n2, json!({ "enabled": !on }), cx)
@@ -458,7 +478,7 @@ impl McpSheet {
 
     fn add_page(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let mut scopes = div().flex().gap(px(2.));
-        for (scope, label) in SCOPES {
+        for (scope, label) in SCOPES.into_iter().filter(|(s, _)| !self.everywhere || *s == "user") {
             let b = Button::new(SharedString::from(format!("scope-{scope}"))).xsmall().label(label);
             scopes = scopes.child((if self.add_scope == scope { b.primary() } else { b.ghost() }).on_click(cx.listener(move |this, _, _, cx| {
                 this.add_scope = scope;
@@ -547,7 +567,7 @@ impl Render for McpSheet {
                             .flex()
                             .items_center()
                             .gap(px(8.))
-                            .child(div().flex_1().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child("MCP Servers"))
+                            .child(div().flex_1().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(if self.everywhere { "MCP Servers Everywhere" } else { "MCP Servers" }))
                             .when_some(self.busy.clone(), |d, b| d.child(div().text_size(px(11.)).text_color(theme.secondary).child(b)))
                             .when(!self.adding, |d| {
                                 d.child(Button::new("mcp-add").small().label("Add Server…").on_click(cx.listener(|this, _, _, cx| {

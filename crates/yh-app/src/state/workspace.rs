@@ -85,6 +85,8 @@ impl Panel {
 
 /// A side chat's id: this, then its thread's.
 pub const SIDE: &str = "side:";
+/// Settings' hidden thread in Home's folder (Settings → MCP): this, then the project.
+pub const SETTINGS: &str = "settings:";
 /// A memory specialist's id: this, its role (`importer`, `reconciler`), `:`, its project.
 pub const MEMORY_AGENT: &str = "memory:";
 
@@ -1192,7 +1194,7 @@ impl Workspace {
     pub fn save_rows(&self, thread: &Entity<ThreadState>, cx: &mut Context<Self>) {
         let Some(db) = self.library.db.clone() else { return };
         let (id, total, rows) = thread.update(cx, |t, _| (t.id().to_string(), t.total, t.take_changes()));
-        if rows.is_empty() || id.starts_with("new:") || id.starts_with("cc:") || id.starts_with(SIDE) || id.starts_with(MEMORY_AGENT) {
+        if rows.is_empty() || id.starts_with("new:") || id.starts_with("cc:") || id.starts_with(SIDE) || id.starts_with(MEMORY_AGENT) || id.starts_with(SETTINGS) {
             return;
         }
         if let Some(total) = total {
@@ -1350,6 +1352,25 @@ impl Workspace {
         if let Some(text) = message {
             self.send(&thread, &text, false, cx);
         }
+    }
+
+    /// A hidden thread in Home's folder, for asking Claude Code about what applies everywhere
+    /// (Settings → MCP); never saved, never in the sidebar.
+    pub fn settings_thread(&mut self, cx: &mut Context<Self>) -> Option<Entity<ThreadState>> {
+        let id = format!("{SETTINGS}{}", self.home_project().or_else(|| self.projects.first().map(|p| p.id.clone()))?);
+        if let Some(t) = self.thread(&id) {
+            return Some(t);
+        }
+        let project = self.home_project().or_else(|| self.projects.first().map(|p| p.id.clone()))?;
+        let mut meta = ThreadMeta::new(id.clone(), project.clone(), "Settings".into());
+        meta.working_directory = self.project(&project).map(|p| p.path.clone());
+        let t = make_thread(meta, cx.entity().downgrade(), cx);
+        t.update(cx, |t, _| {
+            t.loaded = true;
+            t.total = Some(0);
+        });
+        self.by_id.insert(id, t.clone());
+        Some(t)
     }
 
     /// Opens Usage in place of the open thread, or closes it.

@@ -24,11 +24,27 @@ fn picker(id: &'static str, current: String, options: Vec<(String, String)>, on_
     })
 }
 
+/// What Settings opens besides itself: the MCP sheet and the updater (set by the window).
+pub struct SettingsLinks {
+    pub mcp: Entity<crate::ui::mcp::McpSheet>,
+    pub updater: Entity<crate::state::updater::Updater>,
+}
+
+impl gpui_kit::Global for SettingsLinks {}
+
 /// Opens the dialog; each change is saved at once.
 pub fn open(workspace: Entity<Workspace>, window: &mut Window, cx: &mut App) {
     let (ws_export, ws_import) = (workspace.clone(), workspace.clone());
+    let (mcp, updater) = cx.try_global::<SettingsLinks>().map(|l| (Some(l.mcp.clone()), Some(l.updater.clone()))).unwrap_or((None, None));
     window.open_dialog(cx, move |dialog, _, cx| {
         let (ws_export, ws_import) = (ws_export.clone(), ws_import.clone());
+        let (mcp, updater) = (mcp.clone(), updater.clone());
+        let version_line: &'static str = match updater.as_ref().map(|u| u.read(cx).phase.clone()) {
+            Some(crate::state::updater::Phase::UpToDate) => "Up to date",
+            Some(crate::state::updater::Phase::Available(_)) => "A new version is out (see the sidebar)",
+            Some(crate::state::updater::Phase::Checking) => "Checking…",
+            _ => concat!("This is version ", env!("CARGO_PKG_VERSION")),
+        };
         let ws = workspace.read(cx);
         let lib = ws.library.clone();
         let defaults = lib.setting("defaults").unwrap_or(json!({}));
@@ -101,6 +117,31 @@ pub fn open(workspace: Entity<Workspace>, window: &mut Window, cx: &mut App) {
                                 cx.refresh_windows();
                             },
                         ),
+                    ))
+                    .child(div().pt(px(8.)).text_size(px(11.)).font_weight(gpui_kit::FontWeight::SEMIBOLD).child("MCP"))
+                    .child(row(
+                        "Servers that apply in every project",
+                        Button::new("settings-mcp").small().outline().label("MCP Servers…").on_click({
+                            let mcp = mcp.clone();
+                            move |_, window, cx| {
+                                window.close_dialog(cx);
+                                if let Some(m) = mcp.clone() {
+                                    m.update(cx, |m, cx| m.show_everywhere(cx));
+                                }
+                            }
+                        }),
+                    ))
+                    .child(div().pt(px(8.)).text_size(px(11.)).font_weight(gpui_kit::FontWeight::SEMIBOLD).child("Releases"))
+                    .child(row(
+                        version_line,
+                        Button::new("settings-updates").small().outline().label("Check for Updates").on_click({
+                            let updater = updater.clone();
+                            move |_, _, cx| {
+                                if let Some(u) = updater.clone() {
+                                    u.update(cx, |u, cx| u.check(cx));
+                                }
+                            }
+                        }),
                     ))
                     .child(div().pt(px(8.)).text_size(px(11.)).font_weight(gpui_kit::FontWeight::SEMIBOLD).child("State"))
                     .child(row(
