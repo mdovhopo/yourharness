@@ -28,6 +28,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // WebKit draws pages at 60 Hz even on a 120 Hz screen unless told otherwise
         // (`YH_60HZ=1` keeps its default, for comparing).
         if env["YH_60HZ"] != "1" { Self.setFeature("PreferPageRenderingUpdatesNear60FPSEnabled", false, in: config.preferences) }
+        // macOS slows the page's process while the app isn't frontmost; the window is often in
+        // view on another screen while you work elsewhere (`YH_BG_THROTTLE=1` keeps it, for comparing).
+        if env["YH_BG_THROTTLE"] != "1" { Self.setFeature("BackgroundWebContentRunningBoardThrottlingEnabled", false, in: config.preferences) }
 
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.isInspectable = true

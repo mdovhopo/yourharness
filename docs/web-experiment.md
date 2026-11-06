@@ -133,3 +133,21 @@ No difference worth measuring, so the choice is about the design: one reducer in
 where saving, search and the tools agents call already need the rows, and a page that only
 mirrors. It also confirms where the remaining 50–70 ms frames come from: not from handling
 events (a few ms a batch), but from WebKit's own style, layout and painting.
+
+## The collapse, explained (rewrite chunk 1, 2026-11-06)
+
+WebKit's `BackgroundWebContentRunningBoardThrottlingEnabled` (on by default) lets macOS slow
+the page's process whenever the app isn't frontmost. Test runs are always in the background,
+so after a few minutes frames fell apart with the CPU unchanged: the "collapse" above. It
+matters in real use too: the window is often in view on another screen while you type
+elsewhere. The host turns it off (`YH_BG_THROTTLE=1` keeps it). Same build, 30 s phases, one
+run each so far:
+
+| | Throttling off | Throttling on |
+|---|---|---|
+| stream-all | 98.2% on time, worst 68 ms | 97.9%, worst 74 ms |
+| stream-all-scroll | 99.1%, worst 66 ms | 71.5%, worst 380 ms |
+| stream-all-switch | 97.0%, worst 62 ms | 95.9%, worst 181 ms |
+
+Chunk 1 (the backend owning threads, rows only for open threads) is at 97–99% on time in
+every phase; worst frames 45–68 ms. Runs: `test-harness-root/web-perf/chunk1-bg-*`.

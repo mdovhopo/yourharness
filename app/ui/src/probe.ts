@@ -231,7 +231,9 @@ export async function runProbe() {
     const begin = performance.now();
     const marks = new Map(list.map((t) => [t, t.items().length]));
     for (const t of list) if (!t.running()) send(t, `PERF seconds=${Math.round(length)} rate=${config.rate}`);
+    // Open threads show their rows; the others only say they're running.
     const streaming = (t: ThreadState) => {
+      if (!t.loaded) return t.running();
       const items = t.items();
       return t.running() && items.length > (marks.get(t) ?? 0) + 1 && items[items.length - 1].type !== "user";
     };
