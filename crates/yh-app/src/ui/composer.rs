@@ -28,6 +28,7 @@ pub struct Composer {
     pub input: Entity<TextareaState>,
     current: Option<String>,
     card: Option<(String, Card)>,
+    plan_open: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -51,7 +52,7 @@ impl Composer {
                 cx.notify();
             }),
         ];
-        Composer { workspace, input, current: None, card: None, _subscriptions: subscriptions }
+        Composer { workspace, input, current: None, card: None, plan_open: false, _subscriptions: subscriptions }
     }
 
     fn thread(&self, cx: &App) -> Option<Entity<ThreadState>> {
@@ -284,6 +285,10 @@ impl Render for Composer {
                 }
             });
         }
+        let plan = thread.read(cx).plan.clone();
+        if !plan.items.is_empty() {
+            inner = inner.child(self.plan_strip(&plan, &theme, cx));
+        }
         let stop_thread = thread.clone();
         let composer = div()
             .relative()
@@ -321,6 +326,58 @@ impl Render for Composer {
                     ),
             );
         div().w_full().flex().justify_center().px(px(20.)).pb(px(16.)).child(inner.child(composer))
+    }
+}
+
+impl Composer {
+    /// Claude's checklist: progress and what it's on, opening into the whole list.
+    fn plan_strip(&self, plan: &yh_core::plan::Plan, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        use yh_core::plan::Status;
+        let current = plan.current().map(|i| i.active_form.clone().unwrap_or_else(|| i.subject.clone()));
+        let head = format!(
+            "{} Plan {}/{}{}",
+            if self.plan_open { "⌄" } else { "›" },
+            plan.completed(),
+            plan.items.len(),
+            current.map(|c| format!(" · {c}")).unwrap_or_else(|| if plan.is_finished() { " · done".into() } else { String::new() })
+        );
+        let mut strip = div()
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .mb(px(6.))
+            .px(px(12.))
+            .py(px(6.))
+            .rounded(px(10.))
+            .bg(theme.card)
+            .text_size(px(12.))
+            .child(
+                div()
+                    .id("plan-head")
+                    .text_color(theme.secondary)
+                    .child(head)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.plan_open = !this.plan_open;
+                        cx.notify();
+                    })),
+            );
+        if self.plan_open {
+            for item in &plan.items {
+                let (mark, color) = match item.status {
+                    Status::Completed => ("✓", theme.secondary),
+                    Status::InProgress => ("◐", theme.accent),
+                    Status::Pending => ("○", theme.secondary),
+                };
+                strip = strip.child(
+                    div()
+                        .flex()
+                        .gap(px(6.))
+                        .child(div().w(px(14.)).text_color(color).child(mark))
+                        .child(div().when(item.status == Status::Completed, |d| d.text_color(theme.secondary)).child(item.subject.clone())),
+                );
+            }
+        }
+        strip
     }
 }
 

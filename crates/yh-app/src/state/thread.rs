@@ -134,6 +134,8 @@ pub struct ThreadState {
     pub running: bool,
     /// A turn ended while you were elsewhere.
     pub unread: bool,
+    /// The checklist Claude keeps with its task tools, from the rows held.
+    pub plan: yh_core::plan::Plan,
     pub permission: Option<Permission>,
     /// Rows of the history before the first one held.
     pub before: usize,
@@ -167,6 +169,7 @@ impl ThreadState {
             list: ListState::new(0, ListAlignment::Bottom, px(800.)),
             running: false,
             unread: false,
+            plan: Default::default(),
             permission: None,
             before: 0,
             loaded: false,
@@ -222,6 +225,7 @@ impl ThreadState {
         let was_empty = self.items.is_empty();
         let top = self.list.logical_scroll_top();
         self.items.splice(0..0, items);
+        self.refresh_plan();
         self.before = before;
         if was_empty {
             self.list.reset(self.items.len());
@@ -390,6 +394,23 @@ impl ThreadState {
         self.append(EntryData::new(id, Kind::Notice, text));
     }
 
+    /// Rebuilds the checklist from the task tool calls held, in order.
+    pub fn refresh_plan(&mut self) {
+        let mut plan = yh_core::plan::Plan::default();
+        for item in &self.items {
+            for e in &item.entries {
+                let b = e.borrow();
+                if let Some(name) = b.data.tool_name.as_deref().filter(|n| yh_core::plan::TOOLS.contains(n)) {
+                    plan.apply(name, b.data.tool_input.as_deref().unwrap_or(""), b.data.tool_result.as_deref(), &b.data.id);
+                }
+            }
+        }
+        if std::env::var("YH_EVENT_LOG").as_deref() == Ok("1") {
+            eprintln!("plan: {:?}", plan.items.iter().map(|i| (&i.id, &i.subject, i.status)).collect::<Vec<_>>());
+        }
+        self.plan = plan;
+    }
+
     /// Applies one event from this thread's `claude`. True when what the sidebar shows changed.
     pub fn apply(&mut self, event: Event, _cx: &mut Context<Self>) -> bool {
         match event {
@@ -460,12 +481,41 @@ impl ThreadState {
                     }
                     return false;
                 }
+                // The CLI sends a message's blocks one `assistant` event each, all under the
+                // message's ID: a tool block is its tool call; a text or thinking block is the
+                // message's streamed block of that kind still being written, else one that
+                // already says the same, else a new row.
                 for (index, block) in blocks.into_iter().enumerate() {
-                    let key = format!("{message}:{index}");
-                    let existing = self.blocks.get(&key).cloned().or_else(|| match &block {
+                    let mut key = format!("{message}:{index}");
+                    let existing = match &block {
                         Block::Tool { id, .. } => self.tools.get(id).map(|(e, _)| e.clone()),
-                        _ => None,
-                    });
+                        Block::Text(text) | Block::Thinking(text) => {
+                            let kind = if matches!(block, Block::Text(_)) { Kind::Assistant } else { Kind::Thinking };
+                            let prefix = format!("{message}:");
+                            let mut candidates: Vec<(&String, &EntryRef)> = self
+                                .blocks
+                                .iter()
+                                .filter(|(k, e)| k.starts_with(&prefix) && e.borrow().data.kind == kind)
+                                .collect();
+                            candidates.sort_by_key(|(k, _)| k.rsplit(':').next().and_then(|n| n.parse::<u64>().ok()).unwrap_or(0));
+                            let found = candidates
+                                .iter()
+                                .find(|(_, e)| e.borrow().live)
+                                .or_else(|| candidates.iter().find(|(_, e)| e.borrow().data.text == *text))
+                                .map(|(k, e)| ((*k).clone(), (*e).clone()));
+                            match found {
+                                Some((k, e)) => {
+                                    key = k;
+                                    Some(e)
+                                }
+                                // A new block of this message: a key no stream block has.
+                                None => {
+                                    key = format!("{message}:a{}", candidates.len() + index);
+                                    None
+                                }
+                            }
+                        }
+                    };
                     let e = match existing {
                         Some(e) => e,
                         None => {
@@ -498,6 +548,11 @@ impl ThreadState {
                 if parent.is_some() {
                     return false;
                 }
+                let touches_plan = results.iter().any(|r| {
+                    self.tools.get(&r.id).is_some_and(|(e, _)| {
+                        e.borrow().data.tool_name.as_deref().is_some_and(|n| yh_core::plan::TOOLS.contains(&n))
+                    })
+                });
                 for r in results {
                     let Some((e, pos)) = self.tools.get(&r.id).cloned() else { continue };
                     if let Some(full) = r.full {
@@ -513,6 +568,10 @@ impl ThreadState {
                         b.version += 1;
                     }
                     self.touch_pos(pos);
+                }
+                if touches_plan {
+                    self.refresh_plan();
+                    return true;
                 }
                 false
             }

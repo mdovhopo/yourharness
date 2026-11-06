@@ -9,3 +9,4 @@ pub mod history;
 pub mod library;
 pub mod recovery;
 pub mod markdown;
+pub mod plan;
