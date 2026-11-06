@@ -218,3 +218,10 @@ export async function addProject() {
   const p = project(id);
   if (p) newThread(p);
 }
+
+/** A Claude Code session (its ID, or `claude --resume <id>`) as a thread that continues it. */
+export async function resumeSession(text: string) {
+  const id = await call<string>("resumeSession", { text });
+  for (let i = 0; i < 60 && !byId.has(id); i++) await new Promise((r) => requestAnimationFrame(r));
+  select(id);
+}

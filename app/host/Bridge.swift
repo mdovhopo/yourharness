@@ -115,6 +115,8 @@ final class Bridge: NSObject, WKScriptMessageHandlerWithReply {
             return ["select": env["YH_SELECT"] ?? "", "send": env["YH_SEND"] ?? "", "model": env["YH_MODEL"] ?? "",
                     "mode": env["YH_MODE"] ?? "", "answer": env["YH_ANSWER"] ?? "", "quit": env["YH_QUIT"] == "1",
                     "flags": env["YH_FLAGS"] ?? "", "diagAfter": env["YH_DIAG_AFTER"] ?? "", "project": env["YH_PROJECT_NAME"] ?? "",
+                    // `YH_RESUME=<session id>`: resumes that Claude Code session as a thread at launch.
+                    "resume": env["YH_RESUME"] ?? "",
                     // `YH_SEND_IMAGE=<file>`: sent with `YH_SEND`.
                     "image": env["YH_SEND_IMAGE"].flatMap { try? Data(contentsOf: URL(fileURLWithPath: $0)).base64EncodedString() } ?? ""]
         default:

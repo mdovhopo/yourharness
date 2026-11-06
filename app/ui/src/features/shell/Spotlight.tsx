@@ -1,6 +1,6 @@
 import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import type { SearchHit } from "../../protocol";
-import { search, select } from "../../store";
+import { resumeSession, search, select } from "../../store";
 
 // ⌘K: threads by title, then what was said in them. ↑↓ to move, ↩ to open, Esc to close.
 
@@ -8,6 +8,9 @@ export function Spotlight() {
   const [open, setOpen] = createSignal(false);
   const [hits, setHits] = createSignal<SearchHit[]>([]);
   const [index, setIndex] = createSignal(0);
+  /** A pasted session ID: offered as "Resume Claude Code session". */
+  const [session, setSession] = createSignal<string | null>(null);
+  const [error, setError] = createSignal("");
   let field!: HTMLInputElement;
   let timer = 0;
   const onKey = (e: KeyboardEvent) => {
@@ -22,11 +25,22 @@ export function Spotlight() {
     onCleanup(() => window.removeEventListener("keydown", onKey));
   });
   const query = (q: string) => {
+    const id = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.exec(q);
+    setSession(id ? id[0] : null);
+    setError("");
     clearTimeout(timer);
     timer = window.setTimeout(async () => {
       setHits(await search(q));
       setIndex(0);
     }, 80);
+  };
+  const resume = async () => {
+    try {
+      await resumeSession(session()!);
+      setOpen(false);
+    } catch (e) {
+      setError(String(e).replace(/^Error: /, ""));
+    }
   };
   const choose = (hit: SearchHit | undefined) => {
     if (!hit) return;
@@ -45,10 +59,18 @@ export function Spotlight() {
               if (e.key === "Escape") setOpen(false);
               if (e.key === "ArrowDown") (e.preventDefault(), setIndex(Math.min(index() + 1, hits().length - 1)));
               if (e.key === "ArrowUp") (e.preventDefault(), setIndex(Math.max(index() - 1, 0)));
-              if (e.key === "Enter") choose(hits()[index()]);
+              if (e.key === "Enter") session() ? resume() : choose(hits()[index()]);
             }}
           />
-          <Show when={hits().length}>
+          <Show when={session()}>
+            <div class="spotlight-results">
+              <button class="spotlight-hit on" onMouseDown={resume}>
+                <span class="spotlight-title">Resume Claude Code session</span>
+                <span class="spotlight-snippet">{error() || session()}</span>
+              </button>
+            </div>
+          </Show>
+          <Show when={!session() && hits().length}>
             <div class="spotlight-results">
               <For each={hits()}>
                 {(hit, i) => (

@@ -2,7 +2,7 @@ import { render } from "solid-js/web";
 import { App } from "./App";
 import { call, hostLog, inApp } from "./host";
 import { maybeRunProbe } from "./probe";
-import { loadLibrary, newThread, projects, respond, select, send, setMode, setModel, thread, threadList, selectedId } from "./store";
+import { resumeSession, loadLibrary, newThread, projects, respond, select, send, setMode, setModel, thread, threadList, selectedId } from "./store";
 import { createRoot, createEffect, on } from "solid-js";
 import "./styles.css";
 
@@ -29,6 +29,11 @@ loadLibrary().then(async () => {
   }
   if (config.expand) document.documentElement.classList.add("expand-work");
   if (config.send) liveCheck(config);
+  if (config.resume) {
+    resumeSession(config.resume)
+      .then(() => hostLog(`RESUME ok: ${thread(selectedId())?.title()}`))
+      .catch((e) => hostLog(`RESUME failed: ${e}`));
+  }
   maybeRunProbe();
 });
 

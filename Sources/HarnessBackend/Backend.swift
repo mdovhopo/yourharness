@@ -162,6 +162,8 @@ public final class Backend {
             let id = library.addProject(path: p["path"] as? String ?? "")
             if let project = library.project(id) { sink(["t": "project", "p": library.projectWire(project)]) }
             return id
+        case "resumeSession":
+            return try await resumeSession(p["text"] as? String ?? "")
         case "search":
             return ["v": search(p["q"] as? String ?? "")]
         case "settings":

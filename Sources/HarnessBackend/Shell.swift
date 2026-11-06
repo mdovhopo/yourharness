@@ -112,3 +112,40 @@ public enum Attention: Sendable {
     case badge(Int)
     case notify(thread: String, title: String, body: String)
 }
+
+extension Backend {
+    // MARK: Resuming a Claude Code session
+
+    /// A Claude Code session started elsewhere, as a thread that continues it (`--resume`) in
+    /// its own folder, with its history. Read from `~/.claude/projects`, never written.
+    func resumeSession(_ text: String) async throws -> String {
+        guard let sessionID = ClaudeSessionArchive.sessionID(in: text) else { throw BackendError("That isn't a session ID.") }
+        if let known = library.threads.first(where: { $0["sessionID"] as? String == sessionID }), let id = known["id"] as? String { return id }
+        let environment = (try? await cli().0) ?? ProcessInfo.processInfo.environment
+        let config = ClaudeSessionArchive.configDirectory(environment: environment)
+        let archive: ClaudeSessionArchive = try await Task.detached(priority: .userInitiated) {
+            guard let url = ClaudeSessionArchive.locate(sessionID: sessionID, configDirectory: config) else {
+                throw BackendError("No Claude Code session with this ID.")
+            }
+            do { return try ClaudeSessionArchive.load(from: url, sessionID: sessionID) } catch { throw BackendError("Couldn't read this session's history.") }
+        }.value
+        let folder = archive.cwd.flatMap { FileManager.default.fileExists(atPath: $0) ? $0 : nil }
+        let projectID = folder.map { library.addProject(path: $0) }
+            ?? (library.setting("homeProjectID") as? String) ?? library.projects.first?["id"] as? String ?? ""
+        if let project = library.project(projectID) { sink(["t": "project", "p": library.projectWire(project)]) }
+        let id = library.addThread(projectID: projectID)
+        let title = archive.title ?? archive.firstMessage.map { String($0.split(separator: "\n").first ?? "").prefix(60).description } ?? "Resumed session"
+        library.updateThread(id) {
+            $0["sessionID"] = sessionID
+            $0["title"] = title
+            if archive.hasCustomTitle { $0["titleChosen"] = true }
+            if let date = archive.updatedAt { $0["updatedAt"] = Library.iso.string(from: date) }
+        }
+        if let uuid = UUID(uuidString: id) {
+            let rows = archive.items.enumerated().map { Recovery.snapshot($1, id: "h\($0)") }
+            library.db.saveTranscript(uuid, entries: rows)
+        }
+        threadChanged(id)
+        return id
+    }
+}

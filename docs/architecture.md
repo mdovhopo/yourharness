@@ -84,7 +84,7 @@ whole app; the user's app stays the frozen 0.0.16 until then.
 | 0 | Repo on the new stack: layout, frozen legacy, docs, scripts, store experiment kept | done |
 | 1 | **Backend owns threads.** Projects and threads from the app's own `harness.sqlite` (the user's data, same folder, same format), thread runtime (sessions, resume, idle reap, saving rows as they change, crash recovery), the protocol with topics and revisions. UI: sidebar with pin, settle, rename, delete, new thread; transcript; composer with model, effort and mode from the CLI's catalog; queue and steer; stop; permission, question and plan cards. Crash recovery, queued messages, unread. | done |
 | 2 | Transcript parity: markdown details, Edit diffs, sub-agent cards, plan checklist, notices and compaction, slash commands, @ mentions, images and files in messages, find in thread. | done (markdown polish ongoing) |
-| 3 | App shell: titles (generated, renamed), notifications and badge, Home project, ⌘K search, settings, usage limits, resume a Claude Code session. | done but resume |
+| 3 | App shell: titles (generated, renamed), notifications and badge, Home project, ⌘K search, settings, usage limits, resume a Claude Code session. | done |
 | 4 | Agents' tools served by the backend: memory, threads, and their views (Memory page, tasks). | |
 | 5 | Right sidebar: side chat, sub-agents, files, pull requests and workspaces, the agents' browser (native views placed by the page). | |
 | 6 | The rest: usage view, MCP sheet, state export and import, updater, release pipeline; then the switch. | |
