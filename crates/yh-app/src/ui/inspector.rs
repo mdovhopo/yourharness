@@ -757,6 +757,86 @@ impl Inspector {
 }
 
 impl Inspector {
+    /// The thread's browser: its tabs, the page's address, and the place the page is laid
+    /// over (GPUI keeps it empty; the web view follows its bounds every frame).
+    fn browser(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let Some(thread) = self.thread.as_ref().map(|t| t.read(cx).id().to_string()) else { return empty("No thread open.", theme) };
+        let tabs: Vec<(u32, String, bool, bool)> = crate::browser::Browsers::with(|b| {
+            b.sessions
+                .get(&thread)
+                .map(|s| {
+                    let current = s.selected_tab().map(|t| t.id);
+                    s.tabs.iter().map(|t| (t.id, if t.title().is_empty() { t.short_url() } else { t.title() }, Some(t.id) == current, t.web.is_loading())).collect()
+                })
+                .unwrap_or_default()
+        });
+        if tabs.is_empty() {
+            crate::browser::Browsers::show(None);
+            return empty("No pages open. When Claude opens one (mcp__browser__open), it shows here, and you can watch what it does.", theme);
+        }
+        let address = crate::browser::Browsers::with(|b| b.sessions.get(&thread).and_then(|s| s.selected_tab().map(|t| t.short_url()))).unwrap_or_default();
+        let mut strip = div().id("browser-tabs").flex().gap(px(4.)).px(px(8.)).py(px(6.)).overflow_x_scroll();
+        for (id, title, on, loading) in tabs {
+            let t = thread.clone();
+            strip = strip.child(
+                div()
+                    .id(SharedString::from(format!("browser-tab-{id}")))
+                    .flex_none()
+                    .max_w(px(160.))
+                    .px(px(8.))
+                    .py(px(2.))
+                    .rounded(px(10.))
+                    .text_size(px(11.))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .bg(if on { theme.accent.opacity(0.16) } else { theme.selected })
+                    .text_color(if on { theme.text } else { theme.secondary })
+                    .child(if loading { format!("◌ {title}") } else { title })
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        crate::browser::Browsers::select_tab(&t, id);
+                        cx.notify();
+                    })),
+            );
+        }
+        let place = thread.clone();
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(strip)
+            .child(
+                div()
+                    .mx(px(8.))
+                    .mb(px(6.))
+                    .px(px(8.))
+                    .py(px(3.))
+                    .rounded(px(6.))
+                    .bg(theme.card)
+                    .text_size(px(11.))
+                    .font_family(MONO)
+                    .text_color(theme.secondary)
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .child(address),
+            )
+            .child(
+                div().flex_1().min_h_0().border_t_1().border_color(theme.separator).child(
+                    gpui_kit::canvas(
+                        move |bounds, _, _| {
+                            let o = bounds.origin;
+                            let s = bounds.size;
+                            crate::browser::Browsers::show(Some((place.clone(), (f64::from(o.x), f64::from(o.y), f64::from(s.width), f64::from(s.height)))));
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .size_full(),
+                ),
+            )
+            .into_any_element()
+    }
+
     fn pull_requests(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let Some(thread) = &self.thread else { return empty("No thread open.", theme) };
         let id = thread.read(cx).id().to_string();
@@ -1014,6 +1094,7 @@ impl Render for Inspector {
             self.ensure_pulls(cx);
         }
         let content = match panel {
+            Panel::Browser => self.browser(&theme, cx),
             Panel::PullRequests => self.pull_requests(&theme, cx),
             Panel::SideChat => self.side_chat(&theme, cx),
             Panel::Subagents => self.subagents(&theme, cx),

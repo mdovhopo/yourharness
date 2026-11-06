@@ -8,15 +8,17 @@ use serde_json::{json, Value};
 pub struct ToolResult {
     pub text: String,
     pub is_error: bool,
+    /// Pictures before the text: (media type, base64).
+    pub images: Vec<(String, String)>,
 }
 
 impl ToolResult {
     pub fn text(text: impl Into<String>) -> ToolResult {
-        ToolResult { text: text.into(), is_error: false }
+        ToolResult { text: text.into(), is_error: false, images: vec![] }
     }
 
     pub fn error(text: impl Into<String>) -> ToolResult {
-        ToolResult { text: text.into(), is_error: true }
+        ToolResult { text: text.into(), is_error: true, images: vec![] }
     }
 }
 
@@ -69,7 +71,9 @@ pub fn handle(server: &dyn ToolServer, message: &Value) -> Option<Value> {
             }
             let args = if params["arguments"].is_object() { params["arguments"].clone() } else { json!({}) };
             let result = server.call(name, &args, params["_meta"]["claudecode/toolUseId"].as_str());
-            reply(json!({ "content": [{ "type": "text", "text": result.text }], "isError": result.is_error }))
+            let mut content: Vec<Value> = result.images.iter().map(|(media, data)| json!({ "type": "image", "data": data, "mimeType": media })).collect();
+            content.push(json!({ "type": "text", "text": result.text }));
+            reply(json!({ "content": content, "isError": result.is_error }))
         }
         method => failure(-32601, format!("Method not found: {method}")),
     })

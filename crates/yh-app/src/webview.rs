@@ -28,6 +28,92 @@ fn rust_string(s: id) -> Option<String> {
     }
 }
 
+/// What pages tell the app, from WebKit's delegates and the page's hooks; `view` says which
+/// web view (its address).
+#[derive(Debug)]
+pub enum WebEvent {
+    /// A console line or a request, as the hooks post them (JSON).
+    Log { view: usize, json: String },
+    Started { view: usize },
+    Finished { view: usize },
+    Failed { view: usize, error: String },
+}
+
+static EVENTS: std::sync::OnceLock<flume::Sender<WebEvent>> = std::sync::OnceLock::new();
+
+/// Where every web view's events go; set once, before the first web view.
+pub fn set_events(sender: flume::Sender<WebEvent>) {
+    let _ = EVENTS.set(sender);
+}
+
+fn post(event: WebEvent) {
+    if let Some(s) = EVENTS.get() {
+        let _ = s.send(event);
+    }
+}
+
+/// One object, alive for the app's life, that's every web view's navigation delegate and
+/// the hooks' message handler.
+fn delegate() -> id {
+    use objc::declare::ClassDecl;
+    use objc::runtime::{Object, Sel};
+    static DELEGATE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *DELEGATE.get_or_init(|| unsafe {
+        let mut decl = ClassDecl::new("YHWebDelegate", class!(NSObject)).expect("YHWebDelegate");
+        extern "C" fn message(_: &Object, _: Sel, _: id, message: id) {
+            unsafe {
+                let view: id = msg_send![message, webView];
+                let body: id = msg_send![message, body];
+                let valid: bool = msg_send![class!(NSJSONSerialization), isValidJSONObject: body];
+                if !valid {
+                    return;
+                }
+                let data: id = msg_send![class!(NSJSONSerialization), dataWithJSONObject: body options: 0usize error: nil];
+                let text: id = msg_send![class!(NSString), alloc];
+                let text: id = msg_send![text, initWithData: data encoding: 4usize];
+                if let Some(json) = rust_string(text) {
+                    post(WebEvent::Log { view: view as usize, json });
+                }
+                let _: () = msg_send![text, release];
+            }
+        }
+        extern "C" fn started(_: &Object, _: Sel, view: id, _: id) {
+            post(WebEvent::Started { view: view as usize });
+        }
+        extern "C" fn finished(_: &Object, _: Sel, view: id, _: id) {
+            post(WebEvent::Finished { view: view as usize });
+        }
+        extern "C" fn failed(_: &Object, _: Sel, view: id, _: id, error: id) {
+            unsafe {
+                let code: isize = msg_send![error, code];
+                // -999: cancelled, as when another navigation replaces it.
+                if code == -999 {
+                    return;
+                }
+                let text: id = msg_send![error, localizedDescription];
+                post(WebEvent::Failed { view: view as usize, error: rust_string(text).unwrap_or_else(|| "failed".into()) });
+            }
+        }
+        decl.add_method(sel!(userContentController:didReceiveScriptMessage:), message as extern "C" fn(&Object, Sel, id, id));
+        decl.add_method(sel!(webView:didStartProvisionalNavigation:), started as extern "C" fn(&Object, Sel, id, id));
+        decl.add_method(sel!(webView:didFinishNavigation:), finished as extern "C" fn(&Object, Sel, id, id));
+        decl.add_method(sel!(webView:didFailProvisionalNavigation:withError:), failed as extern "C" fn(&Object, Sel, id, id, id));
+        decl.add_method(sel!(webView:didFailNavigation:withError:), failed as extern "C" fn(&Object, Sel, id, id, id));
+        let cls = decl.register();
+        let object: id = msg_send![cls, new];
+        object as usize
+    }) as id
+}
+
+/// The helpers' own content world, which the page can't see into.
+fn helper_world() -> id {
+    unsafe { msg_send![class!(WKContentWorld), worldWithName: ns_string("YourHarness")] }
+}
+
+fn page_world() -> id {
+    unsafe { msg_send![class!(WKContentWorld), pageWorld] }
+}
+
 pub struct WebView {
     view: id,
 }
@@ -38,6 +124,15 @@ impl WebView {
     pub fn new(host: id) -> WebView {
         unsafe {
             let config: id = msg_send![class!(WKWebViewConfiguration), new];
+            // The helpers in their own world; the console and network hooks in the page's.
+            let controller: id = msg_send![config, userContentController];
+            for (source, world) in [(include_str!("browser/helpers.js"), helper_world()), (include_str!("browser/hooks.js"), page_world())] {
+                let script: id = msg_send![class!(WKUserScript), alloc];
+                let script: id = msg_send![script, initWithSource: ns_string(source) injectionTime: 0isize forMainFrameOnly: YES inContentWorld: world];
+                let _: () = msg_send![controller, addUserScript: script];
+                let _: () = msg_send![script, release];
+            }
+            let _: () = msg_send![controller, addScriptMessageHandler: delegate() contentWorld: page_world() name: ns_string("yourHarnessLog")];
             let frame = NSRect::new(NSPoint::new(0., 0.), NSSize::new(10., 10.));
             let view: id = msg_send![class!(WKWebView), alloc];
             let view: id = msg_send![view, initWithFrame: frame configuration: config];
@@ -45,6 +140,7 @@ impl WebView {
             let _: () = msg_send![view, setHidden: YES];
             // Safari's user agent: sites serve the page a Mac browser gets.
             let _: () = msg_send![view, setCustomUserAgent: ns_string("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15")];
+            let _: () = msg_send![view, setNavigationDelegate: delegate()];
             let _: () = msg_send![host, addSubview: view];
             WebView { view }
         }
@@ -93,6 +189,221 @@ impl WebView {
 
     pub fn is_loading(&self) -> bool {
         unsafe { msg_send![self.view, isLoading] }
+    }
+
+    /// Its address, which `WebEvent`s name it by.
+    pub fn key(&self) -> usize {
+        self.view as usize
+    }
+
+    pub fn progress(&self) -> f64 {
+        unsafe { msg_send![self.view, estimatedProgress] }
+    }
+
+    pub fn can_go_back(&self) -> bool {
+        unsafe { msg_send![self.view, canGoBack] }
+    }
+
+    pub fn can_go_forward(&self) -> bool {
+        unsafe { msg_send![self.view, canGoForward] }
+    }
+
+    pub fn go_forward(&self) {
+        unsafe {
+            let _: id = msg_send![self.view, goForward];
+        }
+    }
+
+    /// Its size in CSS pixels (the view's bounds).
+    pub fn size(&self) -> (f64, f64) {
+        unsafe {
+            let b: NSRect = msg_send![self.view, bounds];
+            (b.size.width, b.size.height)
+        }
+    }
+
+    pub fn is_shown(&self) -> bool {
+        unsafe {
+            let hidden: bool = msg_send![self.view, isHidden];
+            !hidden
+        }
+    }
+
+    /// Runs `body` (a function body; `await` works) in the helpers' world, or the page's,
+    /// and replies with what it returned as JSON (`null` for nothing), or the error.
+    pub fn call(&self, body: &str, in_page: bool, reply: flume::Sender<Result<String, String>>) {
+        unsafe {
+            let wrapped = format!("const __yhResult = await (async () => {{ {body} }})();\nreturn __yhResult === undefined ? 'null' : JSON.stringify(__yhResult);");
+            let block = ConcreteBlock::new(move |result: id, error: id| {
+                let answer = if error != nil {
+                    let info: id = msg_send![error, userInfo];
+                    let message: id = msg_send![info, objectForKey: ns_string("WKJavaScriptExceptionMessage")];
+                    let text = rust_string(message).or_else(|| {
+                        let d: id = msg_send![error, localizedDescription];
+                        rust_string(d)
+                    });
+                    Err(text.unwrap_or_else(|| "JavaScript error".into()))
+                } else {
+                    Ok(rust_string(result).unwrap_or_else(|| "null".into()))
+                };
+                let _ = reply.send(answer);
+            });
+            let block = block.copy();
+            let args: id = msg_send![class!(NSDictionary), dictionary];
+            let world = if in_page { page_world() } else { helper_world() };
+            let _: () = msg_send![self.view, callAsyncJavaScript: ns_string(&wrapped) arguments: args inFrame: nil inContentWorld: world completionHandler: &*block];
+        }
+    }
+
+    /// A point in CSS pixels where the window has it, a hundredth of a pixel in (WebKit
+    /// truncates the point it converts back).
+    fn window_point(&self, x: f64, y: f64) -> NSPoint {
+        unsafe {
+            let flipped: bool = msg_send![self.view, isFlipped];
+            let b: NSRect = msg_send![self.view, bounds];
+            let local = NSPoint::new(x + 0.01, if flipped { y + 0.01 } else { b.size.height - y - 0.01 });
+            msg_send![self.view, convertPoint: local toView: nil]
+        }
+    }
+
+    fn mouse_event(&self, kind: usize, at: NSPoint, clicks: isize, modifiers: usize) -> id {
+        unsafe {
+            let window: id = msg_send![self.view, window];
+            let number: isize = if window == nil { 0 } else { msg_send![window, windowNumber] };
+            let info: id = msg_send![class!(NSProcessInfo), processInfo];
+            let time: f64 = msg_send![info, systemUptime];
+            // 2 left up, 4 right up: no pressure.
+            let pressure: f32 = if kind == 2 || kind == 4 || kind == 5 { 0. } else { 1. };
+            msg_send![class!(NSEvent), mouseEventWithType: kind location: at modifierFlags: modifiers timestamp: time windowNumber: number context: nil eventNumber: 0isize clickCount: clicks pressure: pressure]
+        }
+    }
+
+    /// A click at a point in CSS pixels, as real mouse events: `left` or `right`, `count` times.
+    pub fn click(&self, x: f64, y: f64, right: bool, count: isize, modifiers: usize) {
+        let at = self.window_point(x, y);
+        self.hover_at(at, modifiers);
+        unsafe {
+            for n in 1..=count.max(1) {
+                if right {
+                    let _: () = msg_send![self.view, rightMouseDown: self.mouse_event(3, at, n, modifiers)];
+                    let _: () = msg_send![self.view, rightMouseUp: self.mouse_event(4, at, n, modifiers)];
+                } else {
+                    let _: () = msg_send![self.view, mouseDown: self.mouse_event(1, at, n, modifiers)];
+                    let _: () = msg_send![self.view, mouseUp: self.mouse_event(2, at, n, modifiers)];
+                }
+            }
+        }
+    }
+
+    pub fn hover(&self, x: f64, y: f64) {
+        self.hover_at(self.window_point(x, y), 0);
+    }
+
+    /// WebKit hit-tests a plain move only in the key window; a drag-move it hit-tests anywhere.
+    fn hover_at(&self, at: NSPoint, modifiers: usize) {
+        unsafe {
+            let _: () = msg_send![self.view, mouseDragged: self.mouse_event(6, at, 0, modifiers)];
+        }
+    }
+
+    /// A drag with the mouse, in steps, from one point to another.
+    pub fn drag(&self, from: (f64, f64), to: (f64, f64)) {
+        let a = self.window_point(from.0, from.1);
+        unsafe {
+            let _: () = msg_send![self.view, mouseDown: self.mouse_event(1, a, 1, 0)];
+            for i in 1..=10 {
+                let t = i as f64 / 10.;
+                let p = self.window_point(from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t);
+                let _: () = msg_send![self.view, mouseDragged: self.mouse_event(6, p, 1, 0)];
+            }
+            let b = self.window_point(to.0, to.1);
+            let _: () = msg_send![self.view, mouseUp: self.mouse_event(2, b, 1, 0)];
+        }
+    }
+
+    /// Text into what has focus in the page, as input events.
+    pub fn insert(&self, text: &str) {
+        unsafe {
+            let _: () = msg_send![self.view, insertText: ns_string(text)];
+        }
+    }
+
+    /// A key press: real keydown and keyup.
+    pub fn press(&self, key_code: u16, characters: &str, plain: &str, modifiers: usize) {
+        unsafe {
+            let window: id = msg_send![self.view, window];
+            let number: isize = if window == nil { 0 } else { msg_send![window, windowNumber] };
+            let make = |kind: usize| -> id {
+                msg_send![class!(NSEvent), keyEventWithType: kind location: NSPoint::new(0., 0.) modifierFlags: modifiers timestamp: 0f64 windowNumber: number context: nil characters: ns_string(characters) charactersIgnoringModifiers: ns_string(plain) isARepeat: NO keyCode: key_code]
+            };
+            let down = make(10);
+            if modifiers != 0 {
+                let handled: bool = msg_send![self.view, performKeyEquivalent: down];
+                if handled {
+                    return;
+                }
+            }
+            let _: () = msg_send![self.view, keyDown: down];
+            let _: () = msg_send![self.view, keyUp: make(11)];
+        }
+    }
+
+    /// Part of what it shows (CSS pixels, None for all of it) as a JPEG at most `max_width`
+    /// wide, to a file.
+    pub fn capture(&self, rect: Option<(f64, f64, f64, f64)>, max_width: f64, path: String, reply: flume::Sender<Result<(u32, u32), String>>) {
+        unsafe {
+            let (w, h) = self.size();
+            let (x, y, cw, ch) = rect.unwrap_or((0., 0., w, h));
+            let (x, y) = (x.max(0.), y.max(0.));
+            let (cw, ch) = (cw.min(w - x), ch.min(h - y));
+            if cw < 1. || ch < 1. {
+                let _ = reply.send(Err("That's outside the visible page; scroll it into view first.".into()));
+                return;
+            }
+            let flipped: bool = msg_send![self.view, isFlipped];
+            let config: id = msg_send![class!(WKSnapshotConfiguration), new];
+            let r = NSRect::new(NSPoint::new(x, if flipped { y } else { h - y - ch }), NSSize::new(cw, ch));
+            let _: () = msg_send![config, setRect: r];
+            let width = cw.min(max_width);
+            let number: id = msg_send![class!(NSNumber), numberWithDouble: width];
+            let _: () = msg_send![config, setSnapshotWidth: number];
+            let _: () = msg_send![config, setAfterScreenUpdates: YES];
+            let out_h = (ch * width / cw).round();
+            let block = ConcreteBlock::new(move |image: id, error: id| {
+                if error != nil || image == nil {
+                    let _ = reply.send(Err("Couldn't capture the page.".into()));
+                    return;
+                }
+                // Drawn at exactly this many pixels: the snapshot comes back at the screen's scale.
+                let (pw, ph) = (width.round() as isize, out_h as isize);
+                let rep: id = msg_send![class!(NSBitmapImageRep), alloc];
+                let rep: id = msg_send![rep, initWithBitmapDataPlanes: std::ptr::null_mut::<*mut u8>() pixelsWide: pw pixelsHigh: ph bitsPerSample: 8isize samplesPerPixel: 4isize hasAlpha: YES isPlanar: NO colorSpaceName: ns_string("NSDeviceRGBColorSpace") bytesPerRow: 0isize bitsPerPixel: 0isize];
+                let _: () = msg_send![rep, setSize: NSSize::new(pw as f64, ph as f64)];
+                let _: () = msg_send![class!(NSGraphicsContext), saveGraphicsState];
+                let context: id = msg_send![class!(NSGraphicsContext), graphicsContextWithBitmapImageRep: rep];
+                let _: () = msg_send![class!(NSGraphicsContext), setCurrentContext: context];
+                let white: id = msg_send![class!(NSColor), whiteColor];
+                let _: () = msg_send![white, setFill];
+                let all = NSRect::new(NSPoint::new(0., 0.), NSSize::new(pw as f64, ph as f64));
+                unsafe extern "C" {
+                    fn NSRectFill(rect: NSRect);
+                }
+                NSRectFill(all);
+                let _: () = msg_send![image, drawInRect: all];
+                let _: () = msg_send![class!(NSGraphicsContext), restoreGraphicsState];
+                let factor: id = msg_send![class!(NSNumber), numberWithDouble: 0.8f64];
+                let key = ns_string("NSImageCompressionFactor");
+                let props: id = msg_send![class!(NSDictionary), dictionaryWithObject: factor forKey: key];
+                // NSBitmapImageFileTypeJPEG = 3
+                let data: id = msg_send![rep, representationUsingType: 3usize properties: props];
+                let ok: bool = msg_send![data, writeToFile: ns_string(&path) atomically: YES];
+                let _: () = msg_send![rep, release];
+                let _ = reply.send(if ok { Ok((pw as u32, ph as u32)) } else { Err("Couldn't write the screenshot.".into()) });
+            });
+            let block = block.copy();
+            let _: () = msg_send![self.view, takeSnapshotWithConfiguration: config completionHandler: &*block];
+            let _: () = msg_send![config, release];
+        }
     }
 
     pub fn go_back(&self) {

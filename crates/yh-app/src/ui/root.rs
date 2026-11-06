@@ -183,6 +183,11 @@ impl Render for RootView {
         let selected = if page.is_some() { None } else { self.workspace.read(cx).selected_thread() };
         let title = selected.as_ref().map(|t| t.read(cx).title.clone()).unwrap_or_else(|| "YourHarness".into());
         let transcript = self.transcript_view(cx);
+        // The browser's page shows only over its panel; anything else hides it.
+        let ws = self.workspace.read(cx);
+        if !(selected.is_some() && ws.shows_inspector && ws.panel == crate::state::workspace::Panel::Browser) {
+            crate::browser::Browsers::show(None);
+        }
         let tasks = if selected.is_some() { self.tasks.clone() } else { vec![] };
         div()
             .id("root")

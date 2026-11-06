@@ -1,0 +1,1176 @@
+//! The agents' browser: each thread's tabs (WKWebViews over the window, see `webview.rs`), and
+//! `mcp__browser__*`, the tools that drive them. Names, schemas and replies are the Swift
+//! app's (legacy/YourHarness/Browser). Tabs live on the main thread (`Browsers`); a tool call
+//! runs on a thread of its own and sends the main thread jobs, waiting on their replies, so
+//! waiting for a page never holds up the window.
+
+#![allow(deprecated)]
+
+use crate::webview::{WebEvent, WebView};
+use gpui_kit::App;
+use serde_json::{json, Value};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
+use yh_core::mcp::{schema, tool, ToolResult, ToolServer};
+
+pub type Job = Box<dyn FnOnce(&mut Browsers, &mut App) + Send>;
+
+static JOBS: std::sync::OnceLock<flume::Sender<Job>> = std::sync::OnceLock::new();
+
+thread_local! {
+    static BROWSERS: RefCell<Browsers> = RefCell::new(Browsers::default());
+}
+
+/// Big tool results get moved to a file by Claude Code, and the refs with them.
+const OUTLINE_BUDGET: usize = 18_000;
+const MAX_TABS: usize = 8;
+
+#[derive(Clone)]
+pub struct Console {
+    pub id: u64,
+    pub level: String,
+    pub text: String,
+}
+
+impl Console {
+    fn is_error(&self) -> bool {
+        self.level == "error"
+    }
+}
+
+#[derive(Clone)]
+pub struct Request {
+    pub id: u64,
+    pub method: String,
+    pub url: String,
+    pub status: Option<i64>,
+    pub failure: Option<String>,
+    pub kind: String,
+    pub ms: Option<f64>,
+}
+
+impl Request {
+    fn failed(&self) -> bool {
+        self.failure.is_some() || self.status.is_some_and(|s| s >= 400)
+    }
+}
+
+pub struct Tab {
+    pub id: u32,
+    pub web: WebView,
+    pub console: Vec<Console>,
+    pub network: Vec<Request>,
+    next_log: u64,
+    reported_console: u64,
+    reported_network: u64,
+    console_read: u64,
+    network_read: u64,
+    last_url: Option<String>,
+    last_title: Option<String>,
+    nav_error: Option<String>,
+    pub navigations: u64,
+}
+
+impl Tab {
+    pub fn short_url(&self) -> String {
+        let url = self.web.url().unwrap_or_else(|| "about:blank".into());
+        let url = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://")).unwrap_or(&url).to_string();
+        clip(url.trim_end_matches('/'), 120)
+    }
+
+    pub fn title(&self) -> String {
+        self.web.title().unwrap_or_default()
+    }
+
+    fn log(&mut self, v: &Value) {
+        self.next_log += 1;
+        let id = self.next_log;
+        match v["kind"].as_str() {
+            Some("console") => {
+                self.console.push(Console { id, level: v["level"].as_str().unwrap_or("log").into(), text: v["text"].as_str().unwrap_or("").into() });
+                if self.console.len() > 1000 {
+                    self.console.drain(..200);
+                }
+            }
+            Some("request") => {
+                self.network.push(Request {
+                    id,
+                    method: v["method"].as_str().unwrap_or("GET").into(),
+                    url: v["url"].as_str().unwrap_or("").into(),
+                    status: v["status"].as_i64(),
+                    failure: v["failure"].as_str().map(str::to_string),
+                    kind: v["type"].as_str().unwrap_or("other").into(),
+                    ms: v["ms"].as_f64(),
+                });
+                if self.network.len() > 2000 {
+                    self.network.drain(..400);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct Session {
+    pub tabs: Vec<Tab>,
+    pub selected: Option<u32>,
+    next_id: u32,
+}
+
+impl Session {
+    pub fn selected_tab(&self) -> Option<&Tab> {
+        self.selected.and_then(|id| self.tabs.iter().find(|t| t.id == id)).or(self.tabs.last())
+    }
+}
+
+#[derive(Default)]
+pub struct Browsers {
+    /// GPUI's view: web views are laid over it.
+    host: usize,
+    pub sessions: HashMap<String, Session>,
+    /// Where the browser panel is, for which thread: its tabs show there.
+    shown: Option<(String, (f64, f64, f64, f64))>,
+    /// Shows the thread's browser to the user (the right sidebar on Browser).
+    reveal: Option<Box<dyn Fn(&str, &mut App)>>,
+    /// Tells the panel something changed (a page loaded, a tab opened).
+    changed: Option<Box<dyn Fn(&mut App)>>,
+}
+
+impl Browsers {
+    pub fn with<T>(f: impl FnOnce(&mut Browsers) -> T) -> T {
+        BROWSERS.with(|b| f(&mut b.borrow_mut()))
+    }
+
+    fn tab_mut(&mut self, view: usize) -> Option<&mut Tab> {
+        self.sessions.values_mut().flat_map(|s| s.tabs.iter_mut()).find(|t| t.web.key() == view)
+    }
+
+    /// Lays the shown thread's current tab over the panel; every other tab hidden.
+    fn place(&self) {
+        for (thread, session) in &self.sessions {
+            let current = session.selected_tab().map(|t| t.id);
+            for tab in &session.tabs {
+                let here = self.shown.as_ref().filter(|(t, _)| t == thread).map(|(_, b)| *b);
+                tab.web.set_frame(if Some(tab.id) == current { here } else { None });
+            }
+        }
+    }
+
+    /// The panel's place for a thread's browser, or None when it isn't showing.
+    pub fn show(thread: Option<(String, (f64, f64, f64, f64))>) {
+        Browsers::with(|b| {
+            if b.shown != thread {
+                b.shown = thread;
+                b.place();
+            }
+        });
+    }
+
+    fn open_tab(&mut self, thread: &str, url: &str) -> u32 {
+        let host = self.host as cocoa::base::id;
+        let session = self.sessions.entry(thread.to_string()).or_default();
+        session.next_id += 1;
+        let id = session.next_id;
+        let web = WebView::new(host);
+        if let Some(u) = url_from(url) {
+            web.load(&u);
+        }
+        session.tabs.push(Tab {
+            id,
+            web,
+            console: vec![],
+            network: vec![],
+            next_log: 0,
+            reported_console: 0,
+            reported_network: 0,
+            console_read: 0,
+            network_read: 0,
+            last_url: None,
+            last_title: None,
+            nav_error: None,
+            navigations: 0,
+        });
+        session.selected = Some(id);
+        self.place();
+        id
+    }
+
+    pub fn select_tab(thread: &str, id: u32) {
+        Browsers::with(|b| {
+            if let Some(s) = b.sessions.get_mut(thread) {
+                s.selected = Some(id);
+            }
+            b.place();
+        });
+    }
+
+    pub fn close_tab(&mut self, thread: &str, id: u32) {
+        if let Some(s) = self.sessions.get_mut(thread) {
+            s.tabs.retain(|t| t.id != id);
+            if s.selected == Some(id) {
+                s.selected = s.tabs.last().map(|t| t.id);
+            }
+        }
+        self.place();
+    }
+
+    /// A thread's browser goes with it.
+    pub fn close_thread(thread: &str) {
+        Browsers::with(|b| {
+            b.sessions.remove(thread);
+        });
+    }
+}
+
+/// Starts the browser: the window's view to lay pages over, and the loops that run tool
+/// calls' jobs and take in what pages report.
+pub fn start(host: cocoa::base::id, reveal: impl Fn(&str, &mut App) + 'static, changed: impl Fn(&mut App) + 'static, cx: &mut App) {
+    Browsers::with(|b| {
+        b.host = host as usize;
+        b.reveal = Some(Box::new(reveal));
+        b.changed = Some(Box::new(changed));
+    });
+    let (jobs, rx) = flume::unbounded::<Job>();
+    let _ = JOBS.set(jobs);
+    cx.spawn(async move |cx| {
+        while let Ok(job) = rx.recv_async().await {
+            let _ = cx.update(|cx| BROWSERS.with(|b| job(&mut b.borrow_mut(), cx)));
+        }
+    })
+    .detach();
+    let (events, rx) = flume::unbounded::<WebEvent>();
+    crate::webview::set_events(events);
+    cx.spawn(async move |cx| {
+        while let Ok(event) = rx.recv_async().await {
+            let _ = cx.update(|cx| {
+                let notify = BROWSERS.with(|b| {
+                    let mut b = b.borrow_mut();
+                    let (view, nav) = match &event {
+                        WebEvent::Log { view, .. } => (*view, false),
+                        WebEvent::Started { view } | WebEvent::Finished { view } | WebEvent::Failed { view, .. } => (*view, true),
+                    };
+                    let Some(tab) = b.tab_mut(view) else { return false };
+                    match event {
+                        WebEvent::Log { json, .. } => {
+                            if let Ok(v) = serde_json::from_str::<Value>(&json) {
+                                tab.log(&v);
+                            }
+                        }
+                        WebEvent::Started { .. } => {
+                            tab.navigations += 1;
+                            tab.nav_error = None;
+                        }
+                        WebEvent::Finished { .. } => {}
+                        WebEvent::Failed { error, .. } => tab.nav_error = Some(error),
+                    }
+                    nav
+                });
+                if notify {
+                    let changed = BROWSERS.with(|b| b.borrow_mut().changed.take());
+                    if let Some(f) = changed {
+                        f(cx);
+                        BROWSERS.with(|b| b.borrow_mut().changed = Some(f));
+                    }
+                }
+            });
+        }
+    })
+    .detach();
+}
+
+/// As typed in a URL field: a URL, a host, `localhost:3000`, or words to search for.
+pub fn url_from(text: &str) -> Option<String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    if let Some((scheme, _)) = text.split_once(':') {
+        if ["http", "https", "file", "about", "data"].contains(&scheme.to_lowercase().as_str()) {
+            return Some(text.to_string());
+        }
+    }
+    let local = ["localhost", "127.0.0.1", "0.0.0.0", "[::1]"].iter().any(|p| text.starts_with(p));
+    if !text.contains(' ') && (text.contains('.') || text.contains(':') || local) {
+        return Some(format!("{}{text}", if local { "http://" } else { "https://" }));
+    }
+    let q: String = text.bytes().map(|b| if b.is_ascii_alphanumeric() { (b as char).to_string() } else { format!("%{b:02X}") }).collect();
+    Some(format!("https://duckduckgo.com/?q={q}"))
+}
+
+fn clip(text: &str, limit: usize) -> String {
+    if text.chars().count() > limit {
+        format!("{}…", text.chars().take(limit - 1).collect::<String>())
+    } else {
+        text.to_string()
+    }
+}
+
+fn one_line(text: &str, limit: usize) -> String {
+    clip(&text.lines().collect::<Vec<_>>().join(" "), limit)
+}
+
+fn quoted(text: &str, limit: usize) -> String {
+    format!("\"{}\"", one_line(text, limit))
+}
+
+fn count(n: usize, noun: &str) -> String {
+    format!("{n} {noun}{}", if n == 1 { "" } else { "s" })
+}
+
+// MARK: The tools
+
+pub struct BrowserTools {
+    pub thread: String,
+    /// A side chat looks at its thread's browser; it can't act.
+    pub read_only: bool,
+}
+
+type Fail = String;
+
+const READ_ONLY_TOOLS: &[&str] = &["status", "snapshot", "screenshot", "wait_for", "console", "network"];
+
+impl BrowserTools {
+    /// Runs `f` on the main thread with the browsers and waits for what it returns.
+    fn main<T: Send + 'static>(&self, f: impl FnOnce(&mut Browsers, &mut App) -> T + Send + 'static) -> Result<T, Fail> {
+        let (tx, rx) = flume::bounded(1);
+        let job: Job = Box::new(move |b, cx| {
+            let _ = tx.send(f(b, cx));
+        });
+        JOBS.get().ok_or("The browser isn't ready.")?.send(job).map_err(|_| "The browser is gone.".to_string())?;
+        rx.recv_timeout(Duration::from_secs(70)).map_err(|_| "The browser didn't answer.".to_string())
+    }
+
+    /// The tab a call means: `tab`, else the current one.
+    fn tab_id(&self, a: &Value) -> Result<u32, Fail> {
+        let thread = self.thread.clone();
+        let asked = a["tab"].as_u64().map(|t| t as u32);
+        self.main(move |b, _| {
+            let Some(s) = b.sessions.get(&thread).filter(|s| !s.tabs.is_empty()) else { return Err("No page is open. Use open with a URL first.".to_string()) };
+            match asked {
+                Some(id) if s.tabs.iter().any(|t| t.id == id) => Ok(id),
+                Some(id) => Err(format!("There's no tab {id}. Open tabs: {}.", s.tabs.iter().map(|t| t.id.to_string()).collect::<Vec<_>>().join(", "))),
+                None => Ok(s.selected_tab().map(|t| t.id).unwrap_or(0)),
+            }
+        })?
+    }
+
+    /// Does something with a tab on the main thread.
+    fn with_tab<T: Send + 'static>(&self, id: u32, f: impl FnOnce(&mut Tab) -> T + Send + 'static) -> Result<T, Fail> {
+        let thread = self.thread.clone();
+        self.main(move |b, _| {
+            b.sessions.get_mut(&thread).and_then(|s| s.tabs.iter_mut().find(|t| t.id == id)).map(f).ok_or_else(|| "That tab is gone.".to_string())
+        })?
+    }
+
+    /// Runs a function body in the helpers' world (or the page's) and parses what it returned.
+    fn script(&self, id: u32, body: String, in_page: bool, timeout: Duration) -> Result<Value, Fail> {
+        let (tx, rx) = flume::bounded(1);
+        self.with_tab(id, move |t| t.web.call(&body, in_page, tx))?;
+        let text = rx.recv_timeout(timeout).map_err(|_| "The page didn't answer in time.".to_string())??;
+        Ok(serde_json::from_str(&text).unwrap_or(Value::String(text)))
+    }
+
+    fn helper(&self, id: u32, body: &str) -> Result<Value, Fail> {
+        self.script(id, body.to_string(), false, Duration::from_secs(65))
+    }
+
+    fn is_loading(&self, id: u32) -> bool {
+        self.with_tab(id, |t| t.web.is_loading()).unwrap_or(false)
+    }
+
+    fn wait_for_load(&self, id: u32, timeout: Duration) -> bool {
+        let start = Instant::now();
+        while self.is_loading(id) {
+            if start.elapsed() > timeout {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        true
+    }
+
+    /// After an action: if it started a navigation, wait for it; then two frames, so what
+    /// it changed is on screen for a screenshot.
+    fn settle(&self, id: u32, timeout: Duration) {
+        let before = self.with_tab(id, |t| t.navigations).unwrap_or(0);
+        std::thread::sleep(Duration::from_millis(150));
+        if self.with_tab(id, |t| t.navigations).unwrap_or(0) != before || self.is_loading(id) {
+            self.wait_for_load(id, timeout);
+        }
+        let _ = self.script(id, "await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))".into(), false, Duration::from_secs(2));
+    }
+
+    fn wait_for_navigation(&self, id: u32, a: &Value) -> Result<(), Fail> {
+        if a["wait_until"].as_str() == Some("none") {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+        let timeout = a["timeout"].as_f64().unwrap_or(30.).clamp(1., 60.);
+        let finished = self.wait_for_load(id, Duration::from_secs_f64(timeout));
+        if let Some(error) = self.with_tab(id, |t| t.nav_error.take())? {
+            return Err(format!("Couldn't load {}: {error}", self.with_tab(id, |t| t.short_url())?));
+        }
+        if !finished {
+            self.with_tab(id, |t| t.log(&json!({"kind": "console", "level": "info", "text": "Still loading after the timeout."})))?;
+        }
+        self.settle(id, Duration::from_secs(2));
+        Ok(())
+    }
+
+    fn has_target(a: &Value) -> bool {
+        a["ref"].is_string() || a["selector"].is_string() || a["label"].is_string()
+    }
+
+    fn target(a: &Value) -> Value {
+        let mut t = serde_json::Map::new();
+        if let Some(r) = a["ref"].as_str() {
+            t.insert("ref".into(), r.into());
+        }
+        if let Some(s) = a["selector"].as_str() {
+            t.insert("selector".into(), s.into());
+        }
+        if let Some(l) = a["label"].as_str() {
+            t.insert("text".into(), l.into());
+        }
+        Value::Object(t)
+    }
+
+    /// Where an element is: its point to click, its box, how it's described, what covers it.
+    fn locate(&self, id: u32, a: &Value) -> Result<(f64, f64, (f64, f64, f64, f64), String, Option<String>), Fail> {
+        if !Self::has_target(a) {
+            return Err("Say which element: a ref from the latest snapshot, a CSS selector, or its text.".into());
+        }
+        let info = self.helper(id, &format!("const t = {}; return __yh.point(t)", Self::target(a)))?;
+        let r: Vec<f64> = info["rect"].as_array().map(|v| v.iter().filter_map(Value::as_f64).collect()).unwrap_or_default();
+        let rect = if r.len() == 4 { (r[0], r[1], r[2], r[3]) } else { (0., 0., 0., 0.) };
+        Ok((
+            info["x"].as_f64().unwrap_or(rect.0 + rect.2 / 2.),
+            info["y"].as_f64().unwrap_or(rect.1 + rect.3 / 2.),
+            rect,
+            info["describe"].as_str().unwrap_or("the element").to_string(),
+            info["blockedBy"].as_str().map(str::to_string),
+        ))
+    }
+
+    /// New console errors and failed requests since the agent last heard about them.
+    fn news(&self, id: u32) -> Option<String> {
+        if self.read_only {
+            return None;
+        }
+        self.with_tab(id, |t| {
+            let errors: Vec<Console> = t.console.iter().filter(|c| c.id > t.reported_console && c.is_error()).cloned().collect();
+            let failed: Vec<Request> = t.network.iter().filter(|r| r.id > t.reported_network && r.failed()).cloned().collect();
+            t.reported_console = t.reported_console.max(t.console.last().map_or(0, |c| c.id));
+            t.reported_network = t.reported_network.max(t.network.last().map_or(0, |r| r.id));
+            if errors.is_empty() && failed.is_empty() {
+                return None;
+            }
+            let mut parts = vec![];
+            if !errors.is_empty() {
+                parts.push(count(errors.len(), "console error"));
+            }
+            if !failed.is_empty() {
+                parts.push(count(failed.len(), "failed request"));
+            }
+            let mut lines = vec![format!("New in the page: {} (see console, network).", parts.join(", "))];
+            for e in errors.iter().take(2) {
+                lines.push(format!("  {}", one_line(&e.text, 240)));
+            }
+            for r in failed.iter().take(2) {
+                lines.push(format!("  {} {} → {}", r.method, one_line(&r.url, 160), r.status.map(|s| s.to_string()).or(r.failure.clone()).unwrap_or_else(|| "failed".into())));
+            }
+            Some(lines.join("\n"))
+        })
+        .ok()
+        .flatten()
+    }
+
+    /// What every action says: what it did, where the page is if that changed, and what
+    /// went wrong in the page since the agent last heard.
+    fn result(&self, id: u32, line: &str, show_page: bool) -> ToolResult {
+        let page = self
+            .with_tab(id, move |t| {
+                let (url, title) = (t.web.url(), t.title());
+                let changed = show_page || t.last_url != url || t.last_title.as_deref() != Some(title.as_str());
+                t.last_url = url;
+                t.last_title = Some(title.clone());
+                changed.then(|| {
+                    format!(
+                        "Page: {}{}{}",
+                        t.short_url(),
+                        if title.is_empty() { String::new() } else { format!(" — {}", quoted(&title, 80)) },
+                        if t.web.is_loading() { " (still loading)" } else { "" }
+                    )
+                })
+            })
+            .ok()
+            .flatten();
+        let mut lines = vec![format!("{line}.")];
+        lines.extend(page);
+        lines.extend(self.news(id));
+        ToolResult::text(lines.join("\n"))
+    }
+
+    fn reveal(&self) {
+        let thread = self.thread.clone();
+        let _ = self.main(move |b, cx| {
+            let reveal = b.reveal.take();
+            if let Some(f) = &reveal {
+                f(&thread, cx);
+            }
+            b.reveal = reveal;
+        });
+    }
+
+    fn status(&self) -> Result<String, Fail> {
+        let thread = self.thread.clone();
+        self.main(move |b, _| {
+            let Some(s) = b.sessions.get(&thread).filter(|s| !s.tabs.is_empty()) else { return "No pages are open. Use open with a URL.".to_string() };
+            let current = s.selected_tab().map(|t| t.id);
+            let mut lines = vec!["Tabs:".to_string()];
+            for t in &s.tabs {
+                let mut line = format!("{} {}  {}", if Some(t.id) == current { "*" } else { " " }, t.id, t.short_url());
+                let title = t.title();
+                if !title.is_empty() {
+                    line += &format!(" — {}", quoted(&title, 80));
+                }
+                if t.web.is_loading() {
+                    line += &format!(" (loading {}%)", (t.web.progress() * 100.) as i64);
+                }
+                lines.push(line);
+            }
+            if let Some(t) = s.selected_tab() {
+                let (w, h) = t.web.size();
+                lines.push(format!("Viewport: {}×{}.", w as i64, h as i64));
+                let errors = t.console.iter().filter(|c| c.is_error()).count();
+                let failed = t.network.iter().filter(|r| r.failed()).count();
+                lines.push(format!("Logged: {} ({}), {} ({failed} failed).", count(t.console.len(), "console message"), count(errors, "error"), count(t.network.len(), "request")));
+            }
+            lines.push("You can act; the user watches in the app and may take over.".into());
+            lines.join("\n")
+        })
+    }
+
+    fn snapshot(&self, id: u32, selector: Option<&str>) -> Result<String, Fail> {
+        if self.is_loading(id) {
+            self.wait_for_load(id, Duration::from_secs(10));
+        }
+        let mut options = json!({ "budget": OUTLINE_BUDGET, "keepRefs": self.read_only });
+        if let Some(s) = selector {
+            options["selector"] = s.into();
+        }
+        let info = self.helper(id, &format!("const o = {options}; return __yh.snapshot(o)"))?;
+        if !info.is_object() {
+            return Err("Couldn't read the page.".into());
+        }
+        let ints = |k: &str| -> Vec<i64> { info[k].as_array().map(|a| a.iter().filter_map(|v| v.as_f64().map(|f| f as i64)).collect()).unwrap_or_default() };
+        let (viewport, scroll, size) = (ints("viewport"), ints("scroll"), ints("size"));
+        let short = self.with_tab(id, |t| t.short_url())?;
+        let title = info["title"].as_str().filter(|t| !t.is_empty()).map(|t| format!(" — {}", quoted(t, 100))).unwrap_or_default();
+        let mut lines = vec![format!("Tab {id}: {short}{title}")];
+        if viewport.len() == 2 && scroll.len() == 2 && size.len() == 2 {
+            lines.push(format!("Viewport {}×{}, scrolled to {},{} of {}×{}.", viewport[0], viewport[1], scroll[0], scroll[1], size[0], size[1]));
+        }
+        lines.push(String::new());
+        let outline = info["outline"].as_str().unwrap_or("");
+        lines.push(if outline.is_empty() { "(The page shows nothing readable.)".into() } else { outline.to_string() });
+        if let Some(dropped) = info["dropped"].as_i64().filter(|d| *d > 0) {
+            lines.push(String::new());
+            lines.push(format!("({dropped} lines left out to keep this short, text and off-screen parts first. Snapshot a part with selector, or scroll and snapshot again.)"));
+        }
+        if let Some(note) = self.news(id) {
+            lines.push(String::new());
+            lines.push(note);
+        }
+        Ok(lines.join("\n"))
+    }
+
+    fn screenshot(&self, id: u32, a: &Value) -> Result<ToolResult, Fail> {
+        let rect = if Self::has_target(a) {
+            let (_, _, r, _, _) = self.locate(id, a)?;
+            Some((r.0 - 8., r.1 - 8., r.2 + 16., r.3 + 16.))
+        } else {
+            None
+        };
+        let path = std::env::temp_dir().join(format!("yh-shot-{}-{id}.jpg", std::process::id())).to_string_lossy().into_owned();
+        let (tx, rx) = flume::bounded(1);
+        let p = path.clone();
+        let shown = self.with_tab(id, move |t| {
+            let shown = t.web.is_shown();
+            t.web.capture(rect, 1280., p, tx);
+            shown
+        })?;
+        let (pw, ph) = rx.recv_timeout(Duration::from_secs(20)).map_err(|_| if shown { "Couldn't capture the page." } else { "The browser isn't on screen: open it with open (show: true) first." }.to_string())??;
+        let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+        let _ = std::fs::remove_file(&path);
+        let (w, h) = self.with_tab(id, |t| t.web.size())?;
+        let css_width = rect.map_or(w, |r| r.2);
+        let scale = pw as f64 / css_width.max(1.);
+        let mut text = format!("Screenshot of tab {id}, {} ({pw}×{ph}", self.with_tab(id, |t| t.short_url())?);
+        text += &if (scale - 1.).abs() > 0.01 { format!(", {scale:.2}× CSS pixels") } else { ", 1 pixel = 1 CSS pixel".into() };
+        text += &format!("; viewport {}×{}).", w as i64, h as i64);
+        if let Some(note) = self.news(id) {
+            text += &format!("\n{note}");
+        }
+        let mut result = ToolResult::text(text);
+        result.images.push(("image/jpeg".into(), yh_core::attachments::base64(&bytes)));
+        Ok(result)
+    }
+
+    fn perform(&self, name: &str, a: &Value) -> Result<ToolResult, Fail> {
+        match name {
+            "status" => Ok(ToolResult::text(self.status()?)),
+            "open" => {
+                let address = a["url"].as_str().ok_or("Give a url to open.")?.to_string();
+                let url = url_from(&address).ok_or("Give a url to open.")?;
+                let thread = self.thread.clone();
+                let new_tab = a["new_tab"].as_bool() == Some(true);
+                let id = self.main(move |b, _| {
+                    let current = b.sessions.get(&thread).and_then(|s| s.selected_tab().map(|t| t.id));
+                    match current.filter(|_| !new_tab) {
+                        Some(id) => {
+                            let s = b.sessions.get_mut(&thread).unwrap();
+                            if let Some(t) = s.tabs.iter().find(|t| t.id == id) {
+                                t.web.load(&url);
+                            }
+                            s.selected = Some(id);
+                            Ok(id)
+                        }
+                        None => {
+                            if b.sessions.get(&thread).is_some_and(|s| s.tabs.len() >= MAX_TABS) {
+                                return Err(format!("{MAX_TABS} tabs are open, the most there can be. Close one first."));
+                            }
+                            Ok(b.open_tab(&thread, &url))
+                        }
+                    }
+                })??;
+                if a["show"].as_bool() != Some(false) {
+                    self.reveal();
+                }
+                self.wait_for_navigation(id, a)?;
+                let short = self.with_tab(id, |t| t.short_url())?;
+                Ok(self.result(id, &format!("Opened {short} in tab {id}"), true))
+            }
+            "navigate" => {
+                let id = self.tab_id(a)?;
+                let before = self.with_tab(id, |t| t.web.url())?;
+                let action = a["action"].as_str().map(str::to_string);
+                if let Some(address) = a["url"].as_str() {
+                    let url = url_from(address).ok_or("Give a url.")?;
+                    self.with_tab(id, move |t| t.web.load(&url))?;
+                } else {
+                    let act = action.clone();
+                    self.with_tab(id, move |t| match act.as_deref() {
+                        Some("back") if t.web.can_go_back() => {
+                            t.web.go_back();
+                            Ok(())
+                        }
+                        Some("back") => Err("There's no page to go back to.".to_string()),
+                        Some("forward") if t.web.can_go_forward() => {
+                            t.web.go_forward();
+                            Ok(())
+                        }
+                        Some("forward") => Err("There's no page to go forward to.".to_string()),
+                        Some("reload") => {
+                            t.web.reload();
+                            Ok(())
+                        }
+                        _ => Err("Give a url, or an action: back, forward or reload.".to_string()),
+                    })??;
+                }
+                self.wait_for_navigation(id, a)?;
+                let short = self.with_tab(id, |t| t.short_url())?;
+                let verb = match action.as_deref() {
+                    Some("reload") => "Reloaded".to_string(),
+                    Some(other) => format!("Went {other}"),
+                    None => "Went".to_string(),
+                };
+                let changed = before != self.with_tab(id, |t| t.web.url())? || action.as_deref() == Some("reload");
+                Ok(self.result(id, &format!("{verb} to {short}"), changed))
+            }
+            "snapshot" => {
+                let id = self.tab_id(a)?;
+                Ok(ToolResult::text(self.snapshot(id, a["selector"].as_str())?))
+            }
+            "screenshot" => {
+                let id = self.tab_id(a)?;
+                self.screenshot(id, a)
+            }
+            "click" => {
+                let id = self.tab_id(a)?;
+                let right = a["button"].as_str() == Some("right");
+                let count = a["count"].as_i64().unwrap_or(1).clamp(1, 3) as isize;
+                let modifiers = modifier_flags(&a["modifiers"]);
+                let described = if let (Some(x), Some(y), false) = (a["x"].as_f64(), a["y"].as_f64(), Self::has_target(a)) {
+                    self.with_tab(id, move |t| t.web.click(x, y, right, count, modifiers))?;
+                    format!("at {},{}", x as i64, y as i64)
+                } else {
+                    let (x, y, _, describe, blocked) = self.locate(id, a)?;
+                    if let Some(blocker) = &blocked {
+                        if a["force"].as_bool() != Some(true) {
+                            return Err(format!("{describe} is covered by {blocker} there. Close or scroll that away first, or pass force: true to click it with a script."));
+                        }
+                        self.helper(id, &format!("const t = {}; return __yh.click(t)", Self::target(a)))?;
+                    } else {
+                        self.with_tab(id, move |t| t.web.click(x, y, right, count, modifiers))?;
+                    }
+                    describe
+                };
+                self.settle(id, Duration::from_secs(10));
+                let verb = if count == 2 { "Double-clicked" } else if right { "Right-clicked" } else { "Clicked" };
+                Ok(self.result(id, &format!("{verb} {described}"), false))
+            }
+            "hover" => {
+                let id = self.tab_id(a)?;
+                let (x, y, _, describe, _) = self.locate(id, a)?;
+                self.with_tab(id, move |t| t.web.hover(x, y))?;
+                self.settle(id, Duration::from_secs(2));
+                Ok(self.result(id, &format!("Hovered over {describe}"), false))
+            }
+            "type" => {
+                let id = self.tab_id(a)?;
+                let text = a["text"].as_str().ok_or("Give the text to type.")?.to_string();
+                let clear = a["clear"].as_bool().unwrap_or(true);
+                let mut described = "the focused element".to_string();
+                if Self::has_target(a) {
+                    described = self.locate(id, a)?.3;
+                }
+                let target = Self::target(a);
+                if let Some(d) = self.helper(id, &format!("const t = {target}; return __yh.prepareTyping(t, {clear})"))?.as_str() {
+                    described = d.to_string();
+                }
+                if clear && text.is_empty() {
+                    self.helper(id, &format!("const t = {target}; __yh.clear(t)"))?;
+                } else {
+                    let t2 = text.clone();
+                    self.with_tab(id, move |t| t.web.insert(&t2))?;
+                }
+                let submit = a["submit"].as_bool() == Some(true);
+                if submit {
+                    let key = Key::parse("Enter").unwrap();
+                    self.with_tab(id, move |t| t.web.press(key.code, &key.characters, &key.plain, key.modifiers))?;
+                }
+                self.settle(id, Duration::from_secs(10));
+                let secret = self.helper(id, &format!("const t = {target}; return __yh.isSecret(t)")).ok().and_then(|v| v.as_bool()).unwrap_or(false);
+                let mut line = if secret { format!("Typed {} characters into {described}", text.chars().count()) } else { format!("Typed {} into {described}", quoted(&text, 60)) };
+                if !secret {
+                    if let Some(value) = self.helper(id, &format!("const t = {target}; return __yh.value(t)")).ok().and_then(|v| v.as_str().map(str::to_string)) {
+                        if value != text && !value.is_empty() {
+                            line += &format!("; it now holds {}", quoted(&value, 80));
+                        }
+                    }
+                }
+                if submit {
+                    line += ", and pressed Enter";
+                }
+                Ok(self.result(id, &line, false))
+            }
+            "press" => {
+                let id = self.tab_id(a)?;
+                let spec = a["key"].as_str().unwrap_or("").to_string();
+                let key = Key::parse(&spec).ok_or("Unknown key. Use names like Enter, Tab, Escape, Backspace, ArrowDown, PageDown, a, or combinations like Shift+Tab and Meta+A.")?;
+                if Self::has_target(a) {
+                    self.locate(id, a)?;
+                    self.helper(id, &format!("const t = {}; __yh.prepareTyping(t, false)", Self::target(a)))?;
+                }
+                let count = a["count"].as_i64().unwrap_or(1).clamp(1, 50);
+                for _ in 0..count {
+                    let k = key.clone();
+                    self.with_tab(id, move |t| t.web.press(k.code, &k.characters, &k.plain, k.modifiers))?;
+                    // ⌘A in a page, without the menu command that would need the keyboard focus.
+                    if key.modifiers == COMMAND && key.plain == "a" {
+                        self.helper(id, "__yh.selectAll()")?;
+                    }
+                }
+                self.settle(id, Duration::from_secs(10));
+                Ok(self.result(id, &format!("Pressed {spec}{}", if count > 1 { format!(" ×{count}") } else { String::new() }), false))
+            }
+            "select" => {
+                let id = self.tab_id(a)?;
+                let values: Vec<String> = a["values"].as_array().map(|v| v.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default();
+                if values.is_empty() {
+                    return Err("Give the option to select, as values.".into());
+                }
+                let (_, _, _, describe, _) = self.locate(id, a)?;
+                let picked = self.helper(id, &format!("const t = {}; const v = {}; return __yh.select(t, v)", Self::target(a), json!(values)))?;
+                let picked: Vec<String> = picked.as_array().map(|v| v.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or(values);
+                self.settle(id, Duration::from_secs(10));
+                Ok(self.result(id, &format!("Selected {} in {describe}", picked.iter().map(|p| quoted(p, 40)).collect::<Vec<_>>().join(", ")), false))
+            }
+            "scroll" => {
+                let id = self.tab_id(a)?;
+                let mut o = serde_json::Map::new();
+                if Self::has_target(a) {
+                    o.insert("target".into(), Self::target(a));
+                }
+                for k in ["direction", "amount", "to"] {
+                    if !a[k].is_null() {
+                        o.insert(k.into(), a[k].clone());
+                    }
+                }
+                let line = self.helper(id, &format!("const o = {}; return __yh.scroll(o)", Value::Object(o)))?;
+                self.settle(id, Duration::from_secs(2));
+                Ok(self.result(id, line.as_str().unwrap_or("Scrolled"), false))
+            }
+            "drag" => {
+                let id = self.tab_id(a)?;
+                let (from, to) = (a["from"].clone(), a["to"].clone());
+                if from.is_null() || to.is_null() {
+                    return Err("Give from and to, each a ref or selector.".into());
+                }
+                let (fx, fy, _, fd, _) = self.locate(id, &from)?;
+                let (tx, ty, _, td, _) = self.locate(id, &to)?;
+                self.with_tab(id, move |t| t.web.drag((fx, fy), (tx, ty)))?;
+                self.settle(id, Duration::from_secs(10));
+                Ok(self.result(id, &format!("Dragged {fd} to {td}"), false))
+            }
+            "wait_for" => {
+                let id = self.tab_id(a)?;
+                let timeout = a["timeout"].as_f64().unwrap_or(10.).clamp(0.1, 60.);
+                let started = Instant::now();
+                if let Some(fragment) = a["url"].as_str() {
+                    loop {
+                        let url = self.with_tab(id, |t| t.web.url())?.unwrap_or_default();
+                        if url.contains(fragment) {
+                            break;
+                        }
+                        if started.elapsed().as_secs_f64() > timeout {
+                            return Err(format!("Timed out after {} s waiting for the URL to contain {fragment}; it's {}.", timeout as i64, self.with_tab(id, |t| t.short_url())?));
+                        }
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                    self.wait_for_load(id, Duration::from_secs_f64((timeout - started.elapsed().as_secs_f64()).max(1.)));
+                }
+                let mut o = serde_json::Map::new();
+                o.insert("timeout".into(), json!((timeout - started.elapsed().as_secs_f64()) * 1000.));
+                for k in ["text", "selector", "gone"] {
+                    if let Some(v) = a[k].as_str() {
+                        o.insert(k.into(), v.into());
+                    }
+                }
+                if o.len() > 1 {
+                    self.script(id, format!("const o = {}; return await __yh.waitFor(o)", Value::Object(o)), false, Duration::from_secs_f64(timeout + 5.))?;
+                }
+                Ok(self.result(id, &format!("Found it after {:.1} s", started.elapsed().as_secs_f64()), false))
+            }
+            "console" => {
+                let id = self.tab_id(a)?;
+                let level = a["level"].as_str().unwrap_or("all").to_string();
+                let all = a["all"].as_bool() == Some(true) || self.read_only;
+                let limit = a["limit"].as_u64().unwrap_or(100).clamp(1, 500) as usize;
+                let ro = self.read_only;
+                Ok(ToolResult::text(self.with_tab(id, move |t| {
+                    let mut entries: Vec<Console> = t.console.iter().filter(|c| all || c.id > t.console_read).cloned().collect();
+                    match level.as_str() {
+                        "error" => entries.retain(|c| c.is_error()),
+                        "warning" => entries.retain(|c| c.is_error() || c.level == "warn"),
+                        _ => {}
+                    }
+                    if !ro {
+                        t.console_read = t.console.last().map_or(0, |c| c.id);
+                    }
+                    if entries.is_empty() {
+                        return if all { "The console is empty.".into() } else { "Nothing new in the console since you last looked.".into() };
+                    }
+                    let skip = entries.len().saturating_sub(limit);
+                    let mut lines: Vec<String> = entries[skip..].iter().map(|c| format!("[{}] {}", c.level, clip(&c.text, 2000))).collect();
+                    if skip > 0 {
+                        lines.insert(0, format!("({skip} older messages not shown)"));
+                    }
+                    lines.join("\n")
+                })?))
+            }
+            "network" => {
+                let id = self.tab_id(a)?;
+                let all = a["all"].as_bool() == Some(true) || self.read_only;
+                let limit = a["limit"].as_u64().unwrap_or(100).clamp(1, 500) as usize;
+                let failed_only = a["failed_only"].as_bool() == Some(true);
+                let filter = a["filter"].as_str().unwrap_or("").to_lowercase();
+                let ro = self.read_only;
+                Ok(ToolResult::text(self.with_tab(id, move |t| {
+                    let mut entries: Vec<Request> = t.network.iter().filter(|r| all || r.id > t.network_read).cloned().collect();
+                    if failed_only {
+                        entries.retain(|r| r.failed());
+                    }
+                    if !filter.is_empty() {
+                        entries.retain(|r| r.url.to_lowercase().contains(&filter));
+                    }
+                    if !ro {
+                        t.network_read = t.network.last().map_or(0, |r| r.id);
+                    }
+                    if entries.is_empty() {
+                        return if all { "No requests logged.".into() } else { "No new requests since you last looked.".into() };
+                    }
+                    let skip = entries.len().saturating_sub(limit);
+                    let mut lines: Vec<String> = entries[skip..]
+                        .iter()
+                        .map(|r| {
+                            let mut line = format!("{} {} → {} [{}]", r.method, clip(&r.url, 300), r.status.map(|s| s.to_string()).or(r.failure.clone()).unwrap_or_else(|| "…".into()), r.kind);
+                            if let Some(ms) = r.ms {
+                                line += &format!(" {} ms", ms as i64);
+                            }
+                            if let (Some(f), Some(_)) = (&r.failure, r.status) {
+                                line += &format!(" {f}");
+                            }
+                            line
+                        })
+                        .collect();
+                    if skip > 0 {
+                        lines.insert(0, format!("({skip} older requests not shown)"));
+                    }
+                    lines.join("\n")
+                })?))
+            }
+            "evaluate" => {
+                let id = self.tab_id(a)?;
+                let source = a["expression"].as_str().ok_or("Give the JavaScript to run, as expression.")?.to_string();
+                // An expression, or a function body with its own return: told apart in our world.
+                let is_expression = self.script(id, format!("const s = {}; return __yh.isExpression(s)", json!(source)), false, Duration::from_secs(5)).ok().and_then(|v| v.as_bool()).unwrap_or(true);
+                let body = if is_expression { format!("return (\n{source}\n);") } else { source };
+                let wrapped = format!(
+                    "const __yhValue = await (async () => {{ {body} }})();
+const __yhSeen = new WeakSet();
+return JSON.stringify(__yhValue, (key, v) => {{
+  if (typeof Node !== 'undefined' && v instanceof Node) return v.nodeType === 1 ? v.outerHTML.slice(0, 500) : String(v.textContent).slice(0, 500);
+  if (v instanceof Error) return String(v);
+  if (typeof v === 'function') return 'ƒ ' + (v.name || 'anonymous');
+  if (typeof v === 'bigint') return String(v);
+  if (v && typeof v === 'object') {{ if (__yhSeen.has(v)) return '[circular]'; __yhSeen.add(v); }}
+  return v;
+}}) ?? 'undefined';"
+                );
+                let value = self.script(id, wrapped, true, Duration::from_secs(30))?;
+                // The page's JSON text came back as a JSON string of it.
+                let mut text = match value {
+                    Value::String(s) => s,
+                    other => other.to_string(),
+                };
+                let n = text.chars().count();
+                if n > 20_000 {
+                    text = format!("{}… ({} more characters; return less)", text.chars().take(20_000).collect::<String>(), n - 20_000);
+                }
+                if let Some(note) = self.news(id) {
+                    text += &format!("\n\n{note}");
+                }
+                Ok(ToolResult::text(text))
+            }
+            "close" => {
+                let id = self.tab_id(a)?;
+                let thread = self.thread.clone();
+                Ok(ToolResult::text(self.main(move |b, _| {
+                    b.close_tab(&thread, id);
+                    let s = b.sessions.get(&thread);
+                    format!(
+                        "Closed tab {id}. {}",
+                        match s.and_then(|s| s.selected_tab()) {
+                            Some(t) => format!("Tab {} is current.", t.id),
+                            None => "No tabs are open.".into(),
+                        }
+                    )
+                })?))
+            }
+            "resize" => Err("Resizing the viewport isn't in this version yet: the page fits the panel.".into()),
+            "dialog" => Err("No dialog is open.".into()),
+            "upload" => Err("Uploading files isn't in this version yet.".into()),
+            other => Err(format!("Unknown tool {other}.")),
+        }
+    }
+}
+
+const COMMAND: usize = 1 << 20;
+
+fn modifier_flags(v: &Value) -> usize {
+    let mut flags = 0;
+    for name in v.as_array().into_iter().flatten().filter_map(Value::as_str) {
+        flags |= match name.to_lowercase().as_str() {
+            "meta" | "cmd" | "command" => COMMAND,
+            "shift" => 1 << 17,
+            "alt" | "option" => 1 << 19,
+            "control" | "ctrl" => 1 << 18,
+            _ => 0,
+        };
+    }
+    flags
+}
+
+/// A key as the agent names it (`Enter`, `Shift+Tab`, `Meta+A`, `a`), as AppKit sends it.
+#[derive(Clone)]
+struct Key {
+    code: u16,
+    characters: String,
+    plain: String,
+    modifiers: usize,
+}
+
+impl Key {
+    fn parse(spec: &str) -> Option<Key> {
+        let mut parts: Vec<String> = spec.split('+').map(str::to_string).collect();
+        // "Meta++" is Meta and "+".
+        if spec.ends_with("++") {
+            parts.truncate(parts.len().saturating_sub(2));
+            parts.push("+".into());
+        }
+        let name = parts.pop().filter(|n| !n.is_empty())?;
+        let mut modifiers = 0;
+        for p in &parts {
+            modifiers |= match p.to_lowercase().as_str() {
+                "meta" | "cmd" | "command" | "⌘" | "controlormeta" => COMMAND,
+                "control" | "ctrl" | "⌃" => 1 << 18,
+                "alt" | "option" | "opt" | "⌥" => 1 << 19,
+                "shift" | "⇧" => 1 << 17,
+                _ => return None,
+            };
+        }
+        let named: &[(&str, u16, u32)] = &[
+            ("enter", 36, 0x0D), ("return", 36, 0x0D), ("tab", 48, 0x09), ("space", 49, 0x20), (" ", 49, 0x20), ("backspace", 51, 0x7F),
+            ("escape", 53, 0x1B), ("esc", 53, 0x1B), ("delete", 117, 0xF728), ("arrowup", 126, 0xF700), ("arrowdown", 125, 0xF701),
+            ("arrowleft", 123, 0xF702), ("arrowright", 124, 0xF703), ("up", 126, 0xF700), ("down", 125, 0xF701), ("left", 123, 0xF702),
+            ("right", 124, 0xF703), ("home", 115, 0xF729), ("end", 119, 0xF72B), ("pageup", 116, 0xF72C), ("pagedown", 121, 0xF72D),
+        ];
+        if let Some((_, code, scalar)) = named.iter().find(|(n, _, _)| *n == name.to_lowercase()) {
+            let c = char::from_u32(*scalar).unwrap_or(' ').to_string();
+            // Function keys (arrows, Home…) carry the function flag.
+            let function = if *code >= 115 { 1 << 23 } else { 0 };
+            return Some(Key { code: *code, characters: c.clone(), plain: c, modifiers: modifiers | function });
+        }
+        let codes: &[(&str, u16)] = &[
+            ("a", 0), ("s", 1), ("d", 2), ("f", 3), ("h", 4), ("g", 5), ("z", 6), ("x", 7), ("c", 8), ("v", 9), ("b", 11), ("q", 12), ("w", 13),
+            ("e", 14), ("r", 15), ("y", 16), ("t", 17), ("1", 18), ("2", 19), ("3", 20), ("4", 21), ("6", 22), ("5", 23), ("=", 24), ("9", 25),
+            ("7", 26), ("-", 27), ("8", 28), ("0", 29), ("]", 30), ("o", 31), ("u", 32), ("[", 33), ("i", 34), ("p", 35), ("l", 37), ("j", 38),
+            ("'", 39), ("k", 40), (";", 41), ("\\", 42), (",", 43), ("/", 44), ("n", 45), ("m", 46), (".", 47), ("`", 50), ("+", 24),
+        ];
+        if name.chars().count() != 1 {
+            return None;
+        }
+        let lower = name.to_lowercase();
+        let (_, code) = codes.iter().find(|(k, _)| *k == lower)?;
+        let shifted = if modifiers & (1 << 17) != 0 { name.to_uppercase() } else { name.clone() };
+        let characters = if modifiers & (1 << 18) != 0 {
+            char::from_u32((lower.chars().next()? as u32).saturating_sub(96).max(1)).unwrap_or(' ').to_string()
+        } else {
+            shifted
+        };
+        Some(Key { code: *code, characters, plain: lower, modifiers })
+    }
+}
+
+/// What the agent is told about the browser.
+pub fn instructions() -> &'static str {
+    "YourHarness has a real web browser built in, which you drive with the mcp__browser__ tools. The user sees it in the app's sidebar and watches what you do there; they can take control at any time. Use it to check web UI you build or change: start the dev server in the background (Bash with run_in_background), then `open` its URL. Take a `snapshot` to read the page and get refs for click, type and the rest, and a `screenshot` to see how it looks. Every result mentions new console errors and failed requests; `console` and `network` have the details. Use this browser rather than Playwright, Puppeteer, headless Chrome or curl for checking pages, unless the user asks for those."
+}
+
+impl ToolServer for BrowserTools {
+    fn name(&self) -> &str {
+        "browser"
+    }
+
+    fn tools(&self) -> Vec<Value> {
+        let tab = json!({ "type": "integer", "description": "Which tab, from status. Defaults to the current one." });
+        let r#ref = json!({ "type": "string", "description": "An element's ref from the latest snapshot, e.g. e12." });
+        let selector = json!({ "type": "string", "description": "A CSS selector, instead of a ref." });
+        let label = json!({ "type": "string", "description": "Visible text of a button or link to find, instead of a ref." });
+        let wait_until = json!({ "type": "string", "enum": ["load", "none"], "description": "Wait for the page to load (default), or return right away." });
+        let element = |extra: Value| -> Value {
+            let mut m = json!({ "ref": r#ref, "selector": selector, "label": label, "tab": tab });
+            if let (Some(m), Some(e)) = (m.as_object_mut(), extra.as_object()) {
+                for (k, v) in e {
+                    m.insert(k.clone(), v.clone());
+                }
+            }
+            m
+        };
+        let all = vec![
+            tool("status", "The browser's tabs (URL, title, loading), the viewport, whether a dialog is waiting, and whether the user has taken control.", schema(json!({}), &[]), true, false),
+            tool("open", "Open a URL in the browser built into the app, which the user watches. Loads in the current tab unless new_tab is true. Use it for the app you're building: start its dev server in the background first, then open http://localhost:<port>.",
+                schema(json!({
+                    "url": { "type": "string", "description": "A URL, a host, or localhost:3000." },
+                    "new_tab": { "type": "boolean", "description": "Open another tab instead of using the current one." },
+                    "show": { "type": "boolean", "description": "Show the browser to the user (default true)." },
+                    "wait_until": wait_until,
+                }), &["url"]), false, false),
+            tool("navigate", "Go to a URL in the current tab, or back, forward, or reload.",
+                schema(json!({ "url": { "type": "string" }, "action": { "type": "string", "enum": ["back", "forward", "reload"] }, "wait_until": wait_until, "tab": tab }), &[]), false, false),
+            tool("snapshot", "Read the page as an outline: landmarks, headings, text, and interactive elements with refs ([ref=e12]) to use in click, type and the rest. Take one before acting, and again after the page changes. Password values are hidden.",
+                schema(json!({ "selector": { "type": "string", "description": "Only this part of the page, for a big page." }, "tab": tab }), &[]), true, false),
+            tool("screenshot", "See the page: the visible viewport, the whole page, or one element. Use it to check layout, styling and images, which the outline can't show.",
+                schema(element(json!({ "full_page": { "type": "boolean", "description": "The whole scrollable page." } })), &[]), true, false),
+            tool("click", "Click an element with the real mouse: by ref, selector or label, or at x,y in CSS pixels. Waits for a navigation it starts.",
+                schema(element(json!({
+                    "x": { "type": "number" }, "y": { "type": "number" },
+                    "button": { "type": "string", "enum": ["left", "right"] },
+                    "count": { "type": "integer", "description": "2 for a double click." },
+                    "modifiers": { "type": "array", "items": { "type": "string", "enum": ["Meta", "Shift", "Alt", "Control"] } },
+                    "force": { "type": "boolean", "description": "Click with a script even if something covers it." },
+                })), &[]), false, false),
+            tool("type", "Type text into a field (by ref, selector or label), or into the focused element. Replaces what's there unless clear is false.",
+                schema(element(json!({
+                    "text": { "type": "string" },
+                    "clear": { "type": "boolean", "description": "Replace the current value (default true)." },
+                    "submit": { "type": "boolean", "description": "Press Enter after." },
+                })), &["text"]), false, false),
+            tool("press", "Press a key, optionally after focusing an element: Enter, Tab, Escape, Backspace, Delete, ArrowUp/Down/Left/Right, Home, End, PageUp, PageDown, a single character, or combinations like Shift+Tab or Meta+A.",
+                schema(element(json!({ "key": { "type": "string" }, "count": { "type": "integer", "description": "Press it this many times." } })), &["key"]), false, false),
+            tool("hover", "Move the mouse over an element, for hover menus and tooltips.", schema(element(json!({})), &[]), false, false),
+            tool("select", "Pick options in a native <select> by value or label. For custom dropdowns, click instead.",
+                schema(element(json!({ "values": { "type": "array", "items": { "type": "string" } } })), &["values"]), false, false),
+            tool("scroll", "Scroll the page or the scrollable area around an element: a direction and amount in pixels, to top or bottom, or just an element into view.",
+                schema(element(json!({
+                    "direction": { "type": "string", "enum": ["up", "down", "left", "right"] },
+                    "amount": { "type": "number" },
+                    "to": { "type": "string", "enum": ["top", "bottom"] },
+                })), &[]), false, false),
+            tool("drag", "Drag from one element to another with the mouse.",
+                schema(json!({
+                    "from": { "type": "object", "description": "{ref} or {selector}", "properties": { "ref": r#ref, "selector": selector } },
+                    "to": { "type": "object", "description": "{ref} or {selector}", "properties": { "ref": r#ref, "selector": selector } },
+                    "tab": tab,
+                }), &["from", "to"]), false, false),
+            tool("wait_for", "Wait until text appears, an element matching a selector is visible, text is gone, or the URL contains something. Fails at the timeout.",
+                schema(json!({
+                    "text": { "type": "string" }, "selector": { "type": "string" }, "gone": { "type": "string", "description": "Text that should disappear." },
+                    "url": { "type": "string", "description": "Part of the URL to wait for." },
+                    "timeout": { "type": "number", "description": "Seconds, default 10, at most 60." },
+                    "tab": tab,
+                }), &[]), true, false),
+            tool("console", "Console messages and uncaught errors from the page, new since you last looked unless all is true.",
+                schema(json!({ "level": { "type": "string", "enum": ["all", "warning", "error"] }, "all": { "type": "boolean" }, "limit": { "type": "integer" }, "tab": tab }), &[]), true, false),
+            tool("network", "Requests the page made: method, URL, status, type and time, new since you last looked unless all is true.",
+                schema(json!({
+                    "failed_only": { "type": "boolean" }, "filter": { "type": "string", "description": "Only URLs containing this." },
+                    "all": { "type": "boolean" }, "limit": { "type": "integer" }, "tab": tab,
+                }), &[]), true, false),
+            tool("evaluate", "Run JavaScript in the page and get the result as JSON. An expression, or a function body with return; await works.",
+                schema(json!({ "expression": { "type": "string" }, "tab": tab }), &["expression"]), false, false),
+            tool("resize", "Change the viewport: a preset (laptop 1512×982, the default; desktop 1920×1080; tablet 834×1210; phone 402×874; fit = the panel's size) or width and height, and the color scheme the page sees.",
+                schema(json!({
+                    "preset": { "type": "string", "enum": ["laptop", "desktop", "tablet", "phone", "fit"] },
+                    "width": { "type": "number" }, "height": { "type": "number" },
+                    "color_scheme": { "type": "string", "enum": ["light", "dark", "auto"] },
+                    "tab": tab,
+                }), &[]), false, false),
+            tool("dialog", "Answer the alert, confirm or prompt the page is waiting on.",
+                schema(json!({
+                    "accept": { "type": "boolean", "description": "OK (default) or Cancel." },
+                    "text": { "type": "string", "description": "For a prompt." },
+                    "tab": tab,
+                }), &[]), false, false),
+            tool("upload", "Put files in a file input: give the input (or the button that opens the file chooser) and absolute paths.",
+                schema(element(json!({ "paths": { "type": "array", "items": { "type": "string" } } })), &["paths"]), false, false),
+            tool("close", "Close a tab.", schema(json!({ "tab": tab }), &[]), false, false),
+        ];
+        if self.read_only {
+            all.into_iter().filter(|t| t["name"].as_str().is_some_and(|n| READ_ONLY_TOOLS.contains(&n))).collect()
+        } else {
+            all
+        }
+    }
+
+    fn call(&self, name: &str, a: &Value, _: Option<&str>) -> ToolResult {
+        if self.read_only && !READ_ONLY_TOOLS.contains(&name) {
+            return ToolResult::error("The side chat can look at the browser, not use it.");
+        }
+        self.perform(name, a).unwrap_or_else(ToolResult::error)
+    }
+}

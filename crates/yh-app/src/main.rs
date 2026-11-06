@@ -8,6 +8,7 @@ mod state;
 mod theme;
 mod ui;
 mod webview;
+mod browser;
 
 use gpui_kit::{
     point, prelude::*, px, size, App, Bounds, Focusable, KeyBinding, Menu, MenuItem, TitlebarOptions,
@@ -91,6 +92,23 @@ fn main() {
         })
         .expect("window");
         let workspace = root.read(cx).workspace.clone();
+        // The agents' browser: pages laid over this window.
+        {
+            let (ws, inspector) = (workspace.clone(), root.read(cx).inspector.clone());
+            let host = window.update(cx, |_, window, _| platform::ns_view(window)).unwrap_or(std::ptr::null_mut());
+            browser::start(
+                host,
+                move |thread, cx| {
+                    ws.update(cx, |ws, cx| {
+                        if ws.selected.as_deref() == Some(thread) {
+                            ws.show_panel(state::workspace::Panel::Browser, cx);
+                        }
+                    })
+                },
+                move |cx| inspector.update(cx, |_, cx| cx.notify()),
+                cx,
+            );
+        }
 
         {
             let root = root.clone();

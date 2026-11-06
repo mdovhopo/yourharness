@@ -45,10 +45,11 @@ pub enum Panel {
     SideChat,
     Subagents,
     Files,
+    Browser,
 }
 
 impl Panel {
-    pub const ALL: [Panel; 4] = [Panel::PullRequests, Panel::SideChat, Panel::Subagents, Panel::Files];
+    pub const ALL: [Panel; 5] = [Panel::PullRequests, Panel::SideChat, Panel::Subagents, Panel::Files, Panel::Browser];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -56,6 +57,7 @@ impl Panel {
             Panel::SideChat => "Side Chat",
             Panel::Subagents => "Sub-agents",
             Panel::Files => "Files",
+            Panel::Browser => "Browser",
         }
     }
 
@@ -65,6 +67,7 @@ impl Panel {
             "sideChat" | "side-chat" => Some(Panel::SideChat),
             "subagents" => Some(Panel::Subagents),
             "files" => Some(Panel::Files),
+            "browser" => Some(Panel::Browser),
             _ => None,
         }
     }
@@ -435,6 +438,7 @@ impl Workspace {
 
     pub fn delete(&mut self, id: &str, cx: &mut Context<Self>) {
         self.end_runtime(id, cx);
+        crate::browser::Browsers::close_thread(id);
         self.threads.retain(|t| t.read(cx).id() != id);
         self.by_id.remove(id);
         self.library.remove_thread(id);
@@ -666,6 +670,10 @@ impl Workspace {
             self.pump(thread.clone(), id, generation, rx, cx);
             return Ok(());
         }
+        // The browser the user watches, driven with mcp__browser__*.
+        prompt.push(crate::browser::instructions().to_string());
+        allowed.push("mcp__browser".to_string());
+        servers.push(std::sync::Arc::new(crate::browser::BrowserTools { thread: t.id().to_string(), read_only: false }));
         let options = LaunchOptions {
             cwd,
             session_id: t.session_id.clone(),
