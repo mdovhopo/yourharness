@@ -37,6 +37,23 @@ pub enum WebEvent {
     Started { view: usize },
     Finished { view: usize },
     Failed { view: usize, error: String },
+    /// The page waits on an alert, confirm or prompt (`kind`), answered with `answer_dialog`.
+    Dialog { view: usize, kind: String, message: String, default: Option<String> },
+    /// The page opened a file chooser and nothing was waiting to answer it.
+    UploadAsked { view: usize },
+}
+
+/// How a page's dialog is answered, kept until it is.
+enum DialogReply {
+    Alert(block::RcBlock<(), ()>),
+    Confirm(block::RcBlock<(objc::runtime::BOOL,), ()>),
+    Prompt(block::RcBlock<(id,), ()>, Option<String>),
+}
+
+thread_local! {
+    static DIALOGS: std::cell::RefCell<std::collections::HashMap<usize, DialogReply>> = Default::default();
+    /// Files for a web view's next file chooser (the `upload` tool).
+    static UPLOADS: std::cell::RefCell<std::collections::HashMap<usize, Vec<String>>> = Default::default();
 }
 
 static EVENTS: std::sync::OnceLock<flume::Sender<WebEvent>> = std::sync::OnceLock::new();
@@ -94,6 +111,57 @@ fn delegate() -> id {
                 post(WebEvent::Failed { view: view as usize, error: rust_string(text).unwrap_or_else(|| "failed".into()) });
             }
         }
+        extern "C" fn alert(_: &Object, _: Sel, view: id, message: id, _: id, done: id) {
+            let reply = unsafe { block::RcBlock::copy(done as *mut block::Block<(), ()>) };
+            DIALOGS.with(|d| d.borrow_mut().insert(view as usize, DialogReply::Alert(reply)));
+            post(WebEvent::Dialog { view: view as usize, kind: "alert".into(), message: rust_string(message).unwrap_or_default(), default: None });
+        }
+        extern "C" fn confirm(_: &Object, _: Sel, view: id, message: id, _: id, done: id) {
+            let reply = unsafe { block::RcBlock::copy(done as *mut block::Block<(objc::runtime::BOOL,), ()>) };
+            DIALOGS.with(|d| d.borrow_mut().insert(view as usize, DialogReply::Confirm(reply)));
+            post(WebEvent::Dialog { view: view as usize, kind: "confirm".into(), message: rust_string(message).unwrap_or_default(), default: None });
+        }
+        extern "C" fn prompt(_: &Object, _: Sel, view: id, message: id, default: id, _: id, done: id) {
+            let reply = unsafe { block::RcBlock::copy(done as *mut block::Block<(id,), ()>) };
+            let default = rust_string(default);
+            DIALOGS.with(|d| d.borrow_mut().insert(view as usize, DialogReply::Prompt(reply, default.clone())));
+            post(WebEvent::Dialog { view: view as usize, kind: "prompt".into(), message: rust_string(message).unwrap_or_default(), default });
+        }
+        extern "C" fn open_panel(_: &Object, _: Sel, view: id, parameters: id, _: id, done: id) {
+            let done = done as *mut block::Block<(id,), ()>;
+            unsafe {
+                let multiple: bool = msg_send![parameters, allowsMultipleSelection];
+                let files = UPLOADS.with(|u| u.borrow_mut().remove(&(view as usize)));
+                let urls: id = match files {
+                    // The agent's files, waiting for this chooser.
+                    Some(mut files) => {
+                        if !multiple {
+                            files.truncate(1);
+                        }
+                        let list: id = msg_send![class!(NSMutableArray), array];
+                        for f in files {
+                            let url: id = msg_send![class!(NSURL), fileURLWithPath: ns_string(&f)];
+                            let _: () = msg_send![list, addObject: url];
+                        }
+                        list
+                    }
+                    // Yours: the open panel, as Safari shows it.
+                    None => {
+                        post(WebEvent::UploadAsked { view: view as usize });
+                        let panel: id = msg_send![class!(NSOpenPanel), openPanel];
+                        let _: () = msg_send![panel, setAllowsMultipleSelection: multiple];
+                        let _: () = msg_send![panel, setCanChooseFiles: YES];
+                        let answer: isize = msg_send![panel, runModal];
+                        if answer == 1 { msg_send![panel, URLs] } else { nil }
+                    }
+                };
+                (*done).call((urls,));
+            }
+        }
+        decl.add_method(sel!(webView:runJavaScriptAlertPanelWithMessage:initiatedByFrame:completionHandler:), alert as extern "C" fn(&Object, Sel, id, id, id, id));
+        decl.add_method(sel!(webView:runJavaScriptConfirmPanelWithMessage:initiatedByFrame:completionHandler:), confirm as extern "C" fn(&Object, Sel, id, id, id, id));
+        decl.add_method(sel!(webView:runJavaScriptTextInputPanelWithPrompt:defaultText:initiatedByFrame:completionHandler:), prompt as extern "C" fn(&Object, Sel, id, id, id, id, id));
+        decl.add_method(sel!(webView:runOpenPanelWithParameters:initiatedByFrame:completionHandler:), open_panel as extern "C" fn(&Object, Sel, id, id, id, id));
         decl.add_method(sel!(userContentController:didReceiveScriptMessage:), message as extern "C" fn(&Object, Sel, id, id));
         decl.add_method(sel!(webView:didStartProvisionalNavigation:), started as extern "C" fn(&Object, Sel, id, id));
         decl.add_method(sel!(webView:didFinishNavigation:), finished as extern "C" fn(&Object, Sel, id, id));
@@ -115,15 +183,37 @@ fn page_world() -> id {
 }
 
 pub struct WebView {
+    /// What sits over the window: it draws the page scaled when the page's viewport is
+    /// bigger than the panel (its bounds are CSS pixels, its frame points).
+    page: id,
     view: id,
+    /// The page's viewport in CSS pixels; None fits the panel.
+    viewport: std::cell::Cell<Option<(f64, f64)>>,
 }
+
+/// The viewport presets (`resize`): a laptop is the default.
+pub const LAPTOP: (f64, f64) = (1512., 982.);
+pub const DESKTOP: (f64, f64) = (1920., 1080.);
+pub const TABLET: (f64, f64) = (834., 1210.);
+pub const PHONE: (f64, f64) = (402., 874.);
 
 impl WebView {
     /// A web view in the window whose GPUI view is `host`, hidden until it's given a place.
     /// Its cookies and storage persist (the default data store), per app.
-    pub fn new(host: id) -> WebView {
+    /// `store`: the project's ID (a UUID), whose cookies and storage it uses (the Swift app's
+    /// stores, so sign-ins carry over); None for the app's default store.
+    pub fn new(host: id, store: Option<&str>) -> WebView {
         unsafe {
             let config: id = msg_send![class!(WKWebViewConfiguration), new];
+            if let Some(uuid) = store {
+                let identifier: id = msg_send![class!(NSUUID), alloc];
+                let identifier: id = msg_send![identifier, initWithUUIDString: ns_string(uuid)];
+                if identifier != nil {
+                    let data: id = msg_send![class!(WKWebsiteDataStore), dataStoreForIdentifier: identifier];
+                    let _: () = msg_send![config, setWebsiteDataStore: data];
+                    let _: () = msg_send![identifier, release];
+                }
+            }
             // The helpers in their own world; the console and network hooks in the page's.
             let controller: id = msg_send![config, userContentController];
             for (source, world) in [(include_str!("browser/helpers.js"), helper_world()), (include_str!("browser/hooks.js"), page_world())] {
@@ -141,25 +231,106 @@ impl WebView {
             // Safari's user agent: sites serve the page a Mac browser gets.
             let _: () = msg_send![view, setCustomUserAgent: ns_string("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15")];
             let _: () = msg_send![view, setNavigationDelegate: delegate()];
-            let _: () = msg_send![host, addSubview: view];
-            WebView { view }
+            let _: () = msg_send![view, setUIDelegate: delegate()];
+            let page: id = msg_send![class!(NSView), alloc];
+            let page: id = msg_send![page, initWithFrame: frame];
+            let _: () = msg_send![page, setHidden: YES];
+            let _: () = msg_send![view, setHidden: NO];
+            let _: () = msg_send![page, addSubview: view];
+            let _: () = msg_send![host, addSubview: page];
+            let web = WebView { page, view, viewport: std::cell::Cell::new(Some(LAPTOP)) };
+            web.lay_out(LAPTOP.0, LAPTOP.1, LAPTOP.0, LAPTOP.1);
+            web
         }
     }
 
-    /// Where it shows, in the host view's top-left coordinates (GPUI's); `None` hides it.
+    /// Where it shows, in the host view's top-left coordinates (GPUI's); `None` hides it (the
+    /// page keeps its viewport). A viewport bigger than the panel is drawn scaled to fit,
+    /// against the top.
     pub fn set_frame(&self, bounds: Option<(f64, f64, f64, f64)>) {
         unsafe {
             let Some((x, y, w, h)) = bounds else {
-                let _: () = msg_send![self.view, setHidden: YES];
+                let _: () = msg_send![self.page, setHidden: YES];
                 return;
             };
-            let host: id = msg_send![self.view, superview];
+            let (cw, ch) = self.viewport.get().unwrap_or((w, h));
+            let scale = (w / cw).min(h / ch);
+            let (fw, fh) = (cw * scale, ch * scale);
+            let host: id = msg_send![self.page, superview];
             let flipped: bool = msg_send![host, isFlipped];
             let host_frame: NSRect = msg_send![host, bounds];
-            let y = if flipped { y } else { host_frame.size.height - y - h };
-            let _: () = msg_send![self.view, setFrame: NSRect::new(NSPoint::new(x, y), NSSize::new(w, h))];
-            let _: () = msg_send![self.view, setHidden: NO];
+            let left = x + (w - fw) / 2.;
+            let bottom = if flipped { y } else { host_frame.size.height - y - fh };
+            let _: () = msg_send![self.page, setFrame: NSRect::new(NSPoint::new(left, bottom), NSSize::new(fw, fh))];
+            self.lay_out(fw, fh, cw, ch);
+            let _: () = msg_send![self.page, setHidden: NO];
         }
+    }
+
+    /// The page view `frame` points big, the web view `css` points: a CSS pixel is a point,
+    /// as in Safari, drawn scaled (page zoom would hold text to WebKit's minimum size).
+    fn lay_out(&self, fw: f64, fh: f64, cw: f64, ch: f64) {
+        unsafe {
+            let current: NSRect = msg_send![self.page, frame];
+            if current.size.width != fw || current.size.height != fh {
+                let _: () = msg_send![self.page, setFrameSize: NSSize::new(fw, fh)];
+            }
+            let _: () = msg_send![self.page, setBoundsSize: NSSize::new(cw, ch)];
+            let _: () = msg_send![self.view, setFrame: NSRect::new(NSPoint::new(0., 0.), NSSize::new(cw, ch))];
+        }
+    }
+
+    /// The page's viewport in CSS pixels, None to fit the panel; laid out at the next frame.
+    pub fn set_viewport(&self, viewport: Option<(f64, f64)>) {
+        self.viewport.set(viewport);
+        if let Some((w, h)) = viewport {
+            // Hidden, it still takes the size, for a screenshot without the panel.
+            let hidden: bool = unsafe { msg_send![self.page, isHidden] };
+            if hidden {
+                self.lay_out(w, h, w, h);
+            }
+        }
+    }
+
+    pub fn viewport(&self) -> Option<(f64, f64)> {
+        self.viewport.get()
+    }
+
+    /// Light or dark for the page's `prefers-color-scheme`; `auto` follows the app.
+    pub fn set_color_scheme(&self, scheme: &str) {
+        unsafe {
+            let appearance: id = match scheme {
+                "light" => msg_send![class!(NSAppearance), appearanceNamed: ns_string("NSAppearanceNameAqua")],
+                "dark" => msg_send![class!(NSAppearance), appearanceNamed: ns_string("NSAppearanceNameDarkAqua")],
+                _ => nil,
+            };
+            let _: () = msg_send![self.view, setAppearance: appearance];
+        }
+    }
+
+    /// Answers the page's dialog: OK (with `text` for a prompt) or Cancel. False when none waits.
+    pub fn answer_dialog(&self, accept: bool, text: Option<String>) -> bool {
+        let Some(reply) = DIALOGS.with(|d| d.borrow_mut().remove(&(self.view as usize))) else { return false };
+        match reply {
+            DialogReply::Alert(b) => unsafe { b.call(()) },
+            DialogReply::Confirm(b) => unsafe { b.call((if accept { YES } else { NO },)) },
+            DialogReply::Prompt(b, default) => unsafe {
+                let answer = if accept { ns_string(&text.or(default).unwrap_or_default()) } else { nil };
+                b.call((answer,))
+            },
+        }
+        true
+    }
+
+    /// Files for the page's next file chooser; true if it's still waiting for one.
+    pub fn set_upload(&self, files: Option<Vec<String>>) -> bool {
+        UPLOADS.with(|u| match files {
+            Some(f) => {
+                u.borrow_mut().insert(self.view as usize, f);
+                true
+            }
+            None => u.borrow_mut().remove(&(self.view as usize)).is_some(),
+        })
     }
 
     pub fn load(&self, url: &str) {
@@ -224,7 +395,7 @@ impl WebView {
 
     pub fn is_shown(&self) -> bool {
         unsafe {
-            let hidden: bool = msg_send![self.view, isHidden];
+            let hidden: bool = msg_send![self.page, isHidden];
             !hidden
         }
     }
@@ -470,9 +641,13 @@ impl WebView {
 
 impl Drop for WebView {
     fn drop(&mut self) {
+        // A dialog left waiting is cancelled, so WebKit isn't left holding its handler.
+        self.answer_dialog(false, None);
         unsafe {
-            let _: () = msg_send![self.view, removeFromSuperview];
+            let _: () = msg_send![self.view, stopLoading];
+            let _: () = msg_send![self.page, removeFromSuperview];
             let _: () = msg_send![self.view, release];
+            let _: () = msg_send![self.page, release];
         }
     }
 }

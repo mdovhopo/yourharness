@@ -334,7 +334,7 @@ fn main() {
                 let view = window.update(cx, |_, window, _| {
                     let host = platform::ns_view(window);
                     let size = window.viewport_size();
-                    let web = webview::WebView::new(host);
+                    let web = webview::WebView::new(host, None);
                     web.set_frame(Some((f64::from(size.width) - 380., 44., 380., f64::from(size.height) - 44.)));
                     web.load(&url);
                     web

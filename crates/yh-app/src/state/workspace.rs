@@ -687,7 +687,7 @@ impl Workspace {
         // The browser the user watches, driven with mcp__browser__*.
         prompt.push(crate::browser::instructions().to_string());
         allowed.push("mcp__browser".to_string());
-        servers.push(std::sync::Arc::new(crate::browser::BrowserTools { thread: t.id().to_string(), read_only: false }));
+        servers.push(std::sync::Arc::new(crate::browser::BrowserTools { thread: t.id().to_string(), project: Some(t.meta.project_id.clone()), read_only: false }));
         let options = LaunchOptions {
             cwd,
             session_id: t.session_id.clone(),

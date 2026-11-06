@@ -70,6 +70,10 @@ pub struct Tab {
     last_title: Option<String>,
     nav_error: Option<String>,
     pub navigations: u64,
+    /// An alert, confirm or prompt the page waits on: (kind, message, default text).
+    pub dialog: Option<(String, String, Option<String>)>,
+    /// The page's color scheme when set (`resize`), else it follows the app.
+    color_scheme: Option<String>,
 }
 
 impl Tab {
@@ -148,7 +152,7 @@ impl Browsers {
     }
 
     /// Lays the shown thread's current tab over the panel; every other tab hidden.
-    fn place(&self) {
+    pub fn place(&self) {
         for (thread, session) in &self.sessions {
             let current = session.selected_tab().map(|t| t.id);
             for tab in &session.tabs {
@@ -168,12 +172,12 @@ impl Browsers {
         });
     }
 
-    fn open_tab(&mut self, thread: &str, url: &str) -> u32 {
+    fn open_tab(&mut self, thread: &str, project: Option<&str>, url: &str) -> u32 {
         let host = self.host as cocoa::base::id;
         let session = self.sessions.entry(thread.to_string()).or_default();
         session.next_id += 1;
         let id = session.next_id;
-        let web = WebView::new(host);
+        let web = WebView::new(host, project);
         if let Some(u) = url_from(url) {
             web.load(&u);
         }
@@ -191,6 +195,8 @@ impl Browsers {
             last_title: None,
             nav_error: None,
             navigations: 0,
+            dialog: None,
+            color_scheme: None,
         });
         session.selected = Some(id);
         self.place();
@@ -248,8 +254,8 @@ pub fn start(host: cocoa::base::id, reveal: impl Fn(&str, &mut App) + 'static, c
                 let notify = BROWSERS.with(|b| {
                     let mut b = b.borrow_mut();
                     let (view, nav) = match &event {
-                        WebEvent::Log { view, .. } => (*view, false),
-                        WebEvent::Started { view } | WebEvent::Finished { view } | WebEvent::Failed { view, .. } => (*view, true),
+                        WebEvent::Log { view, .. } | WebEvent::UploadAsked { view } => (*view, false),
+                        WebEvent::Started { view } | WebEvent::Finished { view } | WebEvent::Failed { view, .. } | WebEvent::Dialog { view, .. } => (*view, true),
                     };
                     let Some(tab) = b.tab_mut(view) else { return false };
                     match event {
@@ -264,6 +270,8 @@ pub fn start(host: cocoa::base::id, reveal: impl Fn(&str, &mut App) + 'static, c
                         }
                         WebEvent::Finished { .. } => {}
                         WebEvent::Failed { error, .. } => tab.nav_error = Some(error),
+                        WebEvent::Dialog { kind, message, default, .. } => tab.dialog = Some((kind, message, default)),
+                        WebEvent::UploadAsked { .. } => {}
                     }
                     nav
                 });
@@ -323,6 +331,8 @@ fn count(n: usize, noun: &str) -> String {
 
 pub struct BrowserTools {
     pub thread: String,
+    /// The project's ID: its browser data store (cookies, storage) is the project's.
+    pub project: Option<String>,
     /// A side chat looks at its thread's browser; it can't act.
     pub read_only: bool,
 }
@@ -419,6 +429,14 @@ impl BrowserTools {
         Ok(())
     }
 
+    /// Acting while the page waits on a dialog would hang: say so instead.
+    fn check_dialog(&self, id: u32) -> Result<(), Fail> {
+        match self.with_tab(id, |t| t.dialog.clone())? {
+            Some((kind, message, _)) => Err(format!("The page is waiting on a {kind}: {}. Answer it with dialog first.", quoted(&message, 200))),
+            None => Ok(()),
+        }
+    }
+
     fn has_target(a: &Value) -> bool {
         a["ref"].is_string() || a["selector"].is_string() || a["label"].is_string()
     }
@@ -509,6 +527,9 @@ impl BrowserTools {
             .flatten();
         let mut lines = vec![format!("{line}.")];
         lines.extend(page);
+        if let Ok(Some((kind, message, _))) = self.with_tab(id, |t| t.dialog.clone()) {
+            lines.push(format!("The page opened a {kind}: {}. Answer it with dialog.", quoted(&message, 200)));
+        }
         lines.extend(self.news(id));
         ToolResult::text(lines.join("\n"))
     }
@@ -540,10 +561,16 @@ impl BrowserTools {
                     line += &format!(" (loading {}%)", (t.web.progress() * 100.) as i64);
                 }
                 lines.push(line);
+                if let Some((kind, message, _)) = &t.dialog {
+                    lines.push(format!("    waiting on a {kind}: {}", quoted(message, 120)));
+                }
             }
             if let Some(t) = s.selected_tab() {
-                let (w, h) = t.web.size();
-                lines.push(format!("Viewport: {}×{}.", w as i64, h as i64));
+                let viewport = match t.web.viewport() {
+                    Some((w, h)) => format!("{}×{}", w as i64, h as i64),
+                    None => "fits the panel".into(),
+                };
+                lines.push(format!("Viewport: {viewport}{}.", t.color_scheme.as_ref().map(|c| format!(", {c}")).unwrap_or_default()));
                 let errors = t.console.iter().filter(|c| c.is_error()).count();
                 let failed = t.network.iter().filter(|r| r.failed()).count();
                 lines.push(format!("Logged: {} ({}), {} ({failed} failed).", count(t.console.len(), "console message"), count(errors, "error"), count(t.network.len(), "request")));
@@ -626,6 +653,7 @@ impl BrowserTools {
                 let address = a["url"].as_str().ok_or("Give a url to open.")?.to_string();
                 let url = url_from(&address).ok_or("Give a url to open.")?;
                 let thread = self.thread.clone();
+                let project = self.project.clone().filter(|p| p.len() == 36);
                 let new_tab = a["new_tab"].as_bool() == Some(true);
                 let id = self.main(move |b, _| {
                     let current = b.sessions.get(&thread).and_then(|s| s.selected_tab().map(|t| t.id));
@@ -642,7 +670,7 @@ impl BrowserTools {
                             if b.sessions.get(&thread).is_some_and(|s| s.tabs.len() >= MAX_TABS) {
                                 return Err(format!("{MAX_TABS} tabs are open, the most there can be. Close one first."));
                             }
-                            Ok(b.open_tab(&thread, &url))
+                            Ok(b.open_tab(&thread, project.as_deref(), &url))
                         }
                     }
                 })??;
@@ -655,6 +683,7 @@ impl BrowserTools {
             }
             "navigate" => {
                 let id = self.tab_id(a)?;
+                self.check_dialog(id)?;
                 let before = self.with_tab(id, |t| t.web.url())?;
                 let action = a["action"].as_str().map(str::to_string);
                 if let Some(address) = a["url"].as_str() {
@@ -700,6 +729,7 @@ impl BrowserTools {
             }
             "click" => {
                 let id = self.tab_id(a)?;
+                self.check_dialog(id)?;
                 let right = a["button"].as_str() == Some("right");
                 let count = a["count"].as_i64().unwrap_or(1).clamp(1, 3) as isize;
                 let modifiers = modifier_flags(&a["modifiers"]);
@@ -731,6 +761,7 @@ impl BrowserTools {
             }
             "type" => {
                 let id = self.tab_id(a)?;
+                self.check_dialog(id)?;
                 let text = a["text"].as_str().ok_or("Give the text to type.")?.to_string();
                 let clear = a["clear"].as_bool().unwrap_or(true);
                 let mut described = "the focused element".to_string();
@@ -769,6 +800,7 @@ impl BrowserTools {
             }
             "press" => {
                 let id = self.tab_id(a)?;
+                self.check_dialog(id)?;
                 let spec = a["key"].as_str().unwrap_or("").to_string();
                 let key = Key::parse(&spec).ok_or("Unknown key. Use names like Enter, Tab, Escape, Backspace, ArrowDown, PageDown, a, or combinations like Shift+Tab and Meta+A.")?;
                 if Self::has_target(a) {
@@ -925,6 +957,7 @@ impl BrowserTools {
             }
             "evaluate" => {
                 let id = self.tab_id(a)?;
+                self.check_dialog(id)?;
                 let source = a["expression"].as_str().ok_or("Give the JavaScript to run, as expression.")?.to_string();
                 // An expression, or a function body with its own return: told apart in our world.
                 let is_expression = self.script(id, format!("const s = {}; return __yh.isExpression(s)", json!(source)), false, Duration::from_secs(5)).ok().and_then(|v| v.as_bool()).unwrap_or(true);
@@ -971,9 +1004,87 @@ return JSON.stringify(__yhValue, (key, v) => {{
                     )
                 })?))
             }
-            "resize" => Err("Resizing the viewport isn't in this version yet: the page fits the panel.".into()),
-            "dialog" => Err("No dialog is open.".into()),
-            "upload" => Err("Uploading files isn't in this version yet.".into()),
+            "resize" => {
+                let id = self.tab_id(a)?;
+                let mut viewport = self.with_tab(id, |t| t.web.viewport())?;
+                match a["preset"].as_str() {
+                    Some("laptop") => viewport = Some(crate::webview::LAPTOP),
+                    Some("desktop") => viewport = Some(crate::webview::DESKTOP),
+                    Some("tablet") => viewport = Some(crate::webview::TABLET),
+                    Some("phone") => viewport = Some(crate::webview::PHONE),
+                    Some("fit") => viewport = None,
+                    _ => {}
+                }
+                let (cw, ch) = viewport.unwrap_or(crate::webview::LAPTOP);
+                if let Some(w) = a["width"].as_f64() {
+                    viewport = Some((w.clamp(200., 3840.), viewport.map_or(ch, |v| v.1)));
+                }
+                if let Some(h) = a["height"].as_f64() {
+                    viewport = Some((viewport.map_or(cw, |v| v.0), h.clamp(200., 2400.)));
+                }
+                // As the schema says, or as models sometimes write it.
+                let scheme = a["color_scheme"].as_str().or(a["colorScheme"].as_str()).map(str::to_string);
+                self.with_tab(id, move |t| {
+                    t.web.set_viewport(viewport);
+                    if let Some(s) = scheme {
+                        t.web.set_color_scheme(&s);
+                        t.color_scheme = (s != "auto").then_some(s);
+                    }
+                })?;
+                // Laid out with the panel's next frame.
+                let thread = self.thread.clone();
+                self.main(move |b, cx| {
+                    let _ = thread;
+                    b.place();
+                    cx.refresh_windows();
+                })?;
+                self.settle(id, Duration::from_secs(2));
+                let (w, h) = self.with_tab(id, |t| t.web.size())?;
+                let scheme = self.with_tab(id, |t| t.color_scheme.clone())?;
+                let mut line = format!("Viewport is {}×{}{}", w as i64, h as i64, scheme.map(|s| format!(", {s}")).unwrap_or_default());
+                if w < 1024. {
+                    let meta = self.helper(id, "return document.querySelector('meta[name=viewport]')?.content ?? ''").ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
+                    if !meta.replace(' ', "").to_lowercase().contains("width=device-width") {
+                        line += &format!(".\nThis page has no <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">: on a real phone or tablet it's laid out 980px wide and shrunk to fit, so it won't look like this {}px layout there", w as i64);
+                    }
+                }
+                Ok(self.result(id, &line, false))
+            }
+            "dialog" => {
+                let id = self.tab_id(a)?;
+                let Some((kind, message, _)) = self.with_tab(id, |t| t.dialog.clone())? else { return Err("No dialog is open.".into()) };
+                let accept = a["accept"].as_bool().unwrap_or(true);
+                let text = a["text"].as_str().map(str::to_string);
+                self.with_tab(id, move |t| {
+                    t.dialog = None;
+                    t.web.answer_dialog(accept, text)
+                })?;
+                self.settle(id, Duration::from_secs(10));
+                Ok(self.result(id, &format!("{} the {kind} {}", if accept { "Accepted" } else { "Dismissed" }, quoted(&message, 80)), false))
+            }
+            "upload" => {
+                let id = self.tab_id(a)?;
+                let paths: Vec<String> = a["paths"].as_array().map(|p| p.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default();
+                if paths.is_empty() {
+                    return Err("Give absolute file paths, as paths.".into());
+                }
+                let home = std::env::var("HOME").unwrap_or_default();
+                let paths: Vec<String> = paths.into_iter().map(|p| p.strip_prefix("~/").map(|r| format!("{home}/{r}")).unwrap_or(p)).collect();
+                if let Some(missing) = paths.iter().find(|p| !std::path::Path::new(p).exists()) {
+                    return Err(format!("No file at {missing}."));
+                }
+                let names: Vec<String> = paths.iter().map(|p| p.rsplit('/').next().unwrap_or(p).to_string()).collect();
+                let (x, y, _, describe, _) = self.locate(id, a)?;
+                self.with_tab(id, move |t| {
+                    t.web.set_upload(Some(paths));
+                    t.web.click(x, y, false, 1, 0);
+                })?;
+                self.settle(id, Duration::from_secs(10));
+                if self.with_tab(id, |t| t.web.set_upload(None))? {
+                    return Err(format!("Clicking {describe} didn't open a file chooser. Target the <input type=file> or the button that opens it."));
+                }
+                Ok(self.result(id, &format!("Uploaded {} with {describe}", names.join(", ")), false))
+            }
             other => Err(format!("Unknown tool {other}.")),
         }
     }
