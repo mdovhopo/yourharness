@@ -290,11 +290,19 @@ impl HarnessApp {
                 probe::note_batch(started.elapsed().as_secs_f64() * 1000.0, count);
                 if chrome || exited {
                     let id = id.clone();
+                    let thread = thread.clone();
                     let _ = this.update(cx, |app, cx| {
                         if exited {
                             app.live.remove(&id);
                         }
                         app.refresh_chrome(cx);
+                        // `YHG_ANSWER=allow|deny`: answer permission prompts by themselves, for tests.
+                        if let Ok(answer) = std::env::var("YHG_ANSWER") {
+                            if let Some(p) = thread.read(cx).permission.clone() {
+                                eprintln!("answering {} for {}: {answer}", p.id, p.tool);
+                                app.respond(&thread, answer == "allow", cx);
+                            }
+                        }
                     });
                 }
                 if exited {

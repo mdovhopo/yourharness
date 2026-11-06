@@ -12,6 +12,7 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::ffi::c_void;
 use std::time::Instant;
 
+/// Events sent to it dispatch synchronously into GPUI: send them outside any entity update.
 pub fn ns_window(window: &Window) -> id {
     let Ok(handle) = HasWindowHandle::window_handle(window) else { return nil };
     match handle.as_raw() {
@@ -113,9 +114,8 @@ const NSMouseMoved: u64 = 5;
 const NSKeyDown: u64 = 10;
 const NSKeyUp: u64 = 11;
 
-pub fn click(window: &Window, x: f32, y: f32) {
+pub fn click(w: id, x: f32, y: f32) {
     unsafe {
-        let w = ns_window(window);
         let point = window_point(w, x, y);
         for kind in [NSLeftMouseDown, NSLeftMouseUp] {
             let event = mouse_event(w, kind, point, 1);
@@ -126,9 +126,8 @@ pub fn click(window: &Window, x: f32, y: f32) {
     }
 }
 
-pub fn mouse_move(window: &Window, x: f32, y: f32) {
+pub fn mouse_move(w: id, x: f32, y: f32) {
     unsafe {
-        let w = ns_window(window);
         let _: () = msg_send![w, setAcceptsMouseMovedEvents: YES];
         let event = mouse_event(w, NSMouseMoved, window_point(w, x, y), 0);
         if event != nil {
@@ -161,9 +160,8 @@ extern "C" {
 }
 
 /// A pixel scroll, as a trackpad sends: through the window, which finds what's under it.
-pub fn wheel(window: &Window, x: f32, y: f32, dy: i32) {
+pub fn wheel(w: id, x: f32, y: f32, dy: i32) {
     unsafe {
-        let w = ns_window(window);
         let point = window_point(w, x, y);
         let screen_point: NSPoint = msg_send![w, convertPointToScreen: point];
         let screens: id = msg_send![class!(NSScreen), screens];
@@ -177,7 +175,15 @@ pub fn wheel(window: &Window, x: f32, y: f32, dy: i32) {
         let number: isize = msg_send![w, windowNumber];
         CGEventSetIntegerValueField(cg, 91, number as i64); // kCGMouseEventWindowUnderMousePointer
         CGEventSetIntegerValueField(cg, 92, number as i64); // …ThatCanHandleThisEvent
-        let event: id = msg_send![class!(NSEvent), eventWithCGEvent: cg];
+        let mut event: id = msg_send![class!(NSEvent), eventWithCGEvent: cg];
+        // Off screen, the window server finds no window under the point, and an event with no
+        // window has its location in screen coordinates; GPUI reads `locationInWindow`, so put
+        // the point there instead.
+        let event_window: id = if event != nil { msg_send![event, window] } else { nil };
+        if event_window != w {
+            CGEventSetLocation(cg, CGPoint { x: point.x, y: first_frame.size.height - point.y });
+            event = msg_send![class!(NSEvent), eventWithCGEvent: cg];
+        }
         if event != nil {
             let _: () = msg_send![w, sendEvent: event];
         }
@@ -185,9 +191,8 @@ pub fn wheel(window: &Window, x: f32, y: f32, dy: i32) {
     }
 }
 
-pub fn key(window: &Window, text: &str) {
+pub fn key(w: id, text: &str) {
     unsafe {
-        let w = ns_window(window);
         let number: isize = msg_send![w, windowNumber];
         for ch in text.chars() {
             let s = NSString::alloc(nil).init_str(&ch.to_string());

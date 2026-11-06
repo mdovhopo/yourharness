@@ -54,13 +54,16 @@ struct Frames {
     deltas: Vec<f64>,
     last: Option<Instant>,
     running: bool,
+    /// Each start makes a new chain of callbacks; an old one still waiting for its next frame
+    /// stops when it sees it's not the current generation.
+    generation: u64,
 }
 
-fn tick(frames: Rc<RefCell<Frames>>, window: &Window) {
+fn tick(frames: Rc<RefCell<Frames>>, generation: u64, window: &Window) {
     window.on_next_frame(move |window, _| {
         {
             let mut f = frames.borrow_mut();
-            if !f.running {
+            if !f.running || f.generation != generation {
                 return;
             }
             let now = Instant::now();
@@ -69,7 +72,7 @@ fn tick(frames: Rc<RefCell<Frames>>, window: &Window) {
             }
             f.last = Some(now);
         }
-        tick(frames, window);
+        tick(frames, generation, window);
     });
 }
 
@@ -117,6 +120,7 @@ struct Probe {
     real_events: bool,
     frames: Rc<RefCell<Frames>>,
     sampler: platform::Sampler,
+    ns: cocoa::base::id,
 }
 
 pub fn log(s: &str) {
@@ -132,8 +136,16 @@ impl Probe {
         self.handle.update(&mut self.cx, f).expect("window gone")
     }
 
+    /// A read, not an update: the app entity isn't leased, so views reading it (the sidebar) can.
     fn read<R>(&mut self, f: impl FnOnce(&HarnessApp, &gpui::App) -> R) -> R {
-        self.handle.update(&mut self.cx, |app, _, cx| f(app, cx)).expect("window gone")
+        let handle = self.handle;
+        self.cx
+            .update(|cx| {
+                let cx: &gpui::App = cx;
+                handle.read(cx).map(|app| f(app, cx))
+            })
+            .expect("app gone")
+            .expect("window gone")
     }
 
     async fn sleep(&self, ms: u64) {
@@ -175,7 +187,7 @@ impl Probe {
         let x = f32::from(b.origin.x) + (f32::from(b.size.width) / 2.0).min(60.0);
         let y = f32::from(b.origin.y) + f32::from(b.size.height) / 2.0;
         let sent = Instant::now();
-        self.with(|_, window, _| platform::click(window, x, y));
+        platform::click(self.ns, x, y);
         Some(sent)
     }
 
@@ -290,7 +302,7 @@ impl Probe {
             let before = self.scroll_offset();
             if self.real_events {
                 if let Some((x, y)) = self.transcript_center() {
-                    self.with(move |_, window, _| platform::wheel(window, x, y, speed * direction));
+                    platform::wheel(self.ns, x, y, speed * direction);
                 }
             } else {
                 let dy = (speed * direction) as f32;
@@ -313,6 +325,8 @@ impl Probe {
                 direction = -direction;
             }
         }
+        let top = self.read(|app, cx| app.selected_thread().map(|t| t.read(cx).list.logical_scroll_top().item_ix).unwrap_or(0));
+        log(&format!("scroll: {count} steps, ended at row {top}"));
         if highest - lowest < 100.0 {
             log(&format!("FAIL: scrolling moved the transcript only {} px", (highest - lowest).round()));
         } else {
@@ -344,7 +358,7 @@ impl Probe {
             let before = self.read(|app, cx| app.composer.read(cx).input.read(cx).text().len());
             let sent = Instant::now();
             if self.real_events {
-                self.with(move |_, window, _| platform::key(window, &ch.to_string()));
+                platform::key(self.ns, &ch.to_string());
             } else {
                 self.with(move |app, _, cx| {
                     let input = app.composer.read(cx).input.clone();
@@ -438,7 +452,9 @@ pub fn start(handle: WindowHandle<HarnessApp>, folder: String, cx: &mut gpui::Ap
             real_events: true,
             frames: Rc::new(RefCell::new(Frames::default())),
             sampler: platform::Sampler::new(),
+            ns: cocoa::base::nil,
         };
+        p.ns = p.with(|_, window, _| platform::ns_window(window));
         run(&mut p).await;
         log("DONE");
         p.write();
@@ -505,10 +521,10 @@ async fn run(p: &mut Probe) {
                     seed ^= seed << 17;
                     let (rx, ry) = ((seed % 1000) as f32 / 1000.0, ((seed >> 20) % 1000) as f32 / 1000.0);
                     let mut cx2 = cx.clone();
-                    let _ = handle.update(&mut cx2, |_, window, _| {
-                        let size = window.viewport_size();
-                        platform::mouse_move(window, 20.0 + rx * (f32::from(size.width) - 40.0), 60.0 + ry * (f32::from(size.height) - 160.0));
-                    });
+                    let target = handle.update(&mut cx2, |_, window, _| (platform::ns_window(window), window.viewport_size()));
+                    if let Ok((ns, size)) = target {
+                        platform::mouse_move(ns, 20.0 + rx * (f32::from(size.width) - 40.0), 60.0 + ry * (f32::from(size.height) - 160.0));
+                    }
                     cx.background_executor().timer(Duration::from_millis(500)).await;
                 }
             })
@@ -669,9 +685,11 @@ fn start_frames(p: &mut Probe) {
         f.deltas.clear();
         f.last = None;
         f.running = true;
+        f.generation += 1;
     }
     let frames = p.frames.clone();
-    p.with(move |_, window, _| tick(frames, window));
+    let generation = frames.borrow().generation;
+    p.with(move |_, window, _| tick(frames, generation, window));
 }
 
 fn stop_frames(p: &mut Probe) -> Vec<f64> {
