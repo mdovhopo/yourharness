@@ -88,8 +88,36 @@ impl Workspace {
                 workspace.commands.insert(project, list);
             }
         }
+        workspace.ensure_home(cx);
         workspace.recover_cut_off_turns(cx);
         workspace
+    }
+
+    /// A data folder without a Home project gets one, as the Swift app makes it: your home
+    /// folder, or in a development run (`YH_DATA_DIR`) a `home` folder inside the data folder, so a
+    /// test never runs `claude` in your real home.
+    fn ensure_home(&mut self, cx: &mut Context<Self>) {
+        if self.library.db.is_none() || self.home_project().is_some_and(|id| self.project(&id).is_some()) {
+            return;
+        }
+        let path = if std::env::var("YH_DATA_DIR").is_ok() {
+            let home = self.data_dir.join("home");
+            let _ = std::fs::create_dir_all(&home);
+            home.to_string_lossy().into_owned()
+        } else {
+            std::env::var("HOME").unwrap_or_default()
+        };
+        if path.is_empty() {
+            return;
+        }
+        let id = self.add_project(&path, cx);
+        self.library.update_project(&id, |p| {
+            p.insert("name".into(), "Home".into());
+        });
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == id) {
+            p.name = "Home".into();
+        }
+        self.library.set_setting("homeProjectID", &Value::from(id));
     }
 
     pub fn thread(&self, id: &str) -> Option<Entity<ThreadState>> {

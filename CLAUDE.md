@@ -57,7 +57,10 @@ themselves). Also
 `/co` opens the command menu, `@no` the file menu; `YH_DRAFT_DELAY`), `YH_FIND=<words>` (Find
 opened), `YH_EXPAND_WORK=1` (folded work drawn open), `YH_ACTIONS_PROBE=1` (pin, rename, settle,
 delete on the first threads). Also `YH_SNAPSHOT=<png>` (`_DELAY`, `_QUIT`), `YH_BACKGROUND=1`,
-`YH_TIMING=1` and `YH_EVENT_LOG=1` (every event, and each plan rebuild).
+`YH_TIMING=1` and `YH_EVENT_LOG=1` (every event, and each plan rebuild). `YH_NOTIFICATIONS=log`
+prints notifications and the Dock badge instead (always in tests: a real one asks for permission),
+`YH_APPEARANCE=light|dark`, `YH_OPEN_SETTINGS=1`, `YH_SPOTLIGHT=<words>` (⌘K typed;
+`YH_SPOTLIGHT_ENTER=1` with a session ID resumes it).
 
 ## Performance is the product
 
