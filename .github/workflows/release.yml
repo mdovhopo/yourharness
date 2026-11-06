@@ -1,4 +1,4 @@
-# Builds YourHarness.dmg. A pushed v<version> tag (scripts/release.sh) also publishes it as a
+# Builds YourHarness.dmg from the Rust app (crates/, RELEASE=1 scripts/bundle.sh). A pushed v<version> tag (scripts/release.sh) also publishes it as a
 # GitHub release, with that version's CHANGELOG.md notes. Run it by hand to get a DMG of
 # any commit as a workflow artifact.
 name: Release
@@ -29,8 +29,16 @@ jobs:
         if: github.ref_type == 'tag'
         run: test "v$(cat VERSION)" = "$GITHUB_REF_NAME"
 
+      - name: Rust
+        run: |
+          rustup toolchain install stable --profile minimal --target aarch64-apple-darwin
+          rustup default stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
       - name: Test
-        run: swift test
+        run: |
+          scripts/vendor.sh
+          cargo test --release
 
       # The app's own identity, so every release is the same app to macOS and the updater
       # can tell a real update. A tag must be signed: an ad hoc build would break that chain.
@@ -57,11 +65,9 @@ jobs:
 
       - name: Build the DMG
         run: |
-          scripts/bundle.sh
+          RELEASE=1 scripts/bundle.sh
           scripts/dmg.sh
-          version="$(cat VERSION)"
-          echo "VERSION=$version" >> "$GITHUB_ENV"
-          cd build && shasum -a 256 "YourHarness-$version.dmg" > "YourHarness-$version.dmg.sha256"
+          echo "VERSION=$(cat VERSION)" >> "$GITHUB_ENV"
 
       - uses: actions/upload-artifact@v4
         with:
