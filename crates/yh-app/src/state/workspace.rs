@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use yh_core::claude::{ClaudeProcess, Decision, Event, LaunchOptions, ModelInfo};
+use yh_core::claude::{ClaudeProcess, Decision, Event, LaunchOptions, ModelInfo, SlashCommand};
 use yh_core::library::{cli_mode, control_mode, data_directory, iso_now, Library, ProjectMeta, ThreadMeta};
 
 pub const PAGE: usize = 160;
@@ -48,6 +48,10 @@ pub struct Workspace {
     pub models: Vec<ModelInfo>,
     /// Usage limits as Claude last reported them.
     pub limits: Option<Value>,
+    /// Each project's slash commands and skills, as the CLI last listed them (`slashCommands`).
+    commands: HashMap<String, Vec<SlashCommand>>,
+    /// A folder's files for `@` mentions, kept 30 seconds.
+    files: HashMap<String, (Instant, Arc<Vec<String>>)>,
     new_count: usize,
 }
 
@@ -74,8 +78,16 @@ impl Workspace {
             generation: 0,
             models,
             limits: None,
+            commands: HashMap::new(),
+            files: HashMap::new(),
             new_count: 0,
         };
+        if let Some(Value::Object(all)) = workspace.library.setting("slashCommands") {
+            for (project, list) in all {
+                let list = list.as_array().map(|a| a.iter().filter_map(SlashCommand::from_json).collect()).unwrap_or_default();
+                workspace.commands.insert(project, list);
+            }
+        }
         workspace.recover_cut_off_turns(cx);
         workspace
     }
@@ -447,18 +459,7 @@ impl Workspace {
         self.end_runtime(&id, cx);
         let t = thread.read(cx);
         let project = self.project(&t.meta.project_id).cloned();
-        let cwd = t
-            .meta
-            .working_directory
-            .clone()
-            .or_else(|| project.as_ref().map(|p| p.path.clone()))
-            .filter(|p| std::path::Path::new(p).is_dir())
-            .unwrap_or_else(|| {
-                // A project that's gone runs in a folder of the data dir, never your home folder.
-                let home = self.data_dir.join("home");
-                let _ = std::fs::create_dir_all(&home);
-                home.to_string_lossy().into_owned()
-            });
+        let cwd = self.folder_of(t);
         let attachments = self.data_dir.join("attachments");
         let mut env = vec![];
         // Claude Code's task tools: what the plan checklist shows.
@@ -528,7 +529,10 @@ impl Workspace {
                 let _ = this.update(cx, |ws, cx| {
                     for e in &batch {
                         match e {
-                            Event::Catalog { models, .. } => ws.note_catalog(models, cx),
+                            Event::Catalog { models, commands } => {
+                                let project = thread.read(cx).meta.project_id.clone();
+                                ws.note_catalog(models, commands, &project, cx);
+                            }
                             Event::Limits(info) => ws.limits = Some(info.clone()),
                             Event::Session { id: sid } => {
                                 let sid = sid.clone();
@@ -655,7 +659,73 @@ impl Workspace {
         }
     }
 
-    fn note_catalog(&mut self, models: &Value, cx: &mut Context<Self>) {
+    /// The project's slash commands and skills.
+    pub fn commands(&self, project_id: &str) -> &[SlashCommand] {
+        self.commands.get(project_id).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// Where a thread's `claude` runs: its folder, else its project's, else the data dir's `home`.
+    pub fn folder_of(&self, thread: &ThreadState) -> String {
+        thread
+            .meta
+            .working_directory
+            .clone()
+            .or_else(|| self.project(&thread.meta.project_id).map(|p| p.path.clone()))
+            .filter(|p| std::path::Path::new(p).is_dir())
+            .unwrap_or_else(|| {
+                // A project that's gone runs in a folder of the data dir, never your home folder.
+                let home = self.data_dir.join("home");
+                let _ = std::fs::create_dir_all(&home);
+                home.to_string_lossy().into_owned()
+            })
+    }
+
+    /// The thread's folder's files matching `query`, best first; listed off the main thread.
+    pub fn mention_files(&mut self, thread: &Entity<ThreadState>, query: String, cx: &mut Context<Self>) -> Task<Vec<String>> {
+        let folder = self.folder_of(thread.read(cx));
+        let cached = self.files.get(&folder).filter(|(at, _)| at.elapsed() < Duration::from_secs(30)).map(|(_, f)| f.clone());
+        cx.spawn(async move |this, cx| {
+            let files = match cached {
+                Some(files) => files,
+                None => {
+                    let path = folder.clone();
+                    let files = Arc::new(cx.background_executor().spawn(async move { yh_core::files::list(std::path::Path::new(&path)) }).await);
+                    let _ = this.update(cx, |ws, _| {
+                        ws.files.insert(folder, (Instant::now(), files.clone()));
+                    });
+                    files
+                }
+            };
+            cx.background_executor().spawn(async move { yh_core::files::matches(&files, &query, 12) }).await
+        })
+    }
+
+    fn note_catalog(&mut self, models: &Value, commands: &Value, project_id: &str, cx: &mut Context<Self>) {
+        if let Some(list) = commands.as_array() {
+            let parsed: Vec<SlashCommand> = list.iter().filter_map(SlashCommand::from_json).collect();
+            if !parsed.is_empty() {
+                self.commands.insert(project_id.to_string(), parsed);
+                let mut all = match self.library.setting("slashCommands") {
+                    Some(Value::Object(m)) => m,
+                    _ => serde_json::Map::new(),
+                };
+                // In the Swift app's shape (it decodes its own `SlashCommand`).
+                let swift: Vec<Value> = list
+                    .iter()
+                    .filter(|c| c["name"].as_str().is_some_and(|n| !n.is_empty()))
+                    .map(|c| {
+                        serde_json::json!({
+                            "name": c["name"], "description": c["description"].as_str().unwrap_or(""),
+                            "argumentHint": c["argumentHint"].as_str().unwrap_or(""),
+                            "aliases": c["aliases"].as_array().cloned().unwrap_or_default(),
+                            "isBuiltin": c["builtin"].as_bool().unwrap_or(false),
+                        })
+                    })
+                    .collect();
+                all.insert(project_id.to_string(), Value::Array(swift));
+                self.library.set_setting("slashCommands", &Value::Object(all));
+            }
+        }
         let parsed: Vec<ModelInfo> = models.as_array().map(|a| a.iter().filter_map(ModelInfo::from_json).collect()).unwrap_or_default();
         if parsed.is_empty() || parsed == self.models {
             return;

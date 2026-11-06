@@ -61,6 +61,26 @@ impl Decision {
     }
 }
 
+/// A slash command or skill, as the CLI's catalog lists it (saved in the Swift app's shape:
+/// `name`, `description`, `argumentHint`, `aliases`, `isBuiltin`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SlashCommand {
+    pub name: String,
+    pub description: String,
+    pub hint: String,
+}
+
+impl SlashCommand {
+    pub fn from_json(v: &Value) -> Option<SlashCommand> {
+        let name = v["name"].as_str().filter(|n| !n.is_empty())?;
+        Some(SlashCommand {
+            name: name.to_string(),
+            description: v["description"].as_str().unwrap_or("").to_string(),
+            hint: v["argumentHint"].as_str().unwrap_or("").to_string(),
+        })
+    }
+}
+
 /// A model as the CLI's catalog lists it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModelInfo {

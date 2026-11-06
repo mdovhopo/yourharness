@@ -4,6 +4,7 @@
 
 pub mod claude;
 pub mod db;
+pub mod files;
 pub mod schema;
 pub mod history;
 pub mod library;

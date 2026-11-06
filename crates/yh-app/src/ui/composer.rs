@@ -29,6 +29,9 @@ pub struct Composer {
     current: Option<String>,
     card: Option<(String, Card)>,
     plan_open: bool,
+    /// The menu under the caret: slash commands at the start, files after an `@`.
+    suggest: Option<Suggest>,
+    _mentions: Option<gpui_kit::Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -44,7 +47,11 @@ impl Composer {
         let subscriptions = vec![
             cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| match event {
                 InputEvent::PressEnter { shift: false, secondary } => this.enter(*secondary, window, cx),
-                InputEvent::Blur => this.save_draft(cx),
+                InputEvent::Blur => {
+                    this.save_draft(cx);
+                    this.suggest = None;
+                }
+                InputEvent::Change => this.update_suggestions(window, cx),
                 _ => {}
             }),
             cx.observe_in(&workspace, window, |this, _, window, cx| {
@@ -52,7 +59,16 @@ impl Composer {
                 cx.notify();
             }),
         ];
-        Composer { workspace, input, current: None, card: None, plan_open: false, _subscriptions: subscriptions }
+        Composer {
+            workspace,
+            input,
+            current: None,
+            card: None,
+            plan_open: false,
+            suggest: None,
+            _mentions: None,
+            _subscriptions: subscriptions,
+        }
     }
 
     fn thread(&self, cx: &App) -> Option<Entity<ThreadState>> {
@@ -289,8 +305,12 @@ impl Render for Composer {
         if !plan.items.is_empty() {
             inner = inner.child(self.plan_strip(&plan, &theme, cx));
         }
+        if let Some(menu) = self.suggestions(&theme, cx) {
+            inner = inner.child(menu);
+        }
         let stop_thread = thread.clone();
         let composer = div()
+            .capture_key_down(cx.listener(Self::on_key))
             .relative()
             .border_1()
             .border_color(theme.separator)
@@ -378,6 +398,142 @@ impl Composer {
             }
         }
         strip
+    }
+}
+
+struct Suggestion {
+    label: String,
+    detail: String,
+    insert: String,
+}
+
+struct Suggest {
+    items: Vec<Suggestion>,
+    index: usize,
+    /// Where what's being completed starts (the `/` or `@`).
+    start: usize,
+}
+
+impl Composer {
+    /// `YH_DRAFT`: text put in the composer as if typed, the caret at its end.
+    pub fn type_draft(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let len = text.len();
+        self.input.update(cx, |i, cx| {
+            i.set_value(text.to_string(), window, cx);
+            i.set_selected_range(len..len, cx);
+        });
+        self.update_suggestions(window, cx);
+    }
+
+    fn update_suggestions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (text, cursor) = {
+            let i = self.input.read(cx);
+            (i.value().to_string(), i.cursor())
+        };
+        let before = text.get(..cursor).unwrap_or(&text);
+        let Some(thread) = self.thread(cx) else { return };
+        // `/name` alone at the start: commands and skills.
+        if let Some(q) = before.strip_prefix('/').filter(|q| !q.contains(char::is_whitespace)) {
+            let q = q.to_lowercase();
+            let project = thread.read(cx).meta.project_id.clone();
+            let mut items: Vec<&yh_core::claude::SlashCommand> =
+                self.workspace.read(cx).commands(&project).iter().filter(|c| c.name.to_lowercase().contains(&q)).collect();
+            items.sort_by_key(|c| !c.name.to_lowercase().starts_with(&q));
+            let items: Vec<Suggestion> = items
+                .into_iter()
+                .take(12)
+                .map(|c| Suggestion {
+                    label: format!("/{}", c.name),
+                    detail: if c.hint.is_empty() { c.description.clone() } else { format!("{} · {}", c.hint, c.description) },
+                    insert: format!("/{} ", c.name),
+                })
+                .collect();
+            self.suggest = (!items.is_empty()).then_some(Suggest { items, index: 0, start: 0 });
+            cx.notify();
+            return;
+        }
+        // `@word` after a space or at the start: files and folders of the thread's folder.
+        let at = before.rfind('@').filter(|&i| (i == 0 || before[..i].ends_with(char::is_whitespace)) && !before[i + 1..].contains(char::is_whitespace));
+        let Some(at) = at else {
+            if self.suggest.take().is_some() {
+                cx.notify();
+            }
+            return;
+        };
+        let query = before[at + 1..].to_string();
+        let task = self.workspace.update(cx, |ws, cx| ws.mention_files(&thread, query, cx));
+        self._mentions = Some(cx.spawn_in(window, async move |this, cx| {
+            let files = task.await;
+            let _ = this.update(cx, |this, cx| {
+                let items: Vec<Suggestion> = files
+                    .into_iter()
+                    .map(|f| Suggestion {
+                        label: f.trim_end_matches('/').rsplit('/').next().unwrap_or(&f).to_string(),
+                        insert: if f.contains(' ') { format!("@\"{f}\" ") } else { format!("@{f} ") },
+                        detail: f,
+                    })
+                    .collect();
+                this.suggest = (!items.is_empty()).then_some(Suggest { items, index: 0, start: at });
+                cx.notify();
+            });
+        }));
+    }
+
+    fn accept(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(s) = self.suggest.take() else { return };
+        let Some(choice) = s.items.into_iter().nth(index) else { return };
+        self.input.update(cx, |i, cx| {
+            let cursor = i.cursor();
+            i.set_selected_range(s.start..cursor, cx);
+            i.replace(choice.insert, window, cx);
+        });
+        cx.notify();
+    }
+
+    /// ↑↓ move through the menu, ↩ or ⇥ take an item, ⎋ closes it; before the field sees them.
+    fn on_key(&mut self, event: &gpui_kit::KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(s) = &mut self.suggest else { return };
+        let n = s.items.len();
+        match event.keystroke.key.as_str() {
+            "up" => s.index = (s.index + n - 1) % n,
+            "down" => s.index = (s.index + 1) % n,
+            "enter" | "tab" if !event.keystroke.modifiers.shift => {
+                let index = s.index;
+                self.accept(index, window, cx);
+            }
+            "escape" => self.suggest = None,
+            _ => return,
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn suggestions(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let s = self.suggest.as_ref()?;
+        let mut list = div()
+            .flex()
+            .flex_col()
+            .mb(px(6.))
+            .py(px(4.))
+            .rounded(px(10.))
+            .border_1()
+            .border_color(theme.separator)
+            .bg(theme.card);
+        for (i, item) in s.items.iter().enumerate() {
+            list = list.child(
+                div()
+                    .id(("suggestion", i))
+                    .flex()
+                    .gap(px(10.))
+                    .px(px(10.))
+                    .py(px(3.))
+                    .when(i == s.index, |d| d.bg(theme.selected))
+                    .child(div().flex_none().font_weight(FontWeight::MEDIUM).child(item.label.clone()))
+                    .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_color(theme.secondary).child(item.detail.clone()))
+                    .on_mouse_down(gpui_kit::MouseButton::Left, cx.listener(move |this, _, window, cx| this.accept(i, window, cx))),
+            );
+        }
+        Some(list)
     }
 }
 

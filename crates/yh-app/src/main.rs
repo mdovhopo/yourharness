@@ -160,6 +160,20 @@ fn main() {
                 }
             });
         }
+        // `YH_DRAFT=<text>`: typed into the composer after `YH_DRAFT_DELAY` seconds (`/co` opens the
+        // command menu, `@na` the file menu).
+        if let Some(text) = env("YH_DRAFT") {
+            let delay: f64 = env("YH_DRAFT_DELAY").and_then(|v| v.parse().ok()).unwrap_or(0.5);
+            let root = root.clone();
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(Duration::from_secs_f64(delay)).await;
+                let _ = window.update(cx, |_, window, cx| {
+                    let composer = root.read(cx).composer.clone();
+                    composer.update(cx, |c, cx| c.type_draft(&text, window, cx));
+                });
+            })
+            .detach();
+        }
         // `YH_ACTIONS_PROBE=1`: the sidebar's actions on the first three threads, through the
         // workspace calls the menu makes, for checking what they save.
         if env("YH_ACTIONS_PROBE").as_deref() == Some("1") {
