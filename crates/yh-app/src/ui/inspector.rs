@@ -19,6 +19,14 @@ use std::rc::Rc;
 
 pub const WIDTH: f32 = 380.;
 
+/// Import Sign-ins: pick a browser, then the sites whose cookies to copy.
+enum CookieImport {
+    Sources(Vec<yh_core::cookies::Source>),
+    Reading(String),
+    Sites { source: String, cookies: Vec<yh_core::cookies::Cookie>, sites: Vec<(String, usize)>, picked: HashSet<String> },
+    Done(String),
+}
+
 /// Where file links go: set by the window to open them in its Files tab.
 pub struct FileLinks(pub Rc<dyn Fn(&str, Option<(usize, usize)>, &mut App)>);
 
@@ -149,6 +157,8 @@ pub struct Inspector {
     _pulls_timer: Option<gpui_kit::Task<()>>,
     /// The open thread was working when last seen: its turn ending looks again.
     was_running: bool,
+    /// Import Sign-ins, when open: which step it's at.
+    cookie_import: Option<CookieImport>,
     /// The side chat as last drawn: running, asking.
     side_state: (bool, bool),
     _subscriptions: Vec<Subscription>,
@@ -189,6 +199,7 @@ impl Inspector {
             side: None,
             question,
             side_state: (false, false),
+            cookie_import: None,
             pulls: HashMap::new(),
             pulls_loading: false,
             _pulls_timer: None,
@@ -770,12 +781,26 @@ impl Inspector {
                 })
                 .unwrap_or_default()
         });
+        if let Some(import) = &self.cookie_import {
+            crate::browser::Browsers::show(None);
+            return self.cookie_panel(import, theme, cx);
+        }
+        let import_button = Button::new("import-sign-ins").xsmall().ghost().label("Import Sign-ins…").on_click(cx.listener(|this, _, _, cx| {
+            this.cookie_import = Some(CookieImport::Sources(yh_core::cookies::sources()));
+            cx.notify();
+        }));
         if tabs.is_empty() {
             crate::browser::Browsers::show(None);
-            return empty("No pages open. When Claude opens one (mcp__browser__open), it shows here, and you can watch what it does.", theme);
+            return div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(div().flex_1().child(empty("No pages open. When Claude opens one (mcp__browser__open), it shows here, and you can watch what it does.", theme)))
+                .child(div().flex().justify_center().pb(px(16.)).child(import_button))
+                .into_any_element();
         }
         let address = crate::browser::Browsers::with(|b| b.sessions.get(&thread).and_then(|s| s.selected_tab().map(|t| t.short_url()))).unwrap_or_default();
-        let mut strip = div().id("browser-tabs").flex().gap(px(4.)).px(px(8.)).py(px(6.)).overflow_x_scroll();
+        let mut strip = div().id("browser-tabs").flex().items_center().gap(px(4.)).px(px(8.)).py(px(6.)).overflow_x_scroll();
         for (id, title, on, loading) in tabs {
             let t = thread.clone();
             strip = strip.child(
@@ -804,7 +829,7 @@ impl Inspector {
             .size_full()
             .flex()
             .flex_col()
-            .child(strip)
+            .child(div().flex().items_center().child(div().flex_1().min_w_0().child(strip)).child(div().pr(px(6.)).child(import_button)))
             .child(
                 div()
                     .mx(px(8.))
@@ -835,6 +860,106 @@ impl Inspector {
                 ),
             )
             .into_any_element()
+    }
+
+    /// The sign-ins panel: Safari and each Chromium profile; then the source's sites.
+    fn cookie_panel(&self, import: &CookieImport, theme: &Theme, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let mut column = div().id("cookie-import").size_full().overflow_y_scroll().p(px(14.)).flex().flex_col().gap(px(8.)).child(
+            div()
+                .flex()
+                .items_center()
+                .child(div().flex_1().font_weight(FontWeight::SEMIBOLD).child("Import Sign-ins"))
+                .child(Button::new("cookie-close").xsmall().ghost().label("Done").on_click(cx.listener(|this, _, _, cx| {
+                    this.cookie_import = None;
+                    cx.notify();
+                }))),
+        );
+        match import {
+            CookieImport::Sources(sources) => {
+                column = column.child(div().text_size(px(12.)).text_color(theme.secondary).whitespace_normal().child(
+                    "Copy the cookies of sites you're signed in to from another browser into this project's browser, so Claude can use them signed in. Nothing is read until you pick a browser, and macOS asks first.",
+                ));
+                for (i, source) in sources.iter().enumerate() {
+                    let source = source.clone();
+                    column = column.child(
+                        Button::new(SharedString::from(format!("cookie-source-{i}"))).small().label(source.label()).on_click(cx.listener(move |this, _, _, cx| {
+                            this.read_cookies(source.clone(), cx)
+                        })),
+                    );
+                }
+            }
+            CookieImport::Reading(label) => column = column.child(div().text_color(theme.secondary).child(format!("Reading {label}…"))),
+            CookieImport::Done(text) => column = column.child(div().whitespace_normal().child(text.clone())),
+            CookieImport::Sites { source, sites, picked, .. } => {
+                column = column.child(div().text_size(px(12.)).text_color(theme.secondary).child(format!("{source}: pick the sites to bring over.")));
+                let count = picked.len();
+                column = column.child(Button::new("cookie-import-go").small().primary().label(format!("Import {count} Site{}", if count == 1 { "" } else { "s" })).on_click(cx.listener(|this, _, _, cx| this.store_cookies(cx))));
+                for (site, n) in sites.iter().take(400) {
+                    let on = picked.contains(site);
+                    let key = site.clone();
+                    column = column.child(
+                        div()
+                            .id(SharedString::from(format!("site-{site}")))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .px(px(6.))
+                            .py(px(3.))
+                            .rounded(px(5.))
+                            .hover(|d| d.bg(theme.selected))
+                            .child(div().w(px(14.)).text_color(if on { theme.accent } else { theme.secondary }).child(if on { "☑" } else { "☐" }))
+                            .child(div().flex_1().overflow_hidden().whitespace_nowrap().text_ellipsis().child(site.clone()))
+                            .child(div().text_size(px(11.)).text_color(theme.secondary).child(n.to_string()))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if let Some(CookieImport::Sites { picked, .. }) = &mut this.cookie_import {
+                                    if !picked.remove(&key) {
+                                        picked.insert(key.clone());
+                                    }
+                                }
+                                cx.notify();
+                            })),
+                    );
+                }
+            }
+        }
+        column.into_any_element()
+    }
+
+    fn read_cookies(&mut self, source: yh_core::cookies::Source, cx: &mut Context<Self>) {
+        let label = source.label();
+        self.cookie_import = Some(CookieImport::Reading(label.clone()));
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_executor().spawn(async move { yh_core::cookies::read(&source) }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.cookie_import = Some(match result {
+                    Ok(cookies) => {
+                        let sites = yh_core::cookies::sites(&cookies);
+                        CookieImport::Sites { source: label, cookies, sites, picked: HashSet::new() }
+                    }
+                    Err(e) => CookieImport::Done(e),
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn store_cookies(&mut self, cx: &mut Context<Self>) {
+        let Some(CookieImport::Sites { cookies, picked, .. }) = &self.cookie_import else { return };
+        let chosen: Vec<yh_core::cookies::Cookie> = cookies.iter().filter(|c| picked.contains(c.site())).cloned().collect();
+        let Some(project) = self.thread.as_ref().map(|t| t.read(cx).meta.project_id.clone()) else { return };
+        let sites = picked.len();
+        let (tx, rx) = flume::bounded(1);
+        crate::webview::store_cookies(&project, chosen, tx);
+        cx.spawn(async move |this, cx| {
+            let n = rx.recv_async().await.unwrap_or(0);
+            let _ = this.update(cx, |this, cx| {
+                this.cookie_import = Some(CookieImport::Done(format!("Imported {n} cookies for {sites} site{} into this project's browser. Pages opened from now on are signed in where those cookies are still good.", if sites == 1 { "" } else { "s" })));
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn pull_requests(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui_kit::AnyElement {

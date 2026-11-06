@@ -182,6 +182,72 @@ fn page_world() -> id {
     unsafe { msg_send![class!(WKContentWorld), pageWorld] }
 }
 
+/// Puts cookies in a project's browser data store (by its UUID); replies with how many went in.
+pub fn store_cookies(project: &str, cookies: Vec<yh_core::cookies::Cookie>, reply: flume::Sender<usize>) {
+    unsafe {
+        let identifier: id = msg_send![class!(NSUUID), alloc];
+        let identifier: id = msg_send![identifier, initWithUUIDString: ns_string(project)];
+        if identifier == nil {
+            let _ = reply.send(0);
+            return;
+        }
+        let data: id = msg_send![class!(WKWebsiteDataStore), dataStoreForIdentifier: identifier];
+        // Held until the last cookie is in: let go of sooner, its writes never finish.
+        let _: id = msg_send![data, retain];
+        let store: id = msg_send![data, httpCookieStore];
+        let mut made: Vec<id> = vec![];
+        for c in cookies {
+            let props: id = msg_send![class!(NSMutableDictionary), dictionary];
+            let set = |k: &str, v: id| {
+                let _: () = msg_send![props, setObject: v forKey: ns_string(k)];
+            };
+            set("Domain", ns_string(&c.domain));
+            set("Path", ns_string(if c.path.is_empty() { "/" } else { &c.path }));
+            set("Name", ns_string(&c.name));
+            set("Value", ns_string(&c.value));
+            if let Some(e) = c.expires {
+                let date: id = msg_send![class!(NSDate), dateWithTimeIntervalSince1970: e];
+                set("Expires", date);
+            }
+            if c.secure {
+                set("Secure", ns_string("TRUE"));
+            }
+            if c.http_only {
+                set("HttpOnly", ns_string("TRUE"));
+            }
+            match c.same_site.as_deref() {
+                Some("lax") => set("SameSite", ns_string("lax")),
+                Some("strict") => set("SameSite", ns_string("strict")),
+                _ => {}
+            }
+            let cookie: id = msg_send![class!(NSHTTPCookie), cookieWithProperties: props];
+            if cookie != nil {
+                made.push(cookie);
+            }
+        }
+        let total = made.len();
+        if total == 0 {
+            let _: () = msg_send![data, release];
+            let _ = reply.send(0);
+            return;
+        }
+        let left = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(total));
+        let data_ptr = data as usize;
+        for cookie in made {
+            let (left, reply) = (left.clone(), reply.clone());
+            let done = ConcreteBlock::new(move || {
+                if left.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+                    let _: () = msg_send![data_ptr as id, release];
+                    let _ = reply.send(total);
+                }
+            })
+            .copy();
+            let _: () = msg_send![store, setCookie: cookie completionHandler: &*done];
+        }
+        let _: () = msg_send![identifier, release];
+    }
+}
+
 pub struct WebView {
     /// What sits over the window: it draws the page scaled when the page's viewport is
     /// bigger than the panel (its bounds are CSS pixels, its frame points).

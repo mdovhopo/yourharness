@@ -399,6 +399,21 @@ fn main() {
         if let Some(file) = env("YH_STATE_EXPORT") {
             ui::state_transfer::export_to(&workspace, std::path::PathBuf::from(file), cx);
         }
+        // `YH_IMPORT_COOKIES=<Cookies.binarycookies>`: a Safari-format file's cookies imported into the
+        // selected thread's project's browser at launch (a synthetic file: never read your real
+        // browsers from a test).
+        if let Some(file) = env("YH_IMPORT_COOKIES") {
+            let project = workspace.read(cx).selected_thread().map(|t| t.read(cx).meta.project_id.clone());
+            match (project, std::fs::read(&file).map_err(|e| e.to_string()).and_then(|d| yh_core::cookies::parse_safari(&d))) {
+                (Some(project), Ok(cookies)) => {
+                    let (tx, rx) = flume::bounded(1);
+                    webview::store_cookies(&project, cookies, tx);
+                    cx.spawn(async move |_| eprintln!("imported {} cookies", rx.recv_async().await.unwrap_or(0))).detach();
+                }
+                (_, Err(e)) => eprintln!("cookie import failed: {e}"),
+                (None, _) => eprintln!("cookie import failed: no thread selected"),
+            }
+        }
         // `YH_OPEN_SETTINGS=1`: Settings opened after `YH_DRAFT_DELAY`.
         if env("YH_OPEN_SETTINGS").as_deref() == Some("1") {
             let delay: f64 = env("YH_DRAFT_DELAY").and_then(|v| v.parse().ok()).unwrap_or(1.0);

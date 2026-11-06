@@ -72,7 +72,8 @@ mid-call, answered with the form's defaults), `YH_MCP_SIGN_IN_ANSWER=allow|deny`
 to a server; with `YH_MCP_BROWSER=log` each such call prints `MCP sign-in asked: <server>` and the page; never
 finish a real sign-in from a test), `YH_STATE_EXPORT=<file.yhstate>` (the whole state exported at launch, its manifest printed),
 `YH_STATE_IMPORT=<file>` (imported at launch, development data folders only: never into the real app),
-`YH_OPEN_USAGE=1` (Usage; `YH_USAGE_RANGE=week|month|quarter|halfYear|year`, `YH_USAGE_METRIC=cost`,
+`YH_IMPORT_COOKIES=<Cookies.binarycookies>` (a Safari-format file's cookies into the selected thread's project's
+browser: a synthetic file only, never your real browsers, which would ask you for access), `YH_OPEN_USAGE=1` (Usage; `YH_USAGE_RANGE=week|month|quarter|halfYear|year`, `YH_USAGE_METRIC=cost`,
 `YH_USAGE_HOVER=<days ago>`; test it on a clone of `test-harness-root/usage` with `CLAUDE_CONFIG_DIR` at its
 `claude-config`, never the real `~/.claude`), `YH_OPEN_MEMORY=1` (the project's Memory page,
 `YH_MEMORY_TAB=memories|tasks|activity`, after `YH_DRAFT_DELAY`), `YH_SPOTLIGHT=<words>` (⌘K typed;
