@@ -41,16 +41,18 @@ struct Runtime {
 /// The right sidebar's tabs.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Panel {
+    PullRequests,
     SideChat,
     Subagents,
     Files,
 }
 
 impl Panel {
-    pub const ALL: [Panel; 3] = [Panel::SideChat, Panel::Subagents, Panel::Files];
+    pub const ALL: [Panel; 4] = [Panel::PullRequests, Panel::SideChat, Panel::Subagents, Panel::Files];
 
     pub fn label(self) -> &'static str {
         match self {
+            Panel::PullRequests => "PRs",
             Panel::SideChat => "Side Chat",
             Panel::Subagents => "Sub-agents",
             Panel::Files => "Files",
@@ -59,6 +61,7 @@ impl Panel {
 
     pub fn from_name(name: &str) -> Option<Panel> {
         match name {
+            "pullRequests" | "prs" => Some(Panel::PullRequests),
             "sideChat" | "side-chat" => Some(Panel::SideChat),
             "subagents" => Some(Panel::Subagents),
             "files" => Some(Panel::Files),

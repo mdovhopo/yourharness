@@ -142,6 +142,13 @@ pub struct Inspector {
     /// The open thread's side chat, its transcript and what's typed for it.
     side: Option<(Entity<ThreadState>, Entity<TranscriptView>, Subscription)>,
     question: Entity<InputState>,
+    /// Each thread's pull requests as last looked up, and when.
+    pulls: HashMap<String, (Vec<crate::state::pulls::ThreadPull>, std::time::Instant)>,
+    pulls_loading: bool,
+    /// Looks again every 30 seconds while the PRs tab shows.
+    _pulls_timer: Option<gpui_kit::Task<()>>,
+    /// The open thread was working when last seen: its turn ending looks again.
+    was_running: bool,
     /// The side chat as last drawn: running, asking.
     side_state: (bool, bool),
     _subscriptions: Vec<Subscription>,
@@ -182,6 +189,10 @@ impl Inspector {
             side: None,
             question,
             side_state: (false, false),
+            pulls: HashMap::new(),
+            pulls_loading: false,
+            _pulls_timer: None,
+            was_running: false,
             _subscriptions: subscriptions,
         };
         inspector.follow_selection(cx);
@@ -197,6 +208,11 @@ impl Inspector {
             self.seen_subagents = selected.as_ref().map_or(0, |t| t.read(cx).subagents_version);
             self.thread_watch = selected.map(|t| {
                 cx.observe(&t, |this, t, cx| {
+                    let running = t.read(cx).running;
+                    if this.was_running && !running && this.workspace.read(cx).panel == Panel::PullRequests {
+                        this.refresh_pulls(cx);
+                    }
+                    this.was_running = running;
                     let version = t.read(cx).subagents_version;
                     if version != this.seen_subagents && this.workspace.read(cx).panel == Panel::Subagents {
                         this.seen_subagents = version;
@@ -208,8 +224,57 @@ impl Inspector {
             self.ensure_tree(cx);
             self.side = None;
             self.ensure_side(cx);
+            self.ensure_pulls(cx);
         }
         cx.notify();
+    }
+
+    /// The PRs tab looks its thread's PRs up when it shows, then every 30 seconds.
+    fn ensure_pulls(&mut self, cx: &mut Context<Self>) {
+        if self.workspace.read(cx).panel != Panel::PullRequests {
+            self._pulls_timer = None;
+            return;
+        }
+        let Some(id) = self.thread.as_ref().map(|t| t.read(cx).id().to_string()) else { return };
+        if self.pulls.get(&id).is_none_or(|(_, at)| at.elapsed().as_secs() > 25) {
+            self.refresh_pulls(cx);
+        }
+        if self._pulls_timer.is_none() {
+            self._pulls_timer = Some(cx.spawn(async move |this, cx| loop {
+                cx.background_executor().timer(std::time::Duration::from_secs(30)).await;
+                let Ok(showing) = this.update(cx, |this, cx| this.workspace.read(cx).panel == Panel::PullRequests && this.workspace.read(cx).shows_inspector) else { break };
+                if showing {
+                    let _ = this.update(cx, |this, cx| this.refresh_pulls(cx));
+                }
+            }));
+        }
+    }
+
+    fn refresh_pulls(&mut self, cx: &mut Context<Self>) {
+        let Some(thread) = self.thread.clone() else { return };
+        let ws = self.workspace.read(cx);
+        let Some(db) = ws.library.db.clone() else { return };
+        let id = thread.read(cx).id().to_string();
+        let folder = ws.folder_of(thread.read(cx));
+        let path = std::env::var("YH_PATH").ok();
+        self.pulls_loading = true;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let key = id.clone();
+            let found = cx
+                .background_executor()
+                .spawn(async move {
+                    let links = crate::state::pulls::links(&db, &id, &folder, path.as_deref());
+                    crate::state::pulls::look_up(links, path)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.pulls_loading = false;
+                this.pulls.insert(key, (found, std::time::Instant::now()));
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// The side chat's view, once the tab shows for a thread.
@@ -384,6 +449,7 @@ impl Inspector {
                 ws.update(cx, |ws, cx| ws.show_panel(p, cx));
                 this.ensure_tree(cx);
                 this.ensure_side(cx);
+                this.ensure_pulls(cx);
                 cx.notify();
             })));
         }
@@ -691,6 +757,45 @@ impl Inspector {
 }
 
 impl Inspector {
+    fn pull_requests(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let Some(thread) = &self.thread else { return empty("No thread open.", theme) };
+        let id = thread.read(cx).id().to_string();
+        let Some((pulls, at)) = self.pulls.get(&id) else { return empty("Looking for this thread's pull requests…", theme) };
+        if pulls.is_empty() {
+            return empty("No pull requests. When Claude opens, merges or comments on one in this thread, or one's linked here, it shows here and stays current.", theme);
+        }
+        let rank = |p: &crate::state::pulls::ThreadPull| match p.pull.as_ref().map(|p| p.state.as_str()) {
+            Ok("open") => 0,
+            Ok("merged") => 1,
+            Ok(_) => 2,
+            Err(_) => 3,
+        };
+        let mut worked: Vec<&crate::state::pulls::ThreadPull> = pulls.iter().filter(|p| p.worked).collect();
+        worked.sort_by_key(|p| rank(p));
+        let mentioned: Vec<&crate::state::pulls::ThreadPull> = pulls.iter().filter(|p| !p.worked).collect();
+        let open = pulls.iter().filter(|p| p.worked && p.pull.as_ref().is_ok_and(|p| p.state == "open")).count();
+        let mut column = div().id("pulls").size_full().overflow_y_scroll().p(px(12.)).flex().flex_col().gap(px(8.)).child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .text_size(px(11.))
+                .text_color(theme.secondary)
+                .child(div().flex_1().child(format!("{open} open · updated {}", if at.elapsed().as_secs() < 5 { "just now".to_string() } else { format!("{} s ago", at.elapsed().as_secs()) })))
+                .child(Button::new("pulls-refresh").xsmall().ghost().label(if self.pulls_loading { "Looking…" } else { "Refresh" }).on_click(cx.listener(|this, _, _, cx| this.refresh_pulls(cx)))),
+        );
+        for p in worked {
+            column = column.child(pull_card(p, theme));
+        }
+        if !mentioned.is_empty() {
+            column = column.child(div().pt(px(8.)).text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.secondary).child("MENTIONED"));
+            for p in mentioned {
+                column = column.child(pull_card(p, theme));
+            }
+        }
+        column.into_any_element()
+    }
+
     fn side_chat(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let Some((chat, view, _)) = &self.side else { return empty("No thread open.", theme) };
         let (running, permission, empty_chat) = {
@@ -760,6 +865,87 @@ impl Inspector {
     }
 }
 
+/// A PR in the narrow sidebar: what it is, where it's going, what stands in its way.
+fn pull_card(p: &crate::state::pulls::ThreadPull, theme: &Theme) -> impl IntoElement {
+    let url = p.link.url.clone();
+    let green: gpui_kit::Hsla = gpui_kit::rgb(0x34c759).into();
+    let purple: gpui_kit::Hsla = gpui_kit::rgb(0xaf52de).into();
+    let mut card = div()
+        .id(SharedString::from(format!("pull-{}", p.link.id())))
+        .p(px(10.))
+        .rounded(px(8.))
+        .bg(theme.card)
+        .hover(|s| s.bg(theme.selected))
+        .flex()
+        .flex_col()
+        .gap(px(4.))
+        .on_click(move |_, _, cx| cx.open_url(&url));
+    match &p.pull {
+        Ok(pr) => {
+            let (dot, chip): (gpui_kit::Hsla, Option<&str>) = match pr.state.as_str() {
+                "merged" => (purple, Some("Merged")),
+                "closed" => (theme.error, Some("Closed")),
+                _ if pr.draft => (theme.secondary, Some("Draft")),
+                _ if pr.auto_merge => (purple, Some("Auto-merge")),
+                _ => (green, None),
+            };
+            let blocker = match pr.merge_status.as_deref().filter(|_| pr.state == "open") {
+                Some("DIRTY") => Some("Conflicts"),
+                Some("BEHIND") => Some("Behind base"),
+                Some("BLOCKED") => Some("Blocked"),
+                _ => None,
+            };
+            let review = match pr.review.as_str() {
+                "approved" => Some(("Approved", green)),
+                "changesRequested" => Some(("Changes requested", theme.error)),
+                "required" => Some(("Review required", theme.secondary)),
+                _ => None,
+            };
+            let checks = match pr.checks.as_str() {
+                "passing" => Some(("Checks pass", green)),
+                "failing" => Some(("Checks fail", theme.error)),
+                "pending" => Some(("Checks running", theme.warning)),
+                _ => None,
+            };
+            card = card
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(7.))
+                        .child(div().flex_none().w(px(8.)).h(px(8.)).rounded_full().bg(dot))
+                        .child(div().flex_1().min_w_0().font_weight(FontWeight::MEDIUM).line_clamp(2).child(pr.title.clone()))
+                        .when_some(chip, |d, c| d.child(div().flex_none().text_size(px(10.)).px(px(6.)).rounded(px(8.)).bg(dot.opacity(0.15)).text_color(dot).child(c))),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(6.))
+                        .text_size(px(11.))
+                        .text_color(theme.secondary)
+                        .child(format!("{} #{}", p.link.path, p.link.number))
+                        .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().font_family(MONO).child(format!("{} → {}", pr.head, pr.base))),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap(px(8.))
+                        .text_size(px(11.))
+                        .when_some(blocker, |d, b| d.child(div().text_color(theme.warning).child(b)))
+                        .when_some(review, |d, (t, c)| d.child(div().text_color(c).child(t)))
+                        .when_some(checks, |d, (t, c)| d.child(div().text_color(c).child(t))),
+                );
+        }
+        Err(e) => {
+            card = card
+                .child(div().font_weight(FontWeight::MEDIUM).child(format!("{} #{}", p.link.path, p.link.number)))
+                .child(div().text_size(px(11.)).text_color(theme.secondary).line_clamp(2).child(format!("Couldn't look it up: {}", e.lines().next().unwrap_or(""))));
+        }
+    }
+    card
+}
+
 fn run_label(e: &crate::state::thread::Entry) -> (String, String) {
     let sub = e.sub.as_ref();
     let input: serde_json::Value = e.data.tool_input.as_deref().and_then(|i| serde_json::from_str(i).ok()).unwrap_or_default();
@@ -824,7 +1010,11 @@ impl Render for Inspector {
         if panel == Panel::SideChat {
             self.ensure_side(cx);
         }
+        if panel == Panel::PullRequests && self._pulls_timer.is_none() {
+            self.ensure_pulls(cx);
+        }
         let content = match panel {
+            Panel::PullRequests => self.pull_requests(&theme, cx),
             Panel::SideChat => self.side_chat(&theme, cx),
             Panel::Subagents => self.subagents(&theme, cx),
             Panel::Files => self.files(&theme, cx),

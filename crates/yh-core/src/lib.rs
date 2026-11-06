@@ -6,6 +6,7 @@ pub mod attachments;
 pub mod claude;
 pub mod db;
 pub mod files;
+pub mod forge;
 pub mod schema;
 pub mod history;
 pub mod library;
