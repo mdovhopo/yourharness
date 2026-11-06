@@ -18,6 +18,27 @@ pub struct Subagent {
     pub steps: usize,
     /// What it reported, when it came apart from the tool's result (a background sub-agent).
     pub report: Option<String>,
+    /// What it said and did, for following it in the right sidebar: its finished messages
+    /// and tool calls, the newest `SUBAGENT_LOG` of them.
+    pub log: Vec<SubStep>,
+}
+
+/// One thing a sub-agent did: a message (`tool` None) or a tool call with its result.
+#[derive(Clone, Debug)]
+pub struct SubStep {
+    pub tool: Option<String>,
+    pub id: String,
+    pub text: String,
+    pub result: Option<String>,
+    pub is_error: bool,
+}
+
+const SUBAGENT_LOG: usize = 200;
+
+impl Subagent {
+    fn new(description: String) -> Subagent {
+        Subagent { description, status: "running".into(), steps: 0, report: None, log: vec![] }
+    }
 }
 
 pub struct Entry {
@@ -159,6 +180,10 @@ pub struct ThreadState {
     unsaved: Vec<(usize, Row)>,
     blocks: HashMap<String, EntryRef>,
     tools: HashMap<String, (EntryRef, i64)>,
+    /// Goes up whenever a sub-agent's log changes, for the right sidebar.
+    pub subagents_version: u64,
+    /// The sub-agent you picked in the right sidebar (its Agent tool call's id).
+    pub inspected_subagent: Option<String>,
     next_note: u64,
 }
 
@@ -186,6 +211,8 @@ impl ThreadState {
             unsaved: vec![],
             blocks: HashMap::new(),
             tools: HashMap::new(),
+            subagents_version: 0,
+            inspected_subagent: None,
             next_note: 0,
         }
     }
@@ -512,6 +539,22 @@ impl ThreadState {
                             self.subagent_step(&parent);
                         }
                     }
+                    self.subagent_log(&parent, |log| {
+                        for block in blocks {
+                            let step = match block {
+                                Block::Text(text) => SubStep { tool: None, id: String::new(), text, result: None, is_error: false },
+                                Block::Tool { id, name, input } => SubStep { tool: Some(name), id, text: input, result: None, is_error: false },
+                                Block::Thinking(_) => continue,
+                            };
+                            // The CLI may send a block again as it grows: keep the latest.
+                            match log.iter_mut().rev().find(|s| (step.tool.is_some() && s.id == step.id) || (step.tool.is_none() && s.tool.is_none() && step.text.starts_with(&s.text))) {
+                                Some(existing) if step.tool.is_some() || !existing.text.is_empty() => {
+                                    existing.text = step.text;
+                                }
+                                _ => log.push(step),
+                            }
+                        }
+                    });
                     return false;
                 }
                 // The CLI sends a message's blocks one `assistant` event each, all under the
@@ -578,7 +621,15 @@ impl ThreadState {
                 false
             }
             Event::ToolResults { parent, results } => {
-                if parent.is_some() {
+                if let Some(parent) = parent {
+                    self.subagent_log(&parent, |log| {
+                        for r in results {
+                            if let Some(step) = log.iter_mut().rev().find(|s| s.tool.is_some() && s.id == r.id) {
+                                step.result = Some(r.text);
+                                step.is_error = r.is_error;
+                            }
+                        }
+                    });
                     return false;
                 }
                 let touches_plan = results.iter().any(|r| {
@@ -610,7 +661,14 @@ impl ThreadState {
             }
             Event::SubagentStarted { tool_id, description } => {
                 if let Some((e, pos)) = self.tools.get(&tool_id).cloned() {
-                    e.borrow_mut().sub = Some(Subagent { description, status: "running".into(), steps: 0, report: None });
+                    {
+                        let mut b = e.borrow_mut();
+                        // Keep what it already did when the start comes after its first steps.
+                        match &mut b.sub {
+                            Some(sub) => sub.description = description,
+                            None => b.sub = Some(Subagent::new(description)),
+                        }
+                    }
                     e.borrow_mut().version += 1;
                     self.touch_pos(pos);
                 }
@@ -620,7 +678,7 @@ impl ThreadState {
                 if let Some((e, pos)) = self.tools.get(&tool_id).cloned() {
                     {
                         let mut b = e.borrow_mut();
-                        let sub = b.sub.get_or_insert(Subagent { description: String::new(), status: String::new(), steps: 0, report: None });
+                        let sub = b.sub.get_or_insert_with(|| Subagent::new(String::new()));
                         sub.status = status;
                         if summary.is_some() {
                             sub.report = summary;
@@ -661,11 +719,40 @@ impl ThreadState {
         self.dirty.insert(e.borrow().seq);
         {
             let mut b = e.borrow_mut();
-            let sub = b.sub.get_or_insert(Subagent { description: "Sub-agent".into(), status: "running".into(), steps: 0, report: None });
+            let sub = b.sub.get_or_insert_with(|| Subagent::new("Sub-agent".into()));
             sub.steps += 1;
             b.version += 1;
         }
         self.touch_pos(pos);
+    }
+
+    /// Changes what a sub-agent did (its log), and tells whoever follows it.
+    fn subagent_log(&mut self, parent: &str, change: impl FnOnce(&mut Vec<SubStep>)) {
+        let Some((e, pos)) = self.tools.get(parent).cloned() else { return };
+        {
+            let mut b = e.borrow_mut();
+            let sub = b.sub.get_or_insert_with(|| Subagent::new("Sub-agent".into()));
+            change(&mut sub.log);
+            if sub.log.len() > SUBAGENT_LOG {
+                let extra = sub.log.len() - SUBAGENT_LOG;
+                sub.log.drain(..extra);
+            }
+            b.version += 1;
+        }
+        self.subagents_version += 1;
+        self.touch_pos(pos);
+    }
+
+    /// The thread's sub-agents still held, oldest first: (Agent tool call id, its entry).
+    pub fn subagents(&self) -> Vec<(String, EntryRef)> {
+        let mut found: Vec<(usize, String, EntryRef)> = self
+            .tools
+            .iter()
+            .filter(|(_, (e, _))| e.borrow().sub.is_some() || e.borrow().data.tool_name.as_deref().is_some_and(|n| AGENT_TOOLS.contains(&n)))
+            .map(|(id, (e, _))| (e.borrow().seq, id.clone(), e.clone()))
+            .collect();
+        found.sort_by_key(|(seq, _, _)| *seq);
+        found.into_iter().map(|(_, id, e)| (id, e)).collect()
     }
 
     fn end_turn(&mut self) {

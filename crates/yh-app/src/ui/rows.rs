@@ -275,7 +275,7 @@ fn styled_text(styled: &Text, theme: &Theme) -> AnyElement {
     if styled.links.is_empty() {
         return shaped.into_any_element();
     }
-    // Links open in the browser; the paragraph's text and place name it.
+    // Web links open in the browser, file links in the Files tab; the paragraph's text names it.
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     std::hash::Hash::hash(&styled.text, &mut hasher);
     let id = std::hash::Hasher::finish(&hasher) as usize;
@@ -284,7 +284,7 @@ fn styled_text(styled: &Text, theme: &Theme) -> AnyElement {
     gpui_kit::InteractiveText::new(("link-text", id), shaped)
         .on_click(ranges, move |ix, _, cx| {
             if let Some(url) = urls.get(ix) {
-                cx.open_url(url);
+                crate::ui::inspector::open_link(url, cx);
             }
         })
         .into_any_element()

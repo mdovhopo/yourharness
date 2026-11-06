@@ -6,6 +6,7 @@ use crate::state::workspace::{Workspace, WorkspaceEvent};
 use crate::theme::{Theme, UI};
 use crate::ui::composer::Composer;
 use crate::ui::find::FindBar;
+use crate::ui::inspector::Inspector;
 use crate::ui::memory::MemoryPage;
 use crate::ui::spotlight::Spotlight;
 use crate::ui::sidebar::Sidebar;
@@ -16,7 +17,7 @@ use gpui_kit::{
 };
 use yh_core::claude::Decision;
 
-actions!(harness, [Stop, Allow, Deny, Quit, NewThread, Find, FindNext, FindPrevious, OpenSettings, OpenSpotlight]);
+actions!(harness, [Stop, Allow, Deny, Quit, NewThread, Find, FindNext, FindPrevious, OpenSettings, OpenSpotlight, ToggleInspector, OpenMemory]);
 
 /// Transcripts kept made for going back and forth.
 const KEPT_TRANSCRIPTS: usize = 6;
@@ -27,6 +28,7 @@ pub struct RootView {
     pub composer: Entity<Composer>,
     pub find: Entity<FindBar>,
     pub spotlight: Entity<Spotlight>,
+    pub inspector: Entity<Inspector>,
     deck: Vec<(String, Entity<TranscriptView>)>,
     /// The Memory page when one is open (or was last: it's kept for going back to).
     memory: Option<Entity<MemoryPage>>,
@@ -43,6 +45,11 @@ impl RootView {
         let composer = cx.new(|cx| Composer::new(workspace.clone(), window, cx));
         let find = cx.new(|cx| FindBar::new(workspace.clone(), window, cx));
         let spotlight = cx.new(|cx| Spotlight::new(workspace.clone(), window, cx));
+        let inspector = cx.new(|cx| Inspector::new(workspace.clone(), window, cx));
+        let links = inspector.downgrade();
+        cx.set_global(crate::ui::inspector::FileLinks(std::rc::Rc::new(move |path, lines, cx| {
+            let _ = links.update(cx, |i, cx| i.open_file(path, lines, cx));
+        })));
         let subscriptions = vec![
             cx.subscribe_in(&workspace, window, |this, _, event, window, cx| match event {
                 WorkspaceEvent::Selected(id) => this.show(id, window, cx),
@@ -57,7 +64,7 @@ impl RootView {
                 cx.notify();
             }),
         ];
-        RootView { workspace, sidebar, composer, find, spotlight, deck: vec![], memory: None, tasks: vec![], tasks_for: None, focus: cx.focus_handle(), _subscriptions: subscriptions }
+        RootView { workspace, sidebar, composer, find, spotlight, inspector, deck: vec![], memory: None, tasks: vec![], tasks_for: None, focus: cx.focus_handle(), _subscriptions: subscriptions }
     }
 
     fn show(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -188,6 +195,23 @@ impl Render for RootView {
             .on_action(cx.listener(|this, _: &OpenSpotlight, window, cx| this.spotlight.update(cx, |s, cx| s.show(window, cx))))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| crate::ui::settings::open(this.workspace.clone(), window, cx)))
             .on_action(cx.listener(|this, _: &Find, window, cx| this.find.update(cx, |f, cx| f.show(window, cx))))
+            .on_action(cx.listener(|this, _: &ToggleInspector, _, cx| {
+                this.workspace.update(cx, |ws, cx| {
+                    let on = !ws.shows_inspector;
+                    ws.set_shows_inspector(on, cx)
+                })
+            }))
+            .on_action(cx.listener(|this, _: &OpenMemory, _, cx| {
+                let ws = this.workspace.clone();
+                let project = ws
+                    .read(cx)
+                    .selected_thread()
+                    .map(|t| t.read(cx).meta.project_id.clone())
+                    .or_else(|| ws.read(cx).projects.first().map(|p| p.id.clone()));
+                if let Some(project) = project {
+                    ws.update(cx, |ws, cx| ws.open_memory(&project, cx));
+                }
+            }))
             .on_action(cx.listener(|this, _: &FindNext, _, cx| this.find.update(cx, |f, cx| f.step(true, cx))))
             .on_action(cx.listener(|this, _: &FindPrevious, _, cx| this.find.update(cx, |f, cx| f.step(false, cx))))
             .size_full()
@@ -266,6 +290,10 @@ impl Render for RootView {
                         )
                     }),
             )
+            .when(selected.is_some() && self.workspace.read(cx).shows_inspector, |d| {
+                // Cached: it redraws when its tab's data changes, not with the transcript.
+                d.child(AnyView::from(self.inspector.clone()).cached(StyleRefinement::default().h_full().w(px(crate::ui::inspector::WIDTH)).flex_none()))
+            })
             .child(self.spotlight.clone())
     }
 }

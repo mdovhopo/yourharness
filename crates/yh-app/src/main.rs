@@ -41,6 +41,8 @@ fn main() {
             KeyBinding::new("cmd-backspace", Deny, Some("Harness")),
             KeyBinding::new("cmd-n", NewThread, None),
             KeyBinding::new("cmd-f", Find, None),
+            KeyBinding::new("alt-cmd-0", ui::root::ToggleInspector, None),
+            KeyBinding::new("shift-cmd-m", ui::root::OpenMemory, None),
             KeyBinding::new("cmd-s", crate::ui::memory::SaveMemory, Some("MemoryPage")),
             KeyBinding::new("cmd-,", OpenSettings, None),
             KeyBinding::new("cmd-k", OpenSpotlight, None),
@@ -257,6 +259,16 @@ fn main() {
                         });
                     }
                 });
+            })
+            .detach();
+        }
+        // `YH_OPEN_FILE=<path[:line[-end]]>`: opened in the selected thread's Files tab, as a
+        // link does, after `YH_DRAFT_DELAY`.
+        if let Some(link) = env("YH_OPEN_FILE") {
+            let delay: f64 = env("YH_DRAFT_DELAY").and_then(|v| v.parse().ok()).unwrap_or(1.0);
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(Duration::from_secs_f64(delay)).await;
+                let _ = cx.update(|cx| ui::inspector::open_link(&link, cx));
             })
             .detach();
         }

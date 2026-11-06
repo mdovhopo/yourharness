@@ -38,6 +38,32 @@ struct Runtime {
     idle: Option<Task<()>>,
 }
 
+/// The right sidebar's tabs.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Panel {
+    Subagents,
+    Files,
+}
+
+impl Panel {
+    pub const ALL: [Panel; 2] = [Panel::Subagents, Panel::Files];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Panel::Subagents => "Sub-agents",
+            Panel::Files => "Files",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Panel> {
+        match name {
+            "subagents" => Some(Panel::Subagents),
+            "files" => Some(Panel::Files),
+            _ => None,
+        }
+    }
+}
+
 pub struct Workspace {
     pub library: Arc<Library>,
     pub data_dir: PathBuf,
@@ -61,6 +87,9 @@ pub struct Workspace {
     /// Threads whose title is being rewritten (`update_title`), and how many messages the user
     /// had sent when it was last asked for.
     titles_rewriting: std::collections::HashSet<String>,
+    /// The right sidebar: open, and on which tab.
+    pub shows_inspector: bool,
+    pub panel: Panel,
     /// The project whose Memory page is open in place of a thread.
     pub page: Option<String>,
     /// Goes up whenever memory changes (an agent's tools, the Memory page), for views of it.
@@ -106,6 +135,8 @@ impl Workspace {
             tool_requests,
             titles_rewriting: Default::default(),
             page: None,
+            shows_inspector: false,
+            panel: Panel::Subagents,
             memory_revision: 0,
             title_asked_at: HashMap::new(),
         };
@@ -114,6 +145,11 @@ impl Workspace {
                 let list = list.as_array().map(|a| a.iter().filter_map(SlashCommand::from_json).collect()).unwrap_or_default();
                 workspace.commands.insert(project, list);
             }
+        }
+        workspace.shows_inspector = workspace.library.setting("showsInspector").and_then(|v| v.as_bool()).unwrap_or(false);
+        if let Some(panel) = std::env::var("YH_INSPECTOR_PANEL").ok().and_then(|p| Panel::from_name(&p)) {
+            workspace.panel = panel;
+            workspace.shows_inspector = true;
         }
         workspace.ensure_home(cx);
         workspace.recover_cut_off_turns(cx);
@@ -879,21 +915,44 @@ impl Workspace {
     /// The thread's folder's files matching `query`, best first; listed off the main thread.
     pub fn mention_files(&mut self, thread: &Entity<ThreadState>, query: String, cx: &mut Context<Self>) -> Task<Vec<String>> {
         let folder = self.folder_of(thread.read(cx));
-        let cached = self.files.get(&folder).filter(|(at, _)| at.elapsed() < Duration::from_secs(30)).map(|(_, f)| f.clone());
-        cx.spawn(async move |this, cx| {
-            let files = match cached {
-                Some(files) => files,
-                None => {
-                    let path = folder.clone();
-                    let files = Arc::new(cx.background_executor().spawn(async move { yh_core::files::list(std::path::Path::new(&path)) }).await);
-                    let _ = this.update(cx, |ws, _| {
-                        ws.files.insert(folder, (Instant::now(), files.clone()));
-                    });
-                    files
-                }
-            };
+        let files = self.folder_files(folder, cx);
+        cx.spawn(async move |_, cx| {
+            let files = files.await;
             cx.background_executor().spawn(async move { yh_core::files::matches(&files, &query, 12) }).await
         })
+    }
+
+    /// A folder's files (git's list, else a walk), read off the main thread and kept 30
+    /// seconds: for `@` mentions, the Files tab and Go to File.
+    pub fn folder_files(&mut self, folder: String, cx: &mut Context<Self>) -> Task<Arc<Vec<String>>> {
+        let cached = self.files.get(&folder).filter(|(at, _)| at.elapsed() < Duration::from_secs(30)).map(|(_, f)| f.clone());
+        cx.spawn(async move |this, cx| match cached {
+            Some(files) => files,
+            None => {
+                let path = folder.clone();
+                let files = Arc::new(cx.background_executor().spawn(async move { yh_core::files::list(std::path::Path::new(&path)) }).await);
+                let _ = this.update(cx, |ws, _| {
+                    ws.files.insert(folder, (Instant::now(), files.clone()));
+                });
+                files
+            }
+        })
+    }
+
+    // MARK: Right sidebar
+
+    pub fn set_shows_inspector(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.shows_inspector = on;
+        self.library.set_setting("showsInspector", &Value::from(on));
+        cx.notify();
+    }
+
+    pub fn show_panel(&mut self, panel: Panel, cx: &mut Context<Self>) {
+        self.panel = panel;
+        if !self.shows_inspector {
+            self.set_shows_inspector(true, cx);
+        }
+        cx.notify();
     }
 
     fn note_catalog(&mut self, models: &Value, commands: &Value, project_id: &str, cx: &mut Context<Self>) {

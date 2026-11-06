@@ -2,6 +2,7 @@
 
 pub mod composer;
 pub mod find;
+pub mod inspector;
 pub mod memory;
 pub mod root;
 pub mod settings;
