@@ -78,6 +78,6 @@ whole app; the user's app stays the frozen 0.0.16 until then. The web rewrite's 
 | 1 | **The app owns threads.** Read and write `harness.sqlite` in the Swift app's format (projects, threads, rows, blobs), the user's data folder. Thread runtime: sessions, resume, idle reap, saving rows as they change, crash recovery. Sidebar: pin, settle, rename, delete, new thread. Composer: model, effort and mode from the CLI's catalog; queue and steer; stop. Permission, question and plan cards. Unread. | done |
 | 2 | Transcript parity: markdown details (tree-sitter code, tables, links), Edit diffs, sub-agent cards, plan checklist, notices and compaction, slash commands, @ mentions, images and files in messages, find in thread. | done |
 | 3 | App shell: titles (generated, renamed), notifications and badge, Home project, ⌘K search, settings, usage limits, resume a Claude Code session. | done |
-| 4 | Agents' tools served by the app: memory and thread MCP servers, their views (Memory page, tasks). | thread tools done |
+| 4 | Agents' tools served by the app: memory and thread MCP servers, their views (Memory page, tasks). | done except Memory's insights, graph, import, export and reconciler (chunk 6) |
 | 5 | Right sidebar: side chat, sub-agents, files, pull requests and workspaces, the agents' browser (a WKWebView placed over the GPUI window). | |
 | 6 | The rest: usage view, MCP sheet, state export and import, updater, release pipeline; then the switch. | |

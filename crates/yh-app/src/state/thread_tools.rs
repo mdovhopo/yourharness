@@ -45,6 +45,8 @@ pub enum ToolRequest {
     Import { caller: String, session: String, project: Option<String>, reply: flume::Sender<Result<(String, usize), String>> },
     /// `messages`: the conversation's user and assistant messages, oldest first; `sent`: how many
     /// the user sent, so a title is asked for once per message at most.
+    /// An agent's memory tools changed the memory: pages showing it read it again.
+    MemoryChanged,
     UpdateTitle { caller: String, messages: Vec<(bool, String)>, sent: usize, hint: Option<String>, reply: flume::Sender<String> },
 }
 

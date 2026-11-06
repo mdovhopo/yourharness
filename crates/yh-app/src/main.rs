@@ -41,6 +41,7 @@ fn main() {
             KeyBinding::new("cmd-backspace", Deny, Some("Harness")),
             KeyBinding::new("cmd-n", NewThread, None),
             KeyBinding::new("cmd-f", Find, None),
+            KeyBinding::new("cmd-s", crate::ui::memory::SaveMemory, Some("MemoryPage")),
             KeyBinding::new("cmd-,", OpenSettings, None),
             KeyBinding::new("cmd-k", OpenSpotlight, None),
             KeyBinding::new("cmd-g", FindNext, None),
@@ -223,6 +224,39 @@ fn main() {
                         let _ = ws.update(cx, |ws, cx| ws.resume_session(&words, cx)).map_err(|e| eprintln!("resume: {e}"));
                     });
                 }
+            })
+            .detach();
+        }
+        // `YH_OPEN_MEMORY=1`: the selected thread's project's Memory page (else the first
+        // project's) after `YH_DRAFT_DELAY`, on `YH_MEMORY_TAB=memories|tasks|activity`.
+        if env("YH_OPEN_MEMORY").as_deref() == Some("1") {
+            let delay: f64 = env("YH_DRAFT_DELAY").and_then(|v| v.parse().ok()).unwrap_or(1.0);
+            let (workspace, root) = (workspace.clone(), root.clone());
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(Duration::from_secs_f64(delay)).await;
+                let _ = cx.update(|cx| {
+                    let project = workspace
+                        .read(cx)
+                        .selected_thread()
+                        .map(|t| t.read(cx).meta.project_id.clone())
+                        .or_else(|| workspace.read(cx).projects.first().map(|p| p.id.clone()));
+                    if let Some(project) = project {
+                        workspace.update(cx, |ws, cx| ws.open_memory(&project, cx));
+                    }
+                });
+                let tab = match env("YH_MEMORY_TAB").as_deref() {
+                    Some("tasks") => ui::memory::Tab::Tasks,
+                    Some("activity") => ui::memory::Tab::Activity,
+                    _ => ui::memory::Tab::Memories,
+                };
+                let _ = cx.update(|cx| {
+                    if let Some(page) = root.read(cx).memory_page(cx) {
+                        page.update(cx, |p, cx| {
+                            p.tab = tab;
+                            cx.notify();
+                        });
+                    }
+                });
             })
             .detach();
         }

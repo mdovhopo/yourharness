@@ -321,7 +321,8 @@ fn small_row(id: SharedString, label: String, theme: &Theme) -> gpui_kit::Statef
 impl Render for Sidebar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::get(cx);
-        let selected = self.workspace.read(cx).selected.clone();
+        // With a page open in its place, no thread shows as selected.
+        let selected = if self.workspace.read(cx).page.is_some() { None } else { self.workspace.read(cx).selected.clone() };
         let tracking = probe::enabled();
         let mut column = div()
             .id("sidebar-scroll")
@@ -345,7 +346,19 @@ impl Render for Sidebar {
                         .text_color(theme.secondary)
                         .text_size(px(11.))
                         .font_weight(FontWeight::SEMIBOLD)
-                        .child(div().flex_1().overflow_hidden().whitespace_nowrap().child(if home { "Home".to_string() } else { project.name.clone() }))
+                        .child({
+                            // The name opens the project's Memory page.
+                            let (ws, pid) = (self.workspace.clone(), project.id.clone());
+                            div()
+                                .id(SharedString::from(format!("project-{}", project.id)))
+                                .flex_1()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .rounded(px(4.))
+                                .hover(|s| s.text_color(theme.text))
+                                .child(if home { "Home".to_string() } else { project.name.clone() })
+                                .on_click(move |_, _, cx| ws.update(cx, |ws, cx| ws.open_memory(&pid, cx)))
+                        })
                         .child(
                             div()
                                 .id(SharedString::from(format!("new-{}", project.id)))

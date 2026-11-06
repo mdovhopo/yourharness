@@ -24,6 +24,8 @@ pub enum WorkspaceEvent {
     Selected(String),
     /// A thread went away.
     Removed(String),
+    /// A page (Memory) took the place of the thread.
+    PageOpened,
 }
 
 /// One thread's `claude`, between turns too.
@@ -59,6 +61,10 @@ pub struct Workspace {
     /// Threads whose title is being rewritten (`update_title`), and how many messages the user
     /// had sent when it was last asked for.
     titles_rewriting: std::collections::HashSet<String>,
+    /// The project whose Memory page is open in place of a thread.
+    pub page: Option<String>,
+    /// Goes up whenever memory changes (an agent's tools, the Memory page), for views of it.
+    pub memory_revision: u64,
     title_asked_at: HashMap<String, usize>,
 }
 
@@ -99,6 +105,8 @@ impl Workspace {
             new_count: 0,
             tool_requests,
             titles_rewriting: Default::default(),
+            page: None,
+            memory_revision: 0,
             title_asked_at: HashMap::new(),
         };
         if let Some(Value::Object(all)) = workspace.library.setting("slashCommands") {
@@ -183,6 +191,10 @@ impl Workspace {
     /// history that isn't held follows, off the main thread.
     pub fn select(&mut self, id: &str, cx: &mut Context<Self>) {
         let Some(thread) = self.thread(id) else { return };
+        // Choosing a thread closes a page.
+        if self.page.take().is_some() {
+            cx.notify();
+        }
         if self.selected.as_deref() == Some(id) {
             return;
         }
@@ -546,7 +558,15 @@ impl Workspace {
             store.note_injection(&scope, listed, text.len(), &actor);
             prompt.push(text);
             allowed.push("mcp__memory".to_string());
-            servers.push(std::sync::Arc::new(yh_core::memory_tools::MemoryTools { store, scope, actor, on_change: Box::new(|| {}) }));
+            let changed = self.tool_requests.clone();
+            servers.push(std::sync::Arc::new(yh_core::memory_tools::MemoryTools {
+                store,
+                scope,
+                actor,
+                on_change: Box::new(move || {
+                    let _ = changed.send(ToolRequest::MemoryChanged);
+                }),
+            }));
         }
         // The thread tools: list, read and tidy threads; this thread's title.
         if let Some(project) = project.as_ref() {
@@ -1036,6 +1056,24 @@ impl Workspace {
         Ok((id, messages))
     }
 
+    // MARK: Memory
+
+    /// Opens a project's Memory page in place of the open thread.
+    pub fn open_memory(&mut self, project: &str, cx: &mut Context<Self>) {
+        self.page = Some(project.to_string());
+        cx.emit(WorkspaceEvent::PageOpened);
+        cx.notify();
+    }
+
+    pub fn memory_changed(&mut self, cx: &mut Context<Self>) {
+        self.memory_revision += 1;
+        cx.notify();
+    }
+
+    pub fn memory_store(&self) -> Option<yh_core::memory::Store> {
+        self.library.db.clone().map(|db| yh_core::memory::Store { db })
+    }
+
     // MARK: Agents' thread tools
 
     /// The project a thread's agent reaches: None in Home (everything).
@@ -1072,6 +1110,7 @@ impl Workspace {
                 });
                 let _ = reply.send(snapshot);
             }
+            ToolRequest::MemoryChanged => self.memory_changed(cx),
             ToolRequest::Rename { id, title, reply } => {
                 self.rename(&id, &title, cx);
                 let _ = reply.send(());

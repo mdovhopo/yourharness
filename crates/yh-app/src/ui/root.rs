@@ -6,6 +6,7 @@ use crate::state::workspace::{Workspace, WorkspaceEvent};
 use crate::theme::{Theme, UI};
 use crate::ui::composer::Composer;
 use crate::ui::find::FindBar;
+use crate::ui::memory::MemoryPage;
 use crate::ui::spotlight::Spotlight;
 use crate::ui::sidebar::Sidebar;
 use crate::ui::transcript::TranscriptView;
@@ -27,6 +28,11 @@ pub struct RootView {
     pub find: Entity<FindBar>,
     pub spotlight: Entity<Spotlight>,
     deck: Vec<(String, Entity<TranscriptView>)>,
+    /// The Memory page when one is open (or was last: it's kept for going back to).
+    memory: Option<Entity<MemoryPage>>,
+    /// The open thread's tasks from memory, for its header: (title, state, steps done, steps).
+    tasks: Vec<(String, String, usize, usize)>,
+    tasks_for: Option<(String, u64)>,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -44,10 +50,14 @@ impl RootView {
                     this.deck.retain(|(t, _)| t != id);
                     cx.notify();
                 }
+                WorkspaceEvent::PageOpened => this.open_page(window, cx),
             }),
-            cx.observe(&workspace, |_, _, cx| cx.notify()),
+            cx.observe(&workspace, |this, _, cx| {
+                this.refresh_tasks(cx);
+                cx.notify();
+            }),
         ];
-        RootView { workspace, sidebar, composer, find, spotlight, deck: vec![], focus: cx.focus_handle(), _subscriptions: subscriptions }
+        RootView { workspace, sidebar, composer, find, spotlight, deck: vec![], memory: None, tasks: vec![], tasks_for: None, focus: cx.focus_handle(), _subscriptions: subscriptions }
     }
 
     fn show(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -69,6 +79,54 @@ impl RootView {
         }
         self.composer.update(cx, |c, cx| c.switch_to(id, window, cx));
         cx.notify();
+    }
+
+    fn open_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(project) = self.workspace.read(cx).page.clone() else { return };
+        if self.memory.as_ref().is_none_or(|m| m.read(cx).project != project) {
+            let ws = self.workspace.clone();
+            self.memory = Some(cx.new(|cx| MemoryPage::new(ws, project, window, cx)));
+        }
+        cx.notify();
+    }
+
+    /// The open thread's tasks, read off the main thread when the thread or memory changes.
+    fn refresh_tasks(&mut self, cx: &mut Context<Self>) {
+        let ws = self.workspace.read(cx);
+        let key = ws.selected.clone().map(|id| (id, ws.memory_revision));
+        if key == self.tasks_for {
+            return;
+        }
+        self.tasks_for = key.clone();
+        let (Some((id, _)), Some(store)) = (key, ws.memory_store()) else {
+            self.tasks.clear();
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let tasks = cx
+                .background_executor()
+                .spawn(async move {
+                    store
+                        .tasks_of_thread(&id)
+                        .into_iter()
+                        .filter(|m| m.status == "active" && m.task_state.as_deref() != Some("done"))
+                        .map(|m| (m.title.clone(), m.task_state.clone().unwrap_or_else(|| "active".into()), m.steps_done(), m.steps.len()))
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.tasks != tasks {
+                    this.tasks = tasks;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    pub fn memory_page(&self, cx: &App) -> Option<Entity<MemoryPage>> {
+        let project = self.workspace.read(cx).page.clone()?;
+        self.memory.clone().filter(|m| m.read(cx).project == project)
     }
 
     pub fn transcript_view(&self, cx: &App) -> Option<Entity<TranscriptView>> {
@@ -114,9 +172,11 @@ impl Focusable for RootView {
 impl Render for RootView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::get(cx);
-        let selected = self.workspace.read(cx).selected_thread();
+        let page = self.memory_page(cx);
+        let selected = if page.is_some() { None } else { self.workspace.read(cx).selected_thread() };
         let title = selected.as_ref().map(|t| t.read(cx).title.clone()).unwrap_or_else(|| "YourHarness".into());
         let transcript = self.transcript_view(cx);
+        let tasks = if selected.is_some() { self.tasks.clone() } else { vec![] };
         div()
             .id("root")
             .key_context("Harness")
@@ -146,40 +206,64 @@ impl Render for RootView {
                     .h_full()
                     .flex()
                     .flex_col()
-                    .child(
-                        div()
-                            .h(px(44.))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .px(px(20.))
-                            .border_b_1()
-                            .border_color(theme.separator)
-                            .child(div().font_weight(FontWeight::SEMIBOLD).overflow_hidden().whitespace_nowrap().child(title)),
-                    )
-                    .child(self.find.clone())
-                    .child(match transcript {
-                        // Cached: typing in the composer or a sidebar change doesn't redraw the
-                        // transcript; its own thread changing does.
-                        Some(view) => div()
-                            .flex_1()
-                            .min_h_0()
-                            .relative()
-                            .child(AnyView::from(view).cached(StyleRefinement::default().size_full()))
-                            .into_any_element(),
-                        None => div()
-                            .flex_1()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_color(theme.secondary)
-                            .child("Pick a thread, or start one with + next to a project.")
-                            .into_any_element(),
-                    })
+                    .when_some(page, |d, page| d.child(div().flex_1().min_h_0().child(page)))
                     .when(selected.is_some(), |d| {
+                        d.child(
+                            div()
+                                .h(px(44.))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .gap(px(10.))
+                                .px(px(20.))
+                                .border_b_1()
+                                .border_color(theme.separator)
+                                .child(div().flex_1().min_w_0().font_weight(FontWeight::SEMIBOLD).overflow_hidden().whitespace_nowrap().text_ellipsis().child(title))
+                                .children(tasks.into_iter().take(2).map(|(title, state, done, steps)| {
+                                    // A task the agent tracks for this thread, from memory.
+                                    div()
+                                        .flex_none()
+                                        .max_w(px(280.))
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(6.))
+                                        .px(px(8.))
+                                        .py(px(2.))
+                                        .rounded(px(10.))
+                                        .bg(theme.card)
+                                        .text_size(px(11.))
+                                        .text_color(theme.secondary)
+                                        .child(div().w(px(6.)).h(px(6.)).rounded_full().bg(if state == "blocked" { theme.warning } else { theme.accent }))
+                                        .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().child(title))
+                                        .when(steps > 0, |d| d.child(div().flex_none().child(format!("{done}/{steps}"))))
+                                })),
+                        )
+                        .child(self.find.clone())
+                        .child(match transcript {
+                            // Cached: typing in the composer or a sidebar change doesn't redraw the
+                            // transcript; its own thread changing does.
+                            Some(view) => div()
+                                .flex_1()
+                                .min_h_0()
+                                .relative()
+                                .child(AnyView::from(view).cached(StyleRefinement::default().size_full()))
+                                .into_any_element(),
+                            None => div().flex_1().into_any_element(),
+                        })
                         // Not cached: a cached view needs a fixed size, and the composer grows
                         // with its cards. Its render is a handful of elements.
-                        d.child(div().flex_none().w_full().child(self.composer.clone()))
+                        .child(div().flex_none().w_full().child(self.composer.clone()))
+                    })
+                    .when(selected.is_none() && self.memory_page(cx).is_none(), |d| {
+                        d.child(
+                            div()
+                                .flex_1()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_color(theme.secondary)
+                                .child("Pick a thread, or start one with + next to a project."),
+                        )
                     }),
             )
             .child(self.spotlight.clone())
