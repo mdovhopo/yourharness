@@ -1,6 +1,6 @@
 import { batch, createSignal } from "solid-js";
 import { call, hostLog, onPatches } from "../host";
-import type { LibrarySnapshot, ModelWire, Page, Patch, ProjectWire, ThreadSnapshot } from "../protocol";
+import type { LibrarySnapshot, LimitsWire, ModelWire, Page, Patch, ProjectWire, SearchHit, SettingsWire, ThreadSnapshot } from "../protocol";
 import { Entry, ThreadState } from "./thread";
 
 export { Entry, ThreadState } from "./thread";
@@ -17,8 +17,10 @@ const [selectedId, setSelectedId] = createSignal<string | null>(null);
 const [deck, setDeck] = createSignal<ThreadState[]>([]);
 const [models, setModels] = createSignal<ModelWire[]>([]);
 const [defaults, setDefaults] = createSignal({ model: "", effort: "" });
+const [limits, setLimits] = createSignal<LimitsWire | null>(null);
+const [settings, setSettings] = createSignal<SettingsWire | null>(null);
 
-export { projects, threadList, selectedId, deck, models, defaults };
+export { projects, threadList, selectedId, deck, models, defaults, limits, settings };
 
 const byId = new Map<string, ThreadState>();
 export const thread = (id: string | null) => (id ? byId.get(id) : undefined);
@@ -61,6 +63,17 @@ onPatches((patches: Patch[]) => {
           }
           break;
         }
+        case "limits":
+          setLimits(patch.v);
+          break;
+        case "settings":
+          setSettings(patch.v);
+          setDefaults({ model: patch.v.model, effort: patch.v.effort });
+          call("appearance", { v: patch.v.appearance }).catch(() => {});
+          break;
+        case "open":
+          select(patch.th);
+          break;
         case "commands":
           byId.get(patch.th)?.setCommands(patch.v);
           break;
@@ -93,7 +106,10 @@ export async function loadLibrary() {
     setThreadList(states);
     setModels(snapshot.models ?? []);
     setDefaults(snapshot.defaults);
+    setLimits(snapshot.limits);
+    setSettings(snapshot.settings);
   });
+  if (snapshot.settings?.appearance !== "system") call("appearance", { v: snapshot.settings.appearance }).catch(() => {});
   hostLog(`UI library: ${snapshot.projects.length} projects, ${states.length} threads`);
 }
 
@@ -189,3 +205,16 @@ export const pin = (t: ThreadState, on: boolean) => call("pin", { th: t.id, on }
 export const settle = (t: ThreadState, on: boolean) => call("settle", { th: t.id, on });
 export const remove = (t: ThreadState) => call("delete", { th: t.id });
 export const saveDraft = (t: ThreadState, text: string) => call("draft", { th: t.id, text }).catch(() => {});
+
+export const search = (q: string) => call<{ v: SearchHit[] }>("search", { q }).then((r) => r.v);
+export const changeSetting = (key: string, value: unknown) => call("setSetting", { key, value });
+
+/** A folder chosen in the native panel, added as a project, with a new thread in it. */
+export async function addProject() {
+  const path = await call<string | null>("chooseFolder");
+  if (!path) return;
+  const id = await call<string>("addProject", { path });
+  for (let i = 0; i < 60 && !project(id); i++) await new Promise((r) => requestAnimationFrame(r));
+  const p = project(id);
+  if (p) newThread(p);
+}

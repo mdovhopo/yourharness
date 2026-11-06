@@ -223,12 +223,14 @@ export function Composer(props: { t: ThreadState }) {
         />
         <div class="composer-bar">
           <select title="Model" value={currentModel()} onChange={(e) => setModel(props.t, e.currentTarget.value)}>
+            <option value="">Default model</option>
             <Show when={!model() && currentModel()}>
               <option value={currentModel()}>{currentModel()}</option>
             </Show>
             <For each={models()}>{(m) => <option value={m.value}>{m.displayName}</option>}</For>
           </select>
           <select title="Reasoning effort" value={currentEffort()} onChange={(e) => setEffort(props.t, e.currentTarget.value)}>
+            <option value="">Default effort</option>
             <For each={efforts()}>{(level) => <option value={level}>{level[0].toUpperCase() + level.slice(1)}</option>}</For>
           </select>
           <select title="Permissions" value={mode()} onChange={(e) => setMode(props.t, e.currentTarget.value)}>

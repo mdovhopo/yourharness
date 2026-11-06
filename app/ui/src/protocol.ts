@@ -39,11 +39,17 @@ export type ThreadWire = {
 
 export type ModelWire = { value: string; displayName: string; description?: string; supportedEffortLevels: string[]; resolvedModel?: string };
 
+export type LimitsWire = { status: string; windows: { name: string; utilization: number; resetsAt?: string }[] };
+export type SettingsWire = { model: string; effort: string; mode: string; titles: boolean; titleModel: string; notifications: boolean; appearance: string };
+export type SearchHit = { th: string; title: string; kind: "title" | "text"; snippet?: string; seq?: number };
+
 export type LibrarySnapshot = {
   projects: ProjectWire[];
   threads: ThreadWire[];
   defaults: { model: string; effort: string };
   models: ModelWire[];
+  limits: LimitsWire | null;
+  settings: SettingsWire;
 };
 
 export type QuestionWire = { q: string; h: string; multi: boolean; options: { label: string; d: string }[] };
@@ -77,7 +83,10 @@ export type Patch =
   | { t: "commands"; th: string; v: CommandWire[] }
   | { t: "plan"; th: string; v: PlanItemWire[] }
   | { t: "project"; p: ProjectWire }
-  | { t: "models"; v: ModelWire[] };
+  | { t: "models"; v: ModelWire[] }
+  | { t: "limits"; v: LimitsWire }
+  | { t: "settings"; v: SettingsWire }
+  | { t: "open"; th: string };
 
 export const MODES: [string, string][] = [
   ["auto", "Auto"],

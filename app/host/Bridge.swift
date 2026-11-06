@@ -13,6 +13,7 @@ final class Bridge: NSObject, WKScriptMessageHandlerWithReply {
     let backend: Backend
     let outbox = Outbox()
     weak var probe: HostProbe?
+    let attention = AttentionCenter()
     private var link: CADisplayLink?
     private var delivering = false
 
@@ -23,6 +24,8 @@ final class Bridge: NSObject, WKScriptMessageHandlerWithReply {
         AppScheme.shared.attachments = Self.dataDirectory().appendingPathComponent("attachments", isDirectory: true)
         super.init()
         backend.sink = { [weak self] patch in self?.outbox.push(patch) }
+        backend.attention = { [weak self] in self?.attention.handle($0) }
+        attention.open = { [weak self] thread in self?.outbox.push(["t": "open", "th": thread]) }
         // `YH_PROJECT=<folder>`: that folder as a project, for trying things somewhere throwaway.
         if let path = env["YH_PROJECT"] { backend.library.addProject(path: path) }
         outbox.onPending = { [weak self] in self?.link?.isPaused = false }
@@ -85,6 +88,18 @@ final class Bridge: NSObject, WKScriptMessageHandlerWithReply {
             return true
         case "menu":
             return NativeMenu.show(items: p["items"] as? [[String: Any]] ?? [], at: NSPoint(x: p["x"] as? Double ?? 0, y: p["y"] as? Double ?? 0), in: webView)
+        case "chooseFolder":
+            let panel = NSOpenPanel()
+            panel.canChooseDirectories = true
+            panel.canChooseFiles = false
+            panel.prompt = "Add Project"
+            panel.message = "Choose a folder to work in."
+            guard await panel.beginSheetModal(for: window) == .OK else { return nil }
+            return panel.url?.path
+        case "appearance":
+            let name = p["v"] as? String
+            window.appearance = name == "light" ? NSAppearance(named: .aqua) : name == "dark" ? NSAppearance(named: .darkAqua) : nil
+            return true
         case "confirm":
             let alert = NSAlert()
             alert.messageText = p["title"] as? String ?? ""

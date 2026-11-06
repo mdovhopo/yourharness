@@ -22,6 +22,10 @@ public final class Backend {
     private var executable: URL?
     /// Where patches go: the host batches them to the page once a frame.
     public var sink: (Wire) -> Void = { _ in }
+    /// Notifications and the Dock badge, shown natively by the host.
+    public var attention: (Attention) -> Void = { _ in }
+    /// The latest usage limits Claude reported.
+    var limits: Any?
 
     public init(dataDirectory: URL) {
         self.dataDirectory = dataDirectory
@@ -79,6 +83,10 @@ public final class Backend {
                 }
             }
             threadChanged(th)
+            if library.thread(th)?["titleChosen"] as? Bool != true, store.base(th) == 0 || store.base(th) == nil,
+               store.entries(th).isEmpty, !text.isEmpty {
+                generateTitle(th, firstMessage: text)
+            }
             let images = prepareImages(p["images"] as? [String] ?? [], thread: th)
             try await runtime(th).send(text, images: images, now: p["now"] as? Bool ?? false)
             return true
@@ -154,6 +162,13 @@ public final class Backend {
             let id = library.addProject(path: p["path"] as? String ?? "")
             if let project = library.project(id) { sink(["t": "project", "p": library.projectWire(project)]) }
             return id
+        case "search":
+            return ["v": search(p["q"] as? String ?? "")]
+        case "settings":
+            return settingsWire()
+        case "setSetting":
+            setSetting(p["key"] as? String ?? "", p["value"] ?? NSNull())
+            return true
         case "read":
             if unread.remove(th) != nil { threadChanged(th) }
             return true
@@ -183,7 +198,9 @@ public final class Backend {
         return ["projects": library.projects.map(library.projectWire),
                 "threads": library.threads.map { threadWire($0) },
                 "defaults": ["model": defaults["model"] ?? "", "effort": defaults["effort"] ?? ""],
-                "models": library.setting("claudeModels") ?? []]
+                "models": library.setting("claudeModels") ?? [],
+                "limits": limits ?? NSNull(),
+                "settings": settingsWire()]
     }
 
     private func threadWire(_ t: [String: Any]) -> Wire {
@@ -207,6 +224,10 @@ public final class Backend {
     func turnEnded(_ id: String) {
         unread.insert(id)
         threadChanged(id)
+        noteAttention(id, waiting: false)
+        if library.setting("notifications") as? Bool ?? true, let title = library.thread(id)?["title"] as? String {
+            attention(.notify(thread: id, title: title, body: "Claude finished"))
+        }
     }
 
     func threadChanged(_ id: String) {

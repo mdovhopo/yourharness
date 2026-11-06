@@ -1,7 +1,8 @@
 import { createMemo, createSignal, For, Show } from "solid-js";
 import { confirmNative, nativeMenu } from "../../host";
 import type { ProjectWire } from "../../protocol";
-import { newThread, pin, remove, rename, select, selectedId, settle, threadList, projects, type ThreadState } from "../../store";
+import { addProject, limits, newThread, pin, remove, rename, select, selectedId, settle, threadList, projects, type ThreadState } from "../../store";
+import { setSettingsOpen } from "../shell/Settings";
 
 // Projects with their threads: pinned first, then the newest; settled ones on a shelf of
 // their own. Right-click (or the thread's ⋯) opens a native menu.
@@ -26,7 +27,11 @@ export function Sidebar() {
       <div class="sidebar-top" />
       <div class="sidebar-scroll">
         <For each={groups()}>{(g) => <ProjectGroup project={g.project} threads={g.threads} />}</For>
+        <button class="more add-project" onClick={addProject}>
+          + Add Project…
+        </button>
       </div>
+      <Limits />
     </nav>
   );
 }
@@ -130,6 +135,33 @@ function ThreadRow(props: { t: ThreadState }) {
       <Show when={t.running() && !t.waitingForYou()}>
         <span class="dot" />
       </Show>
+    </div>
+  );
+}
+
+/** Claude's 5-hour and weekly limits, as it last reported them, and the way to Settings. */
+function Limits() {
+  const label = (name: string) => (name === "five_hour" ? "5h" : name === "seven_day" ? "Week" : name.replace(/_/g, " "));
+  return (
+    <div class="sidebar-foot">
+      <Show when={limits()?.windows.length} fallback={<span class="foot-note">Usage shows after a turn</span>}>
+        <div class="limits">
+          <For each={limits()!.windows}>
+            {(w) => (
+              <div class="limit" title={w.resetsAt ? `Resets ${new Date(w.resetsAt).toLocaleString()}` : ""}>
+                <span class="limit-name">{label(w.name)}</span>
+                <span class="limit-bar">
+                  <span class="limit-fill" classList={{ high: w.utilization > 0.8 }} style={{ width: `${Math.round(w.utilization * 100)}%` }} />
+                </span>
+                <span class="limit-pct">{Math.round(w.utilization * 100)}%</span>
+              </div>
+            )}
+          </For>
+        </div>
+      </Show>
+      <button class="icon" title="Settings (⌘,)" onClick={() => setSettingsOpen(true)}>
+        ⚙︎
+      </button>
     </div>
   );
 }

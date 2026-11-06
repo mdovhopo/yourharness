@@ -219,3 +219,29 @@ kbd { font: 11px -apple-system, system-ui; opacity: 0.6; margin-left: 4px; }
 .find-count { color: var(--secondary); font-size: 11px; min-width: 64px; text-align: right; }
 .item.find-hit { box-shadow: inset 3px 0 0 rgba(255, 204, 0, 0.6); }
 .item.find-current { box-shadow: inset 3px 0 0 #ffcc00; background: rgba(255, 204, 0, 0.08); }
+
+/* Chunk 3 */
+.sidebar-foot { flex: none; display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-top: 1px solid var(--separator); }
+.foot-note { flex: 1; color: var(--secondary); font-size: 11px; }
+.limits { flex: 1; display: flex; flex-direction: column; gap: 3px; }
+.limit { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--secondary); }
+.limit-name { width: 34px; }
+.limit-bar { flex: 1; height: 4px; border-radius: 2px; background: var(--selected); overflow: hidden; }
+.limit-fill { display: block; height: 100%; background: var(--accent); }
+.limit-fill.high { background: #ff9f0a; }
+.limit-pct { width: 30px; text-align: right; font-variant-numeric: tabular-nums; }
+.add-project { margin: 4px 0 0 2px; }
+.overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.18); z-index: 20; display: flex; align-items: flex-start; justify-content: center; padding-top: 12vh; }
+.spotlight { width: min(640px, 80vw); background: var(--card); border-radius: 14px; border: 1px solid var(--separator); box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3); overflow: hidden; }
+.spotlight input { width: 100%; font: inherit; font-size: 18px; border: 0; outline: 0; padding: 14px 16px; background: transparent; color: var(--text); }
+.spotlight-results { border-top: 1px solid var(--separator); max-height: 50vh; overflow-y: auto; padding: 4px; }
+.spotlight-hit { display: flex; flex-direction: column; width: 100%; padding: 6px 10px; border-radius: 8px; }
+.spotlight-hit.on { background: var(--accent); color: white; }
+.spotlight-hit.on .spotlight-snippet { color: rgba(255, 255, 255, 0.8); }
+.spotlight-snippet { font-size: 11px; color: var(--secondary); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.sheet { width: min(520px, 90vw); background: var(--card); border-radius: 14px; border: 1px solid var(--separator); box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3); padding: 18px 20px; }
+.sheet h2 { margin: 0 0 10px; font-size: 16px; }
+.sheet h3 { margin: 12px 0 6px; font-size: 12px; color: var(--secondary); text-transform: uppercase; letter-spacing: 0.04em; }
+.sheet label { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 4px 0; }
+.sheet label.toggle { justify-content: flex-start; }
+.sheet select { min-width: 180px; }

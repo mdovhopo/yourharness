@@ -3,6 +3,8 @@ import { Composer } from "./features/composer/Composer";
 import { Sidebar } from "./features/sidebar/Sidebar";
 import { Transcript } from "./features/transcript/Transcript";
 import { FindBar } from "./features/transcript/Find";
+import { Settings } from "./features/shell/Settings";
+import { Spotlight } from "./features/shell/Spotlight";
 import { deck, selectedId, thread } from "./store";
 
 export function App() {
@@ -32,6 +34,8 @@ export function App() {
         </div>
         <Show when={selected()}>{(t) => <Composer t={t()} />}</Show>
       </main>
+      <Spotlight />
+      <Settings />
     </div>
   );
 }

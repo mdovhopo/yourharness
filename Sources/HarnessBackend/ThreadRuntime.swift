@@ -104,6 +104,8 @@ final class ThreadRuntime {
             backend.noteCommands(catalog.commands, thread: id)
         case .commandsChanged(let commands):
             backend.noteCommands(commands, thread: id)
+        case .rateLimit(let info):
+            backend.noteRateLimit(info)
         case .turnCompleted, .processExited:
             backend.emit(backend.store.apply(event, thread: id), thread: id)
             setRunning(false)
@@ -116,7 +118,10 @@ final class ThreadRuntime {
         let patches = backend.store.apply(event, thread: id)
         guard !patches.isEmpty else { return }
         backend.emit(patches, thread: id)
-        if case .permissionRequest = event { backend.threadChanged(id) }
+        if case .permissionRequest = event {
+            backend.threadChanged(id)
+            backend.noteAttention(id, waiting: true)
+        }
         if case .toolResults = event { backend.planMayHaveChanged(id) }
         scheduleSave()
     }
