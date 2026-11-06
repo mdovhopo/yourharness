@@ -21,3 +21,5 @@ pub mod usage;
 pub mod state_archive;
 pub mod updates;
 pub mod cookies;
+pub mod memory_stats;
+pub mod memory_agents;

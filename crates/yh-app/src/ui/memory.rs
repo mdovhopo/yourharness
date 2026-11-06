@@ -272,6 +272,23 @@ impl MemoryPage {
         cx.notify();
     }
 
+    /// Asks for files or folders, then hands them to the Importer.
+    fn import_with_agent(&mut self, cx: &mut Context<Self>) {
+        let chosen = cx.prompt_for_paths(gpui_kit::PathPromptOptions { files: true, directories: true, multiple: true, prompt: Some("Import".into()) });
+        let (ws, project) = (self.workspace.clone(), self.project.clone());
+        cx.spawn(async move |_, cx| {
+            let Ok(Ok(Some(paths))) = chosen.await else { return };
+            let sources: Vec<String> = paths.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+            let _ = cx.update(|cx| {
+                ws.update(cx, |ws, cx| {
+                    let message = yh_core::memory_agents::import_request(&sources, None);
+                    ws.open_memory_agent("importer", &project, sources, Some(message), cx)
+                })
+            });
+        })
+        .detach();
+    }
+
     pub fn new_memory(&mut self, cx: &mut Context<Self>) {
         let kind = self.kind_filter.unwrap_or("project");
         let m = Memory::new(&self.scope(), kind, "", "", "", "user");
@@ -413,6 +430,11 @@ impl MemoryPage {
                     .child(tab_button("tab-tasks", if tasks > 0 { "Tasks ·" } else { "Tasks" }, Tab::Tasks, cx).when(tasks > 0, |b| b.label(format!("Tasks {tasks}"))))
                     .child(tab_button("tab-activity", "Activity", Tab::Activity, cx)),
             )
+            .child(Button::new("memory-import").small().ghost().label("Import…").tooltip("Bring memory in from files or folders: the Importer reads them and saves what's worth keeping").on_click(cx.listener(|this, _, _, cx| this.import_with_agent(cx))))
+            .child(Button::new("memory-reconcile").small().ghost().label("Reconcile").tooltip("The Reconciler finds duplicates, stale and vague memories, and fixes them with you").on_click(cx.listener(|this, _, _, cx| {
+                let project = this.project.clone();
+                this.workspace.update(cx, |ws, cx| ws.open_memory_agent("reconciler", &project, vec![], Some(yh_core::memory_agents::RECONCILE_REQUEST.to_string()), cx));
+            })))
             .child(Button::new("new-memory").small().label("New Memory").on_click(cx.listener(|this, _, _, cx| this.new_memory(cx))))
     }
 

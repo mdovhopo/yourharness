@@ -2,9 +2,11 @@
 //! exact state, or moving it to another Mac. The Swift app's `.yhstate` format, so either app
 //! reads the other's: a zip (made and opened with `ditto`, as Finder does) laid out as
 //!
-//!     manifest.json   what made it, on what Mac, and what's inside
-//!     data/           the app's items in its data folder: harness.sqlite and usage.sqlite
-//!                     (snapshots), attachments/, …
+//! ```text
+//! manifest.json   what made it, on what Mac, and what's inside
+//! data/           the app's items in its data folder: harness.sqlite and usage.sqlite
+//!                 (snapshots), attachments/, …
+//! ```
 //!
 //! (The Swift app also wrote `defaults.plist` and `browser-cookies.json`; read here they're
 //! left alone.) Importing replaces the app's items at the next launch, before the database

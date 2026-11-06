@@ -414,6 +414,29 @@ fn main() {
                 (None, _) => eprintln!("cookie import failed: no thread selected"),
             }
         }
+        // `YH_MEMORY_AGENT=importer|reconciler`: the selected thread's project's (else the first
+        // project's) memory specialist opened after `YH_DRAFT_DELAY`; `YH_MEMORY_AGENT_START=1` sets
+        // it going (the importer on `YH_MEMORY_IMPORT_SOURCES=<a:b>`).
+        if let Some(role) = env("YH_MEMORY_AGENT") {
+            let delay: f64 = env("YH_DRAFT_DELAY").and_then(|v| v.parse().ok()).unwrap_or(1.0);
+            let workspace = workspace.clone();
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(Duration::from_secs_f64(delay)).await;
+                let _ = cx.update(|cx| {
+                    let project = workspace
+                        .read(cx)
+                        .selected_thread()
+                        .map(|t| t.read(cx).meta.project_id.clone())
+                        .or_else(|| workspace.read(cx).projects.first().map(|p| p.id.clone()));
+                    let Some(project) = project else { return };
+                    let sources: Vec<String> = env("YH_MEMORY_IMPORT_SOURCES").map(|s| s.split(':').map(str::to_string).collect()).unwrap_or_default();
+                    let start = env("YH_MEMORY_AGENT_START").as_deref() == Some("1");
+                    let message = start.then(|| if role == "importer" { yh_core::memory_agents::import_request(&sources, None) } else { yh_core::memory_agents::RECONCILE_REQUEST.to_string() });
+                    workspace.update(cx, |ws, cx| ws.open_memory_agent(&role, &project, sources, message, cx));
+                });
+            })
+            .detach();
+        }
         // `YH_OPEN_SETTINGS=1`: Settings opened after `YH_DRAFT_DELAY`.
         if env("YH_OPEN_SETTINGS").as_deref() == Some("1") {
             let delay: f64 = env("YH_DRAFT_DELAY").and_then(|v| v.parse().ok()).unwrap_or(1.0);

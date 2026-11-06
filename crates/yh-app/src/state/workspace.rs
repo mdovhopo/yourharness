@@ -85,6 +85,8 @@ impl Panel {
 
 /// A side chat's id: this, then its thread's.
 pub const SIDE: &str = "side:";
+/// A memory specialist's id: this, its role (`importer`, `reconciler`), `:`, its project.
+pub const MEMORY_AGENT: &str = "memory:";
 
 /// What a side chat's agent is told.
 const SIDE_CHAT_PROMPT: &str = "This is a side conversation. You are a copy of the conversation above, opened so the user can ask something on the side without interrupting or adding to the main thread; nothing said here reaches it. Answer the question directly and briefly. You have Read, Glob, Grep, Bash, WebFetch and WebSearch: use them when the answer needs a fresh look rather than what the conversation already says. The app asks the user to approve commands that could change something. You have no tools to edit files: if the answer needs changes, say what the main thread should do.";
@@ -112,6 +114,8 @@ pub struct Workspace {
     /// Threads whose title is being rewritten (`update_title`), and how many messages the user
     /// had sent when it was last asked for.
     titles_rewriting: std::collections::HashSet<String>,
+    /// Folders and files an importer may read, by its id.
+    memory_agent_sources: HashMap<String, Vec<String>>,
     /// Each thread's side chat (`/btw`), made when first opened; never saved.
     side_chats: HashMap<String, Entity<ThreadState>>,
     /// The right sidebar: open, and on which tab.
@@ -163,6 +167,7 @@ impl Workspace {
             titles_rewriting: Default::default(),
             page: None,
             side_chats: HashMap::new(),
+            memory_agent_sources: HashMap::new(),
             shows_inspector: false,
             panel: Panel::SideChat,
             memory_revision: 0,
@@ -631,6 +636,7 @@ impl Workspace {
                 on_change: Box::new(move || {
                     let _ = changed.send(ToolRequest::MemoryChanged);
                 }),
+                specialist: false,
             }));
         }
         // Claude asks you to sign in to an MCP server, from a card in the thread.
@@ -651,6 +657,47 @@ impl Workspace {
                 db: self.library.db.clone(),
                 updates_title,
             }));
+        }
+        // A memory specialist: its own prompt, read-only file tools, the specialist memory tools,
+        // nothing saved; the importer may read the sources it was given.
+        if let Some(rest) = t.id().strip_prefix(MEMORY_AGENT) {
+            let (role, project_id) = rest.split_once(':').unwrap_or(("reconciler", rest));
+            let (role, project_id) = (role.to_string(), project_id.to_string());
+            let Some(db) = self.library.db.clone() else { return Err("No memory here.".into()) };
+            let name = self.project(&project_id).map(|p| if self.home_project().as_deref() == Some(p.id.as_str()) { "Home".to_string() } else { p.name.clone() }).unwrap_or_default();
+            let changed = self.tool_requests.clone();
+            let actor = yh_core::memory::Actor { kind: if role == "importer" { "importer".into() } else { "reconciler".into() }, thread: None };
+            let server = yh_core::memory_tools::MemoryTools {
+                store: yh_core::memory::Store { db },
+                scope: yh_core::memory::scope_of(&project_id),
+                actor,
+                on_change: Box::new(move || {
+                    let _ = changed.send(ToolRequest::MemoryChanged);
+                }),
+                specialist: true,
+            };
+            let t = thread.read(cx);
+            let options = LaunchOptions {
+                cwd,
+                session_id: None,
+                model: self.model_of(t),
+                mode: Some("default".into()),
+                effort: effort.clone(),
+                add_dirs: self.memory_agent_sources.get(t.id()).cloned().unwrap_or_default(),
+                env: vec![],
+                append_system_prompt: Some(yh_core::memory_agents::prompt(&role, &name)),
+                allowed_tools: vec!["mcp__memory".into(), "Read".into(), "Glob".into(), "Grep".into()],
+                servers: vec![std::sync::Arc::new(server)],
+                extra_args: vec!["--tools".into(), "Read,Glob,Grep,AskUserQuestion".into(), "--strict-mcp-config".into(), "--no-session-persistence".into()],
+            };
+            let (tx, rx) = flume::unbounded();
+            let mut process = ClaudeProcess::spawn(options, tx)?;
+            process.initialize();
+            self.generation += 1;
+            let generation = self.generation;
+            self.runtimes.insert(id.clone(), Runtime { process, generation, effort, idle: None });
+            self.pump(thread.clone(), id, generation, rx, cx);
+            return Ok(());
         }
         // A side chat: a copy of its thread's conversation that can look but not edit and
         // leaves nothing behind. It reads freely; commands and web requests ask first.
@@ -1145,7 +1192,7 @@ impl Workspace {
     pub fn save_rows(&self, thread: &Entity<ThreadState>, cx: &mut Context<Self>) {
         let Some(db) = self.library.db.clone() else { return };
         let (id, total, rows) = thread.update(cx, |t, _| (t.id().to_string(), t.total, t.take_changes()));
-        if rows.is_empty() || id.starts_with("new:") || id.starts_with("cc:") || id.starts_with(SIDE) {
+        if rows.is_empty() || id.starts_with("new:") || id.starts_with("cc:") || id.starts_with(SIDE) || id.starts_with(MEMORY_AGENT) {
             return;
         }
         if let Some(total) = total {
@@ -1273,6 +1320,36 @@ impl Workspace {
         self.page = Some(Page::Memory(project.to_string()));
         cx.emit(WorkspaceEvent::PageOpened);
         cx.notify();
+    }
+
+    /// Opens a project's memory importer or reconciler in place of the thread (the one already
+    /// open, or a new one), and sends it `message` (an import's sources, or the review request).
+    pub fn open_memory_agent(&mut self, role: &str, project: &str, sources: Vec<String>, message: Option<String>, cx: &mut Context<Self>) {
+        let id = format!("{MEMORY_AGENT}{role}:{project}");
+        if !sources.is_empty() {
+            // New sources: a new session, so it can read them.
+            self.memory_agent_sources.insert(id.clone(), sources);
+            self.end_runtime(&id, cx);
+        }
+        let thread = match self.thread(&id) {
+            Some(t) => t,
+            None => {
+                let mut meta = ThreadMeta::new(id.clone(), project.into(), yh_core::memory_agents::title(role).into());
+                meta.working_directory = self.project(project).map(|p| p.path.clone());
+                meta.title_chosen = true;
+                let t = make_thread(meta, cx.entity().downgrade(), cx);
+                t.update(cx, |t, _| {
+                    t.loaded = true;
+                    t.total = Some(0);
+                });
+                self.by_id.insert(id.clone(), t.clone());
+                t
+            }
+        };
+        self.select(&id, cx);
+        if let Some(text) = message {
+            self.send(&thread, &text, false, cx);
+        }
     }
 
     /// Opens Usage in place of the open thread, or closes it.

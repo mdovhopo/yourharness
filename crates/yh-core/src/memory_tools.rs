@@ -12,6 +12,8 @@ pub struct MemoryTools {
     pub actor: Actor,
     /// Called after a call changed something, from the call's thread.
     pub on_change: Box<dyn Fn() + Send + Sync>,
+    /// The importer and reconciler: also list, stats, merge, unlink, restore and pin.
+    pub specialist: bool,
 }
 
 fn kinds() -> Value {
@@ -32,6 +34,141 @@ fn id_list(v: &Value) -> Vec<String> {
 }
 
 impl MemoryTools {
+    fn unlink(&self, a: &Value) -> ToolResult {
+        let Some(from) = self.resolve(&a["from"]) else { return self.not_found(&a["from"]) };
+        let Some(to) = self.resolve(&a["to"]) else { return self.not_found(&a["to"]) };
+        self.store.unlink(&from, &to, &self.actor);
+        (self.on_change)();
+        ToolResult::text("Unlinked.")
+    }
+
+    fn list(&self, a: &Value) -> ToolResult {
+        let status = a["status"].as_str().unwrap_or("active");
+        let kind = a["kind"].as_str();
+        let mut memories: Vec<Memory> =
+            self.store.memories(Some(&self.scope), if status == "all" { None } else { Some(status) }).into_iter().filter(|m| kind.is_none_or(|k| m.kind == k)).collect();
+        if memories.is_empty() {
+            return ToolResult::text(format!("No memories here{} yet.", if status == "active" { String::new() } else { format!(" ({status})") }));
+        }
+        memories.sort_by(|a, b| (a.kind.as_str(), a.title.as_str()).cmp(&(b.kind.as_str(), b.title.as_str())));
+        let lines: Vec<String> = memories
+            .iter()
+            .map(|m| {
+                let mut line = format!("- {} [{}] {}", m.short_id(), m.kind, m.title);
+                if !m.description.is_empty() {
+                    line += &format!(" — {}", m.description);
+                }
+                line += &format!(" ({} B, read {}×, updated {}", m.size(), m.recall_count, day(m.updated_at));
+                if m.pinned {
+                    line += ", pinned";
+                }
+                if let Some(state) = &m.task_state {
+                    line += &format!(", {state}");
+                    if !m.steps.is_empty() {
+                        line += &format!(" {}/{}", m.steps_done(), m.steps.len());
+                    }
+                }
+                if m.status != "active" {
+                    line += &format!(", {}", m.status);
+                }
+                if !m.links.is_empty() {
+                    line += &format!(", links {}", m.links.iter().map(|(to, _)| to.chars().take(8).collect::<String>().to_lowercase()).collect::<Vec<_>>().join(" "));
+                }
+                line + ")"
+            })
+            .collect();
+        ToolResult::text(format!("{} memories:\n{}", memories.len(), lines.join("\n")))
+    }
+
+    fn stats(&self) -> ToolResult {
+        ToolResult::text(crate::memory_stats::describe(&crate::memory_stats::compute(&self.store, &self.scope, 30), day))
+    }
+
+    /// Memories that say the same thing as one: the first ID kept with every link, source and
+    /// read count; the others archived, pointing at it.
+    fn merge(&self, a: &Value) -> ToolResult {
+        let mut ids: Vec<String> = vec![];
+        for id in id_list(&a["ids"]).iter().filter_map(|i| self.store.resolve(i, &self.scope)) {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+        if ids.len() < 2 {
+            return ToolResult::error("Give at least two memory IDs from this workspace in `ids`.");
+        }
+        let (Some(title), Some(body), Some(kind)) = (clean(&a["title"]), clean(&a["body"]), a["kind"].as_str().filter(|k| KINDS.contains(k))) else {
+            return ToolResult::error("A merge needs the merged `title`, `description`, `body` and `kind`.");
+        };
+        let description = clean(&a["description"]).unwrap_or_default();
+        if let Some(p) = problem(&title, &description, &body) {
+            return ToolResult::error(p);
+        }
+        let existing: Vec<Memory> = ids.iter().filter_map(|id| self.store.memory(id)).collect();
+        let Some(first) = existing.iter().find(|m| m.id == ids[0]).cloned() else { return ToolResult::error("Couldn't merge those memories.") };
+        let target = first.id.clone();
+        let others: Vec<String> = ids[1..].to_vec();
+        let now = crate::library::now_ms() / 1000.;
+        let mut merged = first.clone();
+        merged.kind = kind.to_string();
+        merged.title = title.clone();
+        merged.description = description;
+        merged.body = body;
+        merged.created_at = existing.iter().map(|m| m.created_at).fold(first.created_at, f64::min);
+        merged.updated_at = now;
+        merged.status = "active".into();
+        merged.merged_into = None;
+        merged.recall_count = existing.iter().map(|m| m.recall_count).sum();
+        merged.surfaced_count = existing.iter().map(|m| m.surfaced_count).sum();
+        merged.last_recalled_at = existing.iter().filter_map(|m| m.last_recalled_at).reduce(f64::max);
+        merged.pinned = existing.iter().any(|m| m.pinned);
+        let mut sources: Vec<(String, String)> = existing.iter().flat_map(|m| m.sources.clone()).collect();
+        sources.sort_by(|a, b| a.1.cmp(&b.1));
+        sources.dedup();
+        merged.sources = sources;
+        let mut links: Vec<(String, Option<String>)> = vec![];
+        for (to, rel) in existing.iter().flat_map(|m| m.links.clone()) {
+            if to != target && !others.contains(&to) && !links.iter().any(|(t, _)| *t == to) {
+                links.push((to, rel));
+            }
+        }
+        merged.links = links;
+        self.store.save(merged, &self.actor, Some("merged"), Some(others.join(",")));
+        for mut other in existing.into_iter().filter(|m| m.id != target) {
+            // Links into the old one now point at the merged memory.
+            let (t, o) = (target.clone(), other.id.clone());
+            let _ = self.store.db.write(move |c, _| {
+                c.execute(
+                    "INSERT OR IGNORE INTO memory_links(from_id, to_id, relation, created_at) SELECT from_id, ?1, relation, created_at FROM memory_links WHERE to_id = ?2 AND from_id != ?1",
+                    rusqlite::params![t, o],
+                )?;
+                c.execute("DELETE FROM memory_links WHERE to_id = ?1 OR from_id = ?1", [&o])?;
+                Ok(())
+            });
+            other.status = "archived".into();
+            other.merged_into = Some(target.clone());
+            other.updated_at = now;
+            other.links = vec![];
+            self.store.save(other, &self.actor, Some("archived"), Some(format!("merged into {target}")));
+        }
+        (self.on_change)();
+        ToolResult::text(format!("Merged into {} {title}; {} archived.", target.chars().take(8).collect::<String>().to_lowercase(), ids.len() - 1))
+    }
+
+    fn restore(&self, a: &Value) -> ToolResult {
+        let Some(m) = self.resolve(&a["id"]).and_then(|id| self.store.memory(&id)) else { return self.not_found(&a["id"]) };
+        self.store.set_status(&m.id, "active", &self.actor, None);
+        (self.on_change)();
+        ToolResult::text(format!("Restored {} {}.", m.short_id(), m.title))
+    }
+
+    fn pin(&self, a: &Value) -> ToolResult {
+        let Some(m) = self.resolve(&a["id"]).and_then(|id| self.store.memory(&id)) else { return self.not_found(&a["id"]) };
+        let pinned = a["pinned"].as_bool().unwrap_or(true);
+        self.store.set_pinned(&m.id, pinned, &self.actor);
+        (self.on_change)();
+        ToolResult::text(format!("{} {} {}.", if pinned { "Pinned" } else { "Unpinned" }, m.short_id(), m.title))
+    }
+
     fn resolve(&self, v: &Value) -> Option<String> {
         v.as_str().and_then(|s| self.store.resolve(s, &self.scope))
     }
@@ -318,7 +455,7 @@ impl ToolServer for MemoryTools {
 
     fn tools(&self) -> Vec<Value> {
         let ids = json!({ "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "Memory IDs (the 8-character ones in the index are enough)." });
-        vec![
+        let mut all = vec![
             tool("search", "Search this workspace's memory: words in titles, descriptions and bodies, best match first. Use it when something you should know about isn't in the memory index, or to check before saving a new memory.",
                 schema(json!({
                     "query": { "type": "string", "description": "What to look for, in a few words." },
@@ -349,10 +486,27 @@ impl ToolServer for MemoryTools {
                     "steps": { "type": "array", "description": "Every step, in order, with what's done ticked.", "items": { "type": "object", "properties": { "text": { "type": "string" }, "done": { "type": "boolean" } }, "required": ["text"] } },
                     "note": { "type": "string", "description": "What just happened, in a line: kept in the task's log with today's date." },
                 }), &[]), false, false),
-        ]
+        ];
+        if self.specialist {
+            all.extend([
+                tool("list", "List the workspace's memories: ID, kind, title, description, size, reads and dates.",
+                    schema(json!({ "kind": kinds(), "status": { "type": "string", "enum": ["active", "proposed", "archived", "all"], "description": "active by default." } }), &[]), true, false),
+                tool("stats", "How the workspace's memory is used: sizes, reads, memories never read, likely duplicates, searches that found nothing.", schema(json!({}), &[]), true, false),
+                tool("merge", "Merge memories that say the same thing into one: it keeps the first ID, every link, source and read count; the others are archived and point at it.",
+                    schema(json!({ "ids": ids, "title": { "type": "string" }, "description": { "type": "string" }, "body": { "type": "string" }, "kind": kinds() }), &["ids", "title", "description", "body", "kind"]), false, false),
+                tool("unlink", "Remove the link between two memories.", schema(json!({ "from": { "type": "string" }, "to": { "type": "string" } }), &["from", "to"]), false, false),
+                tool("restore", "Bring an archived memory back into use.", schema(json!({ "id": { "type": "string" } }), &["id"]), false, false),
+                tool("pin", "Pin a memory so every session gets it in full, not only its index line (for the few that always matter), or unpin it.",
+                    schema(json!({ "id": { "type": "string" }, "pinned": { "type": "boolean" } }), &["id", "pinned"]), false, false),
+            ]);
+        }
+        all
     }
 
     fn call(&self, tool: &str, a: &Value, tool_use_id: Option<&str>) -> ToolResult {
+        if !self.specialist && ["list", "stats", "merge", "unlink", "restore", "pin"].contains(&tool) {
+            return ToolResult::error(format!("No tool named {tool}."));
+        }
         match tool {
             "search" => self.search(a),
             "read" => self.read(a),
@@ -361,6 +515,12 @@ impl ToolServer for MemoryTools {
             "update" => self.update(a),
             "forget" => self.forget(a),
             "link" => self.link(a),
+            "unlink" => self.unlink(a),
+            "list" => self.list(a),
+            "stats" => self.stats(),
+            "merge" => self.merge(a),
+            "restore" => self.restore(a),
+            "pin" => self.pin(a),
             other => ToolResult::error(format!("No tool named {other}.")),
         }
     }
