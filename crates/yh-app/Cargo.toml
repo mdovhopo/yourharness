@@ -16,6 +16,7 @@ serde_json.workspace = true
 flume.workspace = true
 libc.workspace = true
 objc = "0.2"
+block = "0.1"
 cocoa = "0.26"
 core-foundation = "0.10"
 raw-window-handle = "0.6"

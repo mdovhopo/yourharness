@@ -3,6 +3,7 @@
 pub mod composer;
 pub mod find;
 pub mod root;
+pub mod settings;
 pub mod rows;
 pub mod sidebar;
 pub mod transcript;

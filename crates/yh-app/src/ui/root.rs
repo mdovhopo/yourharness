@@ -14,7 +14,7 @@ use gpui_kit::{
 };
 use yh_core::claude::Decision;
 
-actions!(harness, [Stop, Allow, Deny, Quit, NewThread, Find, FindNext, FindPrevious]);
+actions!(harness, [Stop, Allow, Deny, Quit, NewThread, Find, FindNext, FindPrevious, OpenSettings]);
 
 /// Transcripts kept made for going back and forth.
 const KEPT_TRANSCRIPTS: usize = 6;
@@ -122,6 +122,7 @@ impl Render for RootView {
             .on_action(cx.listener(|this, _: &Allow, _, cx| this.respond(Decision::allow(), cx)))
             .on_action(cx.listener(|this, _: &Deny, _, cx| this.respond(Decision::deny(), cx)))
             .on_action(cx.listener(Self::on_new_thread))
+            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| crate::ui::settings::open(this.workspace.clone(), window, cx)))
             .on_action(cx.listener(|this, _: &Find, window, cx| this.find.update(cx, |f, cx| f.show(window, cx))))
             .on_action(cx.listener(|this, _: &FindNext, _, cx| this.find.update(cx, |f, cx| f.step(true, cx))))
             .on_action(cx.listener(|this, _: &FindPrevious, _, cx| this.find.update(cx, |f, cx| f.step(false, cx))))

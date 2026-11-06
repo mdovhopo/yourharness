@@ -245,6 +245,66 @@ impl Sidebar {
     }
 }
 
+impl Sidebar {
+    /// Claude's 5-hour and weekly limits as it last reported them, and the way to Settings.
+    fn footer(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let limits = self.workspace.read(cx).limits.clone();
+        let mut bars = div().flex_1().flex().flex_col().gap(px(3.));
+        let windows = limits.as_ref().and_then(|l| l["unifiedWindows"].as_object().cloned());
+        match windows {
+            Some(windows) if !windows.is_empty() => {
+                for (name, w) in windows {
+                    let used = w["utilization"].as_f64().unwrap_or(0.).clamp(0., 1.);
+                    let label = match name.as_str() {
+                        "five_hour" => "5h".to_string(),
+                        "seven_day" => "Week".to_string(),
+                        other => other.replace('_', " "),
+                    };
+                    bars = bars.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .text_size(px(10.))
+                            .text_color(theme.secondary)
+                            .child(div().w(px(30.)).child(label))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .h(px(4.))
+                                    .rounded(px(2.))
+                                    .bg(theme.selected)
+                                    .child(div().h_full().rounded(px(2.)).w(gpui_kit::relative(used as f32)).bg(if used > 0.8 { theme.warning } else { theme.accent })),
+                            )
+                            .child(div().w(px(28.)).child(format!("{}%", (used * 100.).round()))),
+                    );
+                }
+            }
+            _ => bars = bars.child(div().text_size(px(10.)).text_color(theme.secondary).child("Usage shows after a turn")),
+        }
+        let ws = self.workspace.clone();
+        div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .px(px(12.))
+            .py(px(8.))
+            .border_t_1()
+            .border_color(theme.separator)
+            .child(bars)
+            .child(
+                div()
+                    .id("settings")
+                    .px(px(4.))
+                    .rounded(px(4.))
+                    .text_color(theme.secondary)
+                    .hover(|s| s.bg(theme.selected))
+                    .child("⚙︎")
+                    .on_click(move |_, window, cx| crate::ui::settings::open(ws.clone(), window, cx)),
+            )
+    }
+}
+
 fn small_row(id: SharedString, label: String, theme: &Theme) -> gpui_kit::Stateful<gpui_kit::Div> {
     div()
         .id(id)
@@ -347,5 +407,6 @@ impl Render for Sidebar {
             .border_color(theme.separator)
             .child(div().h(px(44.)).flex_none())
             .child(column)
+            .child(self.footer(&theme, cx))
     }
 }

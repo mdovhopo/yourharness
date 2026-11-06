@@ -8,7 +8,6 @@ mod state;
 mod theme;
 mod ui;
 
-use gpui_kit::component::{Theme as ComponentTheme, ThemeMode};
 use gpui_kit::{
     point, prelude::*, px, size, App, Bounds, Focusable, KeyBinding, Menu, MenuItem, TitlebarOptions, Window, WindowAppearance,
     WindowBounds, WindowOptions,
@@ -17,34 +16,10 @@ use state::workspace::Workspace;
 use std::sync::Arc;
 use std::time::Duration;
 use theme::Theme;
-use ui::root::{Allow, Deny, Find, FindNext, FindPrevious, NewThread, Quit, RootView, Stop};
+use ui::root::{Allow, Deny, Find, FindNext, FindPrevious, NewThread, OpenSettings, Quit, RootView, Stop};
 
 fn env(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
-}
-
-/// The app's palette and gpui-component's (menus, dialogs, inputs) follow light and dark.
-fn apply_appearance(appearance: WindowAppearance, window: &mut Window, cx: &mut App) {
-    cx.set_global(Theme::for_appearance(appearance));
-    let mode = match appearance {
-        WindowAppearance::Dark | WindowAppearance::VibrantDark => ThemeMode::Dark,
-        _ => ThemeMode::Light,
-    };
-    ComponentTheme::change(mode, Some(window), cx);
-    // Its primary buttons in the app's accent, as macOS's default buttons are.
-    let accent = Theme::get(cx).accent;
-    let theme = ComponentTheme::global_mut(cx);
-    let colors = &mut theme.colors;
-    colors.primary = accent;
-    colors.primary_hover = accent.opacity(0.9);
-    colors.primary_active = accent.opacity(0.8);
-    colors.primary_foreground = gpui_kit::white();
-    colors.button_primary = accent;
-    colors.button_primary_hover = accent.opacity(0.9);
-    colors.button_primary_active = accent.opacity(0.8);
-    colors.button_primary_foreground = gpui_kit::white();
-    // Buttons read tokens made from the colours.
-    theme.tokens = gpui_kit::component::theme::ThemeTokens::from(&theme.colors);
 }
 
 fn main() {
@@ -57,6 +32,7 @@ fn main() {
         platform::hold_off_app_nap();
     }
     let library = Arc::new(yh_core::library::Library::open());
+    theme::set_chosen_appearance(library.setting("appearance").and_then(|v| v.as_str().map(str::to_string)));
 
     gpui_kit::application().run(move |cx: &mut App| {
         gpui_kit::init(cx);
@@ -66,13 +42,18 @@ fn main() {
             KeyBinding::new("cmd-backspace", Deny, Some("Harness")),
             KeyBinding::new("cmd-n", NewThread, None),
             KeyBinding::new("cmd-f", Find, None),
+            KeyBinding::new("cmd-,", OpenSettings, None),
             KeyBinding::new("cmd-g", FindNext, None),
             KeyBinding::new("cmd-shift-g", FindPrevious, None),
             KeyBinding::new("cmd-q", Quit, None),
         ]);
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.set_menus(vec![
-            Menu { name: "YourHarness".into(), items: vec![MenuItem::action("Quit", Quit)], disabled: false },
+            Menu {
+                name: "YourHarness".into(),
+                items: vec![MenuItem::action("Settings…", OpenSettings), MenuItem::separator(), MenuItem::action("Quit", Quit)],
+                disabled: false,
+            },
             Menu { name: "File".into(), items: vec![MenuItem::action("New Thread", NewThread)], disabled: false },
             Menu {
                 name: "Thread".into(),
@@ -100,7 +81,7 @@ fn main() {
         };
         let library = library.clone();
         let (window, root) = gpui_kit::open_window(options, cx, |window, cx| {
-            apply_appearance(window.appearance(), window, cx);
+            theme::apply_appearance(window.appearance(), window, cx);
             let workspace = cx.new(|cx| Workspace::new(library.clone(), cx));
             cx.new(|cx| RootView::new(workspace, window, cx))
         })
@@ -111,12 +92,12 @@ fn main() {
             let root = root.clone();
             let _ = window.update(cx, |_, window, cx| {
                 // gpui-component sets its theme up once the window's Root is made: ours on top.
-                apply_appearance(window.appearance(), window, cx);
+                theme::apply_appearance(window.appearance(), window, cx);
                 let input = root.read(cx).composer.read(cx).input.clone();
                 input.update(cx, |i, cx| i.focus(window, cx));
                 window
                     .observe_window_appearance(|window, cx| {
-                        apply_appearance(window.appearance(), window, cx);
+                        theme::apply_appearance(window.appearance(), window, cx);
                         cx.refresh_windows();
                     })
                     .detach();
@@ -213,6 +194,16 @@ fn main() {
                         f.search(cx);
                     });
                 });
+            })
+            .detach();
+        }
+        // `YH_OPEN_SETTINGS=1`: Settings opened after `YH_DRAFT_DELAY`.
+        if env("YH_OPEN_SETTINGS").as_deref() == Some("1") {
+            let delay: f64 = env("YH_DRAFT_DELAY").and_then(|v| v.parse().ok()).unwrap_or(1.0);
+            let workspace = workspace.clone();
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(Duration::from_secs_f64(delay)).await;
+                let _ = window.update(cx, |_, window, cx| ui::settings::open(workspace.clone(), window, cx));
             })
             .detach();
         }

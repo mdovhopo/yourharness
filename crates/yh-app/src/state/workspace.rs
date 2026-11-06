@@ -549,7 +549,12 @@ impl Workspace {
                                 let project = thread.read(cx).meta.project_id.clone();
                                 ws.note_catalog(models, commands, &project, cx);
                             }
-                            Event::Limits(info) => ws.limits = Some(info.clone()),
+                            Event::Limits(info) => {
+                                if ws.limits.as_ref() != Some(info) {
+                                    ws.limits = Some(info.clone());
+                                    cx.notify();
+                                }
+                            }
                             Event::Session { id: sid } => {
                                 let sid = sid.clone();
                                 ws.library.update_thread(&id, |r| {
@@ -585,6 +590,7 @@ impl Workspace {
                     }
                     if chrome {
                         cx.notify();
+                        ws.note_attention(&thread2, cx);
                         ws.answer_for_tests(&thread2, cx);
                     }
                 });
@@ -597,10 +603,33 @@ impl Workspace {
         .detach();
     }
 
+    /// The Dock badge counts threads waiting for you; a request to you, or a turn ending,
+    /// is a notification when you're not looking at that thread.
+    fn note_attention(&mut self, thread: &Entity<ThreadState>, cx: &mut Context<Self>) {
+        let waiting = self.threads.iter().filter(|t| t.read(cx).permission.is_some()).count();
+        crate::platform::set_badge(waiting);
+        let t = thread.read(cx);
+        if t.permission.is_some() && !self.looking_at(t.id()) && self.notifications_on() {
+            crate::platform::notify(&t.title, "Claude is waiting for you");
+        }
+    }
+
+    fn notifications_on(&self) -> bool {
+        self.library.setting("notifications").and_then(|v| v.as_bool()).unwrap_or(true)
+    }
+
+    /// The thread is open in the app you're using.
+    fn looking_at(&self, id: &str) -> bool {
+        self.selected.as_deref() == Some(id) && crate::platform::app_is_active()
+    }
+
     /// The turn is over: saved, unread if you were elsewhere, its `claude` let go of later.
     fn turn_ended(&mut self, thread: &Entity<ThreadState>, cx: &mut Context<Self>) {
         let id = thread.read(cx).id().to_string();
         let selected = self.selected.as_deref() == Some(id.as_str());
+        if !self.looking_at(&id) && self.notifications_on() {
+            crate::platform::notify(&thread.read(cx).title, "Claude finished");
+        }
         let (title, session) = thread.update(cx, |t, _| {
             t.running = false;
             t.meta.turn_in_progress = false;

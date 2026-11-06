@@ -154,6 +154,9 @@ unsafe extern "C" {
     fn CGSessionCopyCurrentDictionary() -> *const c_void;
 }
 
+#[link(name = "UserNotifications", kind = "framework")]
+unsafe extern "C" {}
+
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
     fn CFRelease(cf: *const c_void);
@@ -280,5 +283,55 @@ pub fn hold_off_app_nap() {
         let reason = NSString::alloc(nil).init_str("Performance run");
         let token: id = msg_send![info, beginActivityWithOptions: options reason: reason];
         let _: id = msg_send![token, retain];
+    }
+}
+
+/// The Dock icon's badge: how many threads wait for you (none: no badge).
+pub fn set_badge(count: usize) {
+    if std::env::var("YH_NOTIFICATIONS").as_deref() == Ok("log") {
+        eprintln!("BADGE {count}");
+        return;
+    }
+    unsafe {
+        let app: id = msg_send![class!(NSApplication), sharedApplication];
+        let tile: id = msg_send![app, dockTile];
+        let label = if count == 0 { nil } else { NSString::alloc(nil).init_str(&count.to_string()) };
+        let _: () = msg_send![tile, setBadgeLabel: label];
+    }
+}
+
+/// Whether the app is the one you're using.
+pub fn app_is_active() -> bool {
+    unsafe {
+        let app: id = msg_send![class!(NSApplication), sharedApplication];
+        let active: bool = msg_send![app, isActive];
+        active
+    }
+}
+
+/// A notification from the app (`YH_NOTIFICATIONS=log` prints it instead, so a test run never
+/// asks for permission). The first one asks macOS for permission.
+pub fn notify(title: &str, body: &str) {
+    if std::env::var("YH_NOTIFICATIONS").as_deref() == Ok("log") {
+        eprintln!("NOTIFY {title}: {body}");
+        return;
+    }
+    unsafe {
+        let center: id = msg_send![class!(UNUserNotificationCenter), currentNotificationCenter];
+        if center == nil {
+            return;
+        }
+        static ASKED: std::sync::Once = std::sync::Once::new();
+        ASKED.call_once(|| {
+            let done = block::ConcreteBlock::new(|_granted: bool, _error: id| {}).copy();
+            // Alert and sound.
+            let _: () = msg_send![center, requestAuthorizationWithOptions: (1u64 << 1) | (1u64 << 2) completionHandler: &*done];
+        });
+        let content: id = msg_send![class!(UNMutableNotificationContent), new];
+        let _: () = msg_send![content, setTitle: NSString::alloc(nil).init_str(title)];
+        let _: () = msg_send![content, setBody: NSString::alloc(nil).init_str(body)];
+        let identifier = NSString::alloc(nil).init_str(&yh_core::library::new_uuid());
+        let request: id = msg_send![class!(UNNotificationRequest), requestWithIdentifier: identifier content: content trigger: nil];
+        let _: () = msg_send![center, addNotificationRequest: request withCompletionHandler: nil];
     }
 }

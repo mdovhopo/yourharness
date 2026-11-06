@@ -1,6 +1,7 @@
 //! The web POC's palette (web/ui/src/styles.css), light and dark.
 
-use gpui_kit::{rgb, rgba, App, Global, Hsla, WindowAppearance};
+use gpui_kit::component::{Theme as ComponentTheme, ThemeMode};
+use gpui_kit::{rgb, rgba, App, Global, Hsla, Window, WindowAppearance};
 
 #[derive(Clone, Copy)]
 pub struct Theme {
@@ -73,3 +74,44 @@ impl Theme {
         *cx.global::<Theme>()
     }
 }
+
+thread_local! {
+    /// The appearance chosen in Settings (`system`, `light`, `dark`).
+    static APPEARANCE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+pub fn set_chosen_appearance(value: Option<String>) {
+    APPEARANCE.with(|a| *a.borrow_mut() = value);
+}
+
+/// The app's palette and gpui-component's (menus, dialogs, inputs) follow light and dark.
+pub fn apply_appearance(appearance: WindowAppearance, window: &mut Window, cx: &mut App) {
+    // Settings → Appearance (`YH_APPEARANCE` for test runs) over the system's.
+    let chosen = std::env::var("YH_APPEARANCE").ok().or_else(|| APPEARANCE.with(|a| a.borrow().clone()));
+    let appearance = match chosen.as_deref() {
+        Some("light") => WindowAppearance::Light,
+        Some("dark") => WindowAppearance::Dark,
+        _ => appearance,
+    };
+    cx.set_global(Theme::for_appearance(appearance));
+    let mode = match appearance {
+        WindowAppearance::Dark | WindowAppearance::VibrantDark => ThemeMode::Dark,
+        _ => ThemeMode::Light,
+    };
+    ComponentTheme::change(mode, Some(window), cx);
+    // Its primary buttons in the app's accent, as macOS's default buttons are.
+    let accent = Theme::get(cx).accent;
+    let theme = ComponentTheme::global_mut(cx);
+    let colors = &mut theme.colors;
+    colors.primary = accent;
+    colors.primary_hover = accent.opacity(0.9);
+    colors.primary_active = accent.opacity(0.8);
+    colors.primary_foreground = gpui_kit::white();
+    colors.button_primary = accent;
+    colors.button_primary_hover = accent.opacity(0.9);
+    colors.button_primary_active = accent.opacity(0.8);
+    colors.button_primary_foreground = gpui_kit::white();
+    // Buttons read tokens made from the colours.
+    theme.tokens = gpui_kit::component::theme::ThemeTokens::from(&theme.colors);
+}
+
