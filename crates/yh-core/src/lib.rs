@@ -10,5 +10,6 @@ pub mod schema;
 pub mod history;
 pub mod library;
 pub mod recovery;
+pub mod titles;
 pub mod markdown;
 pub mod plan;

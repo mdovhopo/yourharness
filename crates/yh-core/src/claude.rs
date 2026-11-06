@@ -164,7 +164,7 @@ pub struct ClaudeProcess {
 }
 
 /// `claude` on `YH_PATH` (as the app's test runs pass it), else `PATH` and the usual places.
-fn find_claude() -> Option<std::path::PathBuf> {
+pub fn find_claude() -> Option<std::path::PathBuf> {
     let path = std::env::var("YH_PATH").or_else(|_| std::env::var("PATH")).unwrap_or_default();
     let home = std::env::var("HOME").unwrap_or_default();
     let extra = [format!("{home}/.local/bin"), format!("{home}/.claude/local"), "/opt/homebrew/bin".into(), "/usr/local/bin".into()];

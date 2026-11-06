@@ -413,6 +413,7 @@ impl Workspace {
             let total = self.library.db.as_ref().map_or(0, |db| db.transcript_count(&id));
             thread.update(cx, |t, _| t.total = Some(total));
         }
+        let first_message = thread.read(cx).total == Some(0);
         let message_id = yh_core::library::new_uuid();
         let delivery = running.then_some(if now { "interrupted" } else { "steered" });
         thread.update(cx, |t, cx| {
@@ -435,6 +436,9 @@ impl Workspace {
             r.insert("turnInProgress".into(), true.into());
             r.insert("updatedAt".into(), iso_now().into());
         });
+        if first_message && title == "New thread" && !chosen && !text.is_empty() {
+            self.generate_title(thread, &text, cx);
+        }
         if let Err(error) = self.ensure_runtime(thread, cx) {
             thread.update(cx, |t, cx| {
                 t.notice(&format!("Couldn't send: {error}"));
@@ -628,6 +632,53 @@ impl Workspace {
             }));
         }
         cx.notify();
+    }
+
+    /// After the first message: a title written by a one-shot request with no tools, on the
+    /// model chosen in Settings (Haiku by default), off the main thread. One you chose
+    /// meanwhile stays.
+    fn generate_title(&mut self, thread: &Entity<ThreadState>, message: &str, cx: &mut Context<Self>) {
+        let settings = self.library.setting("titleGeneration").unwrap_or(serde_json::json!({"provider": "claude", "model": "haiku"}));
+        if settings["provider"].as_str() != Some("claude") {
+            return;
+        }
+        let model = settings["model"].as_str().unwrap_or("haiku").to_string();
+        let rules = self.library.setting("titleRules").and_then(|r| r.as_str().map(str::to_string));
+        let prompt = yh_core::titles::initial_prompt(message, rules.as_deref());
+        let Some(claude) = yh_core::claude::find_claude() else { return };
+        let path = std::env::var("YH_PATH").ok();
+        let weak = thread.downgrade();
+        cx.spawn(async move |this, cx| {
+            let mut result = Err(String::new());
+            for attempt in 0..2 {
+                if attempt > 0 {
+                    cx.background_executor().timer(Duration::from_secs(2)).await;
+                }
+                let (claude, path, model, prompt) = (claude.clone(), path.clone(), model.clone(), prompt.clone());
+                result = cx.background_executor().spawn(async move { yh_core::titles::generate(&claude, path.as_deref(), &model, &prompt) }).await;
+                if result.is_ok() {
+                    break;
+                }
+            }
+            let Ok(title) = result else { return };
+            let _ = this.update(cx, |ws, cx| {
+                let Some(thread) = weak.upgrade() else { return };
+                if thread.read(cx).meta.title_chosen {
+                    return;
+                }
+                let id = thread.read(cx).id().to_string();
+                thread.update(cx, |t, cx| {
+                    t.title = title.clone();
+                    t.meta.title = title.clone();
+                    cx.notify();
+                });
+                ws.library.update_thread(&id, |r| {
+                    r.insert("title".into(), title.into());
+                });
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub fn interrupt(&mut self, thread: &Entity<ThreadState>, cx: &mut Context<Self>) {
