@@ -17,3 +17,4 @@ test-harness-root/*
 /legacy/web/ui/dist
 /target
 /vendor
+perf-results/

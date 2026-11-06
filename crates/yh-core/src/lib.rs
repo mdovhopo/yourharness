@@ -17,3 +17,4 @@ pub mod mcp;
 pub mod memory;
 pub mod memory_tools;
 pub mod plan;
+pub mod usage;

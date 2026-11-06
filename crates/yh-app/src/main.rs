@@ -45,6 +45,7 @@ fn main() {
             KeyBinding::new("cmd-f", Find, None),
             KeyBinding::new("alt-cmd-0", ui::root::ToggleInspector, None),
             KeyBinding::new("shift-cmd-m", ui::root::OpenMemory, None),
+            KeyBinding::new("shift-cmd-u", ui::root::ToggleUsage, None),
             KeyBinding::new("cmd-s", crate::ui::memory::SaveMemory, Some("MemoryPage")),
             KeyBinding::new("cmd-,", OpenSettings, None),
             KeyBinding::new("cmd-k", OpenSpotlight, None),
@@ -334,6 +335,17 @@ fn main() {
                 eprintln!("WEB snapshot {shot} {:?}", rx.recv_async().await);
                 cx.background_executor().timer(Duration::from_secs(60)).await;
                 drop(web);
+            })
+            .detach();
+        }
+        // `YH_OPEN_USAGE=1`: Usage opened after `YH_DRAFT_DELAY` (`YH_USAGE_RANGE`,
+        // `YH_USAGE_METRIC=cost`, `YH_USAGE_HOVER=<days ago>`).
+        if env("YH_OPEN_USAGE").as_deref() == Some("1") {
+            let delay: f64 = env("YH_DRAFT_DELAY").and_then(|v| v.parse().ok()).unwrap_or(1.0);
+            let workspace = workspace.clone();
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(Duration::from_secs_f64(delay)).await;
+                let _ = cx.update(|cx| workspace.update(cx, |ws, cx| ws.toggle_usage(cx)));
             })
             .detach();
         }

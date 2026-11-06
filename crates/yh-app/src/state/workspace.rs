@@ -38,6 +38,14 @@ struct Runtime {
     idle: Option<Task<()>>,
 }
 
+/// What can stand in place of the open thread.
+#[derive(Clone, PartialEq, Debug)]
+pub enum Page {
+    /// A project's memory, by its id.
+    Memory(String),
+    Usage,
+}
+
 /// The right sidebar's tabs.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Panel {
@@ -107,8 +115,8 @@ pub struct Workspace {
     /// The right sidebar: open, and on which tab.
     pub shows_inspector: bool,
     pub panel: Panel,
-    /// The project whose Memory page is open in place of a thread.
-    pub page: Option<String>,
+    /// A page open in place of the thread: a project's Memory, or Usage.
+    pub page: Option<Page>,
     /// Goes up whenever memory changes (an agent's tools, the Memory page), for views of it.
     pub memory_revision: u64,
     title_asked_at: HashMap<String, usize>,
@@ -1208,8 +1216,19 @@ impl Workspace {
 
     /// Opens a project's Memory page in place of the open thread.
     pub fn open_memory(&mut self, project: &str, cx: &mut Context<Self>) {
-        self.page = Some(project.to_string());
+        self.page = Some(Page::Memory(project.to_string()));
         cx.emit(WorkspaceEvent::PageOpened);
+        cx.notify();
+    }
+
+    /// Opens Usage in place of the open thread, or closes it.
+    pub fn toggle_usage(&mut self, cx: &mut Context<Self>) {
+        if self.page == Some(Page::Usage) {
+            self.page = None;
+        } else {
+            self.page = Some(Page::Usage);
+            cx.emit(WorkspaceEvent::PageOpened);
+        }
         cx.notify();
     }
 

@@ -17,7 +17,7 @@ use gpui_kit::{
 };
 use yh_core::claude::Decision;
 
-actions!(harness, [Stop, Allow, Deny, Quit, NewThread, Find, FindNext, FindPrevious, OpenSettings, OpenSpotlight, ToggleInspector, OpenMemory]);
+actions!(harness, [Stop, Allow, Deny, Quit, NewThread, Find, FindNext, FindPrevious, OpenSettings, OpenSpotlight, ToggleInspector, OpenMemory, ToggleUsage]);
 
 /// Transcripts kept made for going back and forth.
 const KEPT_TRANSCRIPTS: usize = 6;
@@ -32,6 +32,8 @@ pub struct RootView {
     deck: Vec<(String, Entity<TranscriptView>)>,
     /// The Memory page when one is open (or was last: it's kept for going back to).
     memory: Option<Entity<MemoryPage>>,
+    /// Usage, made the first time it's opened.
+    usage: Option<Entity<crate::ui::usage::UsagePage>>,
     /// The open thread's tasks from memory, for its header: (title, state, steps done, steps).
     tasks: Vec<(String, String, usize, usize)>,
     tasks_for: Option<(String, u64)>,
@@ -64,7 +66,7 @@ impl RootView {
                 cx.notify();
             }),
         ];
-        RootView { workspace, sidebar, composer, find, spotlight, inspector, deck: vec![], memory: None, tasks: vec![], tasks_for: None, focus: cx.focus_handle(), _subscriptions: subscriptions }
+        RootView { workspace, sidebar, composer, find, spotlight, inspector, deck: vec![], memory: None, usage: None, tasks: vec![], tasks_for: None, focus: cx.focus_handle(), _subscriptions: subscriptions }
     }
 
     fn show(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -89,7 +91,14 @@ impl RootView {
     }
 
     fn open_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(project) = self.workspace.read(cx).page.clone() else { return };
+        let Some(crate::state::workspace::Page::Memory(project)) = self.workspace.read(cx).page.clone() else {
+            if self.workspace.read(cx).page == Some(crate::state::workspace::Page::Usage) && self.usage.is_none() {
+                let ws = self.workspace.clone();
+                self.usage = Some(cx.new(|cx| crate::ui::usage::UsagePage::new(ws, window, cx)));
+            }
+            cx.notify();
+            return;
+        };
         if self.memory.as_ref().is_none_or(|m| m.read(cx).project != project) {
             let ws = self.workspace.clone();
             self.memory = Some(cx.new(|cx| MemoryPage::new(ws, project, window, cx)));
@@ -132,7 +141,7 @@ impl RootView {
     }
 
     pub fn memory_page(&self, cx: &App) -> Option<Entity<MemoryPage>> {
-        let project = self.workspace.read(cx).page.clone()?;
+        let Some(crate::state::workspace::Page::Memory(project)) = self.workspace.read(cx).page.clone() else { return None };
         self.memory.clone().filter(|m| m.read(cx).project == project)
     }
 
@@ -179,7 +188,9 @@ impl Focusable for RootView {
 impl Render for RootView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::get(cx);
-        let page = self.memory_page(cx);
+        let page: Option<AnyView> = self.memory_page(cx).map(AnyView::from).or_else(|| {
+            (self.workspace.read(cx).page == Some(crate::state::workspace::Page::Usage)).then(|| self.usage.clone().map(AnyView::from)).flatten()
+        });
         let selected = if page.is_some() { None } else { self.workspace.read(cx).selected_thread() };
         let title = selected.as_ref().map(|t| t.read(cx).title.clone()).unwrap_or_else(|| "YourHarness".into());
         let transcript = self.transcript_view(cx);
@@ -206,6 +217,7 @@ impl Render for RootView {
                     ws.set_shows_inspector(on, cx)
                 })
             }))
+            .on_action(cx.listener(|this, _: &ToggleUsage, _, cx| this.workspace.update(cx, |ws, cx| ws.toggle_usage(cx))))
             .on_action(cx.listener(|this, _: &OpenMemory, _, cx| {
                 let ws = this.workspace.clone();
                 let project = ws
@@ -283,7 +295,7 @@ impl Render for RootView {
                         // with its cards. Its render is a handful of elements.
                         .child(div().flex_none().w_full().child(self.composer.clone()))
                     })
-                    .when(selected.is_none() && self.memory_page(cx).is_none(), |d| {
+                    .when(selected.is_none() && self.workspace.read(cx).page.is_none(), |d| {
                         d.child(
                             div()
                                 .flex_1()

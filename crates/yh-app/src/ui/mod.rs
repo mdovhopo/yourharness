@@ -10,3 +10,4 @@ pub mod rows;
 pub mod sidebar;
 pub mod spotlight;
 pub mod transcript;
+pub mod usage;

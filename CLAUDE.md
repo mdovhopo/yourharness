@@ -64,7 +64,9 @@ prints notifications and the Dock badge instead (always in tests: a real one ask
 `YH_APPEARANCE=light|dark`, `YH_OPEN_SETTINGS=1`, `YH_INSPECTOR_PANEL=prs|sideChat|subagents|files|browser`, `YH_MOCK_PULLS=<file.json>` (PRs read from
 `{"<url>": {…gh pr view's JSON…}}` instead of `gh`), `YH_SIDE_ASK=<text>` (asked in the selected thread's side
 chat after `YH_DRAFT_DELAY`) (the right sidebar open on it), `YH_OPEN_FILE=<path[:line[-end]]>`
-(opened in the Files tab as a link does, after `YH_DRAFT_DELAY`), `YH_OPEN_MEMORY=1` (the project's Memory page,
+(opened in the Files tab as a link does, after `YH_DRAFT_DELAY`), `YH_OPEN_USAGE=1` (Usage; `YH_USAGE_RANGE=week|month|quarter|halfYear|year`, `YH_USAGE_METRIC=cost`,
+`YH_USAGE_HOVER=<days ago>`; test it on a clone of `test-harness-root/usage` with `CLAUDE_CONFIG_DIR` at its
+`claude-config`, never the real `~/.claude`), `YH_OPEN_MEMORY=1` (the project's Memory page,
 `YH_MEMORY_TAB=memories|tasks|activity`, after `YH_DRAFT_DELAY`), `YH_SPOTLIGHT=<words>` (⌘K typed;
 `YH_SPOTLIGHT_ENTER=1` with a session ID resumes it).
 
