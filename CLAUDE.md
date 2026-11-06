@@ -42,7 +42,9 @@ permissions or data with the user's app (`/Applications/YourHarness.app`, the fr
 (a folder with a `harness.sqlite`, e.g. an APFS clone `cp -c` of `test-harness-root/extreme`),
 and `YH_PATH="$PATH"` so no login shell starts and `claude` is found. Launch in the
 background, never taking focus:
-`open -g -n --env YH_DATA_DIR=… --env YH_PATH="$PATH" --stderr <log> "<app>"`. Test builds go
+`open -g -n --env YH_BACKGROUND=1 --env YH_DATA_DIR=… --env YH_PATH="$PATH" --stderr <log> "<app>"`.
+Without `YH_BACKGROUND=1` a window nobody looks at stops drawing, and a snapshot shows it as it
+was seconds after launch (a finished turn still "working"). Test builds go
 to their own folder (`APP=…`), never `build/`, which may be the copy the user has open. A test
 run must never put a macOS privacy prompt on screen: never run `screencapture`. Use a
 `FEATURES=snapshots` build and `YH_SNAPSHOT=<png>` (`Window::render_to_image`). Use Haiku and a

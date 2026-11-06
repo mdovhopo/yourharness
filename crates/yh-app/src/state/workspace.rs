@@ -5,6 +5,7 @@
 
 use crate::probe;
 use crate::state::thread::ThreadState;
+use crate::state::thread_tools::{self, ToolRequest};
 use gpui_kit::{App, AppContext, Context, Entity, EventEmitter, Task, WeakEntity};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -53,6 +54,12 @@ pub struct Workspace {
     /// A folder's files for `@` mentions, kept 30 seconds.
     files: HashMap<String, (Instant, Arc<Vec<String>>)>,
     new_count: usize,
+    /// Where agents' thread tools ask the main thread (`thread_tools`).
+    tool_requests: flume::Sender<ToolRequest>,
+    /// Threads whose title is being rewritten (`update_title`), and how many messages the user
+    /// had sent when it was last asked for.
+    titles_rewriting: std::collections::HashSet<String>,
+    title_asked_at: HashMap<String, usize>,
 }
 
 impl EventEmitter<WorkspaceEvent> for Workspace {}
@@ -67,6 +74,15 @@ impl Workspace {
             .setting("claudeModels")
             .and_then(|v| v.as_array().map(|a| a.iter().filter_map(ModelInfo::from_json).collect()))
             .unwrap_or_default();
+        let (tool_requests, requests) = flume::unbounded();
+        cx.spawn(async move |this, cx| {
+            while let Ok(request) = requests.recv_async().await {
+                if this.update(cx, |ws, cx| ws.handle_tool_request(request, cx)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
         let mut workspace = Workspace {
             projects: library.projects.clone(),
             data_dir: data_directory(),
@@ -81,6 +97,9 @@ impl Workspace {
             commands: HashMap::new(),
             files: HashMap::new(),
             new_count: 0,
+            tool_requests,
+            titles_rewriting: Default::default(),
+            title_asked_at: HashMap::new(),
         };
         if let Some(Value::Object(all)) = workspace.library.setting("slashCommands") {
             for (project, list) in all {
@@ -529,6 +548,21 @@ impl Workspace {
             allowed.push("mcp__memory".to_string());
             servers.push(std::sync::Arc::new(yh_core::memory_tools::MemoryTools { store, scope, actor, on_change: Box::new(|| {}) }));
         }
+        // The thread tools: list, read and tidy threads; this thread's title.
+        if let Some(project) = project.as_ref() {
+            let titles = self.library.setting("titleGeneration");
+            let updates_title = self.library.setting("agentUpdatesTitles").and_then(|v| v.as_bool()).unwrap_or(true)
+                && titles.as_ref().is_none_or(|t| t.get("provider").is_some_and(|p| !p.is_null()));
+            let home = self.home_project().as_deref() == Some(project.id.as_str());
+            prompt.push(thread_tools::instructions((!home).then_some(project.name.as_str()), updates_title));
+            allowed.push("mcp__threads".to_string());
+            servers.push(std::sync::Arc::new(thread_tools::ThreadTools {
+                caller: t.id().to_string(),
+                requests: self.tool_requests.clone(),
+                db: self.library.db.clone(),
+                updates_title,
+            }));
+        }
         let options = LaunchOptions {
             cwd,
             session_id: t.session_id.clone(),
@@ -943,23 +977,39 @@ impl Workspace {
     /// its own folder, with its history. Read from `~/.claude/projects`, never written.
     pub fn resume_session(&mut self, text: &str, cx: &mut Context<Self>) -> Result<(), String> {
         let session = session_id_in(text).ok_or("That isn't a session ID.")?;
-        let known = self.threads.iter().find(|t| t.read(cx).session_id.as_deref().is_some_and(|s| s.eq_ignore_ascii_case(&session))).cloned();
-        if let Some(t) = known {
+        if let Some(t) = self.thread_for_session(&session, cx) {
             let id = t.read(cx).id().to_string();
             self.select(&id, cx);
             return Ok(());
         }
         let path = yh_core::history::locate(&yh_core::history::config_directory(), &session).ok_or("No Claude Code session with this ID.")?;
-        let (cwd, first) = yh_core::history::peek(&path);
-        let rows = yh_core::history::load_with_limit(&path, usize::MAX);
+        let (cwd, _) = yh_core::history::peek(&path);
         let folder = cwd.filter(|c| std::path::Path::new(c).is_dir());
         let project = match &folder {
             Some(f) => self.add_project(f, cx),
             None => self.home_project().or_else(|| self.projects.first().map(|p| p.id.clone())).ok_or("No project to put it in.")?,
         };
+        let (id, _) = self.import_session(&session, &project, cx)?;
+        self.select(&id, cx);
+        Ok(())
+    }
+
+    pub fn thread_for_session(&self, session: &str, cx: &App) -> Option<Entity<ThreadState>> {
+        self.threads.iter().find(|t| t.read(cx).session_id.as_deref().is_some_and(|s| s.eq_ignore_ascii_case(session))).cloned()
+    }
+
+    /// A Claude Code session as a new thread of `project` that continues it in the folder it
+    /// ran in, with its history; the thread's id and how many messages it brought.
+    pub fn import_session(&mut self, session: &str, project: &str, cx: &mut Context<Self>) -> Result<(String, usize), String> {
+        let path = yh_core::history::locate(&yh_core::history::config_directory(), session).ok_or("No Claude Code session with this ID.")?;
+        let (cwd, first) = yh_core::history::peek(&path);
+        let rows = yh_core::history::load_with_limit(&path, usize::MAX);
+        let messages = rows.iter().filter(|e| e.kind == yh_core::library::Kind::User).count();
+        let folder = cwd.filter(|c| std::path::Path::new(c).is_dir());
         let title = first.unwrap_or_else(|| "Resumed session".into());
-        let id = self.new_thread(&project, cx);
-        let project_path = self.project(&project).map(|p| p.path.clone());
+        let id = self.new_thread(project, cx);
+        let project_path = self.project(project).map(|p| p.path.clone());
+        let session = session.to_string();
         self.update_meta(&id, cx, |m, r| {
             m.title = title.clone();
             r.insert("title".into(), title.clone().into());
@@ -982,9 +1032,166 @@ impl Workspace {
             }
             // Read back from what was saved, as any history.
             thread.update(cx, |t, _| t.unload());
-            self.ensure_loaded(&thread, cx);
         }
-        Ok(())
+        Ok((id, messages))
+    }
+
+    // MARK: Agents' thread tools
+
+    /// The project a thread's agent reaches: None in Home (everything).
+    fn tool_scope(&self, caller: &str, cx: &App) -> Option<Option<ProjectMeta>> {
+        let project = self.thread(caller)?.read(cx).meta.project_id.clone();
+        Some(if self.home_project().as_deref() == Some(project.as_str()) { None } else { self.project(&project).cloned() })
+    }
+
+    fn handle_tool_request(&mut self, request: ToolRequest, cx: &mut Context<Self>) {
+        match request {
+            ToolRequest::Snapshot { caller, reply } => {
+                let snapshot = self.tool_scope(&caller, cx).map(|scope| thread_tools::Snapshot {
+                    scope,
+                    projects: self.projects.clone(),
+                    threads: self
+                        .threads
+                        .iter()
+                        .map(|t| {
+                            let t = t.read(cx);
+                            thread_tools::ThreadInfo {
+                                id: t.id().to_string(),
+                                title: t.title.clone(),
+                                project_id: t.meta.project_id.clone(),
+                                running: t.running,
+                                waiting: t.permission.is_some(),
+                                unread: t.unread,
+                                pinned: t.meta.pinned,
+                                settled: t.meta.settled_at.is_some(),
+                                updated_at: t.meta.updated_at,
+                                session_id: t.session_id.clone(),
+                            }
+                        })
+                        .collect(),
+                });
+                let _ = reply.send(snapshot);
+            }
+            ToolRequest::Rename { id, title, reply } => {
+                self.rename(&id, &title, cx);
+                let _ = reply.send(());
+            }
+            ToolRequest::Settle { id, on, reply } => {
+                self.set_settled(&id, on, cx);
+                let _ = reply.send(());
+            }
+            ToolRequest::Pin { id, on, reply } => {
+                self.set_pinned(&id, on, cx);
+                let _ = reply.send(());
+            }
+            ToolRequest::Import { caller, session, project, reply } => {
+                let _ = reply.send(self.import_for_agent(&caller, &session, project.as_deref(), cx));
+            }
+            ToolRequest::UpdateTitle { caller, messages, sent, hint, reply } => {
+                let _ = reply.send(self.update_title_for_agent(&caller, messages, sent, hint, cx));
+            }
+        }
+    }
+
+    /// `import_claude_code_session`: never a new project. From a project's thread, into that
+    /// project when the session ran inside its folder; from Home, into the project asked for,
+    /// else the one for its folder (the closest around it), else Home.
+    fn import_for_agent(&mut self, caller: &str, session: &str, asked: Option<&str>, cx: &mut Context<Self>) -> Result<(String, usize), String> {
+        let scope = self.tool_scope(caller, cx).ok_or("This thread is gone.")?;
+        if let Some(existing) = self.thread_for_session(session, cx) {
+            let project = existing.read(cx).meta.project_id.clone();
+            if scope.as_ref().is_some_and(|p| p.id != project) {
+                return Err("That session is already a thread, in a project you can't reach from here.".into());
+            }
+            return Ok((existing.read(cx).id().to_string(), usize::MAX));
+        }
+        let path = yh_core::history::locate(&yh_core::history::config_directory(), session).ok_or("No Claude Code session with this ID.")?;
+        let (cwd, _) = yh_core::history::peek(&path);
+        let inside = |folder: &str| cwd.as_deref().is_some_and(|c| c == folder || c.starts_with(&format!("{}/", folder.trim_end_matches('/'))));
+        let destination = match &scope {
+            Some(own) => {
+                if !inside(&own.path) {
+                    return Err(format!("That session ran in {}, outside {} ({}). Import it from a thread in Home.", cwd.as_deref().unwrap_or("an unknown folder"), own.name, own.path));
+                }
+                own.id.clone()
+            }
+            None => {
+                let chosen = asked.and_then(|given| {
+                    self.projects
+                        .iter()
+                        .find(|p| given.len() >= 6 && p.id.to_lowercase().starts_with(&given.to_lowercase()))
+                        .or_else(|| self.projects.iter().find(|p| p.name.eq_ignore_ascii_case(given)))
+                });
+                if asked.is_some() && chosen.is_none() {
+                    return Err(format!("No project {}.", asked.unwrap_or_default()));
+                }
+                let home = self.home_project();
+                let suggested = || {
+                    let exact = self.projects.iter().find(|p| cwd.as_deref() == Some(p.path.trim_end_matches('/')));
+                    exact
+                        .or_else(|| {
+                            self.projects
+                                .iter()
+                                .filter(|p| Some(&p.id) != home.as_ref() && inside(&p.path))
+                                .max_by_key(|p| p.path.len())
+                        })
+                        .map(|p| p.id.clone())
+                        .or_else(|| home.clone())
+                        .or_else(|| self.projects.first().map(|p| p.id.clone()))
+                };
+                chosen.map(|p| p.id.clone()).or_else(suggested).ok_or("There's no project to put it in.")?
+            }
+        };
+        self.import_session(session, &destination, cx)
+    }
+
+    /// `update_title`: the caller's title written again from the conversation, with the
+    /// agent's hint, on the title model; kept if still accurate, never over a chosen one.
+    fn update_title_for_agent(&mut self, caller: &str, messages: Vec<(bool, String)>, sent: usize, hint: Option<String>, cx: &mut Context<Self>) -> String {
+        let Some(thread) = self.thread(caller) else { return "This thread is gone.".into() };
+        let current = thread.read(cx).title.clone();
+        if thread.read(cx).meta.title_chosen {
+            return format!("The user chose this thread's title, “{current}”, so it stays. Rename it only if they ask.");
+        }
+        if self.titles_rewriting.contains(caller) {
+            return "The title is already being rewritten.".into();
+        }
+        if self.title_asked_at.get(caller) == Some(&sent) {
+            return "The title was already updated since the user's last message; once per change of subject is enough.".into();
+        }
+        self.title_asked_at.insert(caller.to_string(), sent);
+        let settings = self.library.setting("titleGeneration").unwrap_or(serde_json::json!({"provider": "claude", "model": "haiku"}));
+        let Some(claude) = yh_core::claude::find_claude().filter(|_| settings["provider"].as_str() == Some("claude") && sent > 0) else {
+            return format!("The title (“{current}”) can't be rewritten right now.");
+        };
+        let model = settings["model"].as_str().unwrap_or("haiku").to_string();
+        let rules = self.library.setting("titleRules").and_then(|r| r.as_str().map(str::to_string));
+        let prompt = yh_core::titles::regenerate_prompt(&messages, &current, rules.as_deref(), hint.as_deref());
+        let path = std::env::var("YH_PATH").ok();
+        self.titles_rewriting.insert(caller.to_string());
+        let id = caller.to_string();
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_executor().spawn(async move { yh_core::titles::generate(&claude, path.as_deref(), &model, &prompt) }).await;
+            let _ = this.update(cx, |ws, cx| {
+                ws.titles_rewriting.remove(&id);
+                let (Ok(title), Some(thread)) = (result, ws.thread(&id)) else { return };
+                // A title you chose meanwhile stays.
+                if title.is_empty() || thread.read(cx).meta.title_chosen || thread.read(cx).title == title {
+                    return;
+                }
+                thread.update(cx, |t, cx| {
+                    t.title = title.clone();
+                    t.meta.title = title.clone();
+                    cx.notify();
+                });
+                ws.library.update_thread(&id, |r| {
+                    r.insert("title".into(), title.into());
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+        format!("The title (“{current}”) is being rewritten from the conversation; it stays as it is if it's still accurate. No need to mention it to the user.")
     }
 
     // MARK: Recovery

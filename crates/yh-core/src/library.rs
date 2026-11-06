@@ -250,11 +250,22 @@ impl Library {
             }
             *self.records.lock().unwrap() = records;
         }
-        // `YH_PROJECT=<folder>`: a project of its own, for trying live turns somewhere throwaway.
+        // `YH_PROJECT=<folder>`: a project of its own, for trying live turns somewhere throwaway;
+        // saved like any project when there's a database, so its threads are real ones.
         if let Some(path) = env("YH_PROJECT") {
             // `YH_MODE` sets its permission mode (`ask` to see permission cards).
             let mode = env("YH_MODE").unwrap_or_else(|| "auto".into());
-            self.projects.insert(0, ProjectMeta { id: format!("dir:{path}"), name: last_component(&path), path, mode });
+            if self.db.is_some() {
+                let mut project = self.add_project(&path);
+                self.update_project(&project.id, |p| {
+                    p.insert("permissionMode".into(), mode.clone().into());
+                });
+                project.mode = mode;
+                self.projects.retain(|p| p.id != project.id);
+                self.projects.insert(0, project);
+            } else {
+                self.projects.insert(0, ProjectMeta { id: format!("dir:{path}"), name: last_component(&path), path, mode });
+            }
         }
         if let Some(config) = self.claude_config.clone() {
             let limit = env("YH_CLAUDE_LIMIT").and_then(|v| v.parse().ok()).unwrap_or(400);
@@ -423,15 +434,15 @@ impl Library {
     }
 }
 
-struct SessionFile {
-    path: PathBuf,
-    folder: String,
-    session_id: String,
-    modified: f64,
+pub struct SessionFile {
+    pub path: PathBuf,
+    pub folder: String,
+    pub session_id: String,
+    pub modified: f64,
 }
 
 /// Every session file under `<config>/projects`, newest first.
-fn session_files(config: &Path) -> Vec<SessionFile> {
+pub fn session_files(config: &Path) -> Vec<SessionFile> {
     let mut files = vec![];
     let Ok(folders) = std::fs::read_dir(config.join("projects")) else { return files };
     for folder in folders.flatten() {

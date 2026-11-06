@@ -2,7 +2,7 @@
 //! in the Swift app's settings (`defaults`, `titleGeneration`, `notifications`, `appearance`).
 
 use crate::state::workspace::Workspace;
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::button::Button;
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::{Sizable, WindowExt};
 use gpui_kit::{div, prelude::*, px, App, Entity, Window};

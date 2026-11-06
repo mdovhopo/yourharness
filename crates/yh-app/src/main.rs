@@ -9,13 +9,12 @@ mod theme;
 mod ui;
 
 use gpui_kit::{
-    point, prelude::*, px, size, App, Bounds, Focusable, KeyBinding, Menu, MenuItem, TitlebarOptions, Window, WindowAppearance,
+    point, prelude::*, px, size, App, Bounds, Focusable, KeyBinding, Menu, MenuItem, TitlebarOptions,
     WindowBounds, WindowOptions,
 };
 use state::workspace::Workspace;
 use std::sync::Arc;
 use std::time::Duration;
-use theme::Theme;
 use ui::root::{Allow, Deny, Find, FindNext, FindPrevious, NewThread, OpenSettings, OpenSpotlight, Quit, RootView, Stop};
 
 fn env(key: &str) -> Option<String> {

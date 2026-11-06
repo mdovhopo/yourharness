@@ -112,6 +112,100 @@ pub fn generate(executable: &std::path::Path, path_env: Option<&str>, model: &st
     result
 }
 
+
+const REGENERATE_FRAME: &str = r#"Regenerate the title for an existing YourHarness thread so the user can recognize it weeks later.
+The previous title was {PREVIOUS}.
+Return JSON with keys title and needsRefinement. Set needsRefinement to false.
+
+Determine the title in this order:
+1. Read the USER messages first. Identify the latest explicit durable goal. The original subject remains the subject until the user clearly changes what the thread is about.
+2. Use ASSISTANT messages to resolve vague links, unnamed code, and discovered product nouns. Do not promote one assistant finding into the thread subject unless the user adopts it as a new goal.
+3. Compare that subject with the previous title. Preserve accurate scope words, especially when earlier content is truncated. Replace the previous title when it is generic, artifact-based, a completion update, or contradicted by the thread.
+4. Title the durable subject and desired outcome, not the current workflow state.
+"#;
+
+const REGENERATE_RULES: &str = r#"Editorial rules:
+- 3-8 words, fewer than 40 characters.
+- Use a compact noun phrase or clear action phrase.
+- Preserve the umbrella subject when later messages focus on one finding, provider, platform, or implementation detail.
+- A thread progressing through research, planning, implementation, review, CI, merge, and monitoring has usually not changed subjects.
+- Ignore deliverables and operations such as mocks, plans, HTML, branches, PRs, tests, CI, commits, merging, and monitoring unless they are the actual topic.
+- Models, subagents, tools, output formats, and monitoring instructions do not belong in the title unless they are themselves the topic.
+- Treat final operational follow-ups and assistant completion summaries as weak evidence of subject.
+- For reviews, name the reviewed feature or system and its durable concern, not one finding from the review.
+- For research, name the question domain rather than the research process.
+- Do not claim the work is complete.
+- Do not copy and truncate a thread message.
+- Avoid project names already visible in the UI, PR numbers, quotes, labels, filler, and trailing punctuation.
+- Local git history is not evidence of what a linked PR or issue is about. Never title the thread after branch names, commit messages, or merged commits.
+- If a linked PR or issue cannot be read, fall back to the user's stated action plus its number, such as "Take Over PR 8588". This is the one case where a PR or issue number belongs in the title.
+- Keep the previous title unchanged if it is already accurate. Otherwise return a meaningfully improved title, not a cosmetic paraphrase.
+
+Examples of the distinction:
+- A subagent-monitoring review that finds a roster bug remains "Review Subagent Monitoring Risks," not "Roster Bug Review."
+- A vague failing-test request later identified as a lazy feed mismatch becomes "Fix Lazy Thread Feed Test," not "Prevent Mobile Feed Regressions."
+- A QR-sharing overhaul that ends with CI and merge work remains about QR sharing, not the PR lifecycle.
+"#;
+
+/// The prompt for a fresh title from the whole conversation (`(is_user, text)`, oldest first),
+/// with the agent's hint on what the subject is now.
+pub fn regenerate_prompt(messages: &[(bool, String)], previous: &str, rules: Option<&str>, hint: Option<&str>) -> String {
+    let frame = REGENERATE_FRAME.replace("{PREVIOUS}", &serde_json::to_string(previous).unwrap_or_default());
+    let instructions = match rules.map(str::trim).filter(|r| !r.is_empty()) {
+        Some(r) => format!("{frame}\n\n{r}\n\nKeep the previous title unchanged if it is already accurate. Otherwise return a meaningfully improved title, not a cosmetic paraphrase."),
+        None => format!("{frame}\n\n{REGENERATE_RULES}"),
+    };
+    let mut prompt = format!("{instructions}\n\nThread contents:\n{}", context(messages));
+    if let Some(hint) = hint.map(str::trim).filter(|h| !h.is_empty()) {
+        prompt += &format!(
+            "\n\nThe agent working in this thread says its subject is now: {}\nTreat that as a hint, not the title: check it against the user's messages.",
+            limit(hint, 300)
+        );
+    }
+    prompt
+}
+
+/// About 8,000 characters of the conversation: the first user message, the latest user
+/// messages, then the latest replies, each trimmed in the middle.
+fn context(messages: &[(bool, String)]) -> String {
+    const MAX: usize = 8_000;
+    const MAX_MESSAGE: usize = 2_000;
+    let sections: Vec<(usize, bool, String)> = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, t))| !t.trim().is_empty())
+        .map(|(i, (u, t))| (i, *u, t.trim().to_string()))
+        .collect();
+    let prefix = |u: bool| if u { "USER:\n" } else { "ASSISTANT:\n" };
+    let mut selected: std::collections::BTreeMap<usize, String> = Default::default();
+    let mut remaining = MAX as i64;
+    let add = |s: &(usize, bool, String), budget: i64, selected: &mut std::collections::BTreeMap<usize, String>, remaining: &mut i64| {
+        if selected.contains_key(&s.0) {
+            return;
+        }
+        let lim = budget.min(*remaining) - prefix(s.1).len() as i64 - 2;
+        if lim <= 40 {
+            return;
+        }
+        let text = format!("{}{}", prefix(s.1), limit(&s.2, lim as usize));
+        *remaining -= text.chars().count() as i64 + 2;
+        selected.insert(s.0, text);
+    };
+    if let Some(first) = sections.iter().find(|s| s.1) {
+        add(first, MAX_MESSAGE as i64, &mut selected, &mut remaining);
+    }
+    for s in sections.iter().rev().filter(|s| s.1) {
+        let b = (MAX_MESSAGE as i64).min(remaining - 2_000);
+        add(s, b, &mut selected, &mut remaining);
+    }
+    for s in sections.iter().rev().filter(|s| !s.1) {
+        add(s, MAX_MESSAGE as i64, &mut selected, &mut remaining);
+    }
+    let trimmed = selected.len() < sections.len();
+    let body = selected.into_values().collect::<Vec<_>>().join("\n\n");
+    if trimmed { format!("[Earlier content truncated]\n\n{body}") } else { body }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
