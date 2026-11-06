@@ -79,6 +79,8 @@ pub struct MemoryPage {
     shown_version: Option<i64>,
     /// A memory to put in the editors at the next render (setting a value needs the window).
     pending_fill: Option<Memory>,
+    /// What an import or export just did, under the title.
+    notice: Option<String>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -137,6 +139,7 @@ impl MemoryPage {
             versions: vec![],
             shown_version: None,
             pending_fill: None,
+            notice: None,
             _subscriptions: subscriptions,
         };
         page.reload(cx);
@@ -270,6 +273,120 @@ impl MemoryPage {
             self.pending_fill = Some(m);
         }
         cx.notify();
+    }
+
+    fn project_path(&self, cx: &App) -> Option<String> {
+        self.workspace.read(cx).project(&self.project).map(|p| p.path.clone())
+    }
+
+    fn workspace_name(&self, cx: &App) -> String {
+        let ws = self.workspace.read(cx);
+        ws.project(&self.project).map(|p| if ws.home_project().as_deref() == Some(p.id.as_str()) { "Home".to_string() } else { p.name.clone() }).unwrap_or_default()
+    }
+
+    /// Claude Code's own memory files for this project's folder, not counting its index.
+    fn claude_code_files(&self, cx: &App) -> Vec<std::path::PathBuf> {
+        self.project_path(cx).map(|p| yh_core::memory_archive::claude_code::files(&p, &yh_core::history::config_directory())).unwrap_or_default()
+    }
+
+    /// Imports a file or folder: an export (JSON) or memory files (Markdown with memory
+    /// frontmatter) straight in; anything else goes to the Importer.
+    pub fn import_path(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
+        let Some(store) = self.store.clone() else { return };
+        let scope = self.scope();
+        let (ws, project) = (self.workspace.clone(), self.project.clone());
+        cx.spawn(async move |this, cx| {
+            let p = path.clone();
+            let found: Result<Vec<Memory>, String> = cx
+                .background_executor()
+                .spawn(async move {
+                    let now = yh_core::library::now_ms() / 1000.;
+                    if p.is_dir() {
+                        Ok(yh_core::memory_archive::memories_from_markdown(&yh_core::memory_archive::read_markdown_folder(&p), &scope, now))
+                    } else if p.extension().is_some_and(|e| e == "json") {
+                        let data = std::fs::read(&p).map_err(|e| e.to_string())?;
+                        yh_core::memory_archive::memories_from_json(&data, &scope).map_err(|e| e.to_string())
+                    } else if p.extension().is_some_and(|e| e == "md") {
+                        let text = std::fs::read_to_string(&p).map_err(|e| e.to_string())?;
+                        let mut files = std::collections::BTreeMap::new();
+                        files.insert(p.file_name().unwrap_or_default().to_string_lossy().into_owned(), text);
+                        Ok(yh_core::memory_archive::memories_from_markdown(&files, &scope, now))
+                    } else {
+                        Ok(vec![])
+                    }
+                })
+                .await;
+            let _ = this.update(cx, |page, cx| match found {
+                Ok(memories) if !memories.is_empty() => {
+                    let report = yh_core::memory_archive::merge(memories, &page.scope(), &store, &user());
+                    page.notice = Some(format!("Imported from {}: {} added, {} updated, {} already here.", path.file_name().unwrap_or_default().to_string_lossy(), report.added, report.updated, report.unchanged));
+                    if std::env::var("YH_MEMORY_IMPORT").is_ok() {
+                        eprintln!("MEMORY {}", page.notice.clone().unwrap_or_default());
+                    }
+                    page.written(cx);
+                }
+                Ok(_) => {
+                    // Not memory files: the Importer reads anything.
+                    let sources = vec![path.to_string_lossy().into_owned()];
+                    let message = yh_core::memory_agents::import_request(&sources, None);
+                    ws.update(cx, |ws, cx| ws.open_memory_agent("importer", &project, sources, Some(message), cx));
+                }
+                Err(e) => {
+                    page.notice = Some(e);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn import_file_dialog(&mut self, cx: &mut Context<Self>) {
+        let chosen = cx.prompt_for_paths(gpui_kit::PathPromptOptions { files: true, directories: true, multiple: false, prompt: Some("Import".into()) });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = chosen.await else { return };
+            if let Some(path) = paths.into_iter().next() {
+                let _ = this.update(cx, |p, cx| p.import_path(path, cx));
+            }
+        })
+        .detach();
+    }
+
+    fn import_claude_code(&mut self, cx: &mut Context<Self>) {
+        let Some(folder) = self.project_path(cx) else { return };
+        let dir = yh_core::memory_archive::claude_code::directory(&folder, &yh_core::history::config_directory());
+        self.import_path(dir, cx);
+    }
+
+    /// Writes this workspace's memory as JSON, or a Markdown folder (Claude Code's format), to `to`.
+    pub fn export_to(&mut self, markdown: bool, to: std::path::PathBuf, cx: &mut Context<Self>) {
+        let memories: Vec<Memory> = self.memories.clone();
+        let (name, path) = (self.workspace_name(cx), self.project_path(cx));
+        let result = if markdown {
+            std::fs::create_dir_all(&to)
+                .map_err(|e| e.to_string())
+                .and_then(|_| yh_core::memory_archive::markdown_files(&memories, &name).into_iter().try_for_each(|(f, text)| std::fs::write(to.join(f), text).map_err(|e| e.to_string())))
+        } else {
+            std::fs::write(&to, yh_core::memory_archive::json(&memories, &name, path.as_deref(), yh_core::library::now_ms() / 1000.)).map_err(|e| e.to_string())
+        };
+        self.notice = Some(match result {
+            Ok(()) => format!("Exported {} memories to {}.", memories.len(), to.display()),
+            Err(e) => format!("Couldn't export: {e}"),
+        });
+        if std::env::var("YH_MEMORY_EXPORT").is_ok() {
+            eprintln!("MEMORY {}", self.notice.clone().unwrap_or_default());
+        }
+        cx.notify();
+    }
+
+    fn export_dialog(&mut self, markdown: bool, cx: &mut Context<Self>) {
+        let home = std::env::var("HOME").map(std::path::PathBuf::from).unwrap_or_default().join("Desktop");
+        let name = format!("{} memory{}", self.workspace_name(cx), if markdown { "" } else { ".json" });
+        let chosen = cx.prompt_for_new_path(&home, Some(&name));
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(to))) = chosen.await else { return };
+            let _ = this.update(cx, |p, cx| p.export_to(markdown, to, cx));
+        })
+        .detach();
     }
 
     /// Asks for files or folders, then hands them to the Importer.
@@ -419,7 +536,8 @@ impl MemoryPage {
                     .flex_col()
                     .gap(px(2.))
                     .child(div().text_size(px(20.)).font_weight(FontWeight::SEMIBOLD).child(format!("{} Memory", name.unwrap_or_default())))
-                    .child(div().text_color(theme.secondary).child(if self.loaded { self.summary() } else { "Loading…".into() })),
+                    .child(div().text_color(theme.secondary).child(if self.loaded { self.summary() } else { "Loading…".into() }))
+                    .when_some(self.notice.clone(), |d, n| d.child(div().text_size(px(12.)).text_color(theme.accent).child(n))),
             )
             .when(!memory_on, |d| d.child(chip("Off for agents", theme.warning)))
             .child(
@@ -430,7 +548,38 @@ impl MemoryPage {
                     .child(tab_button("tab-tasks", if tasks > 0 { "Tasks ·" } else { "Tasks" }, Tab::Tasks, cx).when(tasks > 0, |b| b.label(format!("Tasks {tasks}"))))
                     .child(tab_button("tab-activity", "Activity", Tab::Activity, cx)),
             )
-            .child(Button::new("memory-import").small().ghost().label("Import…").tooltip("Bring memory in from files or folders: the Importer reads them and saves what's worth keeping").on_click(cx.listener(|this, _, _, cx| this.import_with_agent(cx))))
+            .child({
+                let page = cx.entity().downgrade();
+                let claude_files = self.claude_code_files(cx).len();
+                Button::new("memory-import").small().ghost().label("Import").dropdown_caret(true).dropdown_menu(move |mut menu, _, _| {
+                    let (a, b, c) = (page.clone(), page.clone(), page.clone());
+                    menu = menu
+                        .item(PopupMenuItem::new("With the Importer…").on_click(move |_, _, cx| {
+                            let _ = a.update(cx, |p, cx| p.import_with_agent(cx));
+                        }))
+                        .item(PopupMenuItem::new("File or Folder…").on_click(move |_, _, cx| {
+                            let _ = b.update(cx, |p, cx| p.import_file_dialog(cx));
+                        }));
+                    if claude_files > 0 {
+                        menu = menu.separator().item(PopupMenuItem::new(format!("Claude Code's Memory ({claude_files})")).on_click(move |_, _, cx| {
+                            let _ = c.update(cx, |p, cx| p.import_claude_code(cx));
+                        }));
+                    }
+                    menu
+                })
+            })
+            .child({
+                let page = cx.entity().downgrade();
+                Button::new("memory-export").small().ghost().label("Export").dropdown_caret(true).dropdown_menu(move |menu, _, _| {
+                    let (a, b) = (page.clone(), page.clone());
+                    menu.item(PopupMenuItem::new("As JSON…").on_click(move |_, _, cx| {
+                        let _ = a.update(cx, |p, cx| p.export_dialog(false, cx));
+                    }))
+                    .item(PopupMenuItem::new("As Markdown Folder…").on_click(move |_, _, cx| {
+                        let _ = b.update(cx, |p, cx| p.export_dialog(true, cx));
+                    }))
+                })
+            })
             .child(Button::new("memory-reconcile").small().ghost().label("Reconcile").tooltip("The Reconciler finds duplicates, stale and vague memories, and fixes them with you").on_click(cx.listener(|this, _, _, cx| {
                 let project = this.project.clone();
                 this.workspace.update(cx, |ws, cx| ws.open_memory_agent("reconciler", &project, vec![], Some(yh_core::memory_agents::RECONCILE_REQUEST.to_string()), cx));

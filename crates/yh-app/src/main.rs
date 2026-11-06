@@ -280,6 +280,27 @@ fn main() {
                         workspace.update(cx, |ws, cx| ws.open_memory(&project, cx));
                     }
                 });
+                // `YH_MEMORY_IMPORT=<file or folder>` imports into it; `YH_MEMORY_EXPORT=<folder>`
+                // writes its memory there as JSON and as a Markdown folder.
+                let _ = cx.update(|cx| {
+                    if let Some(page) = root.read(cx).memory_page(cx) {
+                        if let Some(path) = env("YH_MEMORY_IMPORT") {
+                            page.update(cx, |p, cx| p.import_path(std::path::PathBuf::from(path), cx));
+                        }
+                    }
+                });
+                if let Some(folder) = env("YH_MEMORY_EXPORT") {
+                    cx.background_executor().timer(Duration::from_secs(3)).await;
+                    let _ = cx.update(|cx| {
+                        if let Some(page) = root.read(cx).memory_page(cx) {
+                            let folder = std::path::PathBuf::from(folder);
+                            page.update(cx, |p, cx| {
+                                p.export_to(false, folder.join("memory.json"), cx);
+                                p.export_to(true, folder.join("memory-md"), cx);
+                            });
+                        }
+                    });
+                }
                 let tab = match env("YH_MEMORY_TAB").as_deref() {
                     Some("tasks") => ui::memory::Tab::Tasks,
                     Some("activity") => ui::memory::Tab::Activity,
