@@ -1,5 +1,5 @@
 import { call, hostLog } from "./host";
-import type { ThreadState } from "./model";
+import type { ThreadState } from "./store/thread";
 import { ensureLoaded, recvTimes, select, selectedId, send, threadList } from "./store";
 
 // The performance run (`YH_PERF=<folder>`), the web twin of the native app's PerfProbe:

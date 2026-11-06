@@ -1,7 +1,7 @@
 import { createEffect, For, on, onCleanup, onMount, Show, type Accessor } from "solid-js";
 import { Row } from "./Rows";
-import { loadEarlier } from "./store";
-import type { ThreadState } from "./model";
+import { loadEarlier } from "../../store";
+import type { ThreadState } from "../../store/thread";
 
 // The transcript: one scrolling column of rows, every held row in the DOM. Rows off screen
 // skip layout and painting (`content-visibility: auto`, which keeps each row's last real

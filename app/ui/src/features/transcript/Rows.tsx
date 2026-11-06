@@ -1,6 +1,6 @@
 import { createMemo, createSignal, For, Show, type Accessor } from "solid-js";
 import { entryHTML, escapeHTML } from "./markdown";
-import type { Entry, Item } from "./model";
+import type { Entry, Item } from "../../store/thread";
 
 // One component per kind of row. Each reads its item's version, so a streamed delta redraws
 // that one row. `shown` is false while the transcript is parked: a parked row keeps what it

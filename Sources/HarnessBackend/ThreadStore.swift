@@ -17,6 +17,7 @@ public final class ThreadStore {
         /// Still being written.
         public var live = false
         public var subagent: Subagent?
+        public var date: Date?
 
         public struct Subagent: Sendable, Equatable {
             public var description: String
@@ -45,6 +46,12 @@ public final class ThreadStore {
         /// Streaming blocks: message ID and index to row ID.
         var blocks: [String: String] = [:]
         var permission: PermissionRequest?
+        /// Rows saved before these: row `i` here is row `base + i` of the whole transcript.
+        var base = 0
+        /// Rows changed since the last `takeChanges`, by index here.
+        var dirty = Set<Int>()
+        /// Whole tool results waiting to be saved; rows keep only a head.
+        var fullResults: [String: String] = [:]
     }
 
     private var threads: [String: Thread] = [:]
@@ -61,6 +68,47 @@ public final class ThreadStore {
     /// The rows held for a thread, newest last.
     public func entries(_ thread: String) -> [Entry] {
         threads[thread]?.entries ?? []
+    }
+
+    /// Where this thread's rows start in its saved transcript. Set before its first row.
+    public func setBase(_ base: Int, thread: String) {
+        let t = state(thread)
+        if t.entries.isEmpty { t.base = base }
+    }
+
+    public func base(_ thread: String) -> Int? {
+        threads[thread]?.base
+    }
+
+    /// Rows that changed since the last call, as (row number in the whole transcript, row,
+    /// whole tool result if it was cut), for saving.
+    public func takeChanges(_ thread: String) -> [(seq: Int, entry: Entry, fullResult: String?)] {
+        guard let t = threads[thread], !t.dirty.isEmpty else { return [] }
+        let changed = t.dirty.sorted().map { i -> (Int, Entry, String?) in
+            let entry = t.entries[i]
+            // Only once the row is done: a live row is saved again when it finishes.
+            let full = entry.live ? nil : t.fullResults.removeValue(forKey: entry.id)
+            return (t.base + i, entry, full)
+        }
+        t.dirty.removeAll()
+        return changed
+    }
+
+    /// How many rows the whole transcript has, saved and held.
+    public func total(_ thread: String) -> Int? {
+        threads[thread].map { $0.base + $0.entries.count }
+    }
+
+    /// Rows `from..<to` of the whole transcript that are held here (from `base` on).
+    public func rows(_ thread: String, from: Int, to: Int) -> [Entry] {
+        guard let t = threads[thread] else { return [] }
+        let start = max(from, t.base) - t.base, end = min(to, t.base + t.entries.count) - t.base
+        return start < end ? Array(t.entries[start..<end]) : []
+    }
+
+    /// Lets go of a thread's rows once they're saved and nothing is running in it.
+    public func forget(_ thread: String) {
+        threads[thread] = nil
     }
 
     public func pendingPermission(_ thread: String) -> PermissionRequest? {
@@ -84,7 +132,10 @@ public final class ThreadStore {
     }
 
     private func add(_ entry: Entry, to t: Thread, thread: String) -> ThreadPatch {
+        var entry = entry
+        if entry.date == nil { entry.date = Date() }
         t.index[entry.id] = t.entries.count
+        t.dirty.insert(t.entries.count)
         t.entries.append(entry)
         return .add(thread: thread, entry: entry)
     }
@@ -93,7 +144,9 @@ public final class ThreadStore {
         guard let i = t.index[id] else { return nil }
         let before = t.entries[i]
         change(&t.entries[i])
-        return t.entries[i] == before ? nil : .update(thread: thread, entry: t.entries[i])
+        guard t.entries[i] != before else { return nil }
+        t.dirty.insert(i)
+        return .update(thread: thread, entry: t.entries[i])
     }
 
     /// Your message, as sent.
@@ -146,6 +199,7 @@ public final class ThreadStore {
                 patches.append(add(entry, to: t, thread: thread))
             }
             guard let id = t.blocks[key], let i = t.index[id] else { return patches }
+            t.dirty.insert(i)
             if case .toolInputDelta = event {
                 t.entries[i].toolInput = (t.entries[i].toolInput ?? "") + text
                 patches.append(.append(thread: thread, id: id, field: .input, text: text))
@@ -192,7 +246,8 @@ public final class ThreadStore {
         case .toolResults(let results, let parent):
             guard parent == nil else { return [] }
             return results.compactMap { result in
-                update(result.toolUseID, in: t, thread: thread) { entry in
+                if result.content.utf16.count > resultLimit { t.fullResults[result.toolUseID] = result.content }
+                return update(result.toolUseID, in: t, thread: thread) { entry in
                     entry.toolResult = head(result.content, resultLimit)
                     entry.resultLength = result.content.count
                     entry.isError = result.isError

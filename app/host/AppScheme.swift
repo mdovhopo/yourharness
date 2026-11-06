@@ -2,9 +2,7 @@ import Foundation
 import UniformTypeIdentifiers
 import WebKit
 
-/// Serves the page (`yhw://app/…`) from the built UI, and data (`yhw://app/api/…`) answered
-/// off the main thread: a transcript page can be megabytes, and a fetch streams it straight
-/// into the page's JSON parser without going through the message bridge.
+/// Serves the page (`yhw://app/…`) from the built UI, off the main thread.
 final class AppScheme: NSObject, WKURLSchemeHandler, @unchecked Sendable {
     static let scheme = "yhw"
     static let shared = AppScheme()
@@ -24,7 +22,6 @@ final class AppScheme: NSObject, WKURLSchemeHandler, @unchecked Sendable {
         return URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("app/ui/dist")
     }()
 
-    var api: ((String, [String: String]) -> Data?)?
     private let queue = DispatchQueue(label: "yhw.scheme", qos: .userInitiated, attributes: .concurrent)
     private let stopped = NSHashTable<AnyObject>.weakObjects()
     private let lock = NSLock()
@@ -32,16 +29,11 @@ final class AppScheme: NSObject, WKURLSchemeHandler, @unchecked Sendable {
     func webView(_ webView: WKWebView, start task: any WKURLSchemeTask) {
         guard let url = task.request.url else { return }
         let path = url.path
-        let api = self.api, root = self.root
+        let root = self.root
         let taskBox = TaskBox(task)
         queue.async { [self] in
             let data: Data?, mime: String
-            if path.hasPrefix("/api/") {
-                var query: [String: String] = [:]
-                for item in URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? [] { query[item.name] = item.value ?? "" }
-                data = api?(String(path.dropFirst(5)), query)
-                mime = "application/json"
-            } else {
+            do {
                 let file = root.appendingPathComponent(path == "/" ? "index.html" : String(path.dropFirst()))
                 data = try? Data(contentsOf: file)
                 mime = UTType(filenameExtension: file.pathExtension)?.preferredMIMEType ?? "application/octet-stream"

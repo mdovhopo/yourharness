@@ -1,64 +1,43 @@
-// The page's only way out: calls to the host and events from it. In the app the host is
-// the Swift side (web/host/Bridge.swift); anything else that speaks the same JSON can stand
-// in for it (a recorded stream in a plain browser, another backend later).
+// The page's only way out: requests to the backend (through the host) and the patches it
+// sends back. Anything that speaks protocol.ts can stand in for the host.
+import type { Patch } from "./protocol";
 
-export type WireEntry = {
-  id: string;
-  k: "user" | "assistant" | "thinking" | "tool" | "notice" | "command";
-  t: string;
-  n?: string;
-  i?: string;
-  r?: string;
-  rl?: number;
-  e?: number;
-  d?: number;
-  sa?: { d: string; s: string; c?: number };
-};
-
-export type ProjectMeta = { id: string; name: string; path: string; source: "db" | "claude" };
-export type ThreadMeta = { id: string; projectId: string; title: string; updatedAt: number; sessionId?: string; source: string };
-export type Listing = { projects: ProjectMeta[]; threads: ThreadMeta[] };
-export type Page = { total: number; from: number; entries: WireEntry[] };
-
-/** One event from a thread's `claude`, as LiveThreads.swift writes it. */
-export type HostEvent = { t: string; th: string; [key: string]: any };
-
-type Handler = (events: HostEvent[]) => void;
+type Handler = (patches: Patch[]) => void;
 let handler: Handler = () => {};
 
 declare global {
   interface Window {
-    __yh: { recv: (events: HostEvent[]) => void };
+    __yh: { recv: (patches: Patch[]) => void };
     webkit?: { messageHandlers: { host: { postMessage: (body: unknown) => Promise<any> } } };
   }
 }
 
-window.__yh = { recv: (events) => handler(events) };
+window.__yh = { recv: (patches) => handler(patches) };
 
-export function onEvents(next: Handler) {
+export function onPatches(next: Handler) {
   handler = next;
 }
 
 export const inApp = !!window.webkit?.messageHandlers?.host;
 
-export function call<T = any>(method: string, params: Record<string, unknown> = {}): Promise<T> {
-  if (!inApp) return Promise.reject(new Error(`no host for ${method}`));
-  return window.webkit!.messageHandlers.host.postMessage({ method, params });
-}
-
-const api = inApp ? "yhw://app/api/" : "/api/";
-
-export async function fetchListing(): Promise<Listing> {
-  return (await fetch(api + "library")).json();
-}
-
-export async function fetchPage(thread: string, before: number | undefined, limit: number): Promise<Page> {
-  const query = new URLSearchParams({ thread, limit: String(limit) });
-  if (before !== undefined) query.set("before", String(before));
-  return (await fetch(api + "page?" + query)).json();
+/** A request; big answers come as JSON text and are parsed here. */
+export async function call<T = any>(method: string, params: Record<string, unknown> = {}): Promise<T> {
+  if (!inApp) throw new Error(`no host for ${method}`);
+  const reply = await window.webkit!.messageHandlers.host.postMessage({ method, params });
+  return (typeof reply === "string" && (reply.startsWith("{") || reply.startsWith("[")) ? JSON.parse(reply) : reply) as T;
 }
 
 export function hostLog(s: string) {
   if (inApp) call("log", { s }).catch(() => {});
   else console.log(s);
+}
+
+/** A native menu at a point; resolves to the chosen item's id, or null. */
+export function nativeMenu(items: ({ id: string; title: string; destructive?: boolean } | "-")[], x: number, y: number): Promise<string | null> {
+  return call("menu", { items: items.map((i) => (i === "-" ? { id: "-" } : i)), x, y });
+}
+
+/** A native alert; resolves true when confirmed. */
+export function confirmNative(title: string, message: string, ok: string): Promise<boolean> {
+  return call("confirm", { title, message, ok });
 }

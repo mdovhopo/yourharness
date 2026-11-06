@@ -40,7 +40,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                               backing: .buffered, defer: false)
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
-        window.title = "YourHarness Web"
+        window.title = "YourHarness Next"
         window.minSize = NSSize(width: 640, height: 420)
         window.delegate = self
         // Test runs park the window off screen: they mustn't save where it was.
@@ -102,7 +102,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
     func applicationWillTerminate(_ notification: Notification) {
-        bridge?.live.stopAll()
+        bridge?.backend.prepareForQuit()
     }
 
     static func makeMenu() -> NSMenu {
@@ -119,7 +119,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             item.keyEquivalentModifierMask = modifiers
             return item
         }
-        submenu("YourHarness Web", [
+        submenu("YourHarness Next", [
             item("Hide", #selector(NSApplication.hide(_:)), "h"),
             .separator(),
             item("Quit", #selector(NSApplication.terminate(_:)), "q"),

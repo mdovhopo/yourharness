@@ -13,7 +13,7 @@ import swift from "highlight.js/lib/languages/swift";
 import typescript from "highlight.js/lib/languages/typescript";
 import xml from "highlight.js/lib/languages/xml";
 import yaml from "highlight.js/lib/languages/yaml";
-import type { Entry } from "./model";
+import type { Entry } from "../../store/thread";
 
 for (const [name, lang] of Object.entries({ bash, css, diff, go, javascript, json, python, rust, sql, swift, typescript, xml, yaml })) {
   hljs.registerLanguage(name, lang);

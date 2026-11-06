@@ -1,5 +1,6 @@
 import AppKit
 import WebKit
+import HarnessBackend
 
 /// The page and the host talk in JSON: the page calls `window.webkit.messageHandlers.host
 /// .postMessage({method, params})` and gets a promise of the reply; the host hands it events
@@ -9,9 +10,8 @@ import WebKit
 final class Bridge: NSObject, WKScriptMessageHandlerWithReply {
     let webView: WKWebView
     let window: NSWindow
-    let library = Library()
+    let backend: Backend
     let outbox = Outbox()
-    lazy var live = LiveThreads(outbox: outbox)
     weak var probe: HostProbe?
     private var link: CADisplayLink?
     private var delivering = false
@@ -19,25 +19,23 @@ final class Bridge: NSObject, WKScriptMessageHandlerWithReply {
     init(webView: WKWebView, window: NSWindow) {
         self.webView = webView
         self.window = window
+        backend = Backend(dataDirectory: Self.dataDirectory())
         super.init()
-        let library = self.library
-        AppScheme.shared.api = { name, query in
-            switch name {
-            case "library":
-                if library.projects.isEmpty && library.threads.isEmpty { library.scan() }
-                return library.listingJSON()
-            case "page":
-                return library.pageJSON(thread: query["thread"] ?? "", before: query["before"].flatMap(Int.init),
-                                        limit: query["limit"].flatMap(Int.init) ?? 200)
-            default:
-                return nil
-            }
-        }
+        backend.sink = { [weak self] patch in self?.outbox.push(patch) }
+        // `YH_PROJECT=<folder>`: that folder as a project, for trying things somewhere throwaway.
+        if let path = env["YH_PROJECT"] { backend.library.addProject(path: path) }
         outbox.onPending = { [weak self] in self?.link?.isPaused = false }
         let link = webView.displayLink(target: self, selector: #selector(tick))
         link.add(to: .main, forMode: .common)
         link.isPaused = true
         self.link = link
+    }
+
+    /// `YH_DATA_DIR`, else a folder of its own until the switch: never the frozen app's data.
+    static func dataDirectory() -> URL {
+        if let dir = env["YH_DATA_DIR"] { return URL(fileURLWithPath: dir, isDirectory: true) }
+        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("YourHarness Next", isDirectory: true)
     }
 
     @objc private func tick() {
@@ -55,10 +53,6 @@ final class Bridge: NSObject, WKScriptMessageHandlerWithReply {
         }
     }
 
-    func push(_ event: [String: Any]) {
-        outbox.event(event)
-    }
-
     func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage,
                                replyHandler: @escaping @MainActor @Sendable (Any?, String?) -> Void) {
         guard let body = message.body as? [String: Any], let method = body["method"] as? String else {
@@ -68,7 +62,12 @@ final class Bridge: NSObject, WKScriptMessageHandlerWithReply {
         Task { @MainActor in
             do {
                 let result = try await self.handle(method, params)
-                replyHandler(result, nil)
+                // Big answers go as JSON text: the page parses it faster than WebKit converts objects.
+                if let object = result as? [String: Any], let data = try? JSONSerialization.data(withJSONObject: object) {
+                    replyHandler(String(decoding: data, as: UTF8.self), nil)
+                } else {
+                    replyHandler(result, nil)
+                }
             } catch {
                 replyHandler(nil, "\(error)")
             }
@@ -76,50 +75,63 @@ final class Bridge: NSObject, WKScriptMessageHandlerWithReply {
     }
 
     private func handle(_ method: String, _ p: [String: Any]) async throws -> Any? {
-        let thread = p["th"] as? String ?? ""
         switch method {
-        case "send":
-            let cwd = (p["cwd"] as? String).flatMap { $0.isEmpty ? nil : $0 }
-                ?? (p["projectId"] as? String).flatMap(library.projectPath) ?? FileManager.default.homeDirectoryForCurrentUser.path
-            try await live.send(thread: thread, text: p["text"] as? String ?? "", cwd: cwd,
-                                sessionID: (p["sid"] as? String).flatMap { $0.isEmpty ? nil : $0 },
-                                model: (p["model"] as? String).flatMap { $0.isEmpty ? nil : $0 },
-                                mode: p["mode"] as? String)
-            return true
-        case "interrupt":
-            await live.interrupt(thread: thread)
-            return true
-        case "respond":
-            await live.respond(thread: thread, requestID: p["id"] as? String ?? "", allow: p["allow"] as? Bool ?? false)
-            return true
-        case "setMode":
-            await live.setMode(thread: thread, mode: p["mode"] as? String ?? "default")
-            return true
-        case "setModel":
-            await live.setModel(thread: thread, model: p["model"] as? String ?? "default")
+        case "log":
+            log(p["s"] as? String ?? "")
             return true
         case "quit":
             NSApp.terminate(nil)
             return true
-        case "log":
-            log(p["s"] as? String ?? "")
-            return true
+        case "menu":
+            return NativeMenu.show(items: p["items"] as? [[String: Any]] ?? [], at: NSPoint(x: p["x"] as? Double ?? 0, y: p["y"] as? Double ?? 0), in: webView)
+        case "confirm":
+            let alert = NSAlert()
+            alert.messageText = p["title"] as? String ?? ""
+            alert.informativeText = p["message"] as? String ?? ""
+            let ok = alert.addButton(withTitle: p["ok"] as? String ?? "OK")
+            ok.hasDestructiveAction = true
+            alert.addButton(withTitle: "Cancel")
+            return await alert.beginSheetModal(for: window) == .alertFirstButtonReturn
         case "config":
-            // `YH_SELECT=<title>`: opens that thread at launch. `YH_EXPAND=1`: unfolds work.
-            // `YH_SEND=<text>`: sends it from a new thread in the first project (`YH_MODEL`,
-            // `YH_MODE`), and `YH_ANSWER=allow|deny` answers what Claude asks; both logged.
-            return ["select": env["YH_SELECT"] ?? "", "expand": env["YH_EXPAND"] == "1",
-                    "send": env["YH_SEND"] ?? "", "model": env["YH_MODEL"] ?? "", "mode": env["YH_MODE"] ?? "",
-                    "answer": env["YH_ANSWER"] ?? "", "diagAfter": env["YH_DIAG_AFTER"] ?? "",
-                    // `YH_FLAGS=a,b`: classes on the page's root, for turning one thing off to measure it.
-                    "flags": env["YH_FLAGS"] ?? "",
-                    // `YH_QUIT=1`: quits once the `YH_SEND` turn is done.
-                    "quit": env["YH_QUIT"] == "1"]
+            // Development: `YH_SELECT=<title>` opens a thread at launch; `YH_SEND=<text>` sends it
+            // from a new thread in the first project (`YH_MODEL`, `YH_MODE`), `YH_ANSWER=allow|deny`
+            // answers what Claude asks, `YH_QUIT=1` quits after; `YH_FLAGS` adds classes.
+            return ["select": env["YH_SELECT"] ?? "", "send": env["YH_SEND"] ?? "", "model": env["YH_MODEL"] ?? "",
+                    "mode": env["YH_MODE"] ?? "", "answer": env["YH_ANSWER"] ?? "", "quit": env["YH_QUIT"] == "1",
+                    "flags": env["YH_FLAGS"] ?? "", "diagAfter": env["YH_DIAG_AFTER"] ?? "", "project": env["YH_PROJECT_NAME"] ?? ""]
         default:
             if method.hasPrefix("probe."), let probe {
                 return try await probe.handle(String(method.dropFirst(6)), p)
             }
-            throw HostError("unknown method \(method)")
+            return try await backend.handle(method, p)
         }
+    }
+}
+
+/// A real macOS menu where the page asked for one; answers the chosen item's id.
+@MainActor
+enum NativeMenu {
+    private final class Target: NSObject {
+        var chosen: String?
+        @objc func pick(_ sender: NSMenuItem) { chosen = sender.representedObject as? String }
+    }
+
+    static func show(items: [[String: Any]], at point: NSPoint, in view: NSView) -> String? {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        let target = Target()
+        for item in items {
+            guard let id = item["id"] as? String, id != "-" else { menu.addItem(.separator()); continue }
+            let entry = NSMenuItem(title: item["title"] as? String ?? id, action: #selector(Target.pick(_:)), keyEquivalent: "")
+            entry.target = target
+            entry.representedObject = id
+            if item["destructive"] as? Bool == true {
+                entry.attributedTitle = NSAttributedString(string: entry.title, attributes: [.foregroundColor: NSColor.systemRed])
+            }
+            menu.addItem(entry)
+        }
+        let location = view.isFlipped ? point : NSPoint(x: point.x, y: view.bounds.height - point.y)
+        menu.popUp(positioning: nil, at: location, in: view)
+        return target.chosen
     }
 }
