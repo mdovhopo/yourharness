@@ -160,6 +160,8 @@ pub struct LaunchOptions {
     pub allowed_tools: Vec<String>,
     /// Tools served from inside the app.
     pub servers: Vec<std::sync::Arc<dyn crate::mcp::ToolServer>>,
+    /// More arguments for `claude` (a side chat's `--fork-session`, `--tools`…).
+    pub extra_args: Vec<String>,
 }
 
 pub struct ClaudeProcess {
@@ -226,6 +228,7 @@ impl ClaudeProcess {
         if let Some(session) = options.session_id {
             args.extend(["--resume".into(), session]);
         }
+        args.extend(options.extra_args);
         let mut command = Command::new(&executable);
         command.args(&args).current_dir(&options.cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         if let Ok(path) = std::env::var("YH_PATH") {

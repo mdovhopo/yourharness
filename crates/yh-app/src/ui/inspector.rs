@@ -4,6 +4,8 @@
 
 use crate::state::thread::{SubStep, ThreadState};
 use crate::state::workspace::{Panel, Workspace};
+use crate::ui::transcript::TranscriptView;
+use yh_core::claude::Decision;
 use crate::theme::{Theme, MONO};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -137,14 +139,25 @@ pub struct Inspector {
     goto: Entity<InputState>,
     goto_results: Vec<String>,
     tree_scroll: UniformListScrollHandle,
+    /// The open thread's side chat, its transcript and what's typed for it.
+    side: Option<(Entity<ThreadState>, Entity<TranscriptView>, Subscription)>,
+    question: Entity<InputState>,
+    /// The side chat as last drawn: running, asking.
+    side_state: (bool, bool),
     _subscriptions: Vec<Subscription>,
 }
 
 impl Inspector {
     pub fn new(workspace: Entity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let goto = cx.new(|cx| InputState::new(window, cx).placeholder("Go to File"));
+        let question = cx.new(|cx| InputState::new(window, cx).placeholder("Ask on the side…"));
         let subscriptions = vec![
             cx.observe(&workspace, |this, _, cx| this.follow_selection(cx)),
+            cx.subscribe_in(&question, window, |this, _, e: &InputEvent, window, cx| {
+                if let InputEvent::PressEnter { .. } = e {
+                    this.ask(window, cx);
+                }
+            }),
             cx.subscribe(&goto, |this, _, e: &InputEvent, cx| match e {
                 InputEvent::Change => this.search_files(cx),
                 InputEvent::PressEnter { .. } => {
@@ -166,6 +179,9 @@ impl Inspector {
             goto,
             goto_results: vec![],
             tree_scroll: UniformListScrollHandle::new(),
+            side: None,
+            question,
+            side_state: (false, false),
             _subscriptions: subscriptions,
         };
         inspector.follow_selection(cx);
@@ -190,8 +206,42 @@ impl Inspector {
                 })
             });
             self.ensure_tree(cx);
+            self.side = None;
+            self.ensure_side(cx);
         }
         cx.notify();
+    }
+
+    /// The side chat's view, once the tab shows for a thread.
+    fn ensure_side(&mut self, cx: &mut Context<Self>) {
+        if self.side.is_some() || self.workspace.read(cx).panel != Panel::SideChat {
+            return;
+        }
+        let Some(parent) = self.thread.as_ref().map(|t| t.read(cx).id().to_string()) else { return };
+        if parent.starts_with(crate::state::workspace::SIDE) {
+            return;
+        }
+        let Some(chat) = self.workspace.update(cx, |ws, cx| ws.side_chat(&parent, cx)) else { return };
+        let view = cx.new(|cx| TranscriptView::new(chat.clone(), cx));
+        // Its running state and permission requests change the controls under it.
+        let watch = cx.observe(&chat, |this, chat, cx| {
+            let state = (chat.read(cx).running, chat.read(cx).permission.is_some());
+            if this.side_state != state {
+                this.side_state = state;
+                cx.notify();
+            }
+        });
+        self.side = Some((chat, view, watch));
+    }
+
+    fn ask(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.question.read(cx).value().trim().to_string();
+        let Some(chat) = self.side.as_ref().map(|(c, _, _)| c.clone()) else { return };
+        if text.is_empty() {
+            return;
+        }
+        self.question.update(cx, |i, cx| i.set_value("", window, cx));
+        self.workspace.update(cx, |ws, cx| ws.send(&chat, &text, false, cx));
     }
 
     fn folder(&self, cx: &App) -> Option<String> {
@@ -333,6 +383,7 @@ impl Inspector {
             row = row.child((if p == panel { b.primary() } else { b.ghost() }).on_click(cx.listener(move |this, _, _, cx| {
                 ws.update(cx, |ws, cx| ws.show_panel(p, cx));
                 this.ensure_tree(cx);
+                this.ensure_side(cx);
                 cx.notify();
             })));
         }
@@ -639,6 +690,76 @@ impl Inspector {
     }
 }
 
+impl Inspector {
+    fn side_chat(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let Some((chat, view, _)) = &self.side else { return empty("No thread open.", theme) };
+        let (running, permission, empty_chat) = {
+            let c = chat.read(cx);
+            (c.running, c.permission.clone(), c.items.is_empty())
+        };
+        let ws = self.workspace.clone();
+        let parent = self.thread.as_ref().map(|t| t.read(cx).id().to_string()).unwrap_or_default();
+        let mut column = div().size_full().flex().flex_col();
+        if empty_chat {
+            column = column.child(empty(
+                "Ask something on the side. A copy of this thread's conversation answers: it can read files and run commands you approve, can't edit anything, and nothing said here reaches the thread.",
+                theme,
+            ));
+        } else {
+            column = column.child(div().flex_1().min_h_0().child(gpui_kit::AnyView::from(view.clone()).cached(gpui_kit::StyleRefinement::default().size_full())));
+        }
+        if let Some(p) = permission {
+            let (allow, deny, c1, c2) = (ws.clone(), ws.clone(), chat.clone(), chat.clone());
+            column = column.child(
+                div()
+                    .m(px(10.))
+                    .p(px(10.))
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(theme.warning.opacity(0.5))
+                    .bg(theme.warning.opacity(0.08))
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child(format!("Allow {}?", p.tool)))
+                    .child(div().font_family(MONO).text_size(px(11.)).text_color(theme.secondary).line_clamp(4).child(gist(&p.tool, &p.input)))
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap(px(6.))
+                            .child(Button::new("side-deny").small().label("Deny").on_click(move |_, _, cx| deny.update(cx, |ws, cx| ws.respond(&c2, Decision::deny(), cx))))
+                            .child(Button::new("side-allow").small().primary().label("Allow").on_click(move |_, _, cx| allow.update(cx, |ws, cx| ws.respond(&c1, Decision::allow(), cx)))),
+                    ),
+            );
+        }
+        let (stop_ws, stop_chat, clear_ws) = (ws.clone(), chat.clone(), ws.clone());
+        column
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .p(px(10.))
+                    .border_t_1()
+                    .border_color(theme.separator)
+                    .child(div().flex_1().child(Input::new(&self.question).small()))
+                    .when(running, |d| {
+                        d.child(Button::new("side-stop").small().label("Stop").on_click(move |_, _, cx| stop_ws.update(cx, |ws, cx| ws.interrupt(&stop_chat, cx))))
+                    })
+                    .when(!running && !empty_chat, |d| {
+                        d.child(Button::new("side-clear").small().ghost().label("Clear").tooltip("Start the side chat over").on_click(cx.listener(move |this, _, _, cx| {
+                            clear_ws.update(cx, |ws, cx| ws.clear_side_chat(&parent, cx));
+                            this.side = None;
+                            this.ensure_side(cx);
+                            cx.notify();
+                        })))
+                    }),
+            )
+            .into_any_element()
+    }
+}
+
 fn run_label(e: &crate::state::thread::Entry) -> (String, String) {
     let sub = e.sub.as_ref();
     let input: serde_json::Value = e.data.tool_input.as_deref().and_then(|i| serde_json::from_str(i).ok()).unwrap_or_default();
@@ -700,7 +821,11 @@ impl Render for Inspector {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::get(cx);
         let panel = self.workspace.read(cx).panel;
+        if panel == Panel::SideChat {
+            self.ensure_side(cx);
+        }
         let content = match panel {
+            Panel::SideChat => self.side_chat(&theme, cx),
             Panel::Subagents => self.subagents(&theme, cx),
             Panel::Files => self.files(&theme, cx),
         };

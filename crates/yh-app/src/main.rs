@@ -272,6 +272,25 @@ fn main() {
             })
             .detach();
         }
+        // `YH_SIDE_ASK=<text>`: asked in the selected thread's side chat after `YH_DRAFT_DELAY`,
+        // the right sidebar on Side Chat.
+        if let Some(text) = env("YH_SIDE_ASK") {
+            let delay: f64 = env("YH_DRAFT_DELAY").and_then(|v| v.parse().ok()).unwrap_or(1.0);
+            let workspace = workspace.clone();
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(Duration::from_secs_f64(delay)).await;
+                let _ = cx.update(|cx| {
+                    let Some(parent) = workspace.read(cx).selected.clone() else { return };
+                    workspace.update(cx, |ws, cx| {
+                        ws.show_panel(state::workspace::Panel::SideChat, cx);
+                        if let Some(chat) = ws.side_chat(&parent, cx) {
+                            ws.send(&chat, &text, false, cx);
+                        }
+                    });
+                });
+            })
+            .detach();
+        }
         // `YH_OPEN_SETTINGS=1`: Settings opened after `YH_DRAFT_DELAY`.
         if env("YH_OPEN_SETTINGS").as_deref() == Some("1") {
             let delay: f64 = env("YH_DRAFT_DELAY").and_then(|v| v.parse().ok()).unwrap_or(1.0);

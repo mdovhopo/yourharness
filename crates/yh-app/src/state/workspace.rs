@@ -41,15 +41,17 @@ struct Runtime {
 /// The right sidebar's tabs.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Panel {
+    SideChat,
     Subagents,
     Files,
 }
 
 impl Panel {
-    pub const ALL: [Panel; 2] = [Panel::Subagents, Panel::Files];
+    pub const ALL: [Panel; 3] = [Panel::SideChat, Panel::Subagents, Panel::Files];
 
     pub fn label(self) -> &'static str {
         match self {
+            Panel::SideChat => "Side Chat",
             Panel::Subagents => "Sub-agents",
             Panel::Files => "Files",
         }
@@ -57,12 +59,19 @@ impl Panel {
 
     pub fn from_name(name: &str) -> Option<Panel> {
         match name {
+            "sideChat" | "side-chat" => Some(Panel::SideChat),
             "subagents" => Some(Panel::Subagents),
             "files" => Some(Panel::Files),
             _ => None,
         }
     }
 }
+
+/// A side chat's id: this, then its thread's.
+pub const SIDE: &str = "side:";
+
+/// What a side chat's agent is told.
+const SIDE_CHAT_PROMPT: &str = "This is a side conversation. You are a copy of the conversation above, opened so the user can ask something on the side without interrupting or adding to the main thread; nothing said here reaches it. Answer the question directly and briefly. You have Read, Glob, Grep, Bash, WebFetch and WebSearch: use them when the answer needs a fresh look rather than what the conversation already says. The app asks the user to approve commands that could change something. You have no tools to edit files: if the answer needs changes, say what the main thread should do.";
 
 pub struct Workspace {
     pub library: Arc<Library>,
@@ -87,6 +96,8 @@ pub struct Workspace {
     /// Threads whose title is being rewritten (`update_title`), and how many messages the user
     /// had sent when it was last asked for.
     titles_rewriting: std::collections::HashSet<String>,
+    /// Each thread's side chat (`/btw`), made when first opened; never saved.
+    side_chats: HashMap<String, Entity<ThreadState>>,
     /// The right sidebar: open, and on which tab.
     pub shows_inspector: bool,
     pub panel: Panel,
@@ -135,8 +146,9 @@ impl Workspace {
             tool_requests,
             titles_rewriting: Default::default(),
             page: None,
+            side_chats: HashMap::new(),
             shows_inspector: false,
-            panel: Panel::Subagents,
+            panel: Panel::SideChat,
             memory_revision: 0,
             title_asked_at: HashMap::new(),
         };
@@ -619,6 +631,38 @@ impl Workspace {
                 updates_title,
             }));
         }
+        // A side chat: a copy of its thread's conversation that can look but not edit and
+        // leaves nothing behind. It reads freely; commands and web requests ask first.
+        let side_parent = t.id().strip_prefix(SIDE).map(str::to_string);
+        if let Some(parent) = &side_parent {
+            let fork = self.thread(parent).and_then(|p| p.read(cx).session_id.clone());
+            let mut extra = vec!["--tools".to_string(), "Read,Glob,Grep,Bash,WebFetch,WebSearch".into(), "--strict-mcp-config".into(), "--no-session-persistence".into()];
+            if fork.is_some() {
+                extra.push("--fork-session".into());
+            }
+            let t = thread.read(cx);
+            let options = LaunchOptions {
+                cwd,
+                session_id: fork,
+                model: self.model_of(t),
+                mode: Some("default".into()),
+                effort: effort.clone(),
+                add_dirs: vec![],
+                env: vec![],
+                append_system_prompt: Some(SIDE_CHAT_PROMPT.into()),
+                allowed_tools: vec![],
+                servers: vec![],
+                extra_args: extra,
+            };
+            let (tx, rx) = flume::unbounded();
+            let mut process = ClaudeProcess::spawn(options, tx)?;
+            process.initialize();
+            self.generation += 1;
+            let generation = self.generation;
+            self.runtimes.insert(id.clone(), Runtime { process, generation, effort, idle: None });
+            self.pump(thread.clone(), id, generation, rx, cx);
+            return Ok(());
+        }
         let options = LaunchOptions {
             cwd,
             session_id: t.session_id.clone(),
@@ -630,6 +674,7 @@ impl Workspace {
             append_system_prompt: (!prompt.is_empty()).then(|| prompt.join("\n\n")),
             allowed_tools: allowed,
             servers,
+            extra_args: vec![],
         };
         let (tx, rx) = flume::unbounded();
         let mut process = ClaudeProcess::spawn(options, tx)?;
@@ -760,13 +805,15 @@ impl Workspace {
 
     /// The thread is open in the app you're using.
     fn looking_at(&self, id: &str) -> bool {
+        // A side chat is looked at with its thread.
+        let id = id.strip_prefix(SIDE).unwrap_or(id);
         self.selected.as_deref() == Some(id) && crate::platform::app_is_active()
     }
 
     /// The turn is over: saved, unread if you were elsewhere, its `claude` let go of later.
     fn turn_ended(&mut self, thread: &Entity<ThreadState>, cx: &mut Context<Self>) {
         let id = thread.read(cx).id().to_string();
-        let selected = self.selected.as_deref() == Some(id.as_str());
+        let selected = self.selected.as_deref() == Some(id.strip_prefix(SIDE).unwrap_or(&id));
         if !self.looking_at(&id) && self.notifications_on() {
             crate::platform::notify(&thread.read(cx).title, "Claude finished");
         }
@@ -941,6 +988,37 @@ impl Workspace {
 
     // MARK: Right sidebar
 
+    /// A thread's side chat, made the first time it's asked for: in the thread's folder, on
+    /// its model, starting from its conversation as it is when the first question is sent.
+    pub fn side_chat(&mut self, parent: &str, cx: &mut Context<Self>) -> Option<Entity<ThreadState>> {
+        if let Some(chat) = self.side_chats.get(parent) {
+            return Some(chat.clone());
+        }
+        let p = self.thread(parent)?;
+        let p = p.read(cx);
+        let mut meta = ThreadMeta::new(format!("{SIDE}{parent}"), p.meta.project_id.clone(), "Side Chat".into());
+        meta.working_directory = Some(self.folder_of(p));
+        meta.model = p.meta.model.clone();
+        meta.effort = p.meta.effort.clone();
+        let chat = make_thread(meta, cx.entity().downgrade(), cx);
+        chat.update(cx, |t, _| {
+            t.loaded = true;
+            t.total = Some(0);
+        });
+        self.by_id.insert(format!("{SIDE}{parent}"), chat.clone());
+        self.side_chats.insert(parent.to_string(), chat.clone());
+        Some(chat)
+    }
+
+    /// Starts the side chat over: its `claude` ended, its conversation gone.
+    pub fn clear_side_chat(&mut self, parent: &str, cx: &mut Context<Self>) {
+        let id = format!("{SIDE}{parent}");
+        self.end_runtime(&id, cx);
+        self.by_id.remove(&id);
+        self.side_chats.remove(parent);
+        cx.notify();
+    }
+
     pub fn set_shows_inspector(&mut self, on: bool, cx: &mut Context<Self>) {
         self.shows_inspector = on;
         self.library.set_setting("showsInspector", &Value::from(on));
@@ -994,7 +1072,7 @@ impl Workspace {
     pub fn save_rows(&self, thread: &Entity<ThreadState>, cx: &mut Context<Self>) {
         let Some(db) = self.library.db.clone() else { return };
         let (id, total, rows) = thread.update(cx, |t, _| (t.id().to_string(), t.total, t.take_changes()));
-        if rows.is_empty() || id.starts_with("new:") || id.starts_with("cc:") {
+        if rows.is_empty() || id.starts_with("new:") || id.starts_with("cc:") || id.starts_with(SIDE) {
             return;
         }
         if let Some(total) = total {

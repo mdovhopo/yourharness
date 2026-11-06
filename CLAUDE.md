@@ -61,7 +61,8 @@ opened), `YH_EXPAND_WORK=1` (folded work drawn open), `YH_ACTIONS_PROBE=1` (pin,
 delete on the first threads). Also `YH_SNAPSHOT=<png>` (`_DELAY`, `_QUIT`), `YH_BACKGROUND=1`,
 `YH_TIMING=1` and `YH_EVENT_LOG=1` (every event, and each plan rebuild). `YH_NOTIFICATIONS=log`
 prints notifications and the Dock badge instead (always in tests: a real one asks for permission),
-`YH_APPEARANCE=light|dark`, `YH_OPEN_SETTINGS=1`, `YH_INSPECTOR_PANEL=subagents|files` (the right sidebar open on it), `YH_OPEN_FILE=<path[:line[-end]]>`
+`YH_APPEARANCE=light|dark`, `YH_OPEN_SETTINGS=1`, `YH_INSPECTOR_PANEL=sideChat|subagents|files`, `YH_SIDE_ASK=<text>` (asked in the selected thread's side
+chat after `YH_DRAFT_DELAY`) (the right sidebar open on it), `YH_OPEN_FILE=<path[:line[-end]]>`
 (opened in the Files tab as a link does, after `YH_DRAFT_DELAY`), `YH_OPEN_MEMORY=1` (the project's Memory page,
 `YH_MEMORY_TAB=memories|tasks|activity`, after `YH_DRAFT_DELAY`), `YH_SPOTLIGHT=<words>` (⌘K typed;
 `YH_SPOTLIGHT_ENTER=1` with a session ID resumes it).
