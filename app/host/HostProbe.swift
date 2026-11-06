@@ -26,7 +26,15 @@ final class HostProbe {
         try? FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true)
     }
 
+    /// A run's window is parked out of sight in the background, where App Nap would slow the
+    /// app; this says the work is latency-critical for as long as the run lasts.
+    private var activity: NSObjectProtocol?
+    private var seconds = "phase,second,frames,on_time_pct,worst_ms,total_cpu,web_cpu,total_mb\n"
+
     func windowReady() {
+        if env["YH_PERF_NAP"] != "1" {
+            activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .latencyCritical], reason: "Performance run")
+        }
         guard let screen = window.screen ?? NSScreen.main else { return }
         if env["YH_PERF_FRONT"] == "1" {
             // As you use it: in front, filling the screen, above everything.
@@ -71,6 +79,10 @@ final class HostProbe {
             result["valid"] = isValid()
             phases.append(result)
             write()
+            return true
+        case "second":
+            seconds += [p["phase"], p["second"], p["frames"], p["onTime"], p["worst"], p["cpu"], p["webCpu"], p["mb"]]
+                .map { "\($0 ?? "")" }.joined(separator: ",") + "\n"
             return true
         case "clicks":
             clicks.append(contentsOf: p["list"] as? [[String: Any]] ?? [])
@@ -241,5 +253,6 @@ final class HostProbe {
         }
         save(phases, "phases.json")
         save(clicks, "clicks.json")
+        try? seconds.write(toFile: folder + "/seconds.csv", atomically: true, encoding: .utf8)
     }
 }

@@ -294,13 +294,27 @@ export async function runProbe() {
     await call("probe.sample");
     const memory: number[] = [], cpu: number[] = [], webCPU: number[] = [];
     let sampling = true;
+    let second = 0;
     const sampler = (async () => {
       while (sampling) {
+        const from = frames.deltas.length;
         await sleep(1000);
         const s = await call("probe.sample");
         memory.push(s.totalMB);
         cpu.push(s.totalCPU);
         webCPU.push(s.webCPU ?? 0);
+        // This second's frames, for seeing when a phase went wrong rather than only that it did.
+        const recent = frames.deltas.slice(from);
+        let vs = 0, missed = 0;
+        for (const d of recent) {
+          const spent = Math.max(1, Math.round(d / period));
+          vs += spent;
+          missed += spent - 1;
+        }
+        call("probe.second", {
+          phase: name, second: ++second, frames: recent.length, onTime: vs ? (((vs - missed) / vs) * 100).toFixed(1) : "0",
+          worst: Math.max(0, ...recent).toFixed(0), cpu: s.totalCPU.toFixed(0), webCpu: (s.webCPU ?? 0).toFixed(0), mb: s.totalMB.toFixed(0),
+        }).catch(() => {});
       }
     })();
     const started = performance.now();

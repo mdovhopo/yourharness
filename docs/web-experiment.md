@@ -151,3 +151,14 @@ run each so far:
 
 Chunk 1 (the backend owning threads, rows only for open threads) is at 97–99% on time in
 every phase; worst frames 45–68 ms. Runs: `test-harness-root/web-perf/chunk1-bg-*`.
+
+## Chunk 2: what's left of the drops (2026-11-06)
+
+With background throttling off and App Nap held off during runs (`YH_PERF_NAP=1` lets it
+nap), every phase is at 96.8–98.5% on time except `stream-all-scroll` driven `DIRECT`: there,
+per-second numbers (`seconds.csv`) show frames stepping to exactly 60, then 30 a second, with
+the CPU lower than before (about 50% in all, the web process 10%). Exact halving is a frame-rate
+policy, not load. It needs the probe setting `scrollTop` every 8 ms while 20 threads stream,
+which only happens because synthetic wheel events stopped reaching the background window; the
+same phase with real wheel events stayed at 97.9% (`web-30`), and your own scrolling doesn't
+force a layout per event. To confirm with real events: `YH_PERF_FRONT=1`, with the Mac to itself.
