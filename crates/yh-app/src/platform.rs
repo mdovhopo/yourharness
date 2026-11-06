@@ -12,6 +12,15 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::ffi::c_void;
 use std::time::Instant;
 
+/// GPUI's own view in the window: where native views (the browser) are laid over it.
+pub fn ns_view(window: &Window) -> id {
+    let Ok(handle) = HasWindowHandle::window_handle(window) else { return nil };
+    match handle.as_raw() {
+        RawWindowHandle::AppKit(h) => h.ns_view.as_ptr() as id,
+        _ => nil,
+    }
+}
+
 /// Events sent to it dispatch synchronously into GPUI: send them outside any entity update.
 pub fn ns_window(window: &Window) -> id {
     let Ok(handle) = HasWindowHandle::window_handle(window) else { return nil };

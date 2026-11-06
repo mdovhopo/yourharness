@@ -7,6 +7,7 @@ mod probe;
 mod state;
 mod theme;
 mod ui;
+mod webview;
 
 use gpui_kit::{
     point, prelude::*, px, size, App, Bounds, Focusable, KeyBinding, Menu, MenuItem, TitlebarOptions,
@@ -288,6 +289,33 @@ fn main() {
                         }
                     });
                 });
+            })
+            .detach();
+        }
+        // `YH_WEBVIEW_SPIKE=<url>`: a web view over the window's right edge loads it, then its
+        // title and a screenshot (`<YH_SNAPSHOT>-web.png`) are printed: checks the browser's
+        // native view works over GPUI.
+        if let Some(url) = env("YH_WEBVIEW_SPIKE") {
+            let shot = format!("{}-web.png", env("YH_SNAPSHOT").unwrap_or_else(|| "/tmp/yh".into()).trim_end_matches(".png"));
+            cx.spawn(async move |cx| {
+                let view = window.update(cx, |_, window, _| {
+                    let host = platform::ns_view(window);
+                    let size = window.viewport_size();
+                    let web = webview::WebView::new(host);
+                    web.set_frame(Some((f64::from(size.width) - 380., 44., 380., f64::from(size.height) - 44.)));
+                    web.load(&url);
+                    web
+                });
+                let Ok(web) = view else { return };
+                cx.background_executor().timer(Duration::from_secs(4)).await;
+                let (tx, rx) = flume::bounded(1);
+                web.evaluate("JSON.stringify({title: document.title, links: document.links.length})", tx);
+                eprintln!("WEB eval {:?} url {:?} loading {}", rx.recv_async().await, web.url(), web.is_loading());
+                let (tx, rx) = flume::bounded(1);
+                web.snapshot(shot.clone(), tx);
+                eprintln!("WEB snapshot {shot} {:?}", rx.recv_async().await);
+                cx.background_executor().timer(Duration::from_secs(60)).await;
+                drop(web);
             })
             .detach();
         }
