@@ -140,6 +140,18 @@ fn item_type(data: &EntryData) -> ItemType {
     }
 }
 
+/// An MCP server's question mid-call, waiting for you.
+#[derive(Clone, Debug)]
+pub struct Elicitation {
+    pub id: String,
+    pub server: String,
+    pub message: String,
+    /// `form` or `url`.
+    pub mode: String,
+    pub schema: serde_json::Value,
+    pub url: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 pub struct Permission {
     pub id: String,
@@ -161,6 +173,7 @@ pub struct ThreadState {
     /// The row Find is on, by its number.
     pub find_hit: Option<i64>,
     pub permission: Option<Permission>,
+    pub elicitation: Option<Elicitation>,
     /// Rows of the history before the first one held.
     pub before: usize,
     pub loaded: bool,
@@ -200,6 +213,7 @@ impl ThreadState {
             plan: Default::default(),
             find_hit: None,
             permission: None,
+            elicitation: None,
             before: 0,
             loaded: false,
             loading: false,
@@ -688,6 +702,10 @@ impl ThreadState {
                     self.touch_pos(pos);
                 }
                 false
+            }
+            Event::Elicitation { request_id, server, message, mode, schema, url } => {
+                self.elicitation = Some(Elicitation { id: request_id, server, message, mode, schema, url });
+                true
             }
             Event::Permission { request_id, tool, description, input } => {
                 self.permission = Some(Permission { id: request_id, tool, description, input });

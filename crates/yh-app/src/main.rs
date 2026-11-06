@@ -349,6 +349,38 @@ fn main() {
             })
             .detach();
         }
+        // `YH_OPEN_MCP=1`: the selected thread's `/mcp` sheet after `YH_DRAFT_DELAY`, its servers
+        // printed. `YH_MCP_ADD_URL=<url>` or `YH_MCP_ADD_COMMAND=<command line>` fills Add Server
+        // (`YH_MCP_ADD_SCOPE=local|project|user`), `YH_MCP_ADD_SUBMIT=1` adds it, `YH_MCP_REMOVE=<name>`
+        // removes one; the list is printed again later (`MCP servers later:`). They write Claude
+        // Code's config: project scope in a scratch project, or a scratch `CLAUDE_CONFIG_DIR`.
+        if env("YH_OPEN_MCP").as_deref() == Some("1") {
+            let delay: f64 = env("YH_DRAFT_DELAY").and_then(|v| v.parse().ok()).unwrap_or(1.0);
+            let sheet = root.read(cx).mcp.clone();
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(Duration::from_secs_f64(delay)).await;
+                let _ = cx.update(|cx| sheet.update(cx, |s, cx| s.show(cx)));
+                cx.background_executor().timer(Duration::from_secs(4)).await;
+                let source = env("YH_MCP_ADD_URL").or_else(|| env("YH_MCP_ADD_COMMAND"));
+                if let Some(source) = source {
+                    let scope: &'static str = match env("YH_MCP_ADD_SCOPE").as_deref() {
+                        Some("project") => "project",
+                        Some("user") => "user",
+                        _ => "local",
+                    };
+                    let _ = window.update(cx, |_, window, cx| sheet.update(cx, |s, cx| s.fill_add(&source, scope, window, cx)));
+                    if env("YH_MCP_ADD_SUBMIT").as_deref() == Some("1") {
+                        let _ = cx.update(|cx| sheet.update(cx, |s, cx| s.add(cx)));
+                    }
+                }
+                if let Some(name) = env("YH_MCP_REMOVE") {
+                    let _ = cx.update(|cx| sheet.update(cx, |s, cx| s.remove_named(&name, cx)));
+                }
+                cx.background_executor().timer(Duration::from_secs(8)).await;
+                let _ = cx.update(|cx| eprintln!("MCP servers later: {}", sheet.read(cx).describe()));
+            })
+            .detach();
+        }
         // `YH_OPEN_SETTINGS=1`: Settings opened after `YH_DRAFT_DELAY`.
         if env("YH_OPEN_SETTINGS").as_deref() == Some("1") {
             let delay: f64 = env("YH_DRAFT_DELAY").and_then(|v| v.parse().ok()).unwrap_or(1.0);

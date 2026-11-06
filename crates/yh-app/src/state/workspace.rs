@@ -26,6 +26,8 @@ pub enum WorkspaceEvent {
     Removed(String),
     /// A page (Memory) took the place of the thread.
     PageOpened,
+    /// `/mcp` was typed: the MCP sheet opens for the open thread.
+    OpenMcp,
 }
 
 /// One thread's `claude`, between turns too.
@@ -940,6 +942,48 @@ impl Workspace {
         cx.notify();
     }
 
+    pub fn open_mcp(&mut self, cx: &mut Context<Self>) {
+        cx.emit(WorkspaceEvent::OpenMcp);
+    }
+
+    /// A control request to the thread's `claude` (started in its folder if it isn't running),
+    /// and its reply: `mcp_status`, `mcp_toggle`, `mcp_authenticate`…
+    pub fn mcp(&mut self, thread: &Entity<ThreadState>, request: Value, cx: &mut Context<Self>) -> Task<Result<Value, String>> {
+        if let Err(e) = self.ensure_runtime(thread, cx) {
+            return Task::ready(Err(e));
+        }
+        let id = thread.read(cx).id().to_string();
+        let Some(rt) = self.runtimes.get_mut(&id) else { return Task::ready(Err("No Claude Code process.".into())) };
+        let rx = rt.process.request(request);
+        cx.background_executor().spawn(async move { rx.recv_timeout(Duration::from_secs(30)).map_err(|_| "Claude Code didn't answer.".to_string())? })
+    }
+
+    /// Starts the thread's `claude` over (between turns), so it reads the MCP config again; the
+    /// next message resumes its session.
+    pub fn restart_runtime(&mut self, thread: &Entity<ThreadState>, cx: &mut Context<Self>) {
+        if !thread.read(cx).running {
+            let id = thread.read(cx).id().to_string();
+            self.end_runtime(&id, cx);
+        }
+    }
+
+    /// Answers an MCP server's question: `accept` (with what you filled in), `decline` or `cancel`.
+    pub fn answer_elicitation(&mut self, thread: &Entity<ThreadState>, action: &str, content: Option<Value>, cx: &mut Context<Self>) {
+        let (id, asked) = {
+            let t = thread.read(cx);
+            (t.id().to_string(), t.elicitation.clone())
+        };
+        let Some(asked) = asked else { return };
+        if let Some(rt) = self.runtimes.get(&id) {
+            rt.process.respond_elicitation(&asked.id, action, content);
+        }
+        thread.update(cx, |t, cx| {
+            t.elicitation = None;
+            cx.notify();
+        });
+        cx.notify();
+    }
+
     /// Approves a plan into a permission mode, which becomes the project's.
     pub fn approve_plan(&mut self, thread: &Entity<ThreadState>, mode: &str, cx: &mut Context<Self>) {
         let project = thread.read(cx).meta.project_id.clone();
@@ -949,6 +993,12 @@ impl Workspace {
 
     /// `YH_ANSWER=allow|deny`: permission prompts answered by themselves, for tests.
     fn answer_for_tests(&mut self, thread: &Entity<ThreadState>, cx: &mut Context<Self>) {
+        // `YH_MCP_ELICIT_ANSWER=accept|decline`: what an MCP server asks, answered with its defaults.
+        if let (Ok(answer), Some(e)) = (std::env::var("YH_MCP_ELICIT_ANSWER"), thread.read(cx).elicitation.clone()) {
+            eprintln!("MCP elicitation from {}: {} ({}{}): {answer}", e.server, e.message, e.mode, e.url.as_deref().map(|u| format!(", {u}")).unwrap_or_default());
+            let content = (answer == "accept" && e.mode == "form").then(|| crate::ui::composer::elicit_defaults(&e.schema));
+            self.answer_elicitation(thread, &answer, content, cx);
+        }
         let Ok(answer) = std::env::var("YH_ANSWER") else { return };
         if let Some(p) = thread.read(cx).permission.clone() {
             eprintln!("answering {} for {}: {answer}", p.id, p.tool);

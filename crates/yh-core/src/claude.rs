@@ -123,6 +123,8 @@ pub enum Event {
     /// A sub-agent's end, with its summary (a background one's report comes only here).
     SubagentFinished { tool_id: String, status: String, summary: Option<String> },
     Permission { request_id: String, tool: String, description: String, input: String },
+    /// An MCP server asks something mid-call: a form (`schema`) or a page to visit (`url`).
+    Elicitation { request_id: String, server: String, message: String, mode: String, schema: Value, url: Option<String> },
     Notice(String),
     Done { is_error: bool, text: String },
     Exit { code: i32, tail: String },
@@ -164,7 +166,11 @@ pub struct LaunchOptions {
     pub extra_args: Vec<String>,
 }
 
+type Waiting = Arc<Mutex<std::collections::HashMap<String, flume::Sender<Result<Value, String>>>>>;
+
 pub struct ClaudeProcess {
+    /// Control requests waiting for their reply, by `request_id`.
+    waiting: Waiting,
     child: Arc<Mutex<Child>>,
     writer: flume::Sender<Value>,
     counter: u64,
@@ -274,9 +280,11 @@ impl ClaudeProcess {
                 }
             });
         }
+        let waiting: Waiting = Arc::default();
         {
             let child = child.clone();
             let mcp_writer = writer.clone();
+            let waiting = waiting.clone();
             std::thread::spawn(move || {
                 let mut parser = Parser::default();
                 let mut reader = BufReader::with_capacity(1 << 20, stdout);
@@ -307,6 +315,19 @@ impl ClaudeProcess {
                         });
                         continue;
                     }
+                    // The reply to a request someone waits on (`request`).
+                    if object["type"] == "control_response" {
+                        let response = &object["response"];
+                        if let Some(id) = response["request_id"].as_str() {
+                            if let Some(reply) = waiting.lock().unwrap().remove(id) {
+                                let _ = reply.send(if response["subtype"] == "error" {
+                                    Err(response["error"].as_str().unwrap_or("The request failed.").to_string())
+                                } else {
+                                    Ok(response["response"].clone())
+                                });
+                            }
+                        }
+                    }
                     for event in parser.parse(&object) {
                         if events.send(event).is_err() {
                             return;
@@ -318,7 +339,7 @@ impl ClaudeProcess {
                 let _ = events.send(Event::Exit { code, tail });
             });
         }
-        Ok(ClaudeProcess { child, writer, counter: 0, pid, server_names })
+        Ok(ClaudeProcess { waiting, child, writer, counter: 0, pid, server_names })
     }
 
     /// Your message. `id` comes back in the CLI's message lifecycle; `priority` `now`
@@ -350,6 +371,29 @@ impl ClaudeProcess {
             request["sdkMcpServers"] = json!(self.server_names);
         }
         self.control(request);
+    }
+
+    /// A control request whose reply is waited for: `mcp_status`, `mcp_toggle`…
+    pub fn request(&mut self, request: Value) -> flume::Receiver<Result<Value, String>> {
+        self.counter += 1;
+        let id = format!("yh-{}", self.counter);
+        let (tx, rx) = flume::bounded(1);
+        self.waiting.lock().unwrap().insert(id.clone(), tx);
+        let _ = self.writer.send(json!({ "type": "control_request", "request_id": id, "request": request }));
+        rx
+    }
+
+    /// An MCP server's question mid-call (elicitation): `accept` (with `content` for a
+    /// form), `decline` or `cancel`.
+    pub fn respond_elicitation(&self, request_id: &str, action: &str, content: Option<Value>) {
+        let mut body = json!({ "action": action });
+        if let Some(c) = content {
+            body["content"] = c;
+        }
+        let _ = self.writer.send(json!({
+            "type": "control_response",
+            "response": { "subtype": "success", "request_id": request_id, "response": body },
+        }));
     }
 
     fn control(&mut self, request: Value) {
@@ -504,6 +548,16 @@ impl Parser {
             }
             "control_request" => {
                 let request = &object["request"];
+                if request["subtype"] == "elicitation" {
+                    return vec![Event::Elicitation {
+                        request_id: object["request_id"].as_str().unwrap_or("").into(),
+                        server: request["mcp_server_name"].as_str().unwrap_or("").into(),
+                        message: request["message"].as_str().unwrap_or("").into(),
+                        mode: request["mode"].as_str().unwrap_or("form").into(),
+                        schema: request["requested_schema"].clone(),
+                        url: request["url"].as_str().map(str::to_string),
+                    }];
+                }
                 if request["subtype"] != "can_use_tool" {
                     return vec![];
                 }

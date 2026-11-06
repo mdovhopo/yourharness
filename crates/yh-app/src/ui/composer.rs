@@ -34,7 +34,106 @@ pub struct Composer {
     /// Images waiting to go with the next message: names in `attachments/`.
     images: Vec<String>,
     _mentions: Option<gpui_kit::Task<()>>,
+    /// An MCP server's question, as a card.
+    elicit: Option<(String, Entity<ElicitCard>)>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// What an MCP server asks mid-call: a form, its fields filled with their defaults, or a page
+/// to visit. Accept sends what's in the fields.
+pub struct ElicitCard {
+    asked: crate::state::thread::Elicitation,
+    fields: Vec<(String, String, Entity<InputState>)>,
+    workspace: gpui_kit::WeakEntity<Workspace>,
+}
+
+/// A form's defaults as its answer: each property's `default`, else empty.
+pub fn elicit_defaults(schema: &Value) -> Value {
+    let mut out = serde_json::Map::new();
+    if let Some(props) = schema["properties"].as_object() {
+        for (k, p) in props {
+            if !p["default"].is_null() {
+                out.insert(k.clone(), p["default"].clone());
+            }
+        }
+    }
+    Value::Object(out)
+}
+
+impl ElicitCard {
+    fn new(asked: crate::state::thread::Elicitation, workspace: gpui_kit::WeakEntity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut fields = vec![];
+        if let Some(props) = asked.schema["properties"].as_object() {
+            for (k, p) in props {
+                let label = p["title"].as_str().or(p["description"].as_str()).unwrap_or(k).to_string();
+                let default = match &p["default"] {
+                    Value::String(s) => s.clone(),
+                    Value::Null => String::new(),
+                    other => other.to_string(),
+                };
+                fields.push((k.clone(), label, cx.new(|cx| InputState::new(window, cx).default_value(default))));
+            }
+        }
+        ElicitCard { asked, fields, workspace }
+    }
+
+    /// The fields as the schema's types: numbers and booleans parsed, the rest text.
+    fn content(&self, cx: &App) -> Value {
+        let mut out = serde_json::Map::new();
+        for (k, _, input) in &self.fields {
+            let text = input.read(cx).value().to_string();
+            let kind = self.asked.schema["properties"][k]["type"].as_str().unwrap_or("string");
+            let v = match kind {
+                "number" | "integer" => text.trim().parse::<f64>().map(Value::from).unwrap_or(Value::Null),
+                "boolean" => Value::Bool(matches!(text.trim(), "true" | "yes" | "1")),
+                _ => Value::String(text),
+            };
+            if !v.is_null() {
+                out.insert(k.clone(), v);
+            }
+        }
+        Value::Object(out)
+    }
+
+    fn answer(&self, action: &str, cx: &mut Context<Self>) {
+        let content = (action == "accept" && self.asked.mode == "form").then(|| self.content(cx));
+        let action = action.to_string();
+        if let Some(ws) = self.workspace.upgrade() {
+            if let Some(t) = ws.read(cx).selected_thread() {
+                ws.update(cx, |ws, cx| ws.answer_elicitation(&t, &action, content, cx));
+            }
+        }
+    }
+}
+
+impl Render for ElicitCard {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::get(cx);
+        let mut card = card_frame(&theme)
+            .child(div().flex().gap(px(4.)).child(div().font_weight(FontWeight::BOLD).child(self.asked.server.clone())).child("asks"))
+            .child(div().whitespace_normal().child(self.asked.message.clone()));
+        for (_, label, input) in &self.fields {
+            card = card.child(div().flex().flex_col().gap(px(2.)).child(div().text_size(px(11.)).text_color(theme.secondary).child(label.clone())).child(Input::new(input).small()));
+        }
+        let url = self.asked.url.clone();
+        card.child(
+            div()
+                .flex()
+                .justify_end()
+                .gap(px(6.))
+                .when_some(url, |d, url| {
+                    d.child(Button::new("elicit-open").small().label("Open Page").on_click(move |_, _, cx| {
+                        if std::env::var("YH_MCP_BROWSER").as_deref() == Ok("log") {
+                            eprintln!("MCP page: {url}");
+                        } else {
+                            cx.open_url(&url);
+                        }
+                    }))
+                })
+                .child(Button::new("elicit-decline").small().label("Decline").on_click(cx.listener(|this, _, _, cx| this.answer("decline", cx))))
+                .child(Button::new("elicit-accept").small().primary().label(if self.asked.mode == "url" { "Done" } else { "Send" }).on_click(cx.listener(|this, _, _, cx| this.answer("accept", cx)))),
+        )
+    }
 }
 
 enum Card {
@@ -70,6 +169,7 @@ impl Composer {
             suggest: None,
             images: vec![],
             _mentions: None,
+            elicit: None,
             _subscriptions: subscriptions,
         }
     }
@@ -114,6 +214,12 @@ impl Composer {
             return;
         }
         let Some(thread) = self.thread(cx) else { return };
+        // `/mcp` is the app's: the sheet, not Claude Code's headless one-line answer.
+        if crate::ui::mcp::is_mcp_command(&text) {
+            self.input.update(cx, |i, cx| i.set_value("", window, cx));
+            self.workspace.update(cx, |ws, cx| ws.open_mcp(cx));
+            return;
+        }
         let images = std::mem::take(&mut self.images);
         self.input.update(cx, |i, cx| i.set_value("", window, cx));
         self.workspace.update(cx, |ws, cx| ws.send_with_images(&thread, &text, images, now, cx));
@@ -178,6 +284,16 @@ impl Composer {
 
     /// The card follows the open thread's pending request.
     fn sync_card(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let asked = self.thread(cx).and_then(|t| t.read(cx).elicitation.clone());
+        match (asked, &self.elicit) {
+            (None, Some(_)) => self.elicit = None,
+            (Some(a), current) if current.as_ref().is_none_or(|(id, _)| *id != a.id) => {
+                let ws = self.workspace.downgrade();
+                let id = a.id.clone();
+                self.elicit = Some((id, cx.new(|cx| ElicitCard::new(a, ws, window, cx))));
+            }
+            _ => {}
+        }
         let permission = self.thread(cx).and_then(|t| t.read(cx).permission.clone());
         match (&permission, &self.card) {
             (None, None) => {}
@@ -329,6 +445,9 @@ impl Render for Composer {
         };
         let w = self.workspace.downgrade();
         let mut inner = div().w_full().max_w(px(828.)).flex().flex_col();
+        if let Some((_, card)) = &self.elicit {
+            inner = inner.child(card.clone());
+        }
         if let (Some(p), Some((_, card))) = (&permission, &self.card) {
             inner = inner.child(match card {
                 Card::Question(q) => q.clone().into_any_element(),

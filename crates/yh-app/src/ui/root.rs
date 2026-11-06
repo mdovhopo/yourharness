@@ -29,6 +29,7 @@ pub struct RootView {
     pub find: Entity<FindBar>,
     pub spotlight: Entity<Spotlight>,
     pub inspector: Entity<Inspector>,
+    pub mcp: Entity<crate::ui::mcp::McpSheet>,
     deck: Vec<(String, Entity<TranscriptView>)>,
     /// The Memory page when one is open (or was last: it's kept for going back to).
     memory: Option<Entity<MemoryPage>>,
@@ -48,6 +49,7 @@ impl RootView {
         let find = cx.new(|cx| FindBar::new(workspace.clone(), window, cx));
         let spotlight = cx.new(|cx| Spotlight::new(workspace.clone(), window, cx));
         let inspector = cx.new(|cx| Inspector::new(workspace.clone(), window, cx));
+        let mcp = cx.new(|cx| crate::ui::mcp::McpSheet::new(workspace.clone(), window, cx));
         let links = inspector.downgrade();
         cx.set_global(crate::ui::inspector::FileLinks(std::rc::Rc::new(move |path, lines, cx| {
             let _ = links.update(cx, |i, cx| i.open_file(path, lines, cx));
@@ -60,13 +62,14 @@ impl RootView {
                     cx.notify();
                 }
                 WorkspaceEvent::PageOpened => this.open_page(window, cx),
+                WorkspaceEvent::OpenMcp => this.mcp.update(cx, |m, cx| m.show(cx)),
             }),
             cx.observe(&workspace, |this, _, cx| {
                 this.refresh_tasks(cx);
                 cx.notify();
             }),
         ];
-        RootView { workspace, sidebar, composer, find, spotlight, inspector, deck: vec![], memory: None, usage: None, tasks: vec![], tasks_for: None, focus: cx.focus_handle(), _subscriptions: subscriptions }
+        RootView { workspace, sidebar, composer, find, spotlight, inspector, mcp, deck: vec![], memory: None, usage: None, tasks: vec![], tasks_for: None, focus: cx.focus_handle(), _subscriptions: subscriptions }
     }
 
     fn show(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -312,5 +315,6 @@ impl Render for RootView {
                 d.child(AnyView::from(self.inspector.clone()).cached(StyleRefinement::default().h_full().w(px(crate::ui::inspector::WIDTH)).flex_none()))
             })
             .child(self.spotlight.clone())
+            .child(self.mcp.clone())
     }
 }

@@ -1080,7 +1080,14 @@ fn first_lines(text: &str, n: usize) -> String {
 }
 
 fn empty(text: &str, theme: &Theme) -> gpui_kit::AnyElement {
-    div().size_full().p(px(24.)).flex().items_center().justify_center().text_center().text_color(theme.secondary).child(text.to_string()).into_any_element()
+    div()
+        .size_full()
+        .p(px(24.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(div().w_full().text_center().whitespace_normal().text_color(theme.secondary).child(text.to_string()))
+        .into_any_element()
 }
 
 impl Render for Inspector {
