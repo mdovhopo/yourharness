@@ -242,6 +242,27 @@ impl Browsers {
         self.place();
     }
 
+    /// Opens a page in a new tab of the thread's browser and shows it in the right sidebar: a
+    /// `localhost` link in a reply, which is the app Claude is building.
+    pub fn open_page(thread: &str, project: Option<&str>, url: &str, cx: &mut App) {
+        let reveal = Browsers::with(|b| {
+            if b.host != 0 && b.sessions.get(thread).is_none_or(|s| s.tabs.len() < MAX_TABS) {
+                b.open_tab(thread, project.filter(|p| p.len() == 36), url);
+            }
+            (b.reveal.take(), b.changed.take())
+        });
+        if let Some(f) = &reveal.0 {
+            f(thread, cx);
+        }
+        if let Some(f) = &reveal.1 {
+            f(cx);
+        }
+        Browsers::with(|b| {
+            b.reveal = reveal.0;
+            b.changed = reveal.1;
+        });
+    }
+
     /// A thread's browser goes with it.
     pub fn close_thread(thread: &str) {
         Browsers::with(|b| {

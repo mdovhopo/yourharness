@@ -957,7 +957,9 @@ impl Workspace {
         // Claude asks you to sign in to an MCP server, from a card in the thread.
         prompt.push(crate::state::harness_tools::INSTRUCTIONS.to_string());
         allowed.push("mcp__harness".to_string());
-        servers.push(std::sync::Arc::new(crate::state::harness_tools::HarnessTools { caller: t.id().to_string(), requests: self.tool_requests.clone() }));
+        servers.push(std::sync::Arc::new(crate::state::harness_tools::HarnessTools { caller: t.id().to_string(), requests: self.tool_requests.clone(), folder: cwd.clone(), attachments: attachments.clone() }));
+        // Claude shows you images and videos (`show_media`).
+        prompt.push(crate::state::harness_tools::MEDIA_INSTRUCTIONS.to_string());
         // The thread tools: list, read and tidy threads; this thread's title.
         if let Some(project) = project.as_ref() {
             let titles = self.library.setting("titleGeneration");

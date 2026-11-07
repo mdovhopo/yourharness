@@ -3,19 +3,60 @@
 
 use crate::probe;
 use crate::state::thread::ThreadState;
+use crate::state::workspace::Workspace;
 use crate::theme::Theme;
 use crate::ui::rows;
 use gpui_kit::{div, list, prelude::*, px, Context, Entity, Subscription, Window};
+use std::sync::Arc;
+use yh_core::links::{Linker, Repo};
 
 pub struct TranscriptView {
     pub thread: Entity<ThreadState>,
+    workspace: Entity<Workspace>,
+    /// The thread was running when last looked: its files are read again when it stops.
+    was_running: bool,
     _observe: Subscription,
 }
 
 impl TranscriptView {
-    pub fn new(thread: Entity<ThreadState>, cx: &mut Context<Self>) -> Self {
-        let observe = cx.observe(&thread, |_, _, cx| cx.notify());
-        TranscriptView { thread, _observe: observe }
+    pub fn new(thread: Entity<ThreadState>, workspace: Entity<Workspace>, cx: &mut Context<Self>) -> Self {
+        let observe = cx.observe(&thread, |this, thread, cx| {
+            let running = thread.read(cx).running;
+            if this.was_running && !running {
+                this.load_links(cx);
+            }
+            this.was_running = running;
+            cx.notify()
+        });
+        let was_running = thread.read(cx).running;
+        let mut view = TranscriptView { thread, workspace, was_running, _observe: observe };
+        view.load_links(cx);
+        view
+    }
+
+    /// Reads what the thread's replies link against, off the main thread: its folder's files
+    /// (a turn may have made some) and its repo.
+    fn load_links(&mut self, cx: &mut Context<Self>) {
+        let folder = self.workspace.read(cx).folder_of(self.thread.read(cx));
+        let thread = self.thread.downgrade();
+        cx.spawn(async move |_, cx| {
+            let linker = cx
+                .background_executor()
+                .spawn(async move {
+                    let path = std::path::Path::new(&folder);
+                    let files = yh_core::files::list(path);
+                    let repo = yh_core::forge::origin(path).map(|(host, path, gitlab)| Repo { host, path, gitlab });
+                    Arc::new(Linker::new(&folder, repo, &files))
+                })
+                .await;
+            let _ = thread.update(cx, |t, cx| {
+                if t.linker.as_ref().map(|l| l.revision) != Some(linker.revision) {
+                    t.linker = Some(linker);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 }
 

@@ -1,6 +1,7 @@
 //! What the app draws. Views read state and call it; they keep only view state.
 
 pub mod composer;
+pub mod diagram;
 pub mod find;
 pub mod inspector;
 pub mod mcp;
@@ -14,3 +15,4 @@ pub mod spotlight;
 pub mod state_transfer;
 pub mod transcript;
 pub mod usage;
+pub mod working;

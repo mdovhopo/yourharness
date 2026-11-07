@@ -60,6 +60,8 @@ pub struct RootView {
     tasks: Vec<(String, String, usize, usize)>,
     tasks_for: Option<(String, u64)>,
     focus: FocusHandle,
+    /// "Working 0:12" over the transcript's bottom: outside it, so its tick doesn't redraw it.
+    working: Entity<crate::ui::working::WorkingTimer>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -111,7 +113,8 @@ impl RootView {
                 lib.setting("sidebarWidth").and_then(|v| v.as_f64()).map_or(SIDEBAR_DEFAULT, |w| (w as f32).clamp(SIDEBAR_MIN, SIDEBAR_MAX)),
             )
         };
-        RootView { sidebar_hidden, sidebar_width, resizing_sidebar: false, save_frame: None, workspace, sidebar, composer, find, spotlight, inspector, mcp, deck: vec![], memory: None, project: None, usage: None, tasks: vec![], tasks_for: None, focus: cx.focus_handle(), _subscriptions: subscriptions }
+        let working = cx.new(|cx| crate::ui::working::WorkingTimer::new(workspace.clone(), cx));
+        RootView { sidebar_hidden, sidebar_width, resizing_sidebar: false, save_frame: None, workspace, sidebar, composer, find, spotlight, inspector, mcp, deck: vec![], memory: None, project: None, usage: None, tasks: vec![], tasks_for: None, focus: cx.focus_handle(), working, _subscriptions: subscriptions }
     }
 
     fn show(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -121,7 +124,8 @@ impl RootView {
             self.deck.push(slot);
         } else {
             thread.update(cx, |t, _| t.in_deck = true);
-            let view = cx.new(|cx| TranscriptView::new(thread.clone(), cx));
+            let ws = self.workspace.clone();
+            let view = cx.new(|cx| TranscriptView::new(thread.clone(), ws, cx));
             self.deck.push((id.to_string(), view));
             while self.deck.len() > KEPT_TRANSCRIPTS {
                 let (old, _) = self.deck.remove(0);
@@ -461,6 +465,7 @@ impl Render for RootView {
                                 .min_h_0()
                                 .relative()
                                 .child(AnyView::from(view).cached(StyleRefinement::default().size_full()))
+                                .child(div().absolute().bottom(px(6.)).left(px(28.)).child(self.working.clone()))
                                 .into_any_element(),
                             None => div().flex_1().into_any_element(),
                         })

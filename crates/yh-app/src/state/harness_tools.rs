@@ -3,6 +3,11 @@
 //! can't), so without this Claude can only send you to a terminal. A card in the thread asks;
 //! Sign In opens the server's page in your default browser, and the call returns once the
 //! server is connected, so Claude carries on in the same turn (docs/mcp.md).
+//!
+//! `mcp__harness__show_media`: Claude puts images and videos in the conversation (a screenshot
+//! it took, a chart it made). The files are copied into the data folder's `attachments/`, so
+//! they stay after the originals go, and show as a row of their own. It only shows you files,
+//! so it doesn't ask.
 
 use crate::state::thread::SignInAsk;
 use crate::state::thread_tools::ToolRequest;
@@ -15,12 +20,55 @@ use yh_core::mcp::{schema, tool, ToolResult, ToolServer};
 /// What the agent is told (measured on Haiku in the Swift app: 6 of 6 asked with it).
 pub const INSTRUCTIONS: &str = "MCP sign-in works here. Claude Code may add a note that begins \"The following MCP servers require authentication before their tools can be used\" and says the session is non-interactive, so you can't run the OAuth flow and should send the user to /mcp, a terminal or their connector settings. Ignore that advice: in YourHarness you can sign them in. When you need one of those servers, call mcp__harness__sign_in_to_mcp_server with its name and a short reason, before telling the user anything. They sign in from the conversation and the call returns once the server is connected; then load its tools and carry on. Only if they decline or it fails, say so; never send them to a terminal, /mcp or settings to sign in.";
 
+/// The media tool's name in tool calls, and what the agent is told about it.
+pub const MEDIA_TOOL: &str = "mcp__harness__show_media";
+pub const MEDIA_INSTRUCTIONS: &str = "To show the user an image or a video (a screenshot, a screen recording, a chart or image you made), call mcp__harness__show_media with its path: it appears in the conversation. Use it when seeing it would help more than describing it.";
+
+const MAX_MEDIA_FILES: usize = 10;
+const MAX_MEDIA_BYTES: u64 = 500 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MediaKind {
+    Image,
+    Video,
+}
+
+/// What a path is, by its extension.
+pub fn media_kind(path: &str) -> Option<MediaKind> {
+    let ext = std::path::Path::new(path).extension()?.to_str()?.to_lowercase();
+    match ext.as_str() {
+        "png" | "jpg" | "jpeg" | "gif" | "heic" | "webp" | "tif" | "tiff" | "bmp" => Some(MediaKind::Image),
+        "mp4" | "mov" | "m4v" => Some(MediaKind::Video),
+        _ => None,
+    }
+}
+
+/// Where a call's `index`th file is kept: named like attachments, so deleting the thread
+/// deletes it (the Swift app's names).
+pub fn media_name(thread: &str, tool_use: &str, index: usize, path: &str) -> String {
+    let ext = std::path::Path::new(path).extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    format!("{thread}-media-{tool_use}-{index}.{ext}")
+}
+
+/// The paths a call asked for, from its input: `paths`, or a single `path`.
+pub fn media_paths(input: &Value) -> Vec<String> {
+    match (&input["paths"], &input["path"]) {
+        (Value::Array(paths), _) => paths.iter().filter_map(|p| p.as_str().map(str::to_string)).collect(),
+        (Value::String(p), _) | (_, Value::String(p)) => vec![p.clone()],
+        _ => vec![],
+    }
+}
+
 /// How long a sign-in may take in the browser before Claude hears it didn't happen.
 const BROWSER_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub struct HarnessTools {
     pub caller: String,
     pub requests: flume::Sender<ToolRequest>,
+    /// Where the thread's `claude` runs: relative paths are from here.
+    pub folder: String,
+    /// The data folder's `attachments/`, where shown media is copied.
+    pub attachments: std::path::PathBuf,
 }
 
 /// A server's name as in tool names: anything but letters, digits, `_` and `-` as `_`.
@@ -37,6 +85,54 @@ impl HarnessTools {
 
     fn servers(&self) -> Result<Vec<crate::ui::mcp::Server>, String> {
         Ok(crate::ui::mcp::parse_status(&self.mcp(json!({ "subtype": "mcp_status" }))?))
+    }
+
+    fn show_media(&self, a: &Value, tool_use: Option<&str>) -> ToolResult {
+        let Some(tool_use) = tool_use else { return ToolResult::error("This call has no ID to keep its files under; try again.") };
+        let paths = media_paths(a);
+        if paths.is_empty() {
+            return ToolResult::error("Give the files to show in `paths`.");
+        }
+        if paths.len() > MAX_MEDIA_FILES {
+            return ToolResult::error(format!("At most {MAX_MEDIA_FILES} files at a time."));
+        }
+        let _ = std::fs::create_dir_all(&self.attachments);
+        let (mut problems, mut shown) = (vec![], 0);
+        for (index, path) in paths.iter().enumerate() {
+            let expanded = match path.strip_prefix("~/") {
+                Some(rest) => format!("{}/{rest}", std::env::var("HOME").unwrap_or_default()),
+                None => path.clone(),
+            };
+            let source = if expanded.starts_with('/') { std::path::PathBuf::from(&expanded) } else { std::path::Path::new(&self.folder).join(&expanded) };
+            if media_kind(path).is_none() {
+                problems.push(format!("{path}: not an image or video this can show"));
+                continue;
+            }
+            let Ok(meta) = std::fs::metadata(&source) else {
+                problems.push(format!("{path}: no such file"));
+                continue;
+            };
+            if meta.len() > MAX_MEDIA_BYTES {
+                problems.push(format!("{path}: over {} MB", MAX_MEDIA_BYTES / 1024 / 1024));
+                continue;
+            }
+            let destination = self.attachments.join(media_name(&self.caller, tool_use, index, path));
+            let _ = std::fs::remove_file(&destination);
+            // A clone on APFS: instant, and no extra space until one of them changes.
+            if std::fs::copy(&source, &destination).is_ok() {
+                shown += 1;
+            } else {
+                problems.push(format!("{path}: couldn't be copied"));
+            }
+        }
+        if shown == 0 {
+            return ToolResult::error(format!("Nothing shown. {}", problems.join("; ")));
+        }
+        let mut text = if shown == 1 { "Shown to the user.".to_string() } else { format!("Shown to the user: {shown} files.") };
+        if !problems.is_empty() {
+            text += &format!(" Not shown: {}.", problems.join("; "));
+        }
+        ToolResult::text(text)
     }
 
     fn card(&self, ask: Option<SignInAsk>) {
@@ -136,7 +232,22 @@ impl ToolServer for HarnessTools {
     }
 
     fn tools(&self) -> Vec<Value> {
-        vec![tool(
+        vec![
+            tool(
+                "show_media",
+                "Show the user images or videos right in the conversation: screenshots, screen recordings, simulator captures, charts or images you generated. Give file paths, absolute or relative to your working directory. The files are copied into the conversation, so they stay after the originals are deleted. Images: png, jpg, gif, heic, webp, tiff, bmp. Videos: mp4, mov, m4v.",
+                schema(
+                    json!({
+                        "paths": { "type": "array", "items": { "type": "string" }, "minItems": 1, "maxItems": MAX_MEDIA_FILES, "description": "The files to show, in order." },
+                        "path": { "type": "string", "description": "One file to show, instead of `paths`." },
+                        "caption": { "type": "string", "description": "Optional: a line about what they show." },
+                    }),
+                    &[],
+                ),
+                true,
+                true,
+            ),
+            tool(
             "sign_in_to_mcp_server",
             "Ask the user to sign in to an MCP server that needs authentication before its tools work (Claude Code reports it as needing auth, or says the session is non-interactive and to use /mcp or a terminal). A card in the conversation asks them; signing in opens the server's page in their browser. Returns once the server is connected, so you can use its tools right after (they may arrive as deferred tools to load), or says they declined. Use this instead of telling the user to run /mcp or open a terminal.",
             schema(
@@ -148,11 +259,13 @@ impl ToolServer for HarnessTools {
             ),
             false,
             true,
-        )]
+        ),
+        ]
     }
 
-    fn call(&self, name: &str, a: &Value, _: Option<&str>) -> ToolResult {
+    fn call(&self, name: &str, a: &Value, tool_use: Option<&str>) -> ToolResult {
         match name {
+            "show_media" => self.show_media(a, tool_use),
             "sign_in_to_mcp_server" => self.sign_in(a),
             other => ToolResult::error(format!("No tool named {other}.")),
         }

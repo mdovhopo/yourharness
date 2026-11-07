@@ -325,7 +325,8 @@ impl Inspector {
             return;
         }
         let Some(chat) = self.workspace.update(cx, |ws, cx| ws.side_chat(&parent, cx)) else { return };
-        let view = cx.new(|cx| TranscriptView::new(chat.clone(), cx));
+        let ws = self.workspace.clone();
+        let view = cx.new(|cx| TranscriptView::new(chat.clone(), ws, cx));
         // Its running state and permission requests change the controls under it.
         let watch = cx.observe(&chat, |this, chat, cx| {
             let state = (chat.read(cx).running, chat.read(cx).permission.is_some());

@@ -371,3 +371,101 @@ pub fn notify(title: &str, body: &str) {
         let _: () = msg_send![center, addNotificationRequest: request withCompletionHandler: nil];
     }
 }
+
+// MARK: Quick Look
+
+#[link(name = "Quartz", kind = "framework")]
+unsafe extern "C" {}
+
+thread_local! {
+    /// What Quick Look shows: files, and the one to start at.
+    static PREVIEW: std::cell::RefCell<(Vec<String>, usize)> = const { std::cell::RefCell::new((vec![], 0)) };
+}
+
+/// Opens files in Quick Look's panel (`QLPreviewPanel`), the arrow keys going through the
+/// others, as Finder's space bar does. The panel asks the responder chain for a controller,
+/// so the app's delegate is taught to be one, and feeds it from `PREVIEW`.
+pub fn quick_look(paths: Vec<String>, at: usize) {
+    use objc::runtime::{Class, Object, Sel, BOOL};
+    if paths.is_empty() {
+        return;
+    }
+    let at = at.min(paths.len() - 1);
+    PREVIEW.with(|p| *p.borrow_mut() = (paths, at));
+    extern "C" fn count(_: &Object, _: Sel, _: id) -> isize {
+        PREVIEW.with(|p| p.borrow().0.len() as isize)
+    }
+    extern "C" fn item(_: &Object, _: Sel, _: id, index: isize) -> id {
+        let path = PREVIEW.with(|p| p.borrow().0.get(index.max(0) as usize).cloned()).unwrap_or_default();
+        unsafe {
+            let path = NSString::alloc(nil).init_str(&path);
+            let _: () = msg_send![path, autorelease];
+            msg_send![class!(NSURL), fileURLWithPath: path]
+        }
+    }
+    extern "C" fn accepts(_: &Object, _: Sel, _: id) -> BOOL {
+        YES
+    }
+    extern "C" fn begin(this: &Object, _: Sel, panel: id) {
+        unsafe {
+            let _: () = msg_send![panel, setDataSource: this];
+            let _: () = msg_send![panel, reloadData];
+            let at = PREVIEW.with(|p| p.borrow().1) as isize;
+            let _: () = msg_send![panel, setCurrentPreviewItemIndex: at];
+        }
+    }
+    extern "C" fn end(_: &Object, _: Sel, panel: id) {
+        unsafe {
+            let _: () = msg_send![panel, setDataSource: nil];
+        }
+    }
+    static TAUGHT: std::sync::Once = std::sync::Once::new();
+    unsafe {
+        let app: id = msg_send![class!(NSApplication), sharedApplication];
+        let delegate: id = msg_send![app, delegate];
+        if delegate == nil {
+            return;
+        }
+        TAUGHT.call_once(|| {
+            let cls = objc::runtime::object_getClass(delegate as *const Object) as *mut Class;
+            let add = |name: Sel, imp: objc::runtime::Imp, types: &'static [u8]| {
+                objc::runtime::class_addMethod(cls, name, imp, types.as_ptr() as *const std::ffi::c_char);
+            };
+            add(sel!(numberOfPreviewItemsInPreviewPanel:), std::mem::transmute::<extern "C" fn(&Object, Sel, id) -> isize, objc::runtime::Imp>(count), b"q@:@\0");
+            add(sel!(previewPanel:previewItemAtIndex:), std::mem::transmute::<extern "C" fn(&Object, Sel, id, isize) -> id, objc::runtime::Imp>(item), b"@@:@q\0");
+            add(sel!(acceptsPreviewPanelControl:), std::mem::transmute::<extern "C" fn(&Object, Sel, id) -> BOOL, objc::runtime::Imp>(accepts), b"c@:@\0");
+            add(sel!(beginPreviewPanelControl:), std::mem::transmute::<extern "C" fn(&Object, Sel, id), objc::runtime::Imp>(begin), b"v@:@\0");
+            add(sel!(endPreviewPanelControl:), std::mem::transmute::<extern "C" fn(&Object, Sel, id), objc::runtime::Imp>(end), b"v@:@\0");
+        });
+        let panel: id = msg_send![class!(QLPreviewPanel), sharedPreviewPanel];
+        if panel == nil {
+            return;
+        }
+        let visible: BOOL = msg_send![panel, isVisible];
+        if visible == YES {
+            // Already ours: show the new files.
+            let _: () = msg_send![panel, reloadData];
+            let _: () = msg_send![panel, setCurrentPreviewItemIndex: at as isize];
+        } else {
+            let _: () = msg_send![panel, makeKeyAndOrderFront: nil];
+        }
+    }
+}
+
+/// Whether Quick Look's panel is up (for test runs), and closes it when `close`.
+pub fn quick_look_visible(close: bool) -> bool {
+    use objc::runtime::BOOL;
+    unsafe {
+        let exists: BOOL = msg_send![class!(QLPreviewPanel), sharedPreviewPanelExists];
+        if exists != YES {
+            return false;
+        }
+        let panel: id = msg_send![class!(QLPreviewPanel), sharedPreviewPanel];
+        let visible: BOOL = msg_send![panel, isVisible];
+        let count: isize = msg_send![panel, numberOfPreviewItems];
+        if close {
+            let _: () = msg_send![panel, orderOut: nil];
+        }
+        visible == YES && count > 0
+    }
+}

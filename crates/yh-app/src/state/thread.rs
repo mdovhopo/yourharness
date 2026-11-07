@@ -50,7 +50,8 @@ pub struct Entry {
     pub version: u64,
     /// A step opened in its work row.
     pub open: bool,
-    pub markdown: Option<(u64, Rc<Markdown>)>,
+    /// Its text parsed, for (version, links revision).
+    pub markdown: Option<(u64, u64, Rc<Markdown>)>,
     /// Its row number in the whole saved transcript.
     pub seq: usize,
     /// When it was written (seconds since 1970), for rows made here.
@@ -64,6 +65,7 @@ pub struct Entry {
 pub type EntryRef = Rc<RefCell<Entry>>;
 
 fn entry(data: EntryData, seq: usize) -> EntryRef {
+    let date = data.date;
     Rc::new(RefCell::new(Entry {
         data,
         live: false,
@@ -72,7 +74,7 @@ fn entry(data: EntryData, seq: usize) -> EntryRef {
         open: false,
         markdown: None,
         seq,
-        date: None,
+        date,
         queued: false,
         delivery: None,
     }))
@@ -101,6 +103,7 @@ impl Entry {
             tool_result: full_result.or_else(|| self.data.tool_result.clone()),
             tool_is_error: (self.data.kind == Kind::Tool && self.data.tool_result.is_some()).then_some(self.data.is_error),
             date: self.date,
+            turn_ended_at: self.data.turn_ended_at,
             delivery: self.delivery.clone(),
             attachments: (!self.data.attachments.is_empty()).then(|| serde_json::to_string(&self.data.attachments).unwrap_or_default()),
             ..Default::default()
@@ -116,6 +119,8 @@ pub enum ItemType {
     /// A sub-agent's call (`Agent`, `Task`): a card of its own, never folded into work.
     Agent,
     Notice,
+    /// Images and videos Claude showed you (`show_media`): never folded away.
+    Media,
 }
 
 /// One row on screen: a message, or a run of thinking and tool calls folded into one.
@@ -132,12 +137,48 @@ pub const AGENT_TOOLS: &[&str] = &["Agent", "Task"];
 
 fn item_type(data: &EntryData) -> ItemType {
     match data.kind {
+        Kind::Tool if data.tool_name.as_deref() == Some(crate::state::harness_tools::MEDIA_TOOL) => ItemType::Media,
         Kind::Tool if data.tool_name.as_deref().is_some_and(|n| AGENT_TOOLS.contains(&n)) => ItemType::Agent,
         Kind::Thinking | Kind::Tool => ItemType::Work,
         Kind::User => ItemType::User,
         Kind::Assistant => ItemType::Text,
         Kind::Notice | Kind::Command => ItemType::Notice,
     }
+}
+
+/// A row's place in its turn. A finished turn's work (thinking, tool calls, sub-agents and
+/// what Claude said along the way) folds into one summary row above its answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fold {
+    Shown,
+    /// Folded into its turn's summary: drawn as nothing.
+    Hidden,
+    /// The first row of a turn's work: draws the summary (`turns[turn]`), then itself when open.
+    Summary { turn: usize, open: bool },
+    /// Work of a turn shown open.
+    Open,
+}
+
+/// A finished turn's work, for its summary row: "Worked for 2m 14s · 9 tool calls · edited 3 files".
+pub struct TurnWork {
+    /// The rows folded, by number; the first draws the summary.
+    pub items: Vec<i64>,
+    /// When your message went (seconds since 1970) and when the turn ended, when known.
+    pub started: Option<f64>,
+    pub ended: Option<f64>,
+    /// Its details, worked out the first time the row is drawn.
+    pub details: RefCell<Option<String>>,
+}
+
+/// Whether your message starts a turn: one that joined Claude's turn (steered) doesn't.
+fn starts_turn(e: &Entry) -> bool {
+    e.data.kind == Kind::User && e.delivery.as_deref() != Some("steered")
+}
+
+/// `YH_EXPAND_WORK=1`: every finished turn's work drawn open, for snapshots.
+fn expand_all() -> bool {
+    static EXPAND: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *EXPAND.get_or_init(|| std::env::var("YH_EXPAND_WORK").as_deref() == Ok("1"))
 }
 
 /// Claude asks you to sign in to an MCP server (`mcp__harness__sign_in_to_mcp_server`).
@@ -210,6 +251,16 @@ pub struct ThreadState {
     /// The sub-agent you picked in the right sidebar (its Agent tool call's id).
     pub inspected_subagent: Option<String>,
     next_note: u64,
+    /// Each held row's place in its turn, as `items`.
+    pub folds: Vec<Fold>,
+    /// The finished turns' work, as `Fold::Summary` numbers them.
+    pub turns: Vec<TurnWork>,
+    /// Turns whose work you opened, by their first folded row.
+    open_turns: std::collections::HashSet<i64>,
+    /// Rows came or went, or a turn ended: `folds` is worked out again.
+    folds_dirty: bool,
+    /// What replies link against (the thread's files and repo), once read.
+    pub linker: Option<std::sync::Arc<yh_core::links::Linker>>,
 }
 
 impl ThreadState {
@@ -241,6 +292,11 @@ impl ThreadState {
             subagents_version: 0,
             inspected_subagent: None,
             next_note: 0,
+            folds: vec![],
+            turns: vec![],
+            open_turns: Default::default(),
+            folds_dirty: false,
+            linker: None,
         }
     }
 
@@ -291,6 +347,7 @@ impl ThreadState {
             self.list.splice(0..0, count as usize);
             self.list.scroll_to(ListOffset { item_ix: top.item_ix + count as usize, offset_in_item: top.offset_in_item });
         }
+        self.refresh_folds();
     }
 
     /// Puts a new entry at the end, folding work into the work row before it.
@@ -312,6 +369,7 @@ impl ThreadState {
             _ => {
                 let pos = self.items.last().map_or(0, |i| i.pos + 1);
                 self.items.push(Item { pos, ty, entries: vec![e.clone()], open: false });
+                self.folds_dirty = true;
                 let n = self.items.len();
                 self.list.splice(n - 1..n - 1, 1);
                 // Nobody is looking: keep the newest rows, the rest go back to "earlier".
@@ -398,6 +456,7 @@ impl ThreadState {
         }
         self.before += count;
         self.list.splice(0..cut, 0);
+        self.refresh_folds();
     }
 
     /// Lets go of the rows; they're read again on the next visit.
@@ -409,6 +468,8 @@ impl ThreadState {
         self.tools.clear();
         self.loaded = false;
         self.loading = false;
+        self.folds.clear();
+        self.turns.clear();
     }
 
     pub fn toggle_item(&mut self, pos: i64) {
@@ -429,9 +490,12 @@ impl ThreadState {
         let mut data = EntryData::new(id, Kind::User, text);
         data.attachments = images.to_vec();
         let e = self.append(data);
-        let mut b = e.borrow_mut();
-        b.queued = queued;
-        b.delivery = delivery.map(str::to_string);
+        {
+            let mut b = e.borrow_mut();
+            b.queued = queued;
+            b.delivery = delivery.map(str::to_string);
+        }
+        self.refresh_folds();
     }
 
     /// The CLI says where your message is.
@@ -452,6 +516,98 @@ impl ThreadState {
         self.next_note += 1;
         let id = format!("n{}", self.next_note);
         self.append(EntryData::new(id, Kind::Notice, text));
+        self.refresh_folds();
+    }
+
+    /// Opens or closes a finished turn's work, by its first folded row.
+    pub fn toggle_turn(&mut self, first: i64) {
+        if !self.open_turns.remove(&first) {
+            self.open_turns.insert(first);
+        }
+        self.refresh_folds();
+    }
+
+    /// When the turn going now started: your message that started it.
+    pub fn turn_started_at(&self) -> Option<f64> {
+        self.items.iter().rev().filter(|i| i.ty == ItemType::User).find_map(|i| {
+            let b = i.entries[0].borrow();
+            if starts_turn(&b) { Some(b.date) } else { None }
+        })?
+    }
+
+    /// Works out each row's place in its turn again, and has the rows whose place changed
+    /// measured again.
+    pub fn refresh_folds(&mut self) {
+        self.folds_dirty = false;
+        let old: HashMap<i64, Fold> = self.items.iter().zip(&self.folds).map(|(i, f)| (i.pos, *f)).collect();
+        let mut old_details: HashMap<(i64, usize), Option<String>> =
+            self.turns.drain(..).map(|t| ((t.items[0], t.items.len()), t.details.into_inner())).collect();
+        let n = self.items.len();
+        let mut folds = vec![Fold::Shown; n];
+        let starts: Vec<usize> =
+            (0..n).filter(|&ix| self.items[ix].ty == ItemType::User && starts_turn(&self.items[ix].entries[0].borrow())).collect();
+        // Turns: from each message of yours that starts one to the next; rows held from before
+        // the first are the end of a turn whose start isn't held.
+        let mut bounds: Vec<(usize, usize)> = vec![];
+        let mut from = 0;
+        for &s in &starts {
+            if s > from {
+                bounds.push((from, s));
+            }
+            from = s;
+        }
+        if from < n {
+            bounds.push((from, n));
+        }
+        let count = bounds.len();
+        for (t, (s, e)) in bounds.into_iter().enumerate() {
+            // The turn going now stays as it comes.
+            if t + 1 == count && self.running {
+                continue;
+            }
+            let user = starts.contains(&s).then_some(s);
+            let body = if user.is_some() { s + 1 } else { s };
+            let answer = (body..e).rev().find(|&ix| self.items[ix].ty == ItemType::Text);
+            let folded: Vec<usize> = (body..e)
+                .filter(|&ix| Some(ix) != answer && matches!(self.items[ix].ty, ItemType::Work | ItemType::Agent | ItemType::Text))
+                .collect();
+            let Some(&first) = folded.first() else { continue };
+            let first_pos = self.items[first].pos;
+            let open = expand_all() || self.open_turns.contains(&first_pos);
+            for &ix in &folded {
+                folds[ix] = if open { Fold::Open } else { Fold::Hidden };
+            }
+            folds[first] = Fold::Summary { turn: self.turns.len(), open };
+            let (started, mut ended) = match user {
+                Some(u) => {
+                    let b = self.items[u].entries[0].borrow();
+                    (b.date, b.data.turn_ended_at)
+                }
+                None => (None, None),
+            };
+            if ended.is_none() {
+                ended = self.items[s..e].iter().filter_map(|i| i.entries.last().and_then(|x| x.borrow().date)).reduce(f64::max);
+            }
+            let items: Vec<i64> = folded.iter().map(|&ix| self.items[ix].pos).collect();
+            let details = old_details.remove(&(first_pos, items.len())).flatten();
+            self.turns.push(TurnWork { items, started, ended, details: RefCell::new(details) });
+        }
+        for (ix, fold) in folds.iter().enumerate() {
+            if old.get(&self.items[ix].pos).is_some_and(|was| was != fold) {
+                self.list.splice(ix..ix + 1, 1);
+            }
+        }
+        self.folds = folds;
+    }
+
+    /// A row's place in its turn.
+    pub fn fold_at(&self, ix: usize) -> Fold {
+        self.folds.get(ix).copied().unwrap_or(Fold::Shown)
+    }
+
+    /// The held rows at these numbers.
+    pub fn items_at<'a>(&'a self, positions: &'a [i64]) -> impl Iterator<Item = &'a Item> + 'a {
+        positions.iter().filter_map(|p| self.index(*p).map(|ix| &self.items[ix]))
     }
 
     /// Rows whose text, tool input or result has `query` (lower case), oldest first, by number.
@@ -499,7 +655,15 @@ impl ThreadState {
     }
 
     /// Applies one event from this thread's `claude`. True when what the sidebar shows changed.
-    pub fn apply(&mut self, event: Event, _cx: &mut Context<Self>) -> bool {
+    pub fn apply(&mut self, event: Event, cx: &mut Context<Self>) -> bool {
+        let changed = self.apply_event(event, cx);
+        if self.folds_dirty {
+            self.refresh_folds();
+        }
+        changed
+    }
+
+    fn apply_event(&mut self, event: Event, _cx: &mut Context<Self>) -> bool {
         match event {
             Event::Session { id } => {
                 self.session_id = Some(id);
@@ -795,5 +959,13 @@ impl ThreadState {
         self.blocks.clear();
         self.running = false;
         self.permission = None;
+        // How long the turn took goes on the message that started it.
+        let start = self.items.iter().rev().filter(|i| i.ty == ItemType::User).map(|i| i.entries[0].clone()).find(|e| starts_turn(&e.borrow()));
+        if let Some(e) = start {
+            let mut b = e.borrow_mut();
+            b.data.turn_ended_at = Some(yh_core::library::now_ms() / 1000.0);
+            self.dirty.insert(b.seq);
+        }
+        self.folds_dirty = true;
     }
 }

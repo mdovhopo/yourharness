@@ -594,6 +594,15 @@ fn main() {
                 }
             });
         }
+        // `YH_PREVIEW_MEDIA=1`: the selected thread's last pictures in Quick Look (ui::rows).
+        if env("YH_PREVIEW_MEDIA").as_deref() == Some("1") {
+            let workspace = workspace.clone();
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(Duration::from_secs(3)).await;
+                let _ = cx.update(|cx| ui::rows::preview_probe(&workspace, cx));
+            })
+            .detach();
+        }
         // `YH_SNAPSHOT=<png>`: the window drawn into a PNG after `YH_SNAPSHOT_DELAY` seconds, for
         // looking without capturing the screen (test builds: `--features snapshots`).
         if let Some(file) = env("YH_SNAPSHOT") {
