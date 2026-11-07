@@ -7,7 +7,9 @@
 //! each is in and the threads working in them. Anything that loses work asks first.
 
 use crate::state::workspace::Workspace;
-use crate::theme::{Theme, MONO};
+use crate::theme::{radius, space, text, Theme, MONO};
+use crate::ui::page_icons as icons;
+use crate::ui::page_kit::{self, Segment as Tab};
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem};
@@ -46,6 +48,8 @@ pub struct ProjectPage {
     /// `YH_PROJECT_PROBE`: what to do once the repos have been read (see `run_probe`).
     probe: Option<String>,
     scroll: gpui_kit::ScrollHandle,
+    /// A narrow window (from the last render): the toolbar keeps to its buttons.
+    compact: bool,
     _poll: Option<Task<()>>,
 }
 
@@ -111,6 +115,7 @@ impl ProjectPage {
             show_uncloned: false,
             probe: std::env::var("YH_PROJECT_PROBE").ok(),
             scroll: gpui_kit::ScrollHandle::new(),
+            compact: false,
             _poll: None,
         };
         page.refresh(true, cx);
@@ -555,12 +560,17 @@ impl ProjectPage {
 // MARK: Drawing
 
 fn chip(label: &str, color: Hsla) -> gpui_kit::Div {
-    div().flex_none().px(px(6.)).rounded(px(8.)).text_size(px(10.)).font_weight(FontWeight::MEDIUM).text_color(color).bg(color.opacity(0.14)).child(label.to_string())
+    page_kit::chip(label.to_string(), color)
 }
 
 /// A coloured dot and words: a worktree's or repo's state.
-fn state_badge(text: impl Into<SharedString>, color: Hsla, theme: &Theme) -> gpui_kit::Div {
-    div().flex_none().flex().items_center().gap(px(5.)).text_size(px(11.)).font_weight(FontWeight::MEDIUM).text_color(theme.secondary).child(div().w(px(6.)).h(px(6.)).rounded_full().bg(color)).child(text.into())
+fn state_badge(label: impl Into<SharedString>, color: Hsla, theme: &Theme) -> gpui_kit::Div {
+    div().flex_none().flex().items_center().gap(px(5.)).text_size(px(text::CAPTION)).font_weight(FontWeight::MEDIUM).text_color(theme.secondary).child(page_kit::dot(color, 6.)).child(label.into())
+}
+
+/// A PR's check or review state: an icon in its colour, the words quiet beside it.
+fn status(icon: gpui_kit::component::Icon, color: Hsla, label: &str, theme: &Theme) -> gpui_kit::Div {
+    div().flex_none().flex().items_center().gap(px(3.)).text_color(theme.secondary).child(icon.size(px(11.)).text_color(color)).child(label.to_string())
 }
 
 fn age(updated: Option<&str>) -> String {
@@ -573,29 +583,37 @@ fn section_title(title: &str, count: usize, theme: &Theme) -> gpui_kit::Div {
     div()
         .flex()
         .items_baseline()
-        .gap(px(8.))
-        .child(div().text_size(px(17.)).font_weight(FontWeight::SEMIBOLD).child(title.to_string()))
-        .when(count > 0, |d| d.child(div().text_color(theme.secondary.opacity(0.7)).child(count.to_string())))
+        .gap(px(6.))
+        .child(div().text_size(px(text::TITLE)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(title.to_string()))
+        .when(count > 0, |d| d.child(div().text_size(px(text::FOOTNOTE)).text_color(theme.tertiary).child(count.to_string())))
 }
 
 fn group_label(title: &str, count: usize, theme: &Theme) -> gpui_kit::Div {
-    div().flex().items_center().gap(px(6.)).text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.secondary).child(title.to_string()).child(div().text_color(theme.secondary.opacity(0.6)).child(count.to_string()))
+    div()
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .text_size(px(text::FOOTNOTE))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(theme.secondary)
+        .child(title.to_string())
+        .child(div().font_weight(FontWeight::NORMAL).text_color(theme.tertiary).child(count.to_string()))
 }
 
 /// Ahead and behind its upstream, or that it has none.
 fn sync_label(s: &RepoStatus, theme: &Theme) -> Option<gpui_kit::AnyElement> {
     if s.branch.is_some() && s.upstream.is_none() {
-        return Some(div().id("local-only").text_size(px(11.)).text_color(theme.secondary.opacity(0.7)).child("Local only").tooltip_text("This branch isn't pushed").into_any_element());
+        return Some(div().id("local-only").text_size(px(text::CAPTION)).text_color(theme.tertiary).child("Local only").tooltip_text("This branch isn't pushed").into_any_element());
     }
     if s.ahead == 0 && s.behind == 0 {
         return None;
     }
-    let mut d = div().flex().gap(px(6.)).text_size(px(11.)).font_weight(FontWeight::MEDIUM).text_color(theme.secondary);
+    let mut d = div().flex().gap(px(6.)).text_size(px(text::CAPTION)).font_weight(FontWeight::MEDIUM).text_color(theme.secondary);
     if s.ahead > 0 {
-        d = d.child(format!("↑{}", s.ahead));
+        d = d.child(div().flex().items_center().gap(px(1.)).child(icons::arrow_up().size(px(11.))).child(s.ahead.to_string()));
     }
     if s.behind > 0 {
-        d = d.child(format!("↓{}", s.behind));
+        d = d.child(div().flex().items_center().gap(px(1.)).child(icons::arrow_down().size(px(11.))).child(s.behind.to_string()));
     }
     let tip = [(s.ahead, "to push"), (s.behind, "to pull (as of the last fetch)")]
         .iter()
@@ -671,37 +689,20 @@ impl ProjectPage {
         let (ws1, project) = (self.workspace.clone(), self.project.clone());
         let (p1, p2) = (path.clone(), path.clone());
         let workspace_kind = self.core.as_ref().and_then(|c| c.layout.as_ref()).is_some_and(|l| l.is_workspace());
-        div()
-            .id("project-header")
+        let tabs = page_kit::segmented(
+            vec![
+                Tab::new("tab-overview", "Overview", true, |_, _, _| {}).icon(gpui_kit::component::Icon::new(IconName::LayoutDashboard)),
+                Tab::new("tab-memory", "Memory", false, move |_, _, cx| ws1.update(cx, |ws, cx| ws.open_memory(&project, cx))).icon(icons::brain()),
+            ],
+            theme,
+        )
+        .into_any_element();
+        let toolbar = div()
             .flex()
             .items_center()
-            .gap(px(12.))
-            .px(px(28.))
-            .py(px(16.))
-            .border_b_1()
-            .border_color(theme.separator)
-            .context_menu(move |menu, _, _| {
-                let p = p1.clone();
-                menu.item(PopupMenuItem::new("Show in Finder").icon(IconName::Folder).on_click(move |_, _, cx| cx.reveal_path(Path::new(&p))))
-            })
-            .child(
-                div()
-                    .flex_none()
-                    .w(px(40.))
-                    .h(px(40.))
-                    .rounded(px(10.))
-                    .bg(theme.card)
-                    .border_1()
-                    .border_color(theme.separator)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_color(theme.secondary)
-                    .child(gpui_kit::component::Icon::new(if workspace_kind { IconName::LayoutDashboard } else { IconName::Folder }).size(px(20.))),
-            )
-            .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.)).child(div().text_size(px(20.)).font_weight(FontWeight::SEMIBOLD).child(name)).child(div().text_color(theme.secondary).child(subtitle)))
-            .when_some(self.activity.clone(), |d, a| d.child(div().max_w(px(360.)).text_size(px(12.)).text_color(theme.secondary).line_clamp(2).child(a)))
-            .when_some(updated, |d, u| d.child(div().flex_none().text_size(px(11.)).text_color(theme.secondary.opacity(0.7)).child(u)))
+            .gap(px(2.))
+            .when_some(self.activity.clone(), |d, a| d.child(div().mr(px(space::S)).max_w(px(300.)).text_size(px(text::FOOTNOTE)).text_color(theme.secondary).line_clamp(2).child(a)))
+            .when_some(updated.filter(|_| !self.compact), |d, u| d.child(div().mr(px(space::XS)).flex_none().text_size(px(text::CAPTION)).text_color(theme.tertiary).child(u)))
             .child(
                 Button::new("project-refresh")
                     .small()
@@ -713,10 +714,16 @@ impl ProjectPage {
                     .on_click(cx.listener(|p, _, _, cx| p.refresh(true, cx))),
             )
             .child(Button::new("project-finder").small().ghost().icon(IconName::FolderOpen).tooltip("Show in Finder").on_click(move |_, _, cx| cx.reveal_path(Path::new(&p2))))
-            .child(Button::new("project-new-thread").small().label("New Thread").icon(IconName::Plus).on_click(cx.listener(|p, _, _, cx| p.new_thread_in(None, cx))))
-            .child(div().flex().gap(px(2.)).child(Button::new("tab-overview").small().primary().label("Overview")).child(Button::new("tab-memory").small().ghost().label("Memory").on_click(move |_, _, cx| {
-                ws1.update(cx, |ws, cx| ws.open_memory(&project, cx))
-            })))
+            .child(div().ml(px(space::XS)).child(Button::new("project-new-thread").small().primary().label("New Thread").icon(IconName::Plus).on_click(cx.listener(|p, _, _, cx| p.new_thread_in(None, cx)))))
+            .into_any_element();
+        let icon = if workspace_kind { gpui_kit::component::Icon::new(IconName::LayoutDashboard) } else { icons::folder_git_2() };
+        div()
+            .id("project-header")
+            .context_menu(move |menu, _, _| {
+                let p = p1.clone();
+                menu.item(PopupMenuItem::new("Show in Finder").icon(IconName::Folder).on_click(move |_, _, cx| cx.reveal_path(Path::new(&p))))
+            })
+            .child(page_kit::page_header(icon, name, div().truncate().child(subtitle).into_any_element(), toolbar, Some(tabs), theme))
     }
 
     /// A PR's row: its graph slice (in a stack), state, title, branches, what blocks it.
@@ -768,15 +775,15 @@ impl ProjectPage {
         });
         let url = pr.link.url.clone();
         let review = match pr.review.as_str() {
-            "approved" => Some(("Approved", green())),
-            "changesRequested" => Some(("Changes requested", theme.error)),
-            "required" => Some(("Review required", theme.secondary)),
+            "approved" => Some((icons::circle_check(), "Approved", green())),
+            "changesRequested" => Some((gpui_kit::component::Icon::new(IconName::CircleX), "Changes requested", theme.error)),
+            "required" => Some((gpui_kit::component::Icon::new(IconName::Eye), "Review required", theme.tertiary)),
             _ => None,
         };
         let checks = match pr.checks.as_str() {
-            "passing" => Some(("Checks pass", green())),
-            "failing" => Some(("Checks fail", theme.error)),
-            "pending" => Some(("Checks running", theme.warning)),
+            "passing" => Some((icons::check(), "Checks pass", green())),
+            "failing" => Some((gpui_kit::component::Icon::new(IconName::CircleX), "Checks fail", theme.error)),
+            "pending" => Some((icons::clock(), "Checks running", theme.warning)),
             _ => None,
         };
         let blocker = match pr.merge_status.as_deref().filter(|_| pr.state == "open") {
@@ -791,8 +798,9 @@ impl ProjectPage {
             .flex()
             .items_stretch()
             .min_h(px(48.))
-            .px(px(10.))
-            .hover(|d| d.bg(theme.selected))
+            .px(px(space::S + 2.))
+            .cursor_pointer()
+            .hover(|d| d.bg(theme.hover))
             .on_click(move |_, _, cx| cx.open_url(&url))
             .context_menu(move |menu, _, _| {
                 let (u1, u2, head) = (u1.clone(), u2.clone(), head.clone());
@@ -810,21 +818,30 @@ impl ProjectPage {
                     .flex()
                     .flex_col()
                     .gap(px(2.))
-                    .child(div().flex().items_center().gap(px(6.)).child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_weight(FontWeight::MEDIUM).child(pr.title.clone())).when_some(state, |d, s| d.child(chip(s, dot))))
+                    .child(div().flex().items_center().gap(px(6.)).child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_weight(FontWeight::MEDIUM).text_color(theme.text).child(pr.title.clone())).when_some(state, |d, s| d.child(chip(s, dot))))
                     .child(
                         div()
                             .flex()
-                            .gap(px(8.))
-                            .text_size(px(11.))
+                            .items_center()
+                            .gap(px(space::S + 2.))
+                            .text_size(px(text::CAPTION))
                             .text_color(theme.secondary)
-                            .child(format!("{} #{}", pr.link.path.rsplit('/').next().unwrap_or(&pr.link.path), pr.link.number))
-                            .child(div().font_family(MONO).overflow_hidden().whitespace_nowrap().text_ellipsis().child(format!("{} → {}", pr.head, pr.base)))
-                            .when_some(pr.author.clone().filter(|_| !pr.is_mine), |d, a| d.child(a))
-                            .when_some(blocker, |d, b| d.child(div().text_color(theme.warning).child(b)))
-                            .when_some(review, |d, (t, c)| d.child(div().text_color(c).child(t)))
-                            .when_some(checks, |d, (t, c)| d.child(div().text_color(c).child(t)))
+                            .child(div().flex_none().child(format!("{} #{}", pr.link.path.rsplit('/').next().unwrap_or(&pr.link.path), pr.link.number)))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(3.))
+                                    .child(icons::git_branch().size(px(11.)).text_color(theme.tertiary))
+                                    .child(div().min_w_0().font_family(MONO).overflow_hidden().whitespace_nowrap().text_ellipsis().child(format!("{} → {}", pr.head, pr.base))),
+                            )
+                            .when_some(pr.author.clone().filter(|_| !pr.is_mine), |d, a| d.child(div().flex_none().child(a)))
+                            .when_some(blocker, |d, b| d.child(status(gpui_kit::component::Icon::new(IconName::TriangleAlert), theme.warning, b, theme)))
+                            .when_some(review, |d, (i, t, c)| d.child(status(i, c, t, theme)))
+                            .when_some(checks, |d, (i, t, c)| d.child(status(i, c, t, theme)))
                             .child(div().flex_1())
-                            .child(age(pr.updated_at.as_deref())),
+                            .child(div().flex_none().text_color(theme.tertiary).child(age(pr.updated_at.as_deref()))),
                     ),
             )
             .into_any_element()
@@ -873,7 +890,7 @@ impl ProjectPage {
                     } else {
                         format!("Push the stack and open PRs for its {pending} new branches")
                     };
-                    actions = actions.child(Button::new(SharedString::from(format!("submit-{sid}"))).xsmall().label("Submit").disabled(checkout.is_none()).tooltip(tip).on_click(cx.listener(move |p, _, window, cx| {
+                    actions = actions.child(Button::new(SharedString::from(format!("submit-{sid}"))).small().outline().icon(icons::upload()).label("Submit").disabled(checkout.is_none()).tooltip(tip).on_click(cx.listener(move |p, _, window, cx| {
                         if let Some(c) = checkout.clone() {
                             p.submit_stack(c, window, cx);
                         }
@@ -886,7 +903,7 @@ impl ProjectPage {
             let top_checkout = clone.as_ref().and_then(|r| branches.last().and_then(|b| core.checkout_on_any_of(r, std::slice::from_ref(b))));
             let any_checkout = clone.as_ref().and_then(|r| core.checkout_on_any_of(r, &all.iter().map(|p| p.head.clone()).collect::<Vec<_>>()));
             let page = cx.entity().downgrade();
-            actions = actions.child(Button::new(SharedString::from(format!("more-{sid}"))).xsmall().ghost().icon(IconName::Ellipsis).tooltip("More for this stack").dropdown_menu(move |menu, _, _| {
+            actions = actions.child(Button::new(SharedString::from(format!("more-{sid}"))).small().ghost().icon(IconName::Ellipsis).tooltip("More for this stack").dropdown_menu(move |menu, _, _| {
                 let (p1, p2) = (page.clone(), page.clone());
                 let (t, a) = (top_checkout.clone(), any_checkout.clone());
                 let (t2, a2) = (t.clone(), a.clone());
@@ -918,7 +935,7 @@ impl ProjectPage {
             };
             let urls: Vec<String> = all.iter().map(|p| p.link.url.clone()).collect();
             let repo = clone.as_ref().map(|r| r.path.clone());
-            actions = actions.child(Button::new(SharedString::from(format!("link-{sid}"))).xsmall().label("Make GitHub Stack").disabled(!stack.is_line() || repo.is_none()).tooltip(tip).on_click(cx.listener(move |p, _, window, cx| {
+            actions = actions.child(Button::new(SharedString::from(format!("link-{sid}"))).small().outline().icon(icons::layers()).label("Make GitHub Stack").disabled(!stack.is_line() || repo.is_none()).tooltip(tip).on_click(cx.listener(move |p, _, window, cx| {
                 if let Some(r) = repo.clone() {
                     p.link_stack(urls.clone(), r, window, cx);
                 }
@@ -927,11 +944,14 @@ impl ProjectPage {
         div()
             .flex()
             .items_center()
-            .gap(px(8.))
-            .px(px(12.))
-            .pt(px(8.))
-            .pb(px(2.))
-            .child(div().flex_1().min_w_0().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.secondary).truncate().child(title))
+            .gap(px(6.))
+            .pl(px(space::M + 2.))
+            .pr(px(space::S + 2.))
+            .py(px(space::S))
+            .border_b_1()
+            .border_color(theme.separator)
+            .child(icons::layers().size(px(13.)).text_color(theme.secondary))
+            .child(div().flex_1().min_w_0().text_size(px(text::FOOTNOTE)).font_weight(FontWeight::SEMIBOLD).text_color(theme.secondary).truncate().child(title))
             .child(actions)
             .into_any_element()
     }
@@ -954,7 +974,7 @@ impl ProjectPage {
             return div().into_any_element();
         }
         let mergeable: Vec<&PullRequest> = open.iter().take_while(|p| !p.draft).copied().collect();
-        let disabled = |tip: String| Button::new(SharedString::from(format!("merge-{sid}"))).xsmall().label("Merge").disabled(true).tooltip(tip).into_any_element();
+        let disabled = |tip: String| Button::new(SharedString::from(format!("merge-{sid}"))).small().outline().icon(icons::git_merge()).label("Merge").disabled(true).tooltip(tip).into_any_element();
         if clone.is_none() {
             return disabled(format!("Merging runs gh stack in a clone of {}; there isn't one in this project", stack.pull_request.remote().name()));
         }
@@ -965,8 +985,9 @@ impl ProjectPage {
         if mergeable.len() == 1 {
             let label = if open.len() == 1 { "Merge".to_string() } else { format!("Merge #{}", mergeable[0].number()) };
             return Button::new(SharedString::from(format!("merge-{sid}")))
-                .xsmall()
-                .primary()
+                .small()
+                .outline()
+                .icon(icons::git_merge())
                 .label(label)
                 .tooltip("Squash and merge on GitHub")
                 .on_click(cx.listener(move |p, _, window, cx| {
@@ -982,12 +1003,12 @@ impl ProjectPage {
         let page = cx.entity().downgrade();
         div()
             .flex()
-            .child(Button::new(SharedString::from(format!("merge-{sid}"))).xsmall().primary().label(label).tooltip(tip).on_click(cx.listener(move |p, _, window, cx| {
+            .child(Button::new(SharedString::from(format!("merge-{sid}"))).small().outline().icon(icons::git_merge()).label(label).tooltip(tip).on_click(cx.listener(move |p, _, window, cx| {
                 if let Some(r) = whole.clone() {
                     p.request_merge(r, window, cx);
                 }
             })))
-            .child(Button::new(SharedString::from(format!("merge-menu-{sid}"))).xsmall().ghost().icon(IconName::ChevronDown).tooltip("Merge part of the stack").dropdown_menu(move |mut menu: PopupMenu, _, _| {
+            .child(Button::new(SharedString::from(format!("merge-menu-{sid}"))).small().ghost().icon(IconName::ChevronDown).tooltip("Merge part of the stack").dropdown_menu(move |mut menu: PopupMenu, _, _| {
                 for (n, r) in &partial {
                     let (page, r) = (page.clone(), r.clone());
                     menu = menu.item(PopupMenuItem::new(format!("Merge Up to #{n}")).on_click(move |_, window, cx| {
@@ -1005,7 +1026,7 @@ impl ProjectPage {
     fn stack_card(&self, stack: &PullRequestStack, theme: &Theme, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let graph = StackGraph::layout(stack, Lanes::Depth);
         let is_stack = stack.is_stacked() || stack.number().is_some();
-        let mut card = div().flex().flex_col().py(px(3.)).rounded(px(10.)).bg(theme.card).border_1().border_color(theme.separator);
+        let mut card = div().flex().flex_col().pb(px(2.)).rounded(px(radius::LARGE)).overflow_hidden().bg(theme.card).border_1().border_color(theme.separator);
         if is_stack {
             card = card.child(self.stack_header(stack, theme, cx));
         }
@@ -1043,7 +1064,7 @@ impl ProjectPage {
             } else {
                 format!("{unreachable} of {total} repos aren't")
             };
-            column = column.child(div().text_size(px(12.)).text_color(theme.secondary).child(format!("{repos} visible to {who}, so their pull requests can't be shown.")));
+            column = column.child(div().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child(format!("{repos} visible to {who}, so their pull requests can't be shown.")));
         }
         for (forge, e) in &core.pulls.errors {
             let install = e.starts_with("Install").then(|| forge.install_url().to_string());
@@ -1053,12 +1074,12 @@ impl ProjectPage {
                     .items_center()
                     .gap(px(10.))
                     .p(px(12.))
-                    .rounded(px(10.))
+                    .rounded(px(radius::LARGE))
                     .bg(orange().opacity(0.08))
                     .border_1()
                     .border_color(orange().opacity(0.3))
                     .child(gpui_kit::component::Icon::new(IconName::TriangleAlert).text_color(orange()))
-                    .child(div().flex_1().text_size(px(12.)).text_color(theme.secondary).child(e.clone()))
+                    .child(div().flex_1().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child(e.clone()))
                     .when_some(install, |d, url| d.child(Button::new(SharedString::from(format!("get-{}", forge.cli_name()))).xsmall().ghost().label(format!("Get {}", forge.cli_name())).on_click(move |_, _, cx| cx.open_url(&url)))),
             );
         }
@@ -1082,8 +1103,9 @@ impl ProjectPage {
             } else {
                 let tip = if checkout.is_none() { "Check out one of the stack's branches to submit it".to_string() } else { format!("Push its branches and open a PR for each, into {}", local.trunk) };
                 Button::new(SharedString::from(format!("submit-{sid}")))
-                    .xsmall()
-                    .primary()
+                    .small()
+                    .outline()
+                    .icon(icons::upload())
                     .label("Submit")
                     .disabled(checkout.is_none())
                     .tooltip(tip)
@@ -1094,7 +1116,7 @@ impl ProjectPage {
                     }))
                     .into_any_element()
             };
-            let mut card = div().flex().flex_col().pb(px(3.)).rounded(px(10.)).bg(theme.card).border_1().border_color(theme.separator).child(
+            let mut card = div().flex().flex_col().pb(px(3.)).rounded(px(radius::LARGE)).overflow_hidden().bg(theme.card).border_1().border_color(theme.separator).child(
                 div()
                     .flex()
                     .items_center()
@@ -1102,7 +1124,7 @@ impl ProjectPage {
                     .px(px(12.))
                     .pt(px(8.))
                     .pb(px(2.))
-                    .child(div().flex_1().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.secondary).child(format!("{} · stack of {}, not submitted", repo.name(), local.layers.len())))
+                    .child(div().flex_1().text_size(px(text::CAPTION)).font_weight(FontWeight::SEMIBOLD).text_color(theme.secondary).child(format!("{} · stack of {}, not submitted", repo.name(), local.layers.len())))
                     .child(action),
             );
             for (i, l) in local.layers.iter().enumerate() {
@@ -1240,7 +1262,7 @@ impl ProjectPage {
             if open {
                 let mut grid = div().flex().flex_wrap().gap(px(6.)).pl(px(18.));
                 for r in uncloned {
-                    grid = grid.child(div().w(px(190.)).text_size(px(12.)).text_color(theme.secondary).truncate().child(r.name()));
+                    grid = grid.child(div().w(px(190.)).text_size(px(text::FOOTNOTE)).text_color(theme.secondary).truncate().child(r.name()));
                 }
                 column = column.child(grid);
             }
@@ -1315,7 +1337,7 @@ impl ProjectPage {
                     let _ = pg3.update(cx, |p, cx| p.new_thread_in(Some(here.clone()), cx));
                 }));
                 if has_missing {
-                    menu = menu.item(PopupMenuItem::new("Forget Missing Worktrees").icon(IconName::Delete).on_click(move |_, window, cx| {
+                    menu = menu.item(PopupMenuItem::new("Forget Missing Worktrees").icon(icons::trash()).on_click(move |_, window, cx| {
                         let _ = pg4.update(cx, |p, cx| p.prune(r3.clone(), window, cx));
                     }));
                 }
@@ -1360,10 +1382,11 @@ impl ProjectPage {
                             .flex()
                             .items_center()
                             .gap(px(6.))
-                            .child(div().min_w_0().truncate().font_weight(FontWeight::MEDIUM).child(repo.name()))
+                            .child(icons::folder_git_2().size(px(14.)).text_color(theme.secondary))
+                            .child(div().min_w_0().truncate().font_weight(FontWeight::MEDIUM).text_color(theme.text).child(repo.name()))
                             .when(unreachable, |d| {
                                 let tip: SharedString = format!("{} couldn't find this repo with your account", forge_name.clone().unwrap_or_else(|| "The host".into())).into();
-                                d.child(div().id("unreachable").text_size(px(10.)).text_color(theme.secondary.opacity(0.7)).child("not found").tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)))
+                                d.child(div().id("unreachable").text_size(px(text::CAPTION)).text_color(theme.tertiary).child("not found").tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)))
                             })
                             .when(!open && !worktrees.is_empty(), |d| {
                                 let tip: SharedString = folded_summary.clone().into();
@@ -1376,7 +1399,7 @@ impl ProjectPage {
                                         .px(px(6.))
                                         .rounded(px(8.))
                                         .bg(theme.selected)
-                                        .text_size(px(11.))
+                                        .text_size(px(text::CAPTION))
                                         .text_color(theme.secondary)
                                         .cursor_pointer()
                                         .on_click(toggle2)
@@ -1386,17 +1409,17 @@ impl ProjectPage {
                                 )
                             }),
                     )
-                    .child(div().text_size(px(11.)).font_family(MONO).text_color(theme.secondary).truncate().child(branch_text)),
+                    .child(div().text_size(px(text::CAPTION)).font_family(MONO).text_color(theme.secondary).truncate().child(branch_text)),
             )
             .when_some(threads, |d, t| d.child(t))
             .when_some(status.and_then(|s| sync_label(s, theme)), |d, l| d.child(l))
             .when_some(status.and_then(|s| changes_label(s, theme)), |d, l| d.child(l))
-            .when(status.is_none() && refreshing, |d| d.child(div().text_size(px(11.)).text_color(theme.secondary).child("…")))
+            .when(status.is_none() && refreshing, |d| d.child(div().text_size(px(text::CAPTION)).text_color(theme.secondary).child("…")))
             .when(prs > 0, |d| d.child(chip(&format!("{prs} PR{}", if prs == 1 { "" } else { "s" }), theme.secondary)))
             .when_some(web.zip(forge_name), |d, (w, f)| {
                 d.child(div().invisible().group_hover("repo-row", |s| s.visible()).child(Button::new(SharedString::from(format!("web-{id}"))).xsmall().ghost().icon(IconName::ExternalLink).tooltip(format!("Open on {f}")).on_click(move |_, _, cx| cx.open_url(&w))))
             });
-        let mut card = div().flex().flex_col().rounded(px(10.)).bg(theme.card).border_1().border_color(theme.separator).child(header);
+        let mut card = div().flex().flex_col().rounded(px(radius::LARGE)).overflow_hidden().bg(theme.card).border_1().border_color(theme.separator).child(header);
         if open {
             for wt in &worktrees {
                 card = card.child(self.worktree_row(wt, repo, page, theme, cx));
@@ -1430,7 +1453,7 @@ impl ProjectPage {
             }
         };
         let branch: gpui_kit::AnyElement = match &wt.branch {
-            Some(b) => div().text_size(px(11.)).font_family(MONO).text_color(theme.secondary).truncate().child(b.clone()).into_any_element(),
+            Some(b) => div().text_size(px(text::CAPTION)).font_family(MONO).text_color(theme.secondary).truncate().child(b.clone()).into_any_element(),
             None => {
                 let oid = wt.head_oid.as_deref().map(|o| format!(" · {}", &o[..o.len().min(7)])).unwrap_or_default();
                 div()
@@ -1438,7 +1461,7 @@ impl ProjectPage {
                     .flex()
                     .items_center()
                     .gap(px(4.))
-                    .text_size(px(11.))
+                    .text_size(px(text::CAPTION))
                     .font_family(MONO)
                     .text_color(orange())
                     .child(gpui_kit::component::Icon::new(IconName::TriangleAlert).size(px(10.)))
@@ -1455,7 +1478,7 @@ impl ProjectPage {
                 Some(div().id("landed").child(state_badge(text, green(), theme)).tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Its work has landed. If nothing in it is still needed, it can be removed.").build(window, cx)).into_any_element())
             } else if no_work && !s.is_dirty() {
                 let tip: SharedString = format!("Its branch points at a commit of {base}: nothing has been committed on it").into();
-                Some(div().id("no-commits").text_size(px(11.)).font_weight(FontWeight::MEDIUM).text_color(theme.secondary.opacity(0.7)).child("No commits yet").tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)).into_any_element())
+                Some(div().id("no-commits").text_size(px(text::CAPTION)).font_weight(FontWeight::MEDIUM).text_color(theme.tertiary).child("No commits yet").tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)).into_any_element())
             } else {
                 sync_label(s, theme)
             }
@@ -1502,7 +1525,7 @@ impl ProjectPage {
                     }));
                 }
                 let (pg, w, r) = (page.clone(), w2.clone(), r2.clone());
-                menu.item(PopupMenuItem::new(label).icon(IconName::Delete).disabled(wt.is_locked).on_click(move |_, window, cx| {
+                menu.item(PopupMenuItem::new(label).icon(icons::trash()).disabled(wt.is_locked).on_click(move |_, window, cx| {
                     let _ = pg.update(cx, |p, cx| p.request_removal(w.clone(), r.clone(), window, cx));
                 }))
             }
@@ -1519,7 +1542,7 @@ impl ProjectPage {
             .border_t_1()
             .border_color(theme.separator)
             .context_menu(menu)
-            .child(gpui_kit::component::Icon::new(if wt.is_missing { IconName::CircleAlert } else { IconName::FolderClosed }).size(px(14.)).text_color(if wt.is_missing { orange() } else { theme.secondary.opacity(0.7) }))
+            .child(gpui_kit::component::Icon::new(if wt.is_missing { IconName::CircleAlert } else { IconName::FolderClosed }).size(px(14.)).text_color(if wt.is_missing { orange() } else { theme.tertiary }))
             .child(
                 div()
                     .flex_1()
@@ -1533,8 +1556,8 @@ impl ProjectPage {
                             .items_center()
                             .gap(px(6.))
                             .child(div().flex_none().font_weight(FontWeight::MEDIUM).child(name))
-                            .when(!location.is_empty(), |d| d.child(div().min_w_0().truncate().text_size(px(11.)).text_color(theme.secondary.opacity(0.7)).child(location)))
-                            .when(wt.is_locked, |d| d.child(div().text_size(px(10.)).text_color(theme.secondary.opacity(0.7)).child("locked"))),
+                            .when(!location.is_empty(), |d| d.child(div().min_w_0().truncate().text_size(px(text::CAPTION)).text_color(theme.tertiary).child(location)))
+                            .when(wt.is_locked, |d| d.child(div().text_size(px(text::CAPTION)).text_color(theme.tertiary).child("locked"))),
                     )
                     .child(branch),
             )
@@ -1551,7 +1574,7 @@ impl ProjectPage {
                     Button::new(SharedString::from(format!("rm-wt-{}", wt.path)))
                         .xsmall()
                         .ghost()
-                        .icon(IconName::Delete)
+                        .icon(icons::trash())
                         .disabled(wt.is_locked)
                         .tooltip(remove_tip)
                         .on_click(cx.listener(move |p, _, window, cx| p.request_removal(w1.clone(), r1.clone(), window, cx))),
@@ -1579,8 +1602,8 @@ fn unsubmitted_row(branch: &str, layer: usize, theme: &Theme) -> gpui_kit::AnyEl
         .gap(px(8.))
         .px(px(12.))
         .py(px(7.))
-        .child(div().w(px(16.)).h(px(16.)).rounded_full().border_1().border_dashed().border_color(theme.secondary).flex().items_center().justify_center().text_size(px(9.)).font_weight(FontWeight::BOLD).text_color(theme.secondary).child(layer.to_string()))
-        .child(div().flex_1().min_w_0().truncate().text_size(px(11.)).font_family(MONO).child(branch.to_string()))
+        .child(div().w(px(16.)).h(px(16.)).rounded_full().border_1().border_dashed().border_color(theme.secondary).flex().items_center().justify_center().text_size(px(text::CAPTION)).font_weight(FontWeight::BOLD).text_color(theme.secondary).child(layer.to_string()))
+        .child(div().flex_1().min_w_0().truncate().text_size(px(text::CAPTION)).font_family(MONO).child(branch.to_string()))
         .child(chip("Not submitted", theme.secondary))
         .into_any_element()
 }
@@ -1592,6 +1615,7 @@ impl Render for ProjectPage {
                 cx.defer_in(window, move |p, window, cx| p.run_probe(probe, window, cx));
             }
         }
+        self.compact = page_kit::is_compact(window);
         let theme = Theme::get(cx);
         let plain = self.core.as_ref().and_then(|c| c.layout.as_ref()).is_some_and(|l| l.kind == LayoutKind::Plain);
         let body = if plain {
@@ -1726,14 +1750,14 @@ impl Render for NewWorktreeForm {
             .child(div().text_color(theme.secondary).child("Another checkout of the repo, on its own branch, so work there doesn't touch this one. A thread can work in as many as it needs."))
             .child(field("Branch", Input::new(&self.branch).into_any_element()))
             .child(field("Starting from", Input::new(&self.base).into_any_element()))
-            .child(div().pl(px(122.)).text_size(px(11.)).text_color(theme.secondary).child("Used for a new branch. An existing branch is checked out as it is."))
+            .child(div().pl(px(122.)).text_size(px(text::CAPTION)).text_color(theme.secondary).child("Used for a new branch. An existing branch is checked out as it is."))
             .child(field(
                 "Folder",
                 div()
                     .flex()
                     .items_center()
                     .gap(px(8.))
-                    .child(div().flex_1().min_w_0().truncate().text_size(px(12.)).font_family(MONO).child(tilde(&self.target(cx).to_string_lossy())))
+                    .child(div().flex_1().min_w_0().truncate().text_size(px(text::FOOTNOTE)).font_family(MONO).child(tilde(&self.target(cx).to_string_lossy())))
                     .child(Button::new("wt-folder").xsmall().label("Change…").on_click(cx.listener(|f, _, _, cx| f.choose_folder(cx))))
                     .into_any_element(),
             ))
@@ -1871,12 +1895,14 @@ impl Render for NewStackForm {
                             .px(px(8.))
                             .py(px(3.))
                             .rounded(px(5.))
-                            .hover(|d| d.bg(theme.selected))
+                            .hover(|d| d.bg(theme.hover))
                             .cursor_pointer()
-                            .text_size(px(12.))
-                            .font_family(MONO)
-                            .truncate()
-                            .child(format!("+ {b}"))
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .text_size(px(text::FOOTNOTE))
+                            .child(gpui_kit::component::Icon::new(IconName::Plus).size(px(12.)).text_color(theme.tertiary))
+                            .child(div().min_w_0().truncate().font_family(MONO).child(b.clone()))
                             .on_click(cx.listener(move |f, _, _, cx| {
                                 f.chosen.push(b2.clone());
                                 cx.notify();
@@ -1887,7 +1913,7 @@ impl Render for NewStackForm {
         }
         let mut chosen = list_box();
         if self.chosen.is_empty() {
-            chosen = chosen.child(div().p(px(8.)).text_center().text_color(theme.secondary.opacity(0.7)).child("Click branches to add them, bottom first"));
+            chosen = chosen.child(div().p(px(8.)).text_center().text_color(theme.tertiary).child("Click branches to add them, bottom first"));
         }
         // Shown top first.
         for (i, b) in self.chosen.iter().enumerate().rev() {
@@ -1899,8 +1925,8 @@ impl Render for NewStackForm {
                     .gap(px(6.))
                     .px(px(6.))
                     .py(px(2.))
-                    .child(div().w(px(16.)).text_size(px(11.)).text_color(theme.secondary).child((i + 1).to_string()))
-                    .child(div().flex_1().min_w_0().truncate().text_size(px(12.)).font_family(MONO).child(b.clone()))
+                    .child(div().w(px(16.)).text_size(px(text::CAPTION)).text_color(theme.secondary).child((i + 1).to_string()))
+                    .child(div().flex_1().min_w_0().truncate().text_size(px(text::FOOTNOTE)).font_family(MONO).child(b.clone()))
                     .child(Button::new(SharedString::from(format!("up-{i}"))).xsmall().ghost().icon(IconName::ChevronUp).disabled(i + 1 == n).tooltip("Higher in the stack").on_click(cx.listener(move |f, _, _, cx| {
                         f.chosen.swap(i, i + 1);
                         cx.notify();
@@ -1935,7 +1961,7 @@ impl Render for NewStackForm {
                     })))
                     .child("Submit to GitHub now (push and open the PRs)"),
             )
-            .when(!self.chosen.is_empty(), |d| d.child(div().text_size(px(11.)).text_color(theme.secondary).child(format!("Runs in {}, which ends up on {}", tilde(&self.checkout().to_string_lossy()), self.chosen.last().cloned().unwrap_or_default()))))
+            .when(!self.chosen.is_empty(), |d| d.child(div().text_size(px(text::CAPTION)).text_color(theme.secondary).child(format!("Runs in {}, which ends up on {}", tilde(&self.checkout().to_string_lossy()), self.chosen.last().cloned().unwrap_or_default()))))
             .when(dirty, |d| d.child(div().text_color(orange()).child("That checkout has uncommitted changes. Commit or stash them first.")))
             .when(not_installed, |d| d.child(div().text_color(orange()).child(format!("gh stack isn't installed: {}", yh_core::github::STACK_INSTALL_COMMAND))))
             .when_some(self.error.clone(), |d, e| d.child(div().text_color(theme.error).child(e)))

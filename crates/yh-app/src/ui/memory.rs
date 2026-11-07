@@ -135,6 +135,8 @@ pub struct MemoryPage {
     graph_bounds: std::rc::Rc<std::cell::Cell<gpui_kit::Bounds<gpui_kit::Pixels>>>,
     /// Add a step, under a task's steps.
     new_step: Entity<InputState>,
+    /// A narrow window: toolbar buttons as icons, a narrower list (from the last render).
+    compact: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -210,6 +212,7 @@ impl MemoryPage {
             graph: Graph::default(),
             graph_bounds: Default::default(),
             new_step,
+            compact: false,
             _subscriptions: subscriptions,
         };
         page.reload(cx);
@@ -635,6 +638,7 @@ fn meta(icon: gpui_kit::component::Icon, label: impl Into<SharedString>, theme: 
 
 impl MemoryPage {
     fn header(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let compact = self.compact;
         let name = self.workspace.read(cx).project(&self.project).map(|p| {
             if self.workspace.read(cx).home_project().as_deref() == Some(p.id.as_str()) { "Home".to_string() } else { p.name.clone() }
         });
@@ -674,7 +678,7 @@ impl MemoryPage {
                         .small()
                         .ghost()
                         .icon(IconName::LayoutDashboard)
-                        .label("Project Overview")
+                        .when(!compact, |b| b.label("Project Overview"))
                         .tooltip("The project's pull requests, repos and worktrees")
                         .on_click(move |_, _, cx| ws_overview.update(cx, |ws, cx| ws.open_project(&project_overview, cx))),
                 )
@@ -723,7 +727,7 @@ impl MemoryPage {
             .child({
                 let page = cx.entity().downgrade();
                 let claude_files = self.claude_code_files(cx).len();
-                Button::new("memory-import").small().ghost().icon(icons::download()).label("Import").dropdown_caret(true).dropdown_menu(move |mut menu, _, _| {
+                Button::new("memory-import").small().ghost().icon(icons::download()).when(!compact, |b| b.label("Import")).when(compact, |b| b.tooltip("Import")).dropdown_caret(true).dropdown_menu(move |mut menu, _, _| {
                     let (a, b, c) = (page.clone(), page.clone(), page.clone());
                     menu = menu
                         .item(PopupMenuItem::new("With the Importer…").icon(icons::sparkles()).on_click(move |_, window, cx| {
@@ -745,7 +749,7 @@ impl MemoryPage {
             })
             .child({
                 let page = cx.entity().downgrade();
-                Button::new("memory-export").small().ghost().icon(icons::upload()).label("Export").dropdown_caret(true).dropdown_menu(move |menu, _, _| {
+                Button::new("memory-export").small().ghost().icon(icons::upload()).when(!compact, |b| b.label("Export")).when(compact, |b| b.tooltip("Export")).dropdown_caret(true).dropdown_menu(move |menu, _, _| {
                     let (a, b) = (page.clone(), page.clone());
                     menu.item(PopupMenuItem::new("As JSON…").on_click(move |_, _, cx| {
                         let _ = a.update(cx, |p, cx| p.export_dialog(false, cx));
@@ -755,10 +759,10 @@ impl MemoryPage {
                     }))
                 })
             })
-            .child(Button::new("memory-reconcile").small().ghost().icon(icons::sparkles()).label("Reconcile").tooltip("The Reconciler finds duplicates, stale and vague memories, and fixes them with you").on_click(cx.listener(|this, _, window, cx| {
+            .child(Button::new("memory-reconcile").small().ghost().icon(icons::sparkles()).when(!compact, |b| b.label("Reconcile")).tooltip("The Reconciler finds duplicates, stale and vague memories, and fixes them with you").on_click(cx.listener(|this, _, window, cx| {
                 open_setup(this.workspace.clone(), "reconciler", this.project.clone(), vec![], window, cx);
             })))
-            .child(div().ml(px(space::XS)).child(Button::new("new-memory").small().primary().icon(IconName::Plus).label("New Memory").on_click(cx.listener(|this, _, _, cx| this.new_memory(cx)))))
+            .child(div().ml(px(space::XS)).child(Button::new("new-memory").small().primary().icon(IconName::Plus).label(if compact { "New" } else { "New Memory" }).on_click(cx.listener(|this, _, _, cx| this.new_memory(cx)))))
             .into_any_element();
         page_kit::page_header(icons::brain(), format!("{} Memory", name.unwrap_or_default()), subtitle, toolbar, Some(tabs.into_any_element()), theme)
     }
@@ -892,7 +896,7 @@ impl MemoryPage {
             );
         }
         div()
-            .w(px(300.))
+            .w(px(if self.compact { 240. } else { 300. }))
             .flex_none()
             .h_full()
             .flex()
@@ -975,7 +979,7 @@ impl MemoryPage {
                     .child(div().ml(px(-4.)).child(kind_menu))
                     .when(pinned, |d| d.child(page_kit::quiet_chip("Pinned", theme)))
                     .when(current.status != "active", |d| d.child(chip(if archived { "Archived" } else { "Proposed" }, theme.warning)))
-                    .when(listed, |d| d.child(div().font_family(MONO).text_size(px(text::CAPTION)).text_color(theme.tertiary).child(current.short_id())))
+                    .when(listed && !self.compact, |d| d.child(div().font_family(MONO).text_size(px(text::CAPTION)).text_color(theme.tertiary).child(current.short_id())))
                     .child(div().flex_1())
                     .when(listed, |d| {
                         d.child(
@@ -1722,6 +1726,7 @@ impl Render for MemoryPage {
         if let Some(m) = self.pending_fill.take() {
             self.fill(m, window, cx);
         }
+        self.compact = page_kit::is_compact(window);
         let theme = Theme::get(cx);
         let content = match self.tab {
             Tab::Memories => div()

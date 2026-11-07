@@ -12,6 +12,12 @@ pub fn is_dark(theme: &Theme) -> bool {
     theme.canvas.l < 0.5
 }
 
+/// A window too narrow for a page's toolbar with labels (beside the sidebar): buttons go to
+/// icons with tooltips, lists narrow.
+pub fn is_compact(window: &Window) -> bool {
+    window.viewport_size().width < gpui_kit::px(1180.)
+}
+
 /// A page's header: an icon in a tile, the large title and a subtitle line, the toolbar on the
 /// right, and under them (when given) the page's tabs. The title gives way first: it truncates
 /// before the toolbar ever wraps.
@@ -63,12 +69,6 @@ pub fn icon_tile(icon: Icon, size: f32, theme: &Theme) -> gpui_kit::Div {
         .child(icon.size(px((size * 0.47).round())).text_color(theme.secondary))
 }
 
-/// A subtitle made of parts, " · " between them, in one line that truncates.
-pub fn subtitle_line(parts: impl IntoIterator<Item = String>) -> AnyElement {
-    let parts: Vec<String> = parts.into_iter().filter(|p| !p.is_empty()).collect();
-    div().truncate().child(parts.join(" · ")).into_any_element()
-}
-
 type OnClick = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 
 /// One segment of a segmented control.
@@ -78,13 +78,12 @@ pub struct Segment {
     icon: Option<Icon>,
     badge: Option<SharedString>,
     selected: bool,
-    tooltip: Option<SharedString>,
     on_click: OnClick,
 }
 
 impl Segment {
     pub fn new(id: impl Into<SharedString>, label: impl Into<SharedString>, selected: bool, on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self {
-        Segment { id: id.into(), label: label.into(), icon: None, badge: None, selected, tooltip: None, on_click: Box::new(on_click) }
+        Segment { id: id.into(), label: label.into(), icon: None, badge: None, selected, on_click: Box::new(on_click) }
     }
 
     pub fn icon(mut self, icon: Icon) -> Self {
@@ -98,10 +97,6 @@ impl Segment {
         self
     }
 
-    pub fn tooltip(mut self, tip: impl Into<SharedString>) -> Self {
-        self.tooltip = Some(tip.into());
-        self
-    }
 }
 
 /// A segmented control, as macOS draws one: a quiet track, the chosen segment raised on it.
@@ -113,7 +108,6 @@ pub fn segmented(segments: Vec<Segment>, theme: &Theme) -> gpui_kit::Div {
     let mut row = div().flex_none().flex().items_center().gap(px(2.)).p(px(2.)).rounded(px(radius::MEDIUM + 1.)).bg(track);
     for s in segments {
         let selected = s.selected;
-        let tooltip = s.tooltip.clone();
         let mut seg = div()
             .id(s.id.clone())
             .h(px(24.))
@@ -137,10 +131,6 @@ pub fn segmented(segments: Vec<Segment>, theme: &Theme) -> gpui_kit::Div {
             .child(s.label)
             .when_some(s.badge, |d, b| d.child(div().text_size(px(text::CAPTION)).font_weight(FontWeight::MEDIUM).text_color(theme.tertiary).child(b)))
             .on_click(move |e, w, cx| on_click(e, w, cx));
-        let seg = match tooltip {
-            Some(t) => seg.tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(t.clone()).build(window, cx)),
-            None => seg,
-        };
         row = row.child(seg);
     }
     row
