@@ -15,7 +15,14 @@ ROOT="${0:A:h:h}"
 export DEVELOPER_DIR=${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}
 export PATH="$HOME/.cargo/bin:$PATH"
 "$ROOT/scripts/vendor.sh"
-(cd "$ROOT" && cargo build --release -p yh-app ${FEATURES:+--features=$FEATURES} 2>&1 | grep -E "^(error|warning: unused)|Finished" -A6 || true)
+# A failed build stops here, so a binary left by an earlier build never gets bundled.
+LOG="$(mktemp)"
+if ! (cd "$ROOT" && cargo build --release -p yh-app ${FEATURES:+--features=$FEATURES}) >"$LOG" 2>&1; then
+    cat "$LOG" >&2; rm -f "$LOG"
+    echo "build failed" >&2; exit 1
+fi
+grep -E "^(error|warning: unused)|Finished" -A6 "$LOG" >&2 || true
+rm -f "$LOG"
 BIN="$ROOT/target/release/YourHarness"
 [[ -x $BIN ]] || { echo "build failed" >&2; exit 1; }
 if [[ -n "${RELEASE:-}" ]]; then
@@ -39,11 +46,14 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleExecutable</key><string>YourHarness</string>
     <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
     <key>CFBundleName</key><string>$NAME</string>
+    <key>CFBundleDisplayName</key><string>$NAME</string>
     <key>YHGitCommit</key><string>$COMMIT</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>$VERSION</string>
     <key>CFBundleVersion</key><string>$BUILD</string>
     <key>LSMinimumSystemVersion</key><string>26.0</string>
+    <key>LSArchitecturePriority</key><array><string>arm64</string></array>
+    <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSPrincipalClass</key><string>NSApplication</string>
 </dict>
