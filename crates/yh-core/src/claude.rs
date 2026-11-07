@@ -158,9 +158,17 @@ pub struct ModelInfo {
     pub display_name: String,
     pub description: Option<String>,
     pub efforts: Vec<String>,
+    /// Whether `--permission-mode auto` works with it (the CLI quietly asks instead when it
+    /// doesn't). The CLI leaves the key out for models without it.
+    pub supports_auto_mode: bool,
 }
 
 impl ModelInfo {
+    /// Aliases that follow the latest model (`opus`), as against pinned versions (`claude-…`).
+    pub fn is_alias(&self) -> bool {
+        !self.value.starts_with("claude-")
+    }
+
     pub fn from_json(v: &Value) -> Option<ModelInfo> {
         Some(ModelInfo {
             value: v["value"].as_str()?.to_string(),
@@ -170,6 +178,7 @@ impl ModelInfo {
                 .as_array()
                 .map(|a| a.iter().filter_map(|e| e.as_str().map(str::to_string)).collect())
                 .unwrap_or_default(),
+            supports_auto_mode: v["supportsAutoMode"].as_bool().unwrap_or(false),
         })
     }
 }

@@ -332,6 +332,38 @@ impl WebView {
         }
     }
 
+    /// Where it is, for test runs: its window's title, shown or hidden, its frame.
+    pub fn report_place(&self) -> String {
+        unsafe {
+            let window: id = msg_send![self.page, window];
+            let title = if window == nil {
+                "no window".to_string()
+            } else {
+                let t: id = msg_send![window, title];
+                let utf8: *const std::ffi::c_char = msg_send![t, UTF8String];
+                if utf8.is_null() { String::new() } else { std::ffi::CStr::from_ptr(utf8).to_string_lossy().into_owned() }
+            };
+            let hidden: bool = msg_send![self.page, isHidden];
+            let frame: NSRect = msg_send![self.page, frame];
+            format!("in window \"{title}\" {} at {:.0},{:.0} {:.0}x{:.0}", if hidden { "hidden" } else { "shown" }, frame.origin.x, frame.origin.y, frame.size.width, frame.size.height)
+        }
+    }
+
+    /// Moves it over another GPUI view (the browser's own window, or back), keeping the page.
+    pub fn move_to(&self, host: id) {
+        unsafe {
+            let current: id = msg_send![self.page, superview];
+            if current == host || host == nil {
+                return;
+            }
+            // Held while it has no superview, which would let it go.
+            let _: () = msg_send![self.page, retain];
+            let _: () = msg_send![self.page, removeFromSuperview];
+            let _: () = msg_send![host, addSubview: self.page];
+            let _: () = msg_send![self.page, release];
+        }
+    }
+
     /// Where it shows, in the host view's top-left coordinates (GPUI's); `None` hides it (the
     /// page keeps its viewport). A viewport bigger than the panel is drawn scaled to fit,
     /// against the top.

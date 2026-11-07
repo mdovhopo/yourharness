@@ -51,7 +51,7 @@ fn show_panel(panel: crate::state::workspace::Panel, cx: &mut App) {
     }
 }
 
-fn icon(name: IconName, size: f32, color: Hsla) -> Icon {
+pub fn icon(name: IconName, size: f32, color: Hsla) -> Icon {
     Icon::new(name).size(px(size)).text_color(color)
 }
 

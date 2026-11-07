@@ -426,7 +426,7 @@ impl Sidebar {
         let threads: Vec<&Entity<ThreadState>> = ws.threads.iter().filter(|t| t.read(cx).meta.project_id == project.id && t.read(cx).meta.settled_at.is_none()).collect();
         let activity = threads.iter().any(|t| {
             let t = t.read(cx);
-            t.running || t.unread || t.permission.is_some()
+            t.running || t.unread || t.waiting_for_you()
         });
         let count = threads.len();
         let selected = ws.page == Some(Page::Project(project.id.clone()));
@@ -608,7 +608,7 @@ impl Sidebar {
             }
         }
         let ws = self.workspace.read(cx);
-        let waiting = t.permission.is_some();
+        let waiting = t.waiting_for_you();
         let running = t.running && !waiting;
         let unread = t.unread && !is_selected;
         let pinned = t.meta.pinned;

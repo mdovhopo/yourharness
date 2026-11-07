@@ -144,6 +144,9 @@ pub struct Browsers {
     reveal: Option<Box<dyn Fn(&str, &mut App)>>,
     /// Tells the panel something changed (a page loaded, a tab opened).
     changed: Option<Box<dyn Fn(&mut App)>>,
+    /// Threads whose browser is in a window of its own: that window's view, and where in it the
+    /// page goes (None until it's laid out). The right sidebar then points there.
+    popped: HashMap<String, (usize, Option<(f64, f64, f64, f64)>)>,
 }
 
 impl Browsers {
@@ -155,15 +158,56 @@ impl Browsers {
         self.sessions.values_mut().flat_map(|s| s.tabs.iter_mut()).find(|t| t.web.key() == view)
     }
 
-    /// Lays the shown thread's current tab over the panel; every other tab hidden.
+    /// Lays the shown thread's current tab over the panel, and a popped-out thread's over its
+    /// own window; every other tab hidden. A tab moves to the view it shows in.
     pub fn place(&self) {
         for (thread, session) in &self.sessions {
             let current = session.selected_tab().map(|t| t.id);
+            let (host, here) = match self.popped.get(thread) {
+                Some((host, bounds)) => (*host, *bounds),
+                None => (self.host, self.shown.as_ref().filter(|(t, _)| t == thread).map(|(_, b)| *b)),
+            };
             for tab in &session.tabs {
-                let here = self.shown.as_ref().filter(|(t, _)| t == thread).map(|(_, b)| *b);
+                if host != 0 {
+                    tab.web.move_to(host as cocoa::base::id);
+                }
                 tab.web.set_frame(if Some(tab.id) == current { here } else { None });
             }
         }
+    }
+
+    /// The thread's browser moves to a window of its own, whose view is `host`.
+    pub fn pop_out(thread: &str, host: cocoa::base::id) {
+        Browsers::with(|b| {
+            b.popped.insert(thread.to_string(), (host as usize, None));
+            b.touch(thread);
+            b.place();
+        });
+    }
+
+    /// Where the page goes in the thread's own window (its bounds there), each frame it draws.
+    pub fn show_popped(thread: &str, bounds: (f64, f64, f64, f64)) {
+        Browsers::with(|b| {
+            let Some(entry) = b.popped.get_mut(thread) else { return };
+            if entry.1 != Some(bounds) {
+                entry.1 = Some(bounds);
+                b.touch(thread);
+                b.place();
+            }
+        });
+    }
+
+    /// Back in the right sidebar: its window closed.
+    pub fn bring_back(thread: &str) {
+        Browsers::with(|b| {
+            if b.popped.remove(thread).is_some() {
+                b.place();
+            }
+        });
+    }
+
+    pub fn is_popped(thread: &str) -> bool {
+        Browsers::with(|b| b.popped.contains_key(thread))
     }
 
     fn touch(&mut self, thread: &str) {
@@ -180,7 +224,8 @@ impl Browsers {
         let mut closed = 0;
         for (thread, s) in self.sessions.iter_mut() {
             let idle = s.last_active.is_none_or(|t| t.elapsed() > limit);
-            if s.tabs.is_empty() || !idle || shown.as_deref() == Some(thread.as_str()) {
+            // On screen in its own window counts as looked at.
+            if s.tabs.is_empty() || !idle || shown.as_deref() == Some(thread.as_str()) || self.popped.contains_key(thread) {
                 continue;
             }
             s.restorable = s.tabs.iter().filter_map(|t| t.web.url()).filter(|u| u != "about:blank").collect();
@@ -332,6 +377,7 @@ impl Browsers {
     pub fn close_thread(thread: &str) {
         Browsers::with(|b| {
             b.sessions.remove(thread);
+            b.popped.remove(thread);
         });
     }
 }

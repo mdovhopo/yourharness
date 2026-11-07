@@ -5,7 +5,6 @@
 use crate::state::thread::{SubStep, ThreadState};
 use crate::state::workspace::{Panel, Workspace};
 use crate::ui::transcript::TranscriptView;
-use yh_core::claude::Decision;
 use crate::theme::{Theme, MONO};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -282,7 +281,8 @@ pub struct Inspector {
     /// Import Sign-ins, when open: which step it's at.
     cookie_import: Option<CookieImport>,
     /// The side chat as last drawn: running, asking.
-    side_state: (bool, bool),
+    /// The side chat's running state and the request it shows (its id), which change its controls.
+    side_state: (bool, Option<String>, usize),
     /// The browser's address field, the console or network pane under the page, and the local
     /// dev servers it offers when nothing's open.
     address: Entity<InputState>,
@@ -337,7 +337,7 @@ impl Inspector {
             tree_scroll: UniformListScrollHandle::new(),
             side: None,
             question,
-            side_state: (false, false),
+            side_state: (false, None, 0),
             address,
             // `YH_BROWSER_PANE=console|network` opens that pane, for checking it.
             browser_pane: match std::env::var("YH_BROWSER_PANE").as_deref() {
@@ -466,7 +466,8 @@ impl Inspector {
         let view = cx.new(|cx| TranscriptView::new(chat.clone(), ws, cx));
         // Its running state and permission requests change the controls under it.
         let watch = cx.observe(&chat, |this, chat, cx| {
-            let state = (chat.read(cx).running, chat.read(cx).permission.is_some());
+            let c = chat.read(cx);
+            let state = (c.running, c.permission().map(|p| p.id.clone()), c.permissions.len());
             if this.side_state != state {
                 this.side_state = state;
                 cx.notify();
@@ -1254,6 +1255,32 @@ impl Inspector {
 
     fn browser(&mut self, theme: &Theme, window: &mut Window, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let Some((thread, project)) = self.browser_thread(cx) else { return empty("No thread open.", theme) };
+        // In its own window: the panel points there.
+        if crate::ui::browser_window::is_open(&thread) {
+            crate::browser::Browsers::show(None);
+            let (t1, t2) = (thread.clone(), thread.clone());
+            return div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap(px(10.))
+                .px(px(20.))
+                .child(div().font_weight(FontWeight::SEMIBOLD).child("Open in Its Own Window"))
+                .child(div().text_size(px(12.)).text_color(theme.secondary).text_center().child("This thread's browser is in a window of its own. Claude keeps using it there."))
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(6.))
+                        .child(Button::new("browser-show-window").small().outline().label("Show Window").on_click(move |_, _, cx| crate::ui::browser_window::activate(&t1, cx)))
+                        .child(Button::new("browser-bring-back").small().label("Move Back Here").on_click(cx.listener(move |_, _, _, cx| {
+                            crate::ui::browser_window::close(&t2, cx);
+                            cx.notify();
+                        }))),
+                )
+                .into_any_element();
+        }
         let tabs: Vec<(u32, String, bool, bool)> = crate::browser::Browsers::with(|b| {
             b.sessions
                 .get(&thread)
@@ -1385,11 +1412,18 @@ impl Inspector {
         let menu = {
             let (thread, project, url) = (thread.clone(), project.clone(), url.clone());
             let page = cx.entity().downgrade();
+            let ws = self.workspace.clone();
             Button::new("browser-more").xsmall().ghost().label("⋯").dropdown_menu(move |menu, _, _| {
                 let (u1, u2) = (url.clone(), url.clone());
-                let (p1, p2, p3, p4) = (page.clone(), page.clone(), page.clone(), page.clone());
+                let (p1, p2, p3, p4, p5) = (page.clone(), page.clone(), page.clone(), page.clone(), page.clone());
                 let (project, thread) = (project.clone(), thread.clone());
-                menu.item(PopupMenuItem::new("Open in Default Browser").on_click(move |_, _, cx| cx.open_url(&u1)))
+                let (ws, pop_thread, pop_project) = (ws.clone(), thread.clone(), project.clone());
+                menu.item(PopupMenuItem::new("Open in Window").on_click(move |_, _, cx| {
+                    crate::ui::browser_window::open(ws.clone(), pop_thread.clone(), pop_project.clone(), cx);
+                    let _ = p5.update(cx, |_, cx| cx.notify());
+                }))
+                .separator()
+                .item(PopupMenuItem::new("Open in Default Browser").on_click(move |_, _, cx| cx.open_url(&u1)))
                     .item(PopupMenuItem::new("Copy Address").on_click(move |_, _, cx| cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(u2.clone()))))
                     .separator()
                     .item(PopupMenuItem::new("Console").on_click(move |_, _, cx| {
@@ -1687,7 +1721,7 @@ impl Inspector {
         let Some((chat, view, _)) = &self.side else { return empty("No thread open.", theme) };
         let (running, permission, empty_chat) = {
             let c = chat.read(cx);
-            (c.running, c.permission.clone(), c.items.is_empty())
+            (c.running, c.permission().cloned(), c.items.is_empty())
         };
         let ws = self.workspace.clone();
         let parent = self.thread.as_ref().map(|t| t.read(cx).id().to_string()).unwrap_or_default();
@@ -1701,29 +1735,8 @@ impl Inspector {
             column = column.child(div().flex_1().min_h_0().child(gpui_kit::AnyView::from(view.clone()).cached(gpui_kit::StyleRefinement::default().size_full())));
         }
         if let Some(p) = permission {
-            let (allow, deny, c1, c2) = (ws.clone(), ws.clone(), chat.clone(), chat.clone());
-            column = column.child(
-                div()
-                    .m(px(10.))
-                    .p(px(10.))
-                    .rounded(px(8.))
-                    .border_1()
-                    .border_color(theme.warning.opacity(0.5))
-                    .bg(theme.warning.opacity(0.08))
-                    .flex()
-                    .flex_col()
-                    .gap(px(6.))
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child(format!("Allow {}?", p.tool)))
-                    .child(div().font_family(MONO).text_size(px(11.)).text_color(theme.secondary).line_clamp(4).child(gist(&p.tool, &p.input)))
-                    .child(
-                        div()
-                            .flex()
-                            .justify_end()
-                            .gap(px(6.))
-                            .child(Button::new("side-deny").small().label("Deny").on_click(move |_, _, cx| deny.update(cx, |ws, cx| ws.respond(&c2, Decision::deny(), cx))))
-                            .child(Button::new("side-allow").small().primary().label("Allow").on_click(move |_, _, cx| allow.update(cx, |ws, cx| ws.respond(&c1, Decision::allow(), cx)))),
-                    ),
-            );
+            let more = chat.read(cx).permissions.len().saturating_sub(1);
+            column = column.child(div().px(px(10.)).pt(px(8.)).child(crate::ui::composer::permission_card(&p, chat, ws.downgrade(), more, theme)));
         }
         let (stop_ws, stop_chat, clear_ws) = (ws.clone(), chat.clone(), ws.clone());
         column

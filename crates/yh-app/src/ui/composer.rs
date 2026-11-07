@@ -22,6 +22,8 @@ use yh_core::markdown;
 
 /// Built-in models until the CLI's catalog arrives (it does on the first start).
 const FALLBACK_MODELS: &[(&str, &str)] = &[("haiku", "Haiku"), ("sonnet", "Sonnet"), ("opus", "Opus")];
+/// The composer grows to this many lines (its 320 pt cap), then scrolls.
+const COMPOSER_MAX_ROWS: usize = 15;
 pub const MODES: &[(&str, &str)] =
     &[("auto", "Auto"), ("ask", "Ask"), ("acceptEdits", "Accept Edits"), ("plan", "Plan"), ("bypass", "Bypass")];
 
@@ -168,7 +170,13 @@ impl Composer {
     }
 
     pub fn new(workspace: Entity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let input = cx.new(|cx| TextareaState::new(window, cx).placeholder("Ask Claude…").submit_on_enter(true));
+        // Grows with what's in it, typed or put there (a pick from the browser, a queued message
+        // taken back), up to the field's cap, then scrolls.
+        let input = cx.new(|cx| {
+            let mut state = TextareaState::new(window, cx).placeholder("Ask Claude…").submit_on_enter(true);
+            state.set_auto_grow(1, COMPOSER_MAX_ROWS, cx);
+            state
+        });
         let subscriptions = vec![
             cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| match event {
                 InputEvent::PressEnter { shift: false, secondary } => this.enter(*secondary, window, cx),
@@ -226,7 +234,7 @@ impl Composer {
     /// sends now.
     fn enter(&mut self, secondary: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(thread) = self.thread(cx) else { return };
-        let waiting = thread.read(cx).permission.is_some();
+        let waiting = thread.read(cx).waiting_for_you();
         if secondary && waiting && self.input.read(cx).value().trim().is_empty() {
             self.workspace.update(cx, |ws, cx| ws.respond(&thread, Decision::allow(), cx));
             return;
@@ -399,7 +407,7 @@ impl Composer {
             }
             _ => {}
         }
-        let permission = self.thread(cx).and_then(|t| t.read(cx).permission.clone());
+        let permission = self.thread(cx).and_then(|t| t.read(cx).permission().cloned());
         match (&permission, &self.card) {
             (None, None) => {}
             (Some(p), Some((id, _))) if *id == p.id => {}
@@ -419,71 +427,107 @@ impl Composer {
         }
     }
 
+    /// Model, effort and permissions, as the Swift app's chips: each menu says what its choices
+    /// mean, with a footnote on when they apply.
     fn pickers(&self, thread: &Entity<ThreadState>, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let ws = self.workspace.read(cx);
         let t = thread.read(cx);
         let id = t.id().to_string();
         let project = t.meta.project_id.clone();
+        let project_name = ws.project(&project).map(|p| p.name.clone()).unwrap_or_default();
         let mode = ws.project(&project).map_or("auto".to_string(), |p| p.mode.clone());
         let model = ws.model_of(t);
         let effort = ws.effort_of(t);
-        let models: Vec<(String, String, Vec<String>)> = if ws.models.is_empty() {
-            FALLBACK_MODELS.iter().map(|(v, n)| (v.to_string(), n.to_string(), vec![])).collect()
+        let model_name = ws.model_name(t);
+        let auto_ok = ws.supports_auto_mode(t);
+        let models: Vec<PickerModel> = if ws.models.is_empty() {
+            FALLBACK_MODELS.iter().map(|(v, n)| PickerModel { value: v.to_string(), name: n.to_string(), description: None, efforts: vec![], alias: true }).collect()
         } else {
-            ws.models.iter().map(|m| (m.value.clone(), m.display_name.clone(), m.efforts.clone())).collect()
+            ws.models
+                .iter()
+                .map(|m| PickerModel { value: m.value.clone(), name: m.display_name.clone(), description: m.description.clone(), efforts: m.efforts.clone(), alias: m.is_alias() })
+                .collect()
         };
-        let model_label = model
-            .as_ref()
-            .and_then(|m| models.iter().find(|(v, ..)| v == m).map(|(_, n, _)| n.clone()).or(Some(m.clone())))
-            .unwrap_or_else(|| "Default model".into());
-        let efforts = models.iter().find(|(v, ..)| Some(v) == model.as_ref()).map(|(.., e)| e.clone()).unwrap_or_default();
+        let current_model = model.clone().unwrap_or_else(|| "default".into());
+        let efforts = models.iter().find(|m| m.value == current_model).map(|m| m.efforts.clone()).unwrap_or_default();
         let mode_label = MODES.iter().find(|(v, _)| *v == mode).map_or("Auto", |(_, l)| l);
         let models = Rc::new(models);
         let w = self.workspace.downgrade();
+        let (secondary, error) = (theme.secondary, theme.error);
         let model_menu = {
-            let (w, id, models, current) = (w.clone(), id.clone(), models.clone(), model.clone());
-            Button::new("model").ghost().xsmall().label(model_label).dropdown_caret(true).dropdown_menu(move |mut menu, _, _| {
-                {
+            let (w, id, models, current) = (w.clone(), id.clone(), models.clone(), current_model.clone());
+            Button::new("model").ghost().xsmall().label(model_name.clone()).tooltip("Model").dropdown_caret(true).dropdown_menu(move |mut menu, window, cx| {
+                menu = menu.min_w(px(260.)).label("Claude Code");
+                let pick = |value: Option<String>| {
                     let (w, id) = (w.clone(), id.clone());
-                    menu = menu.item(PopupMenuItem::new("Default").checked(current.is_none()).on_click(move |_, _, cx| {
-                        let _ = w.update(cx, |ws, cx| ws.set_model(&id, None, cx));
-                    }));
+                    move |_: &gpui_kit::ClickEvent, _: &mut Window, cx: &mut App| {
+                        let _ = w.update(cx, |ws, cx| ws.set_model(&id, value.clone(), cx));
+                    }
+                };
+                // The catalog lists "default" itself; without it, Default comes first.
+                if !models.iter().any(|m| m.value == "default") {
+                    menu = menu.item(picker_row("Default".into(), None, secondary, None).checked(current == "default").on_click(pick(None)));
                 }
-                for (value, name, _) in models.iter() {
-                    let (w, id, value) = (w.clone(), id.clone(), value.clone());
-                    let checked = current.as_deref() == Some(value.as_str());
-                    menu = menu.item(PopupMenuItem::new(name.clone()).checked(checked).on_click(move |_, _, cx| {
-                        let _ = w.update(cx, |ws, cx| ws.set_model(&id, Some(value.clone()), cx));
-                    }));
+                for m in models.iter().filter(|m| m.alias) {
+                    // The catalog names the default itself ("Default (recommended)"), its model in the description.
+                    let title = m.name.clone();
+                    let target = (m.value != "default").then(|| m.value.clone());
+                    menu = menu.item(picker_row(title, m.description.clone(), secondary, None).checked(current == m.value).on_click(pick(target)));
                 }
-                menu
+                let pinned: Vec<PickerModel> = models.iter().filter(|m| !m.alias).cloned().collect();
+                if !pinned.is_empty() {
+                    let (w, id, current) = (w.clone(), id.clone(), current.clone());
+                    menu = menu.separator().submenu("Pinned Versions", window, cx, move |mut sub, _, _| {
+                        for m in &pinned {
+                            let (w, id, value) = (w.clone(), id.clone(), m.value.clone());
+                            sub = sub.item(picker_row(m.name.clone(), m.description.clone(), secondary, None).checked(current == m.value).on_click(move |_, _, cx| {
+                                let _ = w.update(cx, |ws, cx| ws.set_model(&id, Some(value.clone()), cx));
+                            }));
+                        }
+                        sub
+                    });
+                }
+                menu.separator().label("Switches instantly. Set the default in Settings.")
             })
         };
         let effort_menu = (!efforts.is_empty()).then(|| {
             let (w, id, current) = (w.clone(), id.clone(), effort.clone());
             let efforts = efforts.clone();
-            let label = effort.clone().map(|e| capitalize(&e)).unwrap_or_else(|| "Effort".into());
-            Button::new("effort").ghost().xsmall().label(label).dropdown_caret(true).dropdown_menu(move |mut menu, _, _| {
+            let label = effort.as_deref().map(effort_label).unwrap_or("Auto").to_string();
+            Button::new("effort").ghost().xsmall().label(label).tooltip("Reasoning effort").dropdown_caret(true).dropdown_menu(move |mut menu, _, _| {
+                menu = menu.min_w(px(240.)).label("Reasoning Effort");
+                {
+                    let (w, id) = (w.clone(), id.clone());
+                    menu = menu.item(picker_row("Auto".into(), Some("Let Claude Code decide".into()), secondary, None).checked(current.is_none()).on_click(move |_, _, cx| {
+                        let _ = w.update(cx, |ws, cx| ws.set_effort(&id, None, cx));
+                    }));
+                }
                 for e in &efforts {
                     let (w, id, e) = (w.clone(), id.clone(), e.clone());
                     let checked = current.as_deref() == Some(e.as_str());
-                    menu = menu.item(PopupMenuItem::new(capitalize(&e)).checked(checked).on_click(move |_, _, cx| {
+                    menu = menu.item(picker_row(effort_label(&e).to_string(), effort_detail(&e).map(str::to_string), secondary, None).checked(checked).on_click(move |_, _, cx| {
                         let _ = w.update(cx, |ws, cx| ws.set_effort(&id, Some(e.clone()), cx));
                     }));
                 }
-                menu
+                menu.separator().label("Applies from your next message.")
             })
         });
         let mode_menu = {
             let (w, project, current) = (w.clone(), project.clone(), mode.clone());
-            Button::new("mode").ghost().xsmall().label(mode_label).dropdown_caret(true).dropdown_menu(move |mut menu, _, _| {
-                for (value, label) in MODES {
+            let help = if mode == "auto" && !auto_ok { format!("{model_name} doesn't support Auto, so Claude asks before changes") } else { format!("Permissions for {project_name}") };
+            let model_name = model_name.clone();
+            Button::new("mode").ghost().xsmall().label(mode_label).tooltip(help).dropdown_caret(true).dropdown_menu(move |mut menu, _, _| {
+                menu = menu.min_w(px(280.)).label(format!("Permissions · {project_name}"));
+                for (value, _) in MODES {
                     let (w, project) = (w.clone(), project.clone());
-                    menu = menu.item(PopupMenuItem::new(*label).checked(current == *value).on_click(move |_, _, cx| {
+                    let (title, detail) = mode_detail(value);
+                    let detail = if *value == "auto" && !auto_ok { format!("Not available with {model_name}. Claude asks instead.") } else { detail.to_string() };
+                    let tint = (*value == "bypass").then_some(error);
+                    menu = menu.item(picker_row(title.to_string(), Some(detail), secondary, tint).checked(current == *value).on_click(move |_, _, cx| {
                         let _ = w.update(cx, |ws, cx| ws.set_mode(&project, value, cx));
                     }));
                 }
-                menu
+                menu.separator().label("Applies to every thread in this project, right away.")
             })
         };
         div()
@@ -498,6 +542,63 @@ impl Composer {
     }
 }
 
+/// A model as the picker lists it.
+#[derive(Clone)]
+struct PickerModel {
+    value: String,
+    name: String,
+    description: Option<String>,
+    efforts: Vec<String>,
+    /// Follows the latest model (`opus`), as against a pinned version.
+    alias: bool,
+}
+
+/// A picker's row: its name, and what it means under it.
+fn picker_row(title: String, subtitle: Option<String>, secondary: gpui_kit::Hsla, tint: Option<gpui_kit::Hsla>) -> PopupMenuItem {
+    PopupMenuItem::element(move |_, _| {
+        div()
+            .flex()
+            .flex_col()
+            .py(px(1.))
+            .child(div().when_some(tint, |d, c| d.text_color(c)).child(title.clone()))
+            .when_some(subtitle.clone(), |d, s| d.child(div().text_size(px(11.)).line_height(px(14.)).text_color(secondary).whitespace_normal().max_w(px(260.)).child(s)))
+    })
+}
+
+/// The Swift app's names for effort levels.
+fn effort_label(e: &str) -> &str {
+    match e {
+        "low" => "Low",
+        "medium" => "Medium",
+        "high" => "High",
+        "xhigh" => "Extra High",
+        "max" => "Max",
+        other => other,
+    }
+}
+
+fn effort_detail(e: &str) -> Option<&'static str> {
+    Some(match e {
+        "low" => "Quickest replies, light reasoning",
+        "medium" => "Balanced speed and depth",
+        "high" => "Thinks things through",
+        "xhigh" => "Deep reasoning for hard problems",
+        "max" => "Everything it's got. Slowest.",
+        _ => return None,
+    })
+}
+
+/// A permission mode's long name and what it does (the Swift app's `PermissionMode`).
+fn mode_detail(mode: &str) -> (&'static str, &'static str) {
+    match mode {
+        "ask" => ("Ask Before Changes", "Claude asks before editing files or running commands."),
+        "acceptEdits" => ("Auto-Accept Edits", "File edits go through. Commands still ask."),
+        "plan" => ("Plan Only", "Claude explores and plans, but changes nothing."),
+        "bypass" => ("Bypass Permissions", "Everything runs without asking. Use with care."),
+        _ => ("Auto", "Claude runs what looks safe and asks when something looks risky."),
+    }
+}
+
 /// At most this many attachments go with one message.
 const ATTACH_LIMIT: usize = 20;
 
@@ -508,11 +609,6 @@ enum Attached {
     Image(String),
     /// Any other file, or a folder: Claude is told where it is.
     File(FileAttachment),
-}
-
-fn capitalize(s: &str) -> String {
-    let mut c = s.chars();
-    c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
 }
 
 fn card_frame(theme: &Theme) -> gpui_kit::Div {
@@ -529,36 +625,65 @@ fn card_frame(theme: &Theme) -> gpui_kit::Div {
         .gap(px(8.))
 }
 
-fn mono(text: String, theme: &Theme) -> impl IntoElement {
-    div()
-        .font_family(MONO)
-        .text_size(px(11.))
-        .bg(theme.code)
-        .rounded(px(6.))
-        .px(px(8.))
-        .py(px(6.))
-        .max_h(px(160.))
-        .overflow_hidden()
-        .child(text)
-}
-
-fn pretty_input(input: &str) -> String {
-    match serde_json::from_str::<Value>(input) {
-        Ok(value) => value["command"]
-            .as_str()
-            .map(str::to_string)
-            .unwrap_or_else(|| serde_json::to_string_pretty(&value).unwrap_or_else(|_| input.to_string())),
-        Err(_) => input.to_string(),
-    }
+/// A tool waiting for your permission, as the Swift app's `PermissionCard`: the tool's icon,
+/// "Allow Run command?", the argument that matters and Claude's description. The buttons sit
+/// beside it, or under it when the card is narrow (the side chat). `more`: requests waiting
+/// after this one (parallel sub-agents), each shown in turn.
+pub fn permission_card(p: &Permission, thread: &Entity<ThreadState>, workspace: gpui_kit::WeakEntity<Workspace>, more: usize, theme: &Theme) -> gpui_kit::Div {
+    let input: Value = serde_json::from_str(&p.input).unwrap_or(Value::Null);
+    let shown = crate::ui::steps::present(&p.tool, &input, None);
+    // A command shows whole (up to four lines), as it will run.
+    let detail = match input["command"].as_str() {
+        Some(c) if p.tool == "Bash" => c.trim().to_string(),
+        _ => shown.detail.clone(),
+    };
+    let description = Some(p.description.trim().to_string()).filter(|d| !d.is_empty() && *d != detail);
+    let (allow, deny) = (workspace.clone(), workspace);
+    let (t1, t2) = (thread.clone(), thread.clone());
+    let (id1, id2) = (p.id.clone(), p.id.clone());
+    let summary = div()
+        .flex_1()
+        .min_w(px(260.))
+        .flex()
+        .items_start()
+        .gap(px(10.))
+        .child(div().flex_none().w(px(24.)).pt(px(1.)).flex().justify_center().child(rows::icon(shown.icon, 18., theme.warning)))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child(format!("Allow {}?", shown.verb)))
+                .when(!detail.is_empty(), |d| d.child(div().font_family(MONO).text_size(px(12.)).line_clamp(4).whitespace_normal().child(detail)))
+                .when_some(description, |d, text| d.child(div().text_size(px(12.)).text_color(theme.secondary).whitespace_normal().child(text)))
+                .when(more > 0, |d| {
+                    d.child(div().text_size(px(11.)).text_color(theme.secondary).child(if more == 1 { "1 more request waiting".to_string() } else { format!("{more} more requests waiting") }))
+                }),
+        );
+    let buttons = div()
+        .flex_none()
+        .ml_auto()
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .child(Button::new(SharedString::from(format!("deny-{}", p.id))).label("Deny").tooltip("Deny (⌘⌫)").on_click(move |_, _, cx| {
+            let _ = deny.update(cx, |ws, cx| ws.respond_to(&t2, &id2, Decision::deny(), cx));
+        }))
+        .child(Button::new(SharedString::from(format!("allow-{}", p.id))).primary().label("Allow").tooltip("Allow (⌘↩)").on_click(move |_, _, cx| {
+            let _ = allow.update(cx, |ws, cx| ws.respond_to(&t1, &id1, Decision::allow(), cx));
+        }));
+    card_frame(theme).child(div().flex().flex_wrap().items_start().gap(px(12.)).child(summary).child(buttons))
 }
 
 impl Render for Composer {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::get(cx);
         let Some(thread) = self.thread(cx) else { return div() };
-        let (running, permission) = {
+        let (running, permission, waiting) = {
             let t = thread.read(cx);
-            (t.running, t.permission.clone())
+            (t.running, t.permission().cloned(), t.permissions.len())
         };
         let w = self.workspace.downgrade();
         let mut inner = div().w_full().max_w(px(828.)).flex().flex_col();
@@ -608,33 +733,7 @@ impl Render for Composer {
             inner = inner.child(match card {
                 Card::Question(q) => q.clone().into_any_element(),
                 Card::Plan(plan) => plan.clone().into_any_element(),
-                Card::Tool => {
-                    let (allow, deny) = (w.clone(), w.clone());
-                    let (t1, t2) = (thread.clone(), thread.clone());
-                    card_frame(&theme)
-                        .child(
-                            div()
-                                .flex()
-                                .gap(px(4.))
-                                .child("Claude wants to use")
-                                .child(div().font_weight(FontWeight::BOLD).child(p.tool.clone()))
-                                .when(!p.description.is_empty(), |d| d.child(div().ml(px(8.)).text_color(theme.secondary).child(p.description.clone()))),
-                        )
-                        .child(mono(pretty_input(&p.input), &theme))
-                        .child(
-                            div()
-                                .flex()
-                                .justify_end()
-                                .gap(px(8.))
-                                .child(Button::new("deny").small().label("Deny ⌘⌫").on_click(move |_, _, cx| {
-                                    let _ = deny.update(cx, |ws, cx| ws.respond(&t2, Decision::deny(), cx));
-                                }))
-                                .child(Button::new("allow").small().primary().label("Allow ⌘↩").on_click(move |_, _, cx| {
-                                    let _ = allow.update(cx, |ws, cx| ws.respond(&t1, Decision::allow(), cx));
-                                })),
-                        )
-                        .into_any_element()
-                }
+                Card::Tool => permission_card(p, &thread, w.clone(), waiting.saturating_sub(1), &theme).into_any_element(),
             });
         }
         let plan = thread.read(cx).plan.clone();
@@ -657,7 +756,6 @@ impl Render for Composer {
         let stop_thread = thread.clone();
         let composer = div()
             .capture_key_down(cx.listener(Self::on_key))
-            .on_drop(cx.listener(|this, paths: &gpui_kit::ExternalPaths, _, cx| this.add_files(paths.paths(), cx)))
             .children(attached)
             .relative()
             .border_1()
@@ -854,6 +952,16 @@ impl Composer {
         let list = self.attached.get(&key).filter(|l| !l.is_empty())?;
         let dir = self.workspace.read(cx).data_dir.join("attachments");
         let mut strip = div().flex().flex_wrap().gap(px(6.));
+        // A click opens Quick Look on what's waiting, at the one clicked; the arrow keys go
+        // through the rest, as in Finder.
+        let all: Vec<String> = list
+            .iter()
+            .map(|a| match a {
+                Attached::Image(name) => dir.join(name),
+                Attached::File(f) => f.path.clone(),
+            })
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
         for (i, a) in list.iter().enumerate() {
             let path = match a {
                 Attached::Image(name) => dir.join(name),
@@ -863,7 +971,7 @@ impl Composer {
                 Attached::Image(_) => div().child(gpui_kit::img(path.clone()).h(px(56.)).max_w(px(120.)).rounded(px(6.))),
                 Attached::File(f) => file_chip(f, theme),
             };
-            let (open, reveal) = (path.clone(), path.clone());
+            let (reveal, look, look_menu) = (path.clone(), all.clone(), all.clone());
             let this = cx.entity().downgrade();
             let remove_key = key.clone();
             let chip = div()
@@ -871,10 +979,11 @@ impl Composer {
                 .relative()
                 .cursor_pointer()
                 .child(body)
-                .on_click(move |_, _, cx| cx.open_with_system(&open))
+                .on_click(move |_, _, _| crate::platform::quick_look(look.clone(), i))
                 .context_menu(move |menu, _, _| {
-                    let (open, reveal, this, key) = (path.clone(), reveal.clone(), this.clone(), remove_key.clone());
-                    menu.item(PopupMenuItem::new("Open").on_click(move |_, _, cx| cx.open_with_system(&open)))
+                    let (open, reveal, this, key, look) = (path.clone(), reveal.clone(), this.clone(), remove_key.clone(), look_menu.clone());
+                    menu.item(PopupMenuItem::new("Quick Look").on_click(move |_, _, _| crate::platform::quick_look(look.clone(), i)))
+                        .item(PopupMenuItem::new("Open").on_click(move |_, _, cx| cx.open_with_system(&open)))
                         .item(PopupMenuItem::new("Show in Finder").on_click(move |_, _, cx| cx.reveal_path(&reveal)))
                         .separator()
                         .item(PopupMenuItem::new("Remove").on_click(move |_, _, cx| {
@@ -908,6 +1017,24 @@ impl Composer {
             strip = strip.child(chip);
         }
         Some(strip)
+    }
+
+    /// What waits in the open thread's composer, as paths (`YH_PREVIEW_MEDIA=draft`).
+    pub fn attached_paths(&self, cx: &App) -> Vec<String> {
+        let Some(key) = self.key(cx) else { return vec![] };
+        let dir = self.workspace.read(cx).data_dir.join("attachments");
+        self.attached
+            .get(&key)
+            .map(|l| {
+                l.iter()
+                    .map(|a| match a {
+                        Attached::Image(name) => dir.join(name),
+                        Attached::File(f) => f.path.clone(),
+                    })
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     fn remove_attached(&mut self, key: &str, index: usize, cx: &mut Context<Self>) {
@@ -1448,6 +1575,8 @@ pub struct PlanCard {
     workspace: gpui_kit::WeakEntity<Workspace>,
     plan: std::rc::Rc<markdown::Markdown>,
     feedback: Entity<InputState>,
+    /// Test runs print what it offers once.
+    logged: bool,
 }
 
 impl PlanCard {
@@ -1456,24 +1585,48 @@ impl PlanCard {
         PlanCard {
             workspace,
             plan: std::rc::Rc::new(markdown::parse(&text)),
-            feedback: cx.new(|cx| InputState::new(window, cx).placeholder("What should change?")),
+            feedback: cx.new(|cx| InputState::new(window, cx).placeholder("Feedback for Claude (optional)")),
+            logged: false,
         }
     }
 }
 
 impl PlanCard {
-    /// ⌘↩: approve in the recommended mode (Auto).
-    fn approve(&self, cx: &mut App) {
+    /// Auto when the thread's model can use it, else Accept Edits (edits go through, commands
+    /// still ask), as the Swift app recommends. Also whether Auto is offered at all.
+    fn recommended(&self, cx: &App) -> (&'static str, bool) {
+        let auto = self.workspace.upgrade().and_then(|ws| ws.read(cx).selected_thread().map(|t| ws.read(cx).supports_auto_mode(t.read(cx)))).unwrap_or(true);
+        (if auto { "auto" } else { "acceptEdits" }, auto)
+    }
+
+    /// Approves into `mode`; what's written as feedback follows as your next message.
+    fn approve_in(&self, mode: &'static str, cx: &mut App) {
+        let feedback = self.feedback.read(cx).value().trim().to_string();
         let Some(ws) = self.workspace.upgrade() else { return };
         if let Some(t) = ws.read(cx).selected_thread() {
-            ws.update(cx, |ws, cx| ws.approve_plan(&t, "auto", cx));
+            ws.update(cx, |ws, cx| {
+                ws.approve_plan(&t, mode, cx);
+                if !feedback.is_empty() {
+                    ws.send_message(&t, &feedback, vec![], vec![], false, cx);
+                }
+            });
         }
     }
 
-    /// ⌘⌫: keep planning, with what's written as feedback.
+    /// ⌘↩: approve in the recommended mode.
+    fn approve(&self, cx: &mut App) {
+        let (mode, _) = self.recommended(cx);
+        self.approve_in(mode, cx);
+    }
+
+    /// ⌘⌫: keep planning, with what's written as feedback (the Swift app's words).
     fn keep_planning(&self, cx: &mut App) {
-        let message = self.feedback.read(cx).value().trim().to_string();
-        let message = if message.is_empty() { "Keep planning.".to_string() } else { message };
+        let feedback = self.feedback.read(cx).value().trim().to_string();
+        let message = if feedback.is_empty() {
+            "The user wants to keep planning. Ask what to change.".to_string()
+        } else {
+            format!("The user wants changes to the plan before you start: {feedback}")
+        };
         let Some(ws) = self.workspace.upgrade() else { return };
         if let Some(t) = ws.read(cx).selected_thread() {
             ws.update(cx, |ws, cx| ws.respond(&t, Decision::Deny { message }, cx));
@@ -1483,33 +1636,52 @@ impl PlanCard {
 
 impl Render for PlanCard {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        use gpui_kit::component::button::DropdownButton;
         let theme = Theme::get(cx);
-        let mut buttons = div().flex().justify_end().gap(px(8.));
-        let keep = self.workspace.clone();
-        let feedback = self.feedback.clone();
-        buttons = buttons.child(Button::new("keep-planning").small().label("Keep Planning").on_click(move |_, _, cx| {
-            let message = feedback.read(cx).value().trim().to_string();
-            let message = if message.is_empty() { "Keep planning.".to_string() } else { message };
-            let Some(ws) = keep.upgrade() else { return };
-            if let Some(t) = ws.read(cx).selected_thread() {
-                ws.update(cx, |ws, cx| ws.respond(&t, Decision::Deny { message }, cx));
-            }
-        }));
-        for (mode, label) in [("ask", "Approve, Ask"), ("acceptEdits", "Approve, Accept Edits"), ("auto", "Approve, Auto")] {
-            let w = self.workspace.clone();
-            let b = Button::new(SharedString::from(format!("approve-{mode}"))).small().label(label);
-            let b = if mode == "auto" { b.primary() } else { b };
-            buttons = buttons.child(b.on_click(move |_, _, cx| {
-                let Some(ws) = w.upgrade() else { return };
-                if let Some(t) = ws.read(cx).selected_thread() {
-                    ws.update(cx, |ws, cx| ws.approve_plan(&t, mode, cx));
-                }
-            }));
+        let (recommended, auto) = self.recommended(cx);
+        if !self.logged && std::env::var("YH_DATA_DIR").is_ok() {
+            self.logged = true;
+            eprintln!("PLAN card: Approve · {recommended}, Auto {}", if auto { "offered" } else { "disabled" });
         }
+        let label = MODES.iter().find(|(v, _)| *v == recommended).map_or("Auto", |(_, l)| l);
+        let this = cx.entity().downgrade();
+        let approve = DropdownButton::new("approve-plan")
+            .small()
+            .primary()
+            .button(
+                Button::new("approve-plan-main")
+                    .label(format!("Approve · {label}"))
+                    .tooltip(format!("Approve and continue in {label} (⌘↩). The menu has other modes."))
+                    .on_click(cx.listener(|this, _, _, cx| this.approve(cx))),
+            )
+            .dropdown_menu(move |mut menu, _, _| {
+                for (mode, label) in [("auto", "Approve, Auto"), ("acceptEdits", "Approve, Accept Edits"), ("ask", "Approve, Ask")] {
+                    let this = this.clone();
+                    menu = menu.item(PopupMenuItem::new(label).disabled(mode == "auto" && !auto).on_click(move |_, _, cx| {
+                        let _ = this.update(cx, |this, cx| this.approve_in(mode, cx));
+                    }));
+                }
+                menu
+            });
         card_frame(&theme)
-            .child(div().font_weight(FontWeight::SEMIBOLD).child("Plan ready for review"))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(rows::icon(gpui_kit::component::IconName::Map, 16., theme.accent))
+                    .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child("Plan ready for review")),
+            )
             .child(div().id("plan-body").max_h(px(320.)).overflow_y_scroll().child(rows::markdown_view(&self.plan, &theme)))
             .child(Input::new(&self.feedback).small())
-            .child(buttons)
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(Button::new("keep-planning").small().label("Keep Planning").tooltip("Send your feedback and keep planning (⌘⌫)").on_click(cx.listener(|this, _, _, cx| this.keep_planning(cx))))
+                    .child(approve),
+            )
     }
 }

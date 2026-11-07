@@ -180,6 +180,10 @@ fn main() {
             browser::start(
                 host,
                 move |thread, cx| {
+                    // In its own window, that window comes forward instead.
+                    if ui::browser_window::is_open(thread) {
+                        return ui::browser_window::activate(thread, cx);
+                    }
                     ws.update(cx, |ws, cx| {
                         let auto_show = ws.library.setting("browserAutoShow").and_then(|v| v.as_bool()).unwrap_or(true);
                         if auto_show && ws.selected.as_deref() == Some(thread) {
@@ -187,7 +191,10 @@ fn main() {
                         }
                     })
                 },
-                move |cx| inspector.update(cx, |_, cx| cx.notify()),
+                move |cx| {
+                    inspector.update(cx, |_, cx| cx.notify());
+                    ui::browser_window::notify_all(cx);
+                },
                 cx,
             );
         }
@@ -253,6 +260,43 @@ fn main() {
                     .detach();
                 }
             }
+        }
+        // `YH_OPEN_BROWSER_WINDOW=1`: the open thread's browser in its own window, as the panel's
+        // ⋯ → Open in Window does, after `YH_DRAFT_DELAY` (`YH_BROWSER_WINDOW_SNAPSHOT=<png>` draws
+        // it 2 s later; `YH_BROWSER_WINDOW_CLOSE=<seconds>` then closes it, the pages going back).
+        if env("YH_OPEN_BROWSER_WINDOW").as_deref() == Some("1") {
+            let delay: f64 = env("YH_DRAFT_DELAY").and_then(|v| v.parse().ok()).unwrap_or(1.0);
+            let workspace = workspace.clone();
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(Duration::from_secs_f64(delay)).await;
+                let found = cx.update(|cx| workspace.read(cx).selected_thread().map(|t| (t.read(cx).id().to_string(), t.read(cx).meta.project_id.clone())));
+                let Some((thread, project)) = found else { return eprintln!("BROWSER no thread open") };
+                let _ = cx.update(|cx| ui::browser_window::open(workspace.clone(), thread.clone(), project, cx));
+                cx.background_executor().timer(Duration::from_secs(2)).await;
+                let _ = cx.update(|cx| {
+                    let report = browser::Browsers::with_tab(&thread, |t| t.web.report_place()).unwrap_or_else(|| "no tab".into());
+                    eprintln!("BROWSER popped={} {report}", browser::Browsers::is_popped(&thread));
+                    if let Some(file) = env("YH_BROWSER_WINDOW_SNAPSHOT") {
+                        for w in cx.windows() {
+                            let _ = w.update(cx, |_, window, _| {
+                                if window.window_title().starts_with("Browser") {
+                                    crate::snapshot(window, &file);
+                                }
+                            });
+                        }
+                    }
+                });
+                if let Some(secs) = env("YH_BROWSER_WINDOW_CLOSE").and_then(|v| v.parse::<f64>().ok()) {
+                    cx.background_executor().timer(Duration::from_secs_f64(secs)).await;
+                    let _ = cx.update(|cx| ui::browser_window::close(&thread, cx));
+                    cx.background_executor().timer(Duration::from_secs(1)).await;
+                    let _ = cx.update(|_| {
+                        let report = browser::Browsers::with_tab(&thread, |t| t.web.report_place()).unwrap_or_else(|| "no tab".into());
+                        eprintln!("BROWSER closed window, popped={} {report}", browser::Browsers::is_popped(&thread));
+                    });
+                }
+            })
+            .detach();
         }
         // `YH_SELECT=<title or id>`: open a thread at launch; `YH_SEND=<text>` then sends it.
         if let Some(wanted) = env("YH_SELECT") {
@@ -427,6 +471,52 @@ fn main() {
                 if let Ok(ns) = window.update(cx, |_, window, _| crate::platform::ns_window(window)) {
                     crate::platform::mouse_move(ns, x, y);
                 }
+            })
+            .detach();
+        }
+        // `YH_CLICK=<x,y>[;<x,y>…]`: clicks there (window points) through the window, a second
+        // apart, after `YH_DRAFT_DELAY` (+0.5 s after `YH_HOVER`): for menus and buttons only a
+        // click opens (the composer's pickers, the plan card's Approve menu).
+        if let Some(points) = env("YH_CLICK") {
+            let points: Vec<(f32, f32)> = points
+                .split(';')
+                .filter_map(|p| p.split_once(',').and_then(|(x, y)| Some((x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?))))
+                .collect();
+            let delay: f64 = env("YH_DRAFT_DELAY").and_then(|v| v.parse().ok()).unwrap_or(1.0) + 0.5;
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(Duration::from_secs_f64(delay)).await;
+                for (x, y) in points {
+                    if let Ok(ns) = window.update(cx, |_, window, _| crate::platform::ns_window(window)) {
+                        crate::platform::mouse_move(ns, x, y);
+                        crate::platform::click(ns, x, y);
+                        eprintln!("CLICK {x},{y}");
+                    }
+                    cx.background_executor().timer(Duration::from_secs(1)).await;
+                }
+            })
+            .detach();
+        }
+        // `YH_DROP=<x,y>` with `YH_DROP_FILES=<a:b>`: files dragged in from Finder to that point
+        // (window points) through GPUI's own file-drop events, after `YH_DRAFT_DELAY`; held there
+        // `YH_DROP_HOLD` seconds (2: a snapshot then shows the overlay), then dropped.
+        if let (Some((x, y)), Some(files)) = (env("YH_DROP").and_then(|v| v.split_once(',').and_then(|(x, y)| Some((x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?)))), env("YH_DROP_FILES")) {
+            use gpui_kit::{point, ExternalPaths, FileDropEvent, PlatformInput};
+            let delay: f64 = env("YH_DRAFT_DELAY").and_then(|v| v.parse().ok()).unwrap_or(1.0);
+            let hold: f64 = env("YH_DROP_HOLD").and_then(|v| v.parse().ok()).unwrap_or(2.0);
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(Duration::from_secs_f64(delay)).await;
+                let position = point(px(x), px(y));
+                let paths = ExternalPaths(files.split(':').map(std::path::PathBuf::from).collect());
+                let _ = window.update(cx, |_, window, cx| {
+                    window.dispatch_event(PlatformInput::FileDrop(FileDropEvent::Entered { position, paths }), cx);
+                    window.dispatch_event(PlatformInput::FileDrop(FileDropEvent::Pending { position }), cx);
+                });
+                eprintln!("DROP over {x},{y}");
+                cx.background_executor().timer(Duration::from_secs_f64(hold)).await;
+                let _ = window.update(cx, |_, window, cx| {
+                    window.dispatch_event(PlatformInput::FileDrop(FileDropEvent::Submit { position }), cx);
+                });
+                eprintln!("DROP submitted");
             })
             .detach();
         }
@@ -770,6 +860,20 @@ fn main() {
             cx.spawn(async move |cx| {
                 cx.background_executor().timer(Duration::from_secs(3)).await;
                 let _ = cx.update(|cx| ui::rows::preview_probe(&workspace, cx));
+            })
+            .detach();
+        }
+        // `YH_PREVIEW_MEDIA=draft`: what waits in the composer (`YH_SEND_FILES` alone attaches it),
+        // in Quick Look as clicking one does; prints PASS when the panel took it, and closes it.
+        if env("YH_PREVIEW_MEDIA").as_deref() == Some("draft") {
+            let composer = root.read(cx).composer.clone();
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(Duration::from_secs(3)).await;
+                let files = cx.update(|cx| composer.read(cx).attached_paths(cx));
+                eprintln!("PREVIEW files: {files:?}");
+                let _ = cx.update(|_| crate::platform::quick_look(files, 0));
+                cx.background_executor().timer(Duration::from_millis(1500)).await;
+                let _ = cx.update(|_| eprintln!("PREVIEW {}", if crate::platform::quick_look_visible(true) { "PASS" } else { "FAIL" }));
             })
             .detach();
         }

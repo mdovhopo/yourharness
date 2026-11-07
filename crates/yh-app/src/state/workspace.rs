@@ -359,6 +359,22 @@ impl Workspace {
         thread.meta.model.clone().or_else(|| self.default_setting("model"))
     }
 
+    /// Whether the thread's model can run in Auto (unknown models are given the benefit of the
+    /// doubt, as the Swift app does).
+    pub fn supports_auto_mode(&self, thread: &ThreadState) -> bool {
+        let model = self.model_of(thread).unwrap_or_else(|| "default".into());
+        self.models.iter().find(|m| m.value == model).is_none_or(|m| m.supports_auto_mode)
+    }
+
+    /// The model's name as the catalog has it ("Haiku"), else as set.
+    /// "Default" when none is chosen (the catalog's "Default (recommended)" is long for a chip).
+    pub fn model_name(&self, thread: &ThreadState) -> String {
+        match self.model_of(thread).filter(|m| m != "default") {
+            Some(model) => self.models.iter().find(|m| m.value == model).map(|m| m.display_name.clone()).unwrap_or(model),
+            None => "Default".into(),
+        }
+    }
+
     pub fn effort_of(&self, thread: &ThreadState) -> Option<String> {
         thread.meta.effort.clone().or_else(|| self.default_setting("effort"))
     }
@@ -856,7 +872,7 @@ impl Workspace {
                 let record = self.library.thread_record(&id).unwrap_or_default();
                 let ok = t.meta.settled_at.is_none()
                     && !t.running
-                    && t.permission.is_none()
+                    && !t.waiting_for_you()
                     && self.selected.as_deref() != Some(id.as_str())
                     && record.get("autoSettle").and_then(|v| v.as_bool()) != Some(false)
                     && record.get("reactivatedAt").is_none_or(|v| v.is_null())
@@ -1389,10 +1405,10 @@ impl Workspace {
     /// The Dock badge counts threads waiting for you; a request to you, or a turn ending,
     /// is a notification when you're not looking at that thread.
     fn note_attention(&mut self, thread: &Entity<ThreadState>, cx: &mut Context<Self>) {
-        let waiting = self.threads.iter().filter(|t| t.read(cx).permission.is_some()).count();
+        let waiting = self.threads.iter().filter(|t| t.read(cx).waiting_for_you()).count();
         crate::platform::set_badge(waiting);
         let t = thread.read(cx);
-        if t.permission.is_some() {
+        if t.waiting_for_you() {
             let body = Self::describe_request(t);
             self.notify_about(crate::state::notify::Kind::NeedsYou, thread, body, cx);
         }
@@ -1438,7 +1454,7 @@ impl Workspace {
                         if weak.upgrade().is_some_and(|t| !t.read(cx).jobs.running.is_empty()) {
                             return true;
                         }
-                        let waiting = weak.upgrade().is_some_and(|t| t.read(cx).running || t.read(cx).permission.is_some());
+                        let waiting = weak.upgrade().is_some_and(|t| t.read(cx).running || t.read(cx).waiting_for_you());
                         if !waiting {
                             ws.end_runtime(&id, cx);
                         }
@@ -1515,20 +1531,28 @@ impl Workspace {
         }
     }
 
-    /// Settles the thread's pending permission request (a tool, a question, a plan).
+    /// Settles the thread's first pending permission request (a tool, a question, a plan): the
+    /// one the composer shows.
     pub fn respond(&mut self, thread: &Entity<ThreadState>, decision: Decision, cx: &mut Context<Self>) {
-        let (id, permission) = {
-            let t = thread.read(cx);
-            (t.id().to_string(), t.permission.clone())
+        let Some(id) = thread.read(cx).permission().map(|p| p.id.clone()) else { return };
+        self.respond_to(thread, &id, decision, cx);
+    }
+
+    /// Settles one pending request by its id; the others keep waiting.
+    pub fn respond_to(&mut self, thread: &Entity<ThreadState>, request_id: &str, decision: Decision, cx: &mut Context<Self>) {
+        let id = thread.read(cx).id().to_string();
+        let Some(permission) = thread.update(cx, |t, cx| {
+            let p = t.answered(request_id);
+            cx.notify();
+            p
+        }) else {
+            return;
         };
-        let Some(permission) = permission else { return };
         if let Some(rt) = self.runtimes.get(&id) {
             rt.process.respond(&permission.id, &permission.input, &decision);
         }
-        thread.update(cx, |t, cx| {
-            t.permission = None;
-            cx.notify();
-        });
+        let waiting = self.threads.iter().filter(|t| t.read(cx).waiting_for_you()).count();
+        crate::platform::set_badge(waiting);
         cx.notify();
     }
 
@@ -1590,10 +1614,34 @@ impl Workspace {
             self.answer_elicitation(thread, &answer, content, cx);
         }
         let Ok(answer) = std::env::var("YH_ANSWER") else { return };
-        if let Some(p) = thread.read(cx).permission.clone() {
+        // `YH_ANSWER_DELAY=<seconds>`: answered that much later, so the cards can be seen (and
+        // several pile up).
+        if let Some(delay) = std::env::var("YH_ANSWER_DELAY").ok().and_then(|v| v.parse::<f64>().ok()) {
+            let weak = thread.downgrade();
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(Duration::from_secs_f64(delay)).await;
+                let _ = this.update(cx, |ws, cx| {
+                    if let Some(thread) = weak.upgrade() {
+                        ws.answer_waiting(&thread, &answer, cx);
+                    }
+                });
+            })
+            .detach();
+            return;
+        }
+        self.answer_waiting(thread, &answer, cx);
+    }
+
+    fn answer_waiting(&mut self, thread: &Entity<ThreadState>, answer: &str, cx: &mut Context<Self>) {
+        // Every request waiting, by its own id (parallel sub-agents ask at once).
+        let waiting: Vec<_> = thread.read(cx).permissions.clone();
+        if waiting.len() > 1 {
+            eprintln!("PERMISSIONS waiting: {}", waiting.len());
+        }
+        for p in waiting {
             eprintln!("answering {} for {}: {answer}", p.id, p.tool);
             let decision = if answer == "allow" { Decision::allow() } else { Decision::deny() };
-            self.respond(thread, decision, cx);
+            self.respond_to(thread, &p.id, decision, cx);
         }
     }
 
@@ -1936,7 +1984,7 @@ impl Workspace {
                                 title: t.title.clone(),
                                 project_id: t.meta.project_id.clone(),
                                 running: t.running,
-                                waiting: t.permission.is_some(),
+                                waiting: t.waiting_for_you(),
                                 unread: t.unread,
                                 pinned: t.meta.pinned,
                                 settled: t.meta.settled_at.is_some(),

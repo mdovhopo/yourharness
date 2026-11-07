@@ -71,10 +71,11 @@ impl Workspace {
 
     /// What a request to you is, as a notification's body.
     pub fn describe_request(thread: &ThreadState) -> String {
-        if thread.elicitation.is_some() && thread.permission.is_none() {
+        if thread.elicitation.is_some() && !thread.waiting_for_you() {
             return "An MCP server is asking you something.".into();
         }
-        let Some(p) = &thread.permission else { return "Claude is waiting for you.".into() };
+        // The newest request: the one that just came.
+        let Some(p) = thread.permissions.last() else { return "Claude is waiting for you.".into() };
         let input: Value = serde_json::from_str(&p.input).unwrap_or(Value::Null);
         match p.tool.as_str() {
             "AskUserQuestion" => input["questions"][0]["question"].as_str().map(|q| format!("Claude asks: {q}")).unwrap_or_else(|| "Claude has a question for you.".into()),

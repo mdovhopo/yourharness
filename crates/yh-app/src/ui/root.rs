@@ -743,6 +743,12 @@ impl Render for RootView {
                         // with its cards. Its render is a handful of elements.
                         .child(div().flex_none().w_full().child(self.jobs.clone()))
                         .child(div().flex_none().w_full().child(self.composer.clone())))
+                        // Files dropped anywhere on the thread go with the next message. The
+                        // overlay shows only while files are dragged over it (a style GPUI works
+                        // out at paint, so nothing re-renders and the cached transcript stays).
+                        .relative()
+                        .on_drop(cx.listener(|this, paths: &gpui_kit::ExternalPaths, _, cx| this.composer.update(cx, |c, cx| c.add_files(paths.paths(), cx))))
+                        .child(drop_overlay(&theme))
                     })
                     .when(selected.is_none() && self.workspace.read(cx).page.is_none(), |d| d.child(self.empty_state(&theme, cx))),
             )
@@ -775,6 +781,38 @@ impl Render for RootView {
             .child(self.resume.clone())
             .child(self.mcp.clone())
     }
+}
+
+/// "Drop files to attach" over the thread, hidden until files are dragged over it (the Swift
+/// app's dashed outline). Hidden, it paints nothing and takes no clicks; its own hitbox (GPUI
+/// gives drag styles only to an element with one) never blocks what's under it.
+fn drop_overlay(theme: &Theme) -> impl IntoElement {
+    let mut overlay = div()
+        .absolute()
+        .top(px(8.))
+        .left(px(8.))
+        .right(px(8.))
+        .bottom(px(8.))
+        .rounded(px(16.))
+        .border_2()
+        .border_dashed()
+        .border_color(theme.accent)
+        // Mostly opaque: the words read over the composer and the transcript.
+        .bg(theme.canvas.opacity(0.88))
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap(px(8.))
+        .text_size(px(17.))
+        .child(crate::ui::rows::icon(gpui_kit::component::IconName::File, 18., theme.text))
+        .child("Drop files to attach")
+        .drag_over::<gpui_kit::ExternalPaths>(|s, _, _, _| {
+            let mut s = s;
+            s.visibility = Some(gpui_kit::Visibility::Visible);
+            s
+        });
+    overlay.style().visibility = Some(gpui_kit::Visibility::Hidden);
+    overlay
 }
 
 /// Over a new thread's composer: where the work happens. None once it has rows (or is loading

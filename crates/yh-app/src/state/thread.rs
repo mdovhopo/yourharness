@@ -230,6 +230,23 @@ pub struct Permission {
     pub input: String,
 }
 
+impl ThreadState {
+    /// The request the composer shows: the oldest waiting.
+    pub fn permission(&self) -> Option<&Permission> {
+        self.permissions.first()
+    }
+
+    pub fn waiting_for_you(&self) -> bool {
+        !self.permissions.is_empty()
+    }
+
+    /// Takes a request off the list once answered.
+    pub fn answered(&mut self, request_id: &str) -> Option<Permission> {
+        let i = self.permissions.iter().position(|p| p.id == request_id)?;
+        Some(self.permissions.remove(i))
+    }
+}
+
 pub struct ThreadState {
     pub meta: ThreadMeta,
     pub title: String,
@@ -242,7 +259,9 @@ pub struct ThreadState {
     pub plan: yh_core::plan::Plan,
     /// The row Find is on, by its number.
     pub find_hit: Option<i64>,
-    pub permission: Option<Permission>,
+    /// Requests waiting for you, oldest first: parallel sub-agents can each ask at once. The
+    /// composer shows the first; each is answered by its own request id.
+    pub permissions: Vec<Permission>,
     pub elicitation: Option<Elicitation>,
     pub sign_in: Option<SignInAsk>,
     /// Rows of the history before the first one held.
@@ -323,7 +342,7 @@ impl ThreadState {
             unread: false,
             plan: Default::default(),
             find_hit: None,
-            permission: None,
+            permissions: vec![],
             elicitation: None,
             sign_in: None,
             before: 0,
@@ -1094,7 +1113,12 @@ impl ThreadState {
                 true
             }
             Event::Permission { request_id, tool, description, input } => {
-                self.permission = Some(Permission { id: request_id, tool, description, input });
+                // The same request again (a resumed stream) replaces itself; a new one waits its turn.
+                let asked = Permission { id: request_id, tool, description, input };
+                match self.permissions.iter_mut().find(|p| p.id == asked.id) {
+                    Some(p) => *p = asked,
+                    None => self.permissions.push(asked),
+                }
                 true
             }
             Event::Notice(text) => {
@@ -1196,7 +1220,7 @@ impl ThreadState {
         }
         self.blocks.clear();
         self.running = false;
-        self.permission = None;
+        self.permissions.clear();
         // How long the turn took goes on the message that started it.
         let start = self.items.iter().rev().filter(|i| i.ty == ItemType::User).map(|i| i.entries[0].clone()).find(|e| starts_turn(&e.borrow()));
         if let Some(e) = start {
