@@ -182,6 +182,28 @@ fn page_world() -> id {
     unsafe { msg_send![class!(WKContentWorld), pageWorld] }
 }
 
+/// Clears everything a project's browser keeps (cookies, storage, caches): its sign-ins go too.
+pub fn clear_store(project: &str) {
+    unsafe {
+        let identifier: id = msg_send![class!(NSUUID), alloc];
+        let identifier: id = msg_send![identifier, initWithUUIDString: ns_string(project)];
+        if identifier == nil {
+            return;
+        }
+        let data: id = msg_send![class!(WKWebsiteDataStore), dataStoreForIdentifier: identifier];
+        let _: id = msg_send![data, retain];
+        let types: id = msg_send![class!(WKWebsiteDataStore), allWebsiteDataTypes];
+        let since: id = msg_send![class!(NSDate), distantPast];
+        let keep = data as usize;
+        let done = block::ConcreteBlock::new(move || {
+            let data = keep as id;
+            let _: () = msg_send![data, release];
+        })
+        .copy();
+        let _: () = msg_send![data, removeDataOfTypes: types modifiedSince: since completionHandler: &*done];
+    }
+}
+
 /// Puts cookies in a project's browser data store (by its UUID); replies with how many went in.
 pub fn store_cookies(project: &str, cookies: Vec<yh_core::cookies::Cookie>, reply: flume::Sender<usize>) {
     unsafe {

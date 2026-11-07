@@ -9,7 +9,8 @@ use yh_core::claude::Decision;
 use crate::theme::{Theme, MONO};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::Sizable;
+use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_kit::component::{Disableable, Sizable};
 use gpui_kit::{
     div, prelude::*, px, uniform_list, App, Context, Entity, FontWeight, ScrollHandle, ScrollStrategy, SharedString, Subscription,
     UniformListScrollHandle, WeakEntity, Window,
@@ -136,6 +137,12 @@ struct Folder {
     loading: bool,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum BrowserPane {
+    Console,
+    Network,
+}
+
 pub struct Inspector {
     workspace: Entity<Workspace>,
     thread: Option<Entity<ThreadState>>,
@@ -161,6 +168,11 @@ pub struct Inspector {
     cookie_import: Option<CookieImport>,
     /// The side chat as last drawn: running, asking.
     side_state: (bool, bool),
+    /// The browser's address field, the console or network pane under the page, and the local
+    /// dev servers it offers when nothing's open.
+    address: Entity<InputState>,
+    browser_pane: Option<BrowserPane>,
+    dev_servers: Option<Vec<yh_core::dev_servers::Server>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -168,7 +180,14 @@ impl Inspector {
     pub fn new(workspace: Entity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let goto = cx.new(|cx| InputState::new(window, cx).placeholder("Go to File"));
         let question = cx.new(|cx| InputState::new(window, cx).placeholder("Ask on the side…"));
+        let address = cx.new(|cx| InputState::new(window, cx).placeholder("Address or search"));
         let subscriptions = vec![
+            cx.subscribe(&address, |this, input, e: &InputEvent, cx| {
+                if let InputEvent::PressEnter { .. } = e {
+                    let text = input.read(cx).value().to_string();
+                    this.go_to(&text, cx);
+                }
+            }),
             cx.observe(&workspace, |this, _, cx| this.follow_selection(cx)),
             cx.subscribe_in(&question, window, |this, _, e: &InputEvent, window, cx| {
                 if let InputEvent::PressEnter { .. } = e {
@@ -199,6 +218,14 @@ impl Inspector {
             side: None,
             question,
             side_state: (false, false),
+            address,
+            // `YH_BROWSER_PANE=console|network` opens that pane, for checking it.
+            browser_pane: match std::env::var("YH_BROWSER_PANE").as_deref() {
+                Ok("console") => Some(BrowserPane::Console),
+                Ok("network") => Some(BrowserPane::Network),
+                _ => None,
+            },
+            dev_servers: None,
             cookie_import: None,
             pulls: HashMap::new(),
             pulls_loading: false,
@@ -770,8 +797,42 @@ impl Inspector {
 impl Inspector {
     /// The thread's browser: its tabs, the page's address, and the place the page is laid
     /// over (GPUI keeps it empty; the web view follows its bounds every frame).
-    fn browser(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
-        let Some(thread) = self.thread.as_ref().map(|t| t.read(cx).id().to_string()) else { return empty("No thread open.", theme) };
+    /// The browser's thread and project, for the panel's buttons.
+    fn browser_thread(&self, cx: &App) -> Option<(String, String)> {
+        self.thread.as_ref().map(|t| {
+            let t = t.read(cx);
+            (t.id().to_string(), t.meta.project_id.clone())
+        })
+    }
+
+    /// The address field: a URL, a host, or words to search for, in the current tab or a new one.
+    fn go_to(&mut self, text: &str, cx: &mut Context<Self>) {
+        let Some((thread, project)) = self.browser_thread(cx) else { return };
+        let text = text.trim();
+        if text.is_empty() {
+            return;
+        }
+        let url = crate::browser::url_from(text).unwrap_or_else(|| format!("https://duckduckgo.com/?q={}", text.split_whitespace().collect::<Vec<_>>().join("+")));
+        if crate::browser::Browsers::with_tab(&thread, |t| t.web.load(&url)).is_none() {
+            crate::browser::Browsers::open_for_user(&thread, Some(&project), Some(&url));
+        }
+        cx.notify();
+    }
+
+    fn find_dev_servers(&mut self, cx: &mut Context<Self>) {
+        let task = cx.background_executor().spawn(async { yh_core::dev_servers::list() });
+        cx.spawn(async move |this, cx| {
+            let found = task.await;
+            let _ = this.update(cx, |this, cx| {
+                this.dev_servers = Some(found);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn browser(&mut self, theme: &Theme, window: &mut Window, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let Some((thread, project)) = self.browser_thread(cx) else { return empty("No thread open.", theme) };
         let tabs: Vec<(u32, String, bool, bool)> = crate::browser::Browsers::with(|b| {
             b.sessions
                 .get(&thread)
@@ -791,60 +852,211 @@ impl Inspector {
         }));
         if tabs.is_empty() {
             crate::browser::Browsers::show(None);
+            if self.dev_servers.is_none() {
+                self.dev_servers = Some(vec![]);
+                self.find_dev_servers(cx);
+            }
+            let servers = self.dev_servers.clone().unwrap_or_default();
+            let mut list = div().flex().flex_col().gap(px(4.)).w_full().px(px(16.));
+            if !servers.is_empty() {
+                list = list.child(div().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.secondary).child("Running on this Mac"));
+            }
+            for server in servers {
+                let url = server.url();
+                list = list.child(
+                    Button::new(SharedString::from(format!("dev-{}", server.port))).small().outline().w_full().label(format!("localhost:{} · {}", server.port, server.command)).on_click(cx.listener(move |this, _, _, cx| this.go_to(&url, cx))),
+                );
+            }
             return div()
                 .size_full()
                 .flex()
                 .flex_col()
-                .child(div().flex_1().child(empty("No pages open. When Claude opens one (mcp__browser__open), it shows here, and you can watch what it does.", theme)))
-                .child(div().flex().justify_center().pb(px(16.)).child(import_button))
+                .gap(px(10.))
+                .child(div().px(px(8.)).pt(px(8.)).child(Input::new(&self.address).small()))
+                .child(div().flex_1().child(empty("No pages open. Type an address, or wait for Claude to open one: it shows here, and you can watch what it does.", theme)))
+                .child(list)
+                .child(
+                    div()
+                        .flex()
+                        .justify_center()
+                        .gap(px(6.))
+                        .pb(px(16.))
+                        .child(Button::new("dev-refresh").xsmall().ghost().label("Look for Dev Servers").on_click(cx.listener(|this, _, _, cx| this.find_dev_servers(cx))))
+                        .child(import_button),
+                )
                 .into_any_element();
         }
-        let address = crate::browser::Browsers::with(|b| b.sessions.get(&thread).and_then(|s| s.selected_tab().map(|t| t.short_url()))).unwrap_or_default();
+        let (url, can_back, can_forward) = crate::browser::Browsers::with_tab(&thread, |t| (t.web.url().unwrap_or_default(), t.web.can_go_back(), t.web.can_go_forward())).unwrap_or_default();
+        // The field shows the page's address, except while you're typing in it.
+        if !gpui_kit::Focusable::focus_handle(self.address.read(cx), cx).is_focused(window) && self.address.read(cx).value() != url.as_str() {
+            let shown = url.clone();
+            self.address.update(cx, |a, cx| a.set_value(shown, window, cx));
+        }
         let mut strip = div().id("browser-tabs").flex().items_center().gap(px(4.)).px(px(8.)).py(px(6.)).overflow_x_scroll();
         for (id, title, on, loading) in tabs {
-            let t = thread.clone();
+            let (t, t2) = (thread.clone(), thread.clone());
             strip = strip.child(
                 div()
                     .id(SharedString::from(format!("browser-tab-{id}")))
+                    .group("tab")
                     .flex_none()
-                    .max_w(px(160.))
-                    .px(px(8.))
+                    .max_w(px(170.))
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .pl(px(8.))
+                    .pr(px(4.))
                     .py(px(2.))
                     .rounded(px(10.))
                     .text_size(px(11.))
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
                     .bg(if on { theme.accent.opacity(0.16) } else { theme.selected })
                     .text_color(if on { theme.text } else { theme.secondary })
-                    .child(if loading { format!("◌ {title}") } else { title })
+                    .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(if loading { format!("◌ {title}") } else { title }))
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("browser-tab-close-{id}")))
+                            .flex_none()
+                            .px(px(3.))
+                            .rounded(px(6.))
+                            .text_color(theme.secondary)
+                            .hover(|s| s.bg(theme.separator))
+                            .child("×")
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                crate::browser::Browsers::close_tab_now(&t2, id);
+                                cx.stop_propagation();
+                                cx.notify();
+                            })),
+                    )
                     .on_click(cx.listener(move |_, _, _, cx| {
                         crate::browser::Browsers::select_tab(&t, id);
                         cx.notify();
                     })),
             );
         }
+        let new_tab = {
+            let (thread, project) = (thread.clone(), project.clone());
+            Button::new("browser-new-tab").xsmall().ghost().label("+").tooltip("New Tab").on_click(cx.listener(move |this, _, window, cx| {
+                crate::browser::Browsers::open_for_user(&thread, Some(&project), None);
+                this.address.update(cx, |a, cx| {
+                    a.set_value("", window, cx);
+                    a.focus(window, cx);
+                });
+                cx.notify();
+            }))
+        };
+        let nav = |id: &'static str, label: &'static str, tip: &'static str, enabled: bool, act: fn(&crate::webview::WebView)| {
+            let thread = thread.clone();
+            Button::new(id).xsmall().ghost().label(label).tooltip(tip).disabled(!enabled).on_click(cx.listener(move |_, _, _, cx| {
+                crate::browser::Browsers::with_tab(&thread, |t| act(&t.web));
+                cx.notify();
+            }))
+        };
+        let menu = {
+            let (thread, project, url) = (thread.clone(), project.clone(), url.clone());
+            let page = cx.entity().downgrade();
+            Button::new("browser-more").xsmall().ghost().label("⋯").dropdown_menu(move |menu, _, _| {
+                let (u1, u2) = (url.clone(), url.clone());
+                let (p1, p2, p3, p4) = (page.clone(), page.clone(), page.clone(), page.clone());
+                let (project, thread) = (project.clone(), thread.clone());
+                menu.item(PopupMenuItem::new("Open in Default Browser").on_click(move |_, _, cx| cx.open_url(&u1)))
+                    .item(PopupMenuItem::new("Copy Address").on_click(move |_, _, cx| cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(u2.clone()))))
+                    .separator()
+                    .item(PopupMenuItem::new("Console").on_click(move |_, _, cx| {
+                        let _ = p1.update(cx, |this, cx| {
+                            this.browser_pane = if this.browser_pane == Some(BrowserPane::Console) { None } else { Some(BrowserPane::Console) };
+                            cx.notify();
+                        });
+                    }))
+                    .item(PopupMenuItem::new("Network").on_click(move |_, _, cx| {
+                        let _ = p2.update(cx, |this, cx| {
+                            this.browser_pane = if this.browser_pane == Some(BrowserPane::Network) { None } else { Some(BrowserPane::Network) };
+                            cx.notify();
+                        });
+                    }))
+                    .separator()
+                    .item(PopupMenuItem::new("Import Sign-ins…").on_click(move |_, _, cx| {
+                        let _ = p3.update(cx, |this, cx| {
+                            this.cookie_import = Some(CookieImport::Sources(yh_core::cookies::sources()));
+                            cx.notify();
+                        });
+                    }))
+                    .item(PopupMenuItem::new("Clear Browsing Data").on_click(move |_, _, cx| {
+                        // Sign-ins and storage go for the whole project; open pages reload signed out.
+                        crate::webview::clear_store(&project);
+                        crate::browser::Browsers::with_tab(&thread, |t| t.web.reload());
+                        let _ = p4.update(cx, |_, cx| cx.notify());
+                    }))
+            })
+        };
+        let pane = self.browser_pane.map(|which| {
+            let lines: Vec<(String, bool)> = crate::browser::Browsers::with_tab(&thread, |t| match which {
+                BrowserPane::Console => t.console.iter().rev().take(200).map(|c| (format!("{} {}", c.level, c.text), c.level == "error")).collect(),
+                BrowserPane::Network => t
+                    .network
+                    .iter()
+                    .rev()
+                    .take(200)
+                    .map(|r| {
+                        let status = r.failure.clone().or(r.status.map(|s| s.to_string())).unwrap_or_else(|| "…".into());
+                        let failed = r.failure.is_some() || r.status.is_some_and(|s| s >= 400);
+                        (format!("{status} {} {}", r.method, r.url), failed)
+                    })
+                    .collect(),
+            })
+            .unwrap_or_default();
+            div()
+                .h(px(180.))
+                .flex_none()
+                .flex()
+                .flex_col()
+                .border_t_1()
+                .border_color(theme.separator)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .px(px(8.))
+                        .py(px(3.))
+                        .text_size(px(11.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(if which == BrowserPane::Console { "Console" } else { "Network" })
+                        .child(Button::new("pane-close").xsmall().ghost().label("×").on_click(cx.listener(|this, _, _, cx| {
+                            this.browser_pane = None;
+                            cx.notify();
+                        }))),
+                )
+                .child(
+                    div()
+                        .id("browser-pane")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .px(px(8.))
+                        .font_family(MONO)
+                        .text_size(px(10.5))
+                        .when(lines.is_empty(), |d| d.text_color(theme.secondary).child("Nothing yet."))
+                        .children(lines.into_iter().map(|(line, bad)| div().py(px(1.)).whitespace_nowrap().overflow_hidden().text_ellipsis().text_color(if bad { theme.error } else { theme.secondary }).child(line))),
+                )
+        });
         let place = thread.clone();
         div()
             .size_full()
             .flex()
             .flex_col()
-            .child(div().flex().items_center().child(div().flex_1().min_w_0().child(strip)).child(div().pr(px(6.)).child(import_button)))
+            .child(div().flex().items_center().child(div().flex_1().min_w_0().child(strip)).child(div().pr(px(6.)).child(new_tab)))
             .child(
                 div()
-                    .mx(px(8.))
-                    .mb(px(6.))
-                    .px(px(8.))
-                    .py(px(3.))
-                    .rounded(px(6.))
-                    .bg(theme.card)
-                    .text_size(px(11.))
-                    .font_family(MONO)
-                    .text_color(theme.secondary)
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .child(address),
+                    .flex()
+                    .items_center()
+                    .gap(px(2.))
+                    .px(px(6.))
+                    .pb(px(6.))
+                    .child(nav("browser-back", "‹", "Back", can_back, |w| w.go_back()))
+                    .child(nav("browser-forward", "›", "Forward", can_forward, |w| w.go_forward()))
+                    .child(nav("browser-reload", "↻", "Reload", true, |w| w.reload()))
+                    .child(div().flex_1().min_w_0().child(Input::new(&self.address).xsmall().font_family(MONO)))
+                    .child(menu),
             )
             .child(
                 div().flex_1().min_h_0().border_t_1().border_color(theme.separator).child(
@@ -859,6 +1071,7 @@ impl Inspector {
                     .size_full(),
                 ),
             )
+            .children(pane)
             .into_any_element()
     }
 
@@ -1216,7 +1429,7 @@ fn empty(text: &str, theme: &Theme) -> gpui_kit::AnyElement {
 }
 
 impl Render for Inspector {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::get(cx);
         let panel = self.workspace.read(cx).panel;
         if panel == Panel::SideChat {
@@ -1226,7 +1439,7 @@ impl Render for Inspector {
             self.ensure_pulls(cx);
         }
         let content = match panel {
-            Panel::Browser => self.browser(&theme, cx),
+            Panel::Browser => self.browser(&theme, window, cx),
             Panel::PullRequests => self.pull_requests(&theme, cx),
             Panel::SideChat => self.side_chat(&theme, cx),
             Panel::Subagents => self.subagents(&theme, cx),

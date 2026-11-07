@@ -203,6 +203,26 @@ impl Browsers {
         id
     }
 
+    /// A tab you open from the panel (an address, or a blank page with None).
+    pub fn open_for_user(thread: &str, project: Option<&str>, url: Option<&str>) {
+        Browsers::with(|b| {
+            b.open_tab(thread, project, url.unwrap_or(""));
+        });
+    }
+
+    /// Does something with a thread's current tab, from the panel's buttons.
+    pub fn with_tab<T>(thread: &str, f: impl FnOnce(&mut Tab) -> T) -> Option<T> {
+        Browsers::with(|b| {
+            let s = b.sessions.get_mut(thread)?;
+            let id = s.selected_tab()?.id;
+            s.tabs.iter_mut().find(|t| t.id == id).map(f)
+        })
+    }
+
+    pub fn close_tab_now(thread: &str, id: u32) {
+        Browsers::with(|b| b.close_tab(thread, id));
+    }
+
     pub fn select_tab(thread: &str, id: u32) {
         Browsers::with(|b| {
             if let Some(s) = b.sessions.get_mut(thread) {

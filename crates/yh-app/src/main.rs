@@ -234,6 +234,13 @@ fn main() {
                 }
             });
         }
+        // `YH_BROWSER_OPEN=<url>`: a page in the open thread's browser at launch, as you'd open it.
+        if let Some(url) = env("YH_BROWSER_OPEN") {
+            let found = workspace.read(cx).selected_thread().map(|t| (t.read(cx).id().to_string(), t.read(cx).meta.project_id.clone()));
+            if let Some((thread, project)) = found {
+                browser::Browsers::open_for_user(&thread, Some(&project), Some(&url));
+            }
+        }
         // `YH_SELECT=<title or id>`: open a thread at launch; `YH_SEND=<text>` then sends it.
         if let Some(wanted) = env("YH_SELECT") {
             workspace.update(cx, |ws, cx| {
