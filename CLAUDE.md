@@ -182,8 +182,10 @@ Nothing is released from `rewrite` until it's the whole app. `main` keeps the fr
 release scripts (`legacy/scripts` here). The pipeline is ready for after the switch:
 `RELEASE=1 scripts/bundle.sh` builds the real app (bundle ID `com.mdovhopo.yourharness`, signed with
 the app's own identity from `~/.yourharness/signing`), `scripts/dmg.sh` packs it with its `.sha256`,
-`scripts/release.sh <version>` (from `main` only) tags it and `.github/workflows/release.yml` publishes
-it, and the updater (`state/updater.rs`) installs it on every copy, the Swift app's included: same
+`scripts/check-dmg.sh <dmg> [identity]` checks it as the updaters will, `scripts/release.sh <version>`
+(from `main` only) tests, builds and checks the DMG, then tags and pushes, and
+`.github/workflows/release.yml` builds it again and publishes it (run it by hand to test the pipeline
+on a branch, artifact only: `gh workflow run release.yml --ref rewrite`), and the updater (`state/updater.rs`) installs it on every copy, the Swift app's included: same
 bundle ID and signature. Never run a `RELEASE=1` build here: it shares your app's permissions and
 data. Test the updater with `.next` copies and `YH_UPDATE_FEED=<release.json>` (`YH_UPDATE_DOWNLOAD=1`,
 `YH_UPDATE_RESTART=1` run the whole flow; `VERSION_OVERRIDE=9.9.9 scripts/bundle.sh` makes the newer copy).

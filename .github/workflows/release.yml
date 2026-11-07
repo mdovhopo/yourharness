@@ -1,19 +1,43 @@
-# Builds YourHarness.dmg from the Rust app (crates/, RELEASE=1 scripts/bundle.sh). A pushed v<version> tag (scripts/release.sh) also publishes it as a
-# GitHub release, with that version's CHANGELOG.md notes. Run it by hand to get a DMG of
-# any commit as a workflow artifact.
+# Builds YourHarness-<version>.dmg (and its .sha256) from the Rust app: tests, then
+# RELEASE=1 scripts/bundle.sh, scripts/dmg.sh, and scripts/check-dmg.sh checks it the way the
+# updaters will. A pushed v<version> tag (scripts/release.sh) also publishes it as a GitHub
+# release, with that version's CHANGELOG.md notes.
+#
+# Run it by hand to test the pipeline on any branch: the DMG is a workflow artifact and nothing
+# is published. `gh workflow run release.yml --ref rewrite`
+# `publish` only matters when it's run on a v* tag (a release whose job failed): it creates the
+# release, or replaces its files.
 name: Release
 
 on:
   push:
     tags: ["v*.*.*"]
   workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish the GitHub release (only when run on a v* tag; otherwise the DMG is an artifact only)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # The Rust the release is built with, so a new stable never changes a release under us.
+  # Bump it on purpose (the runner image has it preinstalled when it matches).
+  RUST_TOOLCHAIN: "1.99.1"
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: "0"
+  CARGO_NET_RETRY: "10"
+
 jobs:
   dmg:
     runs-on: macos-26
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v5
         with:
@@ -27,18 +51,50 @@ jobs:
 
       - name: Check the tag matches VERSION
         if: github.ref_type == 'tag'
-        run: test "v$(cat VERSION)" = "$GITHUB_REF_NAME"
+        run: |
+          if [ "v$(cat VERSION)" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::The tag is $GITHUB_REF_NAME but VERSION says $(cat VERSION)."
+            exit 1
+          fi
 
       - name: Rust
         run: |
-          rustup toolchain install stable --profile minimal --target aarch64-apple-darwin
-          rustup default stable
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target aarch64-apple-darwin
+          rustup default "$RUST_TOOLCHAIN"
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          rustc -V
+          cargo -V
+
+      # The registry and the dependencies' build, keyed on Cargo.lock and the toolchain.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      # The patched GPUI crate (scripts/vendor.sh), so a release doesn't hang on crates.io.
+      - uses: actions/cache@v4
+        with:
+          path: vendor
+          key: vendor-${{ hashFiles('patches/**', 'scripts/vendor.sh') }}
+
+      - name: Vendor the patched GPUI crates
+        run: scripts/vendor.sh
+
+      # GPUI either compiles its Metal shaders at build time with `xcrun metal`, which Xcode 26
+      # no longer ships (it's a separate download), or at run time with `runtime_shaders`,
+      # which gpui-kit turns on today. Download the toolchain only if that ever changes.
+      - name: Metal shaders
+        run: |
+          if cargo tree --locked -p yh-app -e features -i gpui-pre-apple | grep -q 'gpui-pre-apple feature "runtime_shaders"'; then
+            echo "GPUI compiles its shaders at run time: no Metal toolchain needed."
+          elif xcrun metal --version >/dev/null 2>&1; then
+            xcrun metal --version
+          else
+            xcodebuild -downloadComponent MetalToolchain
+            xcrun metal --version
+          fi
 
       - name: Test
-        run: |
-          scripts/vendor.sh
-          cargo test --release
+        run: cargo test --release --locked
 
       # The app's own identity, so every release is the same app to macOS and the updater
       # can tell a real update. A tag must be signed: an ad hoc build would break that chain.
@@ -69,13 +125,24 @@ jobs:
           scripts/dmg.sh
           echo "VERSION=$(cat VERSION)" >> "$GITHUB_ENV"
 
+      # What both updaters check (bundle ID, version, signature, the .sha256), and when it's
+      # signed with the identity, that it's that identity and not ad hoc.
+      - name: Check the DMG
+        run: |
+          if [ -n "${YH_SIGN_IDENTITY:-}" ]; then
+            scripts/check-dmg.sh "build/YourHarness-$VERSION.dmg" "YourHarness Self-Signed"
+          else
+            scripts/check-dmg.sh "build/YourHarness-$VERSION.dmg"
+          fi
+
       - uses: actions/upload-artifact@v4
         with:
           name: YourHarness-${{ env.VERSION }}
           path: build/YourHarness-${{ env.VERSION }}.dmg*
+          if-no-files-found: error
 
       - name: Publish the release
-        if: github.ref_type == 'tag'
+        if: github.ref_type == 'tag' && (github.event_name == 'push' || inputs.publish)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -84,5 +151,14 @@ jobs:
             echo
             cat .github/install-notes.md
           } > notes.md
-          gh release create "$GITHUB_REF_NAME" build/YourHarness-$VERSION.dmg build/YourHarness-$VERSION.dmg.sha256 \
-            --title "YourHarness $VERSION" --notes-file notes.md --verify-tag
+          files=("build/YourHarness-$VERSION.dmg" "build/YourHarness-$VERSION.dmg.sha256")
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "${files[@]}" \
+              --title "YourHarness $VERSION" --notes-file notes.md --verify-tag
+          fi
+
+      - name: Remove the signing keychain
+        if: always() && env.YH_SIGN_KEYCHAIN != ''
+        run: security delete-keychain "$YH_SIGN_KEYCHAIN" || true
