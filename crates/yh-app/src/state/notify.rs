@@ -55,6 +55,10 @@ impl Workspace {
     /// Tells you about `thread` unless you're looking at it.
     pub fn notify_about(&self, kind: Kind, thread: &Entity<ThreadState>, body: String, cx: &Context<Self>) {
         let t = thread.read(cx);
+        // A side chat is asked from the open thread's sidebar: it never notifies.
+        if t.id().starts_with(SIDE) {
+            return;
+        }
         if !self.library.setting("notifications").and_then(|v| v.as_bool()).unwrap_or(true) {
             return;
         }
@@ -71,7 +75,7 @@ impl Workspace {
 
     /// What a request to you is, as a notification's body.
     pub fn describe_request(thread: &ThreadState) -> String {
-        if thread.elicitation.is_some() && !thread.waiting_for_you() {
+        if thread.elicitation().is_some() && !thread.waiting_for_you() {
             return "An MCP server is asking you something.".into();
         }
         // The newest request: the one that just came.

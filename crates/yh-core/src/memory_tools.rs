@@ -14,7 +14,12 @@ pub struct MemoryTools {
     pub on_change: Box<dyn Fn() + Send + Sync>,
     /// The importer and reconciler: also list, stats, merge, unlink, restore and pin.
     pub specialist: bool,
+    /// Search and read only (a side chat: it can look, never change).
+    pub read_only: bool,
 }
+
+/// What a read-only memory offers.
+const READ_ONLY_TOOLS: &[&str] = &["search", "read"];
 
 fn kinds() -> Value {
     json!({ "type": "string", "enum": KINDS, "description": "user, feedback, project or reference. Tasks are kept with `track`." })
@@ -500,11 +505,14 @@ impl ToolServer for MemoryTools {
                     schema(json!({ "id": { "type": "string" }, "pinned": { "type": "boolean" } }), &["id", "pinned"]), false, false),
             ]);
         }
+        if self.read_only {
+            all.retain(|t| t["name"].as_str().is_some_and(|n| READ_ONLY_TOOLS.contains(&n)));
+        }
         all
     }
 
     fn call(&self, tool: &str, a: &Value, tool_use_id: Option<&str>) -> ToolResult {
-        if !self.specialist && ["list", "stats", "merge", "unlink", "restore", "pin"].contains(&tool) {
+        if (!self.specialist && ["list", "stats", "merge", "unlink", "restore", "pin"].contains(&tool)) || (self.read_only && !READ_ONLY_TOOLS.contains(&tool)) {
             return ToolResult::error(format!("No tool named {tool}."));
         }
         match tool {

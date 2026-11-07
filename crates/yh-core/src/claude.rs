@@ -209,6 +209,20 @@ impl ModelInfo {
     }
 }
 
+/// What a sub-agent has used: its `usage` in `task_progress` and `task_notification`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SubagentUsage {
+    pub tokens: Option<u64>,
+    pub tool_uses: Option<u64>,
+    pub duration_ms: Option<u64>,
+}
+
+impl SubagentUsage {
+    fn from_json(v: &Value) -> SubagentUsage {
+        SubagentUsage { tokens: v["total_tokens"].as_u64(), tool_uses: v["tool_uses"].as_u64(), duration_ms: v["duration_ms"].as_u64() }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum Event {
     /// The CLI's catalog, as JSON: `models` (see `ModelInfo`) and `commands`.
@@ -225,8 +239,10 @@ pub enum Event {
     ToolResults { parent: Option<String>, results: Vec<ToolResult> },
     /// `task_id` is what `stop_task` takes to stop it.
     SubagentStarted { tool_id: String, description: String, task_id: Option<String> },
+    /// What a sub-agent is doing now ("Reading a.txt") and what it has used so far.
+    SubagentProgress { tool_id: String, activity: Option<String>, usage: SubagentUsage },
     /// A sub-agent's end, with its summary (a background one's report comes only here).
-    SubagentFinished { tool_id: String, status: String, summary: Option<String> },
+    SubagentFinished { tool_id: String, status: String, summary: Option<String>, usage: SubagentUsage },
     /// A job Claude left running: a command in the background (`run_in_background`), a
     /// foreground one that's taking a while, or a watch (Monitor). `task_id` is what
     /// `stop_task` takes; `tool_id` the call that started it.
@@ -240,7 +256,11 @@ pub enum Event {
     JobsRunning(Vec<String>),
     Permission { request_id: String, tool: String, description: String, input: String },
     /// An MCP server asks something mid-call: a form (`schema`) or a page to visit (`url`).
-    Elicitation { request_id: String, server: String, message: String, mode: String, schema: Value, url: Option<String> },
+    Elicitation { request_id: String, server: String, message: String, mode: String, schema: Value, url: Option<String>, elicitation_id: Option<String> },
+    /// A page-mode question answered on the page: the server has its answer.
+    ElicitationComplete { server: String, elicitation_id: String },
+    /// What the CLI is doing between messages: `requesting`, `compacting`.
+    Status(String),
     Notice(String),
     /// What a built-in command printed (`/context`, `/usage`): markdown, not a reply.
     CommandOutput(String),
@@ -370,9 +390,9 @@ impl ClaudeProcess {
         args.extend(options.extra_args);
         let mut command = Command::new(&executable);
         command.args(&args).current_dir(&options.cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-        if let Ok(path) = std::env::var("YH_PATH") {
-            command.env("PATH", path);
-        }
+        // The login shell's environment (`YH_PATH`'s in test runs), never an outer Claude Code
+        // session's variables.
+        crate::shell_env::apply(&mut command);
         for (k, v) in &options.env {
             command.env(k, v);
         }
@@ -661,7 +681,21 @@ impl Parser {
                     tool_id: object["tool_use_id"].as_str().unwrap_or("").into(),
                     status: object["status"].as_str().unwrap_or("completed").into(),
                     summary: object["summary"].as_str().map(str::to_string),
+                    usage: SubagentUsage::from_json(&object["usage"]),
                 }],
+                "task_progress" => match object["tool_use_id"].as_str() {
+                    Some(id) => vec![Event::SubagentProgress {
+                        tool_id: id.into(),
+                        activity: object["description"].as_str().filter(|d| !d.is_empty()).map(str::to_string),
+                        usage: SubagentUsage::from_json(&object["usage"]),
+                    }],
+                    None => vec![],
+                },
+                "status" => object["status"].as_str().map(|s| vec![Event::Status(s.into())]).unwrap_or_default(),
+                "elicitation_complete" => match (object["mcp_server_name"].as_str(), object["elicitation_id"].as_str()) {
+                    (Some(server), Some(id)) => vec![Event::ElicitationComplete { server: server.into(), elicitation_id: id.into() }],
+                    _ => vec![],
+                },
                 "compact_boundary" => {
                     let meta = &object["compact_metadata"];
                     let mut notice =
@@ -790,6 +824,7 @@ impl Parser {
                         mode: request["mode"].as_str().unwrap_or("form").into(),
                         schema: request["requested_schema"].clone(),
                         url: request["url"].as_str().map(str::to_string),
+                        elicitation_id: request["elicitation_id"].as_str().map(str::to_string),
                     }];
                 }
                 if request["subtype"] != "can_use_tool" {
@@ -1034,6 +1069,35 @@ mod tests {
         assert_eq!(compact_tokens(1_000_000), "1M");
         assert_eq!(compact_tokens(200_000), "200k");
         assert_eq!(compact_tokens(512), "512");
+    }
+
+    /// The Swift app's capture: a foreground sub-agent reading two files.
+    const SUBAGENT: &str = include_str!("../../../legacy/Tests/HarnessCoreTests/Fixtures/subagent-foreground.jsonl");
+
+    #[test]
+    fn reads_sub_agent_progress_and_status() {
+        let events = events(SUBAGENT);
+        let progress: Vec<(String, Option<String>, Option<u64>)> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::SubagentProgress { tool_id, activity, usage } => Some((tool_id.clone(), activity.clone(), usage.tokens)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(progress.first(), Some(&("toolu_01VNvV6dcB9RqSfqqTfFRccv".to_string(), Some("Reading a.txt".to_string()), Some(15684))));
+        assert!(events.iter().any(|e| matches!(e, Event::SubagentFinished { usage, .. } if usage.tokens.is_some())));
+        assert!(matches!(&parse(r#"{"type":"system","subtype":"status","status":"compacting"}"#)[..], [Event::Status(s)] if s == "compacting"));
+        assert!(parse(r#"{"type":"system","subtype":"status","status":null}"#).is_empty());
+        assert!(parse(r#"{"type":"system","subtype":"task_progress","description":"x"}"#).is_empty());
+    }
+
+    #[test]
+    fn reads_elicitations_and_their_end() {
+        let asked = parse(r#"{"type":"control_request","request_id":"r1","request":{"subtype":"elicitation","mcp_server_name":"s","message":"Sign in","mode":"url","url":"https://x","elicitation_id":"e1"}}"#);
+        assert!(matches!(&asked[..], [Event::Elicitation { elicitation_id: Some(id), mode, .. }] if id == "e1" && mode == "url"));
+        let done = parse(r#"{"type":"system","subtype":"elicitation_complete","mcp_server_name":"s","elicitation_id":"e1"}"#);
+        assert!(matches!(&done[..], [Event::ElicitationComplete { server, elicitation_id }] if server == "s" && elicitation_id == "e1"));
+        assert!(parse(r#"{"type":"system","subtype":"elicitation_complete","mcp_server_name":"s"}"#).is_empty());
     }
 
     #[test]

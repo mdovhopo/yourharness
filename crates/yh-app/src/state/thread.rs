@@ -23,6 +23,11 @@ pub struct Subagent {
     pub log: Vec<SubStep>,
     /// What `stop_task` takes to stop it (the right sidebar's Stop).
     pub task_id: Option<String>,
+    /// What it's doing now, as the CLI says it (`task_progress`: "Reading a.txt").
+    pub activity: Option<String>,
+    /// Tokens it has used so far, and its tool calls, as the CLI counts them.
+    pub tokens: Option<u64>,
+    pub tool_uses: Option<u64>,
 }
 
 /// One thing a sub-agent did: a message (`tool` None) or a tool call with its result.
@@ -39,7 +44,12 @@ const SUBAGENT_LOG: usize = 200;
 
 impl Subagent {
     fn new(description: String) -> Subagent {
-        Subagent { description, status: "running".into(), steps: 0, report: None, log: vec![], task_id: None }
+        Subagent { description, status: "running".into(), steps: 0, report: None, log: vec![], task_id: None, activity: None, tokens: None, tool_uses: None }
+    }
+
+    fn apply(&mut self, usage: yh_core::claude::SubagentUsage) {
+        self.tokens = usage.tokens.or(self.tokens);
+        self.tool_uses = usage.tool_uses.or(self.tool_uses);
     }
 }
 
@@ -220,6 +230,8 @@ pub struct Elicitation {
     pub mode: String,
     pub schema: serde_json::Value,
     pub url: Option<String>,
+    /// A page's question: what its end (`elicitation_complete`) names it by.
+    pub elicitation_id: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -240,6 +252,22 @@ impl ThreadState {
         !self.permissions.is_empty()
     }
 
+    /// The MCP question the composer shows: the oldest waiting.
+    pub fn elicitation(&self) -> Option<&Elicitation> {
+        self.elicitations.first()
+    }
+
+    /// Your queued messages go back into the composer, and their rows become notes: for a
+    /// stop, and when `claude` is gone with them unread.
+    pub fn restore_queued(&mut self) {
+        let queued: Vec<EntryRef> = self.items.iter().rev().take(40).flat_map(|i| i.entries.iter()).filter(|e| e.borrow().queued).cloned().collect();
+        for e in queued.into_iter().rev() {
+            let id = e.borrow().data.id.clone();
+            self.composer.restore_on_withdraw.insert(id);
+            self.withdrawn(&e);
+        }
+    }
+
     /// Takes a request off the list once answered.
     pub fn answered(&mut self, request_id: &str) -> Option<Permission> {
         let i = self.permissions.iter().position(|p| p.id == request_id)?;
@@ -253,8 +281,6 @@ pub struct ThreadState {
     pub items: Vec<Item>,
     pub list: ListState,
     pub running: bool,
-    /// You pressed Stop on this turn: its end says "Interrupted", and nobody's notified.
-    pub stop_requested: bool,
     /// A turn ended while you were elsewhere.
     pub unread: bool,
     /// The checklist Claude keeps with its task tools, from the rows held.
@@ -264,8 +290,20 @@ pub struct ThreadState {
     /// Requests waiting for you, oldest first: parallel sub-agents can each ask at once. The
     /// composer shows the first; each is answered by its own request id.
     pub permissions: Vec<Permission>,
-    pub elicitation: Option<Elicitation>,
+    /// MCP servers' questions mid-call, oldest first: the composer shows the first.
+    pub elicitations: Vec<Elicitation>,
     pub sign_in: Option<SignInAsk>,
+    /// You pressed Stop: the turn's end is "Interrupted", not an error, and tells nobody.
+    pub interrupt_requested: bool,
+    /// The turn that just ended was stopped by you (read by the workspace as it ends).
+    pub stopped_by_you: bool,
+    /// What the CLI is doing between messages, when it says ("Compacting the conversation…").
+    pub activity: Option<String>,
+    /// The session's start (`init`) came from this `claude`: a resume that never got one failed.
+    pub received_init: bool,
+    /// Its first title was a guess (the subject wasn't known yet): written again from the
+    /// conversation once the first turn is over.
+    pub title_needs_refinement: bool,
     /// Rows of the history before the first one held.
     pub before: usize,
     pub loaded: bool,
@@ -341,13 +379,17 @@ impl ThreadState {
             items: vec![],
             list: ListState::new(0, ListAlignment::Bottom, px(800.)),
             running: false,
-            stop_requested: false,
             unread: false,
             plan: Default::default(),
             find_hit: None,
             permissions: vec![],
-            elicitation: None,
+            elicitations: vec![],
             sign_in: None,
+            interrupt_requested: false,
+            stopped_by_you: false,
+            activity: None,
+            received_init: false,
+            title_needs_refinement: false,
             before: 0,
             loaded: false,
             loading: false,
@@ -863,8 +905,37 @@ impl ThreadState {
         match event {
             Event::Session { id } => {
                 self.session_id = Some(id);
+                self.received_init = true;
                 false
             }
+            Event::Status(status) => {
+                let activity = (status == "compacting").then(|| "Compacting the conversation…".to_string());
+                let changed = activity != self.activity;
+                self.activity = activity;
+                changed
+            }
+            Event::SubagentProgress { tool_id, activity, usage } => {
+                if let Some((e, pos)) = self.tools.get(&tool_id).cloned() {
+                    {
+                        let mut b = e.borrow_mut();
+                        let is_agent = b.sub.is_some() || b.data.tool_name.as_deref().is_some_and(|n| AGENT_TOOLS.contains(&n));
+                        if !is_agent {
+                            return false;
+                        }
+                        let sub = b.sub.get_or_insert_with(|| Subagent::new(String::new()));
+                        if activity.is_some() {
+                            sub.activity = activity;
+                        }
+                        sub.apply(usage);
+                        b.version += 1;
+                    }
+                    self.subagents_version += 1;
+                    self.touch_pos(pos);
+                }
+                false
+            }
+            // Answered for you by the workspace (it holds the process), which takes it off the list.
+            Event::ElicitationComplete { .. } => false,
             Event::Lifecycle { id, state } => self.lifecycle(&id, &state),
             Event::CommandOutput(text) => {
                 self.next_note += 1;
@@ -1097,12 +1168,14 @@ impl ThreadState {
                 }
                 false
             }
-            Event::SubagentFinished { tool_id, status, summary } => {
+            Event::SubagentFinished { tool_id, status, summary, usage } => {
                 if let Some((e, pos)) = self.tools.get(&tool_id).cloned() {
                     {
                         let mut b = e.borrow_mut();
                         let sub = b.sub.get_or_insert_with(|| Subagent::new(String::new()));
                         sub.status = status;
+                        sub.activity = None;
+                        sub.apply(usage);
                         if summary.is_some() {
                             sub.report = summary;
                         }
@@ -1112,8 +1185,13 @@ impl ThreadState {
                 }
                 false
             }
-            Event::Elicitation { request_id, server, message, mode, schema, url } => {
-                self.elicitation = Some(Elicitation { id: request_id, server, message, mode, schema, url });
+            Event::Elicitation { request_id, server, message, mode, schema, url, elicitation_id } => {
+                // Several servers (or calls) can ask at once: each waits its turn.
+                let asked = Elicitation { id: request_id, server, message, mode, schema, url, elicitation_id };
+                match self.elicitations.iter_mut().find(|e| e.id == asked.id) {
+                    Some(e) => *e = asked,
+                    None => self.elicitations.push(asked),
+                }
                 true
             }
             Event::Permission { request_id, tool, description, input } => {
@@ -1132,9 +1210,11 @@ impl ThreadState {
             Event::Done { is_error, text } => {
                 self.end_turn();
                 // Stopped for a message sent now, which carries that on itself; stopped by you,
-                // a plain note (the CLI ends it as `error_during_execution`).
-                if is_error && self.composer.sending_now.is_empty() {
-                    if self.stop_requested {
+                // a plain note (the CLI ends it as `error_during_execution`); anything else, the
+                // CLI's error.
+                let for_message = !self.composer.sending_now.is_empty();
+                if is_error && !for_message {
+                    if self.interrupt_requested {
                         self.notice("Interrupted");
                     } else if text.is_empty() || (text.starts_with("error_") && !text.contains(' ')) {
                         let why = if text.is_empty() { String::new() } else { format!(" ({text})") };
@@ -1143,6 +1223,8 @@ impl ThreadState {
                         self.error_notice(&text);
                     }
                 }
+                self.stopped_by_you = self.interrupt_requested || for_message;
+                self.interrupt_requested = false;
                 true
             }
             Event::JobStarted { task_id, tool_id, description, background } => {
@@ -1175,9 +1257,22 @@ impl ThreadState {
                     self.notice(&note);
                 }
                 self.end_turn();
-                if code != 0 {
-                    self.error_notice(&format!("claude exited ({code}) {tail}"));
+                // Whatever still waited never reached Claude: back to the composer.
+                self.restore_queued();
+                self.composer.sending_now.clear();
+                self.interrupt_requested = false;
+                self.elicitations.clear();
+                if code != 0 && !self.received_init && self.session_id.is_some() {
+                    // Its session couldn't be resumed (gone, or another folder's): start afresh.
+                    self.session_id = None;
+                    self.meta.session_id = None;
+                    self.error_notice("Couldn't resume the previous session. Your next message starts a new one.");
+                } else if code != 0 {
+                    let detail: Vec<&str> = tail.lines().filter(|l| !l.trim().is_empty()).collect();
+                    let detail = detail[detail.len().saturating_sub(3)..].join("\n");
+                    self.error_notice(&format!("Claude exited (code {code}). {detail}").trim_end().to_string());
                 }
+                self.received_init = false;
                 true
             }
         }
@@ -1232,6 +1327,7 @@ impl ThreadState {
         }
         self.blocks.clear();
         self.running = false;
+        self.activity = None;
         self.permissions.clear();
         // How long the turn took goes on the message that started it.
         let start = self.items.iter().rev().filter(|i| i.ty == ItemType::User).map(|i| i.entries[0].clone()).find(|e| starts_turn(&e.borrow()));

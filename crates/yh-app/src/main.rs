@@ -56,6 +56,8 @@ fn main() {
             IMPORTED.store(true, std::sync::atomic::Ordering::SeqCst);
         }
     }
+    // The login shell's environment for `claude` and its tools, read aside (`YH_PATH` skips it).
+    yh_core::shell_env::start();
     let mut library = yh_core::library::Library::open();
     if IMPORTED.load(std::sync::atomic::Ordering::SeqCst) {
         let home = library.fix_imported_home(&yh_core::library::data_directory(), env("YH_DATA_DIR").is_some());
@@ -468,6 +470,25 @@ fn main() {
                             _ => ws.withdraw(&t, &id, false, cx),
                         }
                     })
+                });
+            })
+            .detach();
+        }
+        // `YH_STOP=<seconds>`: ⌘. that long after launch, through the window as the shortcut goes
+        // (queued messages back into the composer, the turn ending "Interrupted").
+        if let Some(delay) = env("YH_STOP").and_then(|v| v.parse::<f64>().ok()) {
+            let root = root.clone();
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(Duration::from_secs_f64(delay)).await;
+                let _ = window.update(cx, |_, window, cx| {
+                    let running = root.read(cx).workspace.read(cx).selected_thread().is_some_and(|t| t.read(cx).running);
+                    eprintln!("STOP pressed (running={running})");
+                    window.dispatch_action(Box::new(Stop), cx);
+                });
+                cx.background_executor().timer(Duration::from_secs(3)).await;
+                let _ = window.update(cx, |_, _, cx| {
+                    let draft = root.read(cx).composer.read(cx).input.read(cx).value().to_string();
+                    eprintln!("STOP composer now holds: {draft:?}");
                 });
             })
             .detach();

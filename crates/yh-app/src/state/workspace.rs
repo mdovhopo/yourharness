@@ -49,6 +49,8 @@ struct Runtime {
     /// Effort is a launch option: a different one starts a new process.
     effort: Option<String>,
     idle: Option<Task<()>>,
+    /// A launch option (effort) changed while a turn was under way: started over once idle.
+    restart_when_idle: bool,
 }
 
 /// What can stand in place of the open thread.
@@ -105,6 +107,15 @@ pub const MEMORY_AGENT: &str = "memory:";
 
 /// What a side chat's agent is told.
 const SIDE_CHAT_PROMPT: &str = "This is a side conversation. You are a copy of the conversation above, opened so the user can ask something on the side without interrupting or adding to the main thread; nothing said here reaches it. Answer the question directly and briefly. You have Read, Glob, Grep, Bash, WebFetch and WebSearch: use them when the answer needs a fresh look rather than what the conversation already says. The app asks the user to approve commands that could change something. You have no tools to edit files: if the answer needs changes, say what the main thread should do.";
+
+/// The side chat's view of its thread's browser.
+const SIDE_BROWSER_PROMPT: &str = "You can look at the thread's browser, built into YourHarness, with the mcp__browser__ tools: status, snapshot, screenshot, console and network. You can't click or type there; that's for the main thread.";
+
+/// The side chat's view of the workspace's memory.
+const SIDE_MEMORY_PROMPT: &str = "This workspace has a memory kept by YourHarness: mcp__memory__search finds what earlier sessions learned and mcp__memory__read reads it. You can't change it from here.";
+
+/// When `gh stack` is installed: how GitHub's stacked PRs are made here.
+const STACKS_PROMPT: &str = "The user works with GitHub's stacked pull requests through the `gh stack` extension. For a stack (or stacked PRs): `gh stack init --base <trunk> [branches…]` starts one or adopts existing branches, bottom first; `gh stack add <branch>` adds a branch on top (run it on the top branch, then commit there); `gh stack submit --auto --open` pushes and opens or updates the PRs; `gh stack sync` rebases and pushes after changes below; `gh stack view --json` shows the stack. Pass flags so nothing prompts. Don't merge a stack unless asked: YourHarness shows the stack with its merge buttons.";
 
 /// A thread action that Undo takes back.
 pub enum Undo {
@@ -182,6 +193,9 @@ pub struct Workspace {
     merge_links: Arc<std::sync::Mutex<HashMap<String, (usize, Vec<yh_core::forge::Link>)>>>,
     /// Why the last generated title failed, until one works.
     pub title_error: Option<String>,
+    /// Whether `gh stack` is installed, once looked (aside, at launch): its instructions then
+    /// go to every thread's agent.
+    stacks_installed: Option<bool>,
 }
 
 impl EventEmitter<WorkspaceEvent> for Workspace {}
@@ -244,7 +258,20 @@ impl Workspace {
             composer: ComposerJobs::default(),
             merge_links: Default::default(),
             title_error: None,
+            stacks_installed: None,
         };
+        // Is `gh stack` there? Looked aside, so the first thread's agent knows how stacks are made.
+        cx.spawn(async move |this, cx| {
+            let installed = cx
+                .background_executor()
+                .spawn(async move {
+                    let path = std::env::var("YH_PATH").ok();
+                    yh_core::git::which("gh", path.as_deref()).is_some() && yh_core::github::GitHubStacks::new(path.as_deref()).is_installed()
+                })
+                .await;
+            let _ = this.update(cx, |ws, _| ws.stacks_installed = Some(installed));
+        })
+        .detach();
         if let Some(Value::Object(all)) = workspace.library.setting("slashCommands") {
             for (project, list) in all {
                 let list = list.as_array().map(|a| a.iter().filter_map(SlashCommand::from_json).collect()).unwrap_or_default();
@@ -869,6 +896,31 @@ impl Workspace {
         .detach();
     }
 
+    /// A first title that was a guess, written again from the conversation (the rows held: it's
+    /// the end of the thread's first turn). One you chose stays.
+    fn refine_title(&mut self, thread: &Entity<ThreadState>, cx: &mut Context<Self>) {
+        let (id, messages) = {
+            let t = thread.read(cx);
+            let messages: Vec<(bool, String)> = t
+                .items
+                .iter()
+                .flat_map(|i| i.entries.iter())
+                .filter_map(|e| {
+                    let b = e.borrow();
+                    match b.data.kind {
+                        yh_core::library::Kind::User => Some((true, b.data.text.clone())),
+                        yh_core::library::Kind::Assistant => Some((false, b.data.text.clone())),
+                        _ => None,
+                    }
+                })
+                .collect();
+            (t.id().to_string(), messages)
+        };
+        thread.update(cx, |t, _| t.title_needs_refinement = false);
+        let sent = messages.iter().filter(|m| m.0).count();
+        self.update_title_for_agent(&id, messages, sent, None, cx);
+    }
+
     /// Keep Awake follows whether Claude works anywhere; its one timer is for a deadline.
     pub fn note_working(&mut self, cx: &mut Context<Self>) {
         let working = self.threads.iter().any(|t| t.read(cx).running) || self.by_id.values().any(|t| t.read(cx).running);
@@ -1301,7 +1353,7 @@ impl Workspace {
         if first_message && title == "New thread" && !chosen && !subject.is_empty() {
             self.generate_title(thread, &subject, cx);
         }
-        if let Err(error) = self.ensure_runtime(thread, cx) {
+        if let Err(error) = self.ensure_runtime(thread, running, cx) {
             thread.update(cx, |t, cx| {
                 // As the Swift app's `fail`: the reason itself, in error colour.
                 t.error_notice(&error);
@@ -1348,20 +1400,87 @@ impl Workspace {
         cx.notify();
     }
 
-    fn ensure_runtime(&mut self, thread: &Entity<ThreadState>, cx: &mut Context<Self>) -> Result<(), String> {
+    /// The thread's `claude`, started if it isn't. `running`: a turn is under way in it (a
+    /// message steering in), which a changed launch option never ends.
+    fn ensure_runtime(&mut self, thread: &Entity<ThreadState>, running: bool, cx: &mut Context<Self>) -> Result<(), String> {
         let t = thread.read(cx);
         let id = t.id().to_string();
         let effort = self.effort_of(t);
-        if let Some(rt) = self.runtimes.get(&id) {
+        if let Some(rt) = self.runtimes.get_mut(&id) {
             if rt.effort == effort {
+                return Ok(());
+            }
+            // Effort is a launch option, but a running turn is never ended for it (a message
+            // steering in, `/mcp` while it works): the process starts over once it's idle.
+            if running {
+                rt.restart_when_idle = true;
                 return Ok(());
             }
         }
         self.end_runtime(&id, cx);
+        thread.update(cx, |t, _| t.received_init = false);
         let t = thread.read(cx);
         let project = self.project(&t.meta.project_id).cloned();
         let cwd = self.folder_of(t);
         let attachments = self.data_dir.join("attachments");
+        let memory_on = self.library.setting("memoryEnabled").and_then(|v| v.as_bool()).unwrap_or(true);
+        let memory_off_for_claude = self.library.setting("claudeCodeMemoryOff").and_then(|v| v.as_bool()).unwrap_or(true);
+        // A side chat: a copy of its thread's conversation that can look but not edit and
+        // leaves nothing behind. It reads freely; commands and web requests ask first. It sees
+        // its thread's browser and the memory, read-only.
+        if let Some(parent) = t.id().strip_prefix(SIDE).map(str::to_string) {
+            let parent_thread = self.thread(&parent);
+            let fork = parent_thread.as_ref().and_then(|p| p.read(cx).session_id.clone());
+            let mut extra = vec!["--tools".to_string(), "Read,Glob,Grep,Bash,WebFetch,WebSearch".into(), "--strict-mcp-config".into(), "--no-session-persistence".into()];
+            if fork.is_some() {
+                extra.push("--fork-session".into());
+            }
+            let mut servers: Vec<std::sync::Arc<dyn yh_core::mcp::ToolServer>> = vec![];
+            let mut prompt = vec![SIDE_CHAT_PROMPT.to_string()];
+            let mut allowed = vec![];
+            let mut env = vec![];
+            if self.library.setting("browserTools").and_then(|v| v.as_bool()).unwrap_or(true) {
+                prompt.push(SIDE_BROWSER_PROMPT.into());
+                allowed.push("mcp__browser".to_string());
+                servers.push(std::sync::Arc::new(crate::browser::BrowserTools { thread: parent.clone(), project: Some(t.meta.project_id.clone()), read_only: true }));
+            }
+            if let (true, Some(db), Some(project)) = (memory_on, self.library.db.clone(), project.as_ref()) {
+                if memory_off_for_claude {
+                    env.push(("CLAUDE_CODE_DISABLE_AUTO_MEMORY".to_string(), "1".to_string()));
+                }
+                prompt.push(SIDE_MEMORY_PROMPT.into());
+                allowed.push("mcp__memory".to_string());
+                servers.push(std::sync::Arc::new(yh_core::memory_tools::MemoryTools {
+                    store: yh_core::memory::Store { db },
+                    scope: yh_core::memory::scope_of(&project.id),
+                    actor: yh_core::memory::Actor { kind: "agent".into(), thread: Some(parent.clone()) },
+                    on_change: Box::new(|| {}),
+                    specialist: false,
+                    read_only: true,
+                }));
+            }
+            let options = LaunchOptions {
+                cwd,
+                session_id: fork,
+                model: self.model_of(t),
+                mode: Some("default".into()),
+                effort: effort.clone(),
+                add_dirs: vec![],
+                env,
+                append_system_prompt: Some(prompt.join("\n\n")),
+                allowed_tools: allowed,
+                servers,
+                extra_args: extra,
+            };
+            let (tx, rx) = flume::unbounded();
+            let mut process = ClaudeProcess::spawn(options, tx)?;
+            process.initialize();
+            self.generation += 1;
+            let generation = self.generation;
+            self.runtimes.insert(id.clone(), Runtime { process, generation, effort, idle: None, restart_when_idle: false });
+            self.pump(thread.clone(), id, generation, rx, cx);
+            return Ok(());
+        }
         let mut env = vec![];
         // Claude Code's task tools: what the plan checklist shows.
         if self.library.setting("planChecklist").and_then(|v| v.as_bool()).unwrap_or(true) {
@@ -1371,10 +1490,9 @@ impl Workspace {
         let mut servers: Vec<std::sync::Arc<dyn yh_core::mcp::ToolServer>> = vec![];
         let mut prompt: Vec<String> = vec![];
         let mut allowed = vec![];
-        let memory_on = self.library.setting("memoryEnabled").and_then(|v| v.as_bool()).unwrap_or(true);
         if let (true, Some(db), Some(project)) = (memory_on, self.library.db.clone(), project.as_ref()) {
             // One memory, the app's: Claude Code's own files would compete with it.
-            if self.library.setting("claudeCodeMemoryOff").and_then(|v| v.as_bool()).unwrap_or(true) {
+            if memory_off_for_claude {
                 env.push(("CLAUDE_CODE_DISABLE_AUTO_MEMORY".into(), "1".into()));
             }
             let store = yh_core::memory::Store { db };
@@ -1393,6 +1511,7 @@ impl Workspace {
                     let _ = changed.send(ToolRequest::MemoryChanged);
                 }),
                 specialist: false,
+                read_only: false,
             }));
         }
         // Claude asks you to sign in to an MCP server, from a card in the thread.
@@ -1434,6 +1553,7 @@ impl Workspace {
                     let _ = changed.send(ToolRequest::MemoryChanged);
                 }),
                 specialist: true,
+                read_only: false,
             };
             let t = thread.read(cx);
             let options = LaunchOptions {
@@ -1454,39 +1574,7 @@ impl Workspace {
             process.initialize();
             self.generation += 1;
             let generation = self.generation;
-            self.runtimes.insert(id.clone(), Runtime { process, generation, effort, idle: None });
-            self.pump(thread.clone(), id, generation, rx, cx);
-            return Ok(());
-        }
-        // A side chat: a copy of its thread's conversation that can look but not edit and
-        // leaves nothing behind. It reads freely; commands and web requests ask first.
-        let side_parent = t.id().strip_prefix(SIDE).map(str::to_string);
-        if let Some(parent) = &side_parent {
-            let fork = self.thread(parent).and_then(|p| p.read(cx).session_id.clone());
-            let mut extra = vec!["--tools".to_string(), "Read,Glob,Grep,Bash,WebFetch,WebSearch".into(), "--strict-mcp-config".into(), "--no-session-persistence".into()];
-            if fork.is_some() {
-                extra.push("--fork-session".into());
-            }
-            let t = thread.read(cx);
-            let options = LaunchOptions {
-                cwd,
-                session_id: fork,
-                model: self.model_of(t),
-                mode: Some("default".into()),
-                effort: effort.clone(),
-                add_dirs: vec![],
-                env: vec![],
-                append_system_prompt: Some(SIDE_CHAT_PROMPT.into()),
-                allowed_tools: vec![],
-                servers: vec![],
-                extra_args: extra,
-            };
-            let (tx, rx) = flume::unbounded();
-            let mut process = ClaudeProcess::spawn(options, tx)?;
-            process.initialize();
-            self.generation += 1;
-            let generation = self.generation;
-            self.runtimes.insert(id.clone(), Runtime { process, generation, effort, idle: None });
+            self.runtimes.insert(id.clone(), Runtime { process, generation, effort, idle: None, restart_when_idle: false });
             self.pump(thread.clone(), id, generation, rx, cx);
             return Ok(());
         }
@@ -1499,6 +1587,10 @@ impl Workspace {
         // Mermaid blocks are always drawn; this tells agents they may use them.
         if self.library.setting("diagramInstructions").and_then(|v| v.as_bool()).unwrap_or(true) {
             prompt.push(DIAGRAM_PROMPT.to_string());
+        }
+        // `gh stack` installed: how GitHub's stacked PRs are made here (checked aside at launch).
+        if self.stacks_installed == Some(true) {
+            prompt.push(STACKS_PROMPT.to_string());
         }
         let options = LaunchOptions {
             cwd,
@@ -1518,7 +1610,7 @@ impl Workspace {
         process.initialize();
         self.generation += 1;
         let generation = self.generation;
-        self.runtimes.insert(id.clone(), Runtime { process, generation, effort, idle: None });
+        self.runtimes.insert(id.clone(), Runtime { process, generation, effort, idle: None, restart_when_idle: false });
         self.pump(thread.clone(), id, generation, rx, cx);
         Ok(())
     }
@@ -1591,6 +1683,7 @@ impl Workspace {
                                 });
                             }
                             Event::TitleChanged(_) | Event::Skills(_) | Event::ContextWindows(_) => ws.note_composer_event(&thread, e, cx),
+                            Event::ElicitationComplete { server, elicitation_id } => ws.elicitation_completed(&thread, server, elicitation_id, cx),
                             _ => {}
                         }
                     }
@@ -1642,7 +1735,7 @@ impl Workspace {
         let waiting = self.threads.iter().filter(|t| t.read(cx).waiting_for_you()).count();
         crate::platform::set_badge(waiting);
         let t = thread.read(cx);
-        if t.waiting_for_you() {
+        if t.waiting_for_you() || t.elicitation().is_some() {
             let body = Self::describe_request(t);
             self.notify_about(crate::state::notify::Kind::NeedsYou, thread, body, cx);
         }
@@ -1654,13 +1747,17 @@ impl Workspace {
         thread.update(cx, |t, _| t.running = false);
         self.note_working(cx);
         let selected = self.selected.as_deref() == Some(id.strip_prefix(SIDE).unwrap_or(&id));
-        // Waiting on jobs it started, Claude isn't done: it's back when they report.
+        // Waiting on jobs it started, Claude isn't done: it's back when they report. Stopped by
+        // you: you're there, nothing to tell. A side chat never notifies.
         let waiting_on_jobs = thread.read(cx).jobs.waiting() > 0;
-        // You stopped it yourself: you're there, nothing to tell.
-        let stopped = thread.update(cx, |t, _| std::mem::take(&mut t.stop_requested));
-        if !waiting_on_jobs && !stopped {
+        let stopped = thread.update(cx, |t, _| std::mem::take(&mut t.stopped_by_you));
+        if !waiting_on_jobs && !stopped && !id.starts_with(SIDE) {
             let body = Self::last_reply(thread.read(cx));
             self.notify_about(crate::state::notify::Kind::Finished, thread, body, cx);
+        }
+        // A first title that was a guess: written again now the conversation says more.
+        if thread.read(cx).title_needs_refinement && !stopped {
+            self.refine_title(thread, cx);
         }
         let (title, session) = thread.update(cx, |t, _| {
             t.running = false;
@@ -1674,14 +1771,21 @@ impl Workspace {
         self.library.update_thread(&id, |r| {
             r.remove("turnInProgress");
             r.insert("title".into(), title.into());
-            if let Some(s) = session {
-                r.insert("sessionID".into(), s.into());
-            }
+            // None after a resume that failed: the next message starts a new session.
+            r.insert("sessionID".into(), session.map_or(Value::Null, Value::from));
             r.insert("updatedAt".into(), iso_now().into());
         });
         self.save_rows(thread, cx);
+        // Effort changed mid-turn: the process starts over now, unless jobs it left run on.
+        let restart = self.runtimes.get(&id).is_some_and(|rt| rt.restart_when_idle) && thread.read(cx).jobs.running.is_empty() && !waiting_on_jobs;
+        if restart {
+            self.end_runtime(&id, cx);
+        }
         let weak = thread.downgrade();
-        if let Some(rt) = self.runtimes.get_mut(&id) {
+        // A side chat or a memory specialist can't be resumed (nothing's saved): it lives while
+        // it's open, never let go of when idle.
+        let aside = id.starts_with(SIDE) || id.starts_with(MEMORY_AGENT);
+        if let Some(rt) = self.runtimes.get_mut(&id).filter(|_| !aside) {
             rt.idle = Some(cx.spawn(async move |this, cx| loop {
                 cx.background_executor().timer(IDLE_LIMIT).await;
                 let again = this
@@ -1718,12 +1822,19 @@ impl Workspace {
         let prompt = yh_core::titles::initial_prompt(message, rules.as_deref());
         let Some(claude) = yh_core::claude::find_claude() else { return };
         let path = std::env::var("YH_PATH").ok();
+        // Linked PRs and issues are looked up (aside) so the title says what they're about.
+        let linked_text = message.to_string();
+        let gh = yh_core::git::which("gh", path.as_deref());
         let weak = thread.downgrade();
         // The sidebar dims the placeholder title meanwhile.
         let generating = thread.read(cx).id().to_string();
         self.titles_rewriting.insert(generating.clone());
         cx.notify();
         cx.spawn(async move |this, cx| {
+            let prompt = cx
+                .background_executor()
+                .spawn(async move { prompt + &yh_core::titles::linked_suffix(yh_core::titles::linked_context(&linked_text, gh.as_deref()).as_deref()) })
+                .await;
             let mut result = Err(String::new());
             for attempt in 0..2 {
                 if attempt > 0 {
@@ -1741,7 +1852,8 @@ impl Workspace {
                 ws.title_error = result.as_ref().err().map(|e| if e.is_empty() { "no answer".to_string() } else { e.clone() });
                 cx.notify();
             });
-            let Ok(title) = result else { return };
+            let Ok(generated) = result else { return };
+            let title = generated.title;
             let _ = this.update(cx, |ws, cx| {
                 let Some(thread) = weak.upgrade() else { return };
                 if thread.read(cx).meta.title_chosen {
@@ -1751,8 +1863,19 @@ impl Workspace {
                 thread.update(cx, |t, cx| {
                     t.title = title.clone();
                     t.meta.title = title.clone();
+                    // The subject wasn't known yet ("fix this", a link it couldn't read): written
+                    // again from the conversation once the first turn is over.
+                    t.title_needs_refinement = generated.needs_refinement;
+                    if std::env::var("YH_DATA_DIR").is_ok() {
+                        eprintln!("TITLE generated: {title} (needs refinement: {})", generated.needs_refinement);
+                    }
                     cx.notify();
                 });
+                // The turn already ended: now.
+                let replied = thread.read(cx).items.iter().any(|i| i.ty == crate::state::thread::ItemType::Text);
+                if generated.needs_refinement && !thread.read(cx).running && replied {
+                    ws.refine_title(&thread, cx);
+                }
                 ws.library.update_thread(&id, |r| {
                     r.insert("title".into(), title.into());
                 });
@@ -1762,13 +1885,42 @@ impl Workspace {
         .detach();
     }
 
+    /// Stops the turn for a message sent now (the message carries that on itself).
     pub fn interrupt(&mut self, thread: &Entity<ThreadState>, cx: &mut Context<Self>) {
         let id = thread.read(cx).id().to_string();
         if let Some(rt) = self.runtimes.get_mut(&id) {
-            // Your Stop, not a message sent now (which carries its own mark).
-            thread.update(cx, |t, _| t.stop_requested = t.running && t.composer.sending_now.is_empty());
             rt.process.interrupt();
         }
+    }
+
+    /// Stop (the button, ⌘.): anything queued goes back into the composer first, so stopping
+    /// never sends it; what waited on you is dropped; the turn ends as "Interrupted", quietly.
+    /// `removing`: queued messages the composer is already taking away for good.
+    pub fn stop(&mut self, thread: &Entity<ThreadState>, removing: &std::collections::HashSet<String>, cx: &mut Context<Self>) {
+        if !thread.read(cx).running {
+            return;
+        }
+        let queued = thread.read(cx).queued_messages();
+        for (message, ..) in queued {
+            if !removing.contains(&message) {
+                self.withdraw(thread, &message, true, cx);
+            }
+        }
+        thread.update(cx, |t, cx| {
+            t.interrupt_requested = true;
+            t.permissions.clear();
+            t.elicitations.clear();
+            if let Some(ask) = t.sign_in.take() {
+                ask.cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+                if let Some(decision) = ask.decision {
+                    let _ = decision.send(false);
+                }
+            }
+            cx.notify();
+        });
+        crate::platform::set_badge(self.threads.iter().filter(|t| t.read(cx).waiting_for_you()).count());
+        self.interrupt(thread, cx);
+        cx.notify();
     }
 
     /// Settles the thread's first pending permission request (a tool, a question, a plan): the
@@ -1803,7 +1955,7 @@ impl Workspace {
     /// A control request to the thread's `claude` (started in its folder if it isn't running),
     /// and its reply: `mcp_status`, `mcp_toggle`, `mcp_authenticate`…
     pub fn mcp(&mut self, thread: &Entity<ThreadState>, request: Value, cx: &mut Context<Self>) -> Task<Result<Value, String>> {
-        if let Err(e) = self.ensure_runtime(thread, cx) {
+        if let Err(e) = self.ensure_runtime(thread, thread.read(cx).running, cx) {
             return Task::ready(Err(e));
         }
         let id = thread.read(cx).id().to_string();
@@ -1822,20 +1974,37 @@ impl Workspace {
     }
 
     /// Answers an MCP server's question: `accept` (with what you filled in), `decline` or `cancel`.
+    /// The one the composer shows: the oldest waiting.
     pub fn answer_elicitation(&mut self, thread: &Entity<ThreadState>, action: &str, content: Option<Value>, cx: &mut Context<Self>) {
-        let (id, asked) = {
-            let t = thread.read(cx);
-            (t.id().to_string(), t.elicitation.clone())
-        };
-        let Some(asked) = asked else { return };
+        let Some(asked) = thread.read(cx).elicitation().map(|e| e.id.clone()) else { return };
+        self.answer_elicitation_id(thread, &asked, action, content, cx);
+    }
+
+    /// One waiting question, by its request id; the others keep waiting.
+    pub fn answer_elicitation_id(&mut self, thread: &Entity<ThreadState>, request_id: &str, action: &str, content: Option<Value>, cx: &mut Context<Self>) {
+        let id = thread.read(cx).id().to_string();
         if let Some(rt) = self.runtimes.get(&id) {
-            rt.process.respond_elicitation(&asked.id, action, content);
+            rt.process.respond_elicitation(request_id, action, content);
         }
         thread.update(cx, |t, cx| {
-            t.elicitation = None;
+            t.elicitations.retain(|e| e.id != request_id);
             cx.notify();
         });
         cx.notify();
+    }
+
+    /// A page-mode question answered on its page: the server has its answer, so the card goes.
+    fn elicitation_completed(&mut self, thread: &Entity<ThreadState>, server: &str, elicitation_id: &str, cx: &mut Context<Self>) {
+        let done: Vec<String> = thread
+            .read(cx)
+            .elicitations
+            .iter()
+            .filter(|e| e.server == server && e.elicitation_id.as_deref() == Some(elicitation_id))
+            .map(|e| e.id.clone())
+            .collect();
+        for request in done {
+            self.answer_elicitation_id(thread, &request, "accept", None, cx);
+        }
     }
 
     /// Approves a plan into a permission mode, which becomes the project's.
@@ -1848,10 +2017,16 @@ impl Workspace {
     /// `YH_ANSWER=allow|deny`: permission prompts answered by themselves, for tests.
     fn answer_for_tests(&mut self, thread: &Entity<ThreadState>, cx: &mut Context<Self>) {
         // `YH_MCP_ELICIT_ANSWER=accept|decline`: what an MCP server asks, answered with its defaults.
-        if let (Ok(answer), Some(e)) = (std::env::var("YH_MCP_ELICIT_ANSWER"), thread.read(cx).elicitation.clone()) {
-            eprintln!("MCP elicitation from {}: {} ({}{}): {answer}", e.server, e.message, e.mode, e.url.as_deref().map(|u| format!(", {u}")).unwrap_or_default());
-            let content = (answer == "accept" && e.mode == "form").then(|| crate::ui::composer::elicit_defaults(&e.schema));
-            self.answer_elicitation(thread, &answer, content, cx);
+        if let Ok(answer) = std::env::var("YH_MCP_ELICIT_ANSWER") {
+            let waiting = thread.read(cx).elicitations.clone();
+            if waiting.len() > 1 {
+                eprintln!("MCP elicitations waiting: {}", waiting.len());
+            }
+            for e in waiting {
+                eprintln!("MCP elicitation from {}: {} ({}{}): {answer}", e.server, e.message, e.mode, e.url.as_deref().map(|u| format!(", {u}")).unwrap_or_default());
+                let content = (answer == "accept" && e.mode == "form").then(|| crate::ui::composer::elicit_defaults(&e.schema));
+                self.answer_elicitation_id(thread, &e.id, &answer, content, cx);
+            }
         }
         let Ok(answer) = std::env::var("YH_ANSWER") else { return };
         // `YH_ANSWER_DELAY=<seconds>`: answered that much later, so the cards can be seen (and
@@ -1892,12 +2067,14 @@ impl Workspace {
 
     /// Where a thread's `claude` runs: its folder, else its project's, else the data dir's `home`.
     pub fn folder_of(&self, thread: &ThreadState) -> String {
+        let exists = |p: &String| std::path::Path::new(p).is_dir();
+        // A worktree that's since been removed falls back to the project's folder.
         thread
             .meta
             .working_directory
             .clone()
-            .or_else(|| self.project(&thread.meta.project_id).map(|p| p.path.clone()))
-            .filter(|p| std::path::Path::new(p).is_dir())
+            .filter(exists)
+            .or_else(|| self.project(&thread.meta.project_id).map(|p| p.path.clone()).filter(exists))
             .unwrap_or_else(|| {
                 // A project that's gone runs in a folder of the data dir, never your home folder.
                 let home = self.data_dir.join("home");
@@ -2366,13 +2543,24 @@ impl Workspace {
         let rules = self.title_prompt();
         let prompt = yh_core::titles::regenerate_prompt(&messages, &current, rules.as_deref(), hint.as_deref());
         let path = std::env::var("YH_PATH").ok();
+        let gh = yh_core::git::which("gh", path.as_deref());
+        let linked_text: String = messages.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>().join("\n");
         self.titles_rewriting.insert(caller.to_string());
         let id = caller.to_string();
         cx.spawn(async move |this, cx| {
-            let result = cx.background_executor().spawn(async move { yh_core::titles::generate(&claude, path.as_deref(), &model, &prompt) }).await;
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let prompt = prompt + &yh_core::titles::linked_suffix(yh_core::titles::linked_context(&linked_text, gh.as_deref()).as_deref());
+                    yh_core::titles::generate(&claude, path.as_deref(), &model, &prompt)
+                })
+                .await;
             let _ = this.update(cx, |ws, cx| {
                 ws.titles_rewriting.remove(&id);
-                let (Ok(title), Some(thread)) = (result, ws.thread(&id)) else { return };
+                if std::env::var("YH_DATA_DIR").is_ok() {
+                    eprintln!("TITLE rewritten: {result:?}");
+                }
+                let (Ok(yh_core::titles::Generated { title, .. }), Some(thread)) = (result, ws.thread(&id)) else { return };
                 // A title you chose meanwhile stays.
                 if title.is_empty() || thread.read(cx).meta.title_chosen || thread.read(cx).title == title {
                     return;

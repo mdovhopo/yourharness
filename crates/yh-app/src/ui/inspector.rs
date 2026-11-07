@@ -2027,7 +2027,7 @@ impl Inspector {
                         .child(div().flex_1().min_w_0().child(Input::new(&self.question).appearance(false).small()))
                         .when(running, |d| {
                             d.child(
-                                tool_button("side-stop", icons::circle_stop(), "Stop", theme).on_click(move |_, _, cx| stop_ws.update(cx, |ws, cx| ws.interrupt(&stop_chat, cx))),
+                                tool_button("side-stop", icons::circle_stop(), "Stop", theme).on_click(move |_, _, cx| stop_ws.update(cx, |ws, cx| ws.stop(&stop_chat, &Default::default(), cx))),
                             )
                         }),
                 ),

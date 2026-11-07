@@ -45,7 +45,7 @@ pub struct Composer {
     /// and folders. Kept by thread until sent, not saved.
     attached: HashMap<String, Vec<Attached>>,
     /// Queued messages you asked to remove, until the CLI lets go of them.
-    withdrawing: HashSet<String>,
+    pub withdrawing: HashSet<String>,
     _mentions: Option<gpui_kit::Task<()>>,
     /// An MCP server's question, as a card.
     elicit: Option<(String, Entity<ElicitCard>)>,
@@ -617,7 +617,7 @@ impl Composer {
 
     /// The card follows the open thread's pending request.
     fn sync_card(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let asked = self.thread(cx).and_then(|t| t.read(cx).elicitation.clone());
+        let asked = self.thread(cx).and_then(|t| t.read(cx).elicitation().cloned());
         match (asked, &self.elicit) {
             (None, Some(_)) => self.elicit = None,
             (Some(a), current) if current.as_ref().is_none_or(|(id, _)| *id != a.id) => {
@@ -1050,13 +1050,8 @@ impl Render for Composer {
                         let w = w.clone();
                         d.child(Button::new("stop").small().ghost().icon(icons::circle_stop().size(px(16.)).text_color(theme.text)).tooltip("Stop (⌘.)").on_click(cx.listener(move |this, _, _, cx| {
                             // Anything queued goes back into the composer first, so stopping never sends it.
-                            let queued = stop_thread.read(cx).queued_messages();
-                            for (id, ..) in queued {
-                                if !this.withdrawing.contains(&id) {
-                                    let _ = w.update(cx, |ws, cx| ws.withdraw(&stop_thread, &id, true, cx));
-                                }
-                            }
-                            let _ = w.update(cx, |ws, cx| ws.interrupt(&stop_thread, cx));
+                            let removing = this.withdrawing.clone();
+                            let _ = w.update(cx, |ws, cx| ws.stop(&stop_thread, &removing, cx));
                         })))
                     })
                     .child(if running {

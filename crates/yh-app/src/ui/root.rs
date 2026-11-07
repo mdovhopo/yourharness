@@ -301,10 +301,10 @@ impl RootView {
 
     fn on_stop(&mut self, _: &Stop, _: &mut Window, cx: &mut Context<Self>) {
         let ws = self.workspace.clone();
+        // As the Stop button: queued messages go back into the composer first.
         if let Some(t) = ws.read(cx).selected_thread() {
-            if t.read(cx).running {
-                ws.update(cx, |ws, cx| ws.interrupt(&t, cx));
-            }
+            let removing = self.composer.read(cx).withdrawing.clone();
+            ws.update(cx, |ws, cx| ws.stop(&t, &removing, cx));
         }
     }
 

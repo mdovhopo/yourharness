@@ -1181,8 +1181,9 @@ impl BrowserTools {
         let (pw, ph) = captured.map_err(|_| if shown { "Couldn't capture the page." } else { "The browser isn't on screen: open it with open (show: true) first." }.to_string())??;
         let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
         let _ = std::fs::remove_file(&path);
-        // A copy for the transcript, whose step shows it (`<thread>-browser-<tool use>.jpg`).
-        if let Some(tool_use) = tool_use {
+        // A copy for the transcript, whose step shows it (`<thread>-browser-<tool use>.jpg`). Not
+        // a side chat's: it leaves nothing behind, and `thread` is the thread it looks at.
+        if let Some(tool_use) = tool_use.filter(|_| !self.read_only) {
             let dir = yh_core::library::data_directory().join("attachments");
             let _ = std::fs::create_dir_all(&dir);
             let _ = std::fs::write(dir.join(format!("{}-browser-{tool_use}.jpg", self.thread)), &bytes);
