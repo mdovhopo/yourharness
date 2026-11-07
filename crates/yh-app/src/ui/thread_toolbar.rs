@@ -8,7 +8,7 @@ use crate::theme::{Theme, MONO};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::popover::Popover;
-use gpui_kit::component::Sizable;
+use gpui_kit::component::{Disableable, Sizable};
 use gpui_kit::{div, prelude::*, px, AnyElement, App, Entity, FontWeight, SharedString};
 use yh_core::git::RepoStatus;
 
@@ -180,7 +180,82 @@ pub fn checkouts(workspace: &Entity<Workspace>, theme: &Theme, cx: &App) -> Opti
     )
 }
 
-/// Pull requests and the right sidebar.
+/// A memory specialist's own buttons, as its Swift window had: its model and effort, what this
+/// session changed in the memory (read when the menu opens), Set Up before it starts, Open
+/// Memory, and New Session.
+fn specialist(workspace: &Entity<Workspace>, cx: &App) -> Option<AnyElement> {
+    let ws = workspace.read(cx);
+    let thread = ws.selected_thread()?;
+    let t = thread.read(cx);
+    let id = t.id().to_string();
+    let (role, project) = id.strip_prefix(crate::state::workspace::MEMORY_AGENT)?.split_once(':').map(|(a, b)| (a.to_string(), b.to_string()))?;
+    let started = t.running || !t.items.is_empty();
+    let (model, effort) = (t.meta.model.clone(), t.meta.effort.clone());
+    let w = workspace.downgrade();
+    let menus = {
+        let (w, id) = (w.clone(), id.clone());
+        crate::ui::memory::model_menus("specialist", ws, model, effort, move |m, e, cx| {
+            let _ = w.update(cx, |ws, cx| {
+                ws.set_model(&id, m, cx);
+                ws.set_effort(&id, e, cx);
+            });
+        })
+    };
+    let store = ws.memory_store();
+    let changes = {
+        let id = id.clone();
+        Button::new("specialist-changes").small().ghost().label("Changes").dropdown_caret(true).tooltip("What this session changed in the memory").dropdown_menu(move |mut menu, _, _| {
+            let events = store.as_ref().map(|s| s.events_of_thread(&id, 500)).unwrap_or_default();
+            let count = |kinds: &[&str]| events.iter().filter(|(k, ..)| kinds.contains(&k.as_str())).count();
+            let reads = count(&["recalled"]);
+            let shown: Vec<_> = events.iter().filter(|(k, ..)| !["recalled", "searched", "injected"].contains(&k.as_str())).collect();
+            let mut parts = vec![];
+            for (n, what) in [(count(&["created"]), "added"), (count(&["updated", "merged"]), "updated"), (count(&["archived"]), "archived"), (reads, "read")] {
+                if n > 0 {
+                    parts.push(format!("{n} {what}"));
+                }
+            }
+            menu = menu.label(if parts.is_empty() { "Nothing yet".to_string() } else { parts.join(" · ") });
+            if !shown.is_empty() {
+                menu = menu.separator();
+            }
+            for (kind, _, title, _) in shown.iter().rev().take(40) {
+                let mut k = kind.clone();
+                if let Some(f) = k.get_mut(0..1) {
+                    f.make_ascii_uppercase();
+                }
+                menu = menu.label(format!("{k}: {}", title.clone().unwrap_or_else(|| "Memory".into())));
+            }
+            menu
+        })
+    };
+    let (w1, w2, w3) = (w.clone(), w.clone(), w.clone());
+    let (p1, r1, id2) = (project.clone(), role.clone(), id.clone());
+    Some(
+        div()
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .child(menus)
+            .child(changes)
+            .when(!started, |d| {
+                d.child(Button::new("specialist-setup").small().primary().label("Set Up…").tooltip("Choose what it reads and what to focus on, then start it").on_click(move |_, window, cx| {
+                    if let Some(ws) = w3.upgrade() {
+                        crate::ui::memory::open_setup(ws, &r1, p1.clone(), vec![], window, cx);
+                    }
+                }))
+            })
+            .child(Button::new("specialist-open-memory").small().ghost().label("Open Memory").on_click(move |_, _, cx| {
+                let _ = w1.update(cx, |ws, cx| ws.open_memory(&project, cx));
+            }))
+            .child(Button::new("specialist-new-session").small().ghost().label("New Session").disabled(!started).tooltip("End this conversation and start over").on_click(move |_, _, cx| {
+                let _ = w2.update(cx, |ws, cx| ws.restart_memory_agent(&id2, cx));
+            }))
+            .into_any_element(),
+    )
+}
+
+/// Pull requests and the right sidebar; for a memory specialist, its own buttons too.
 pub fn buttons(workspace: &Entity<Workspace>, cx: &App) -> AnyElement {
     let ws = workspace.read(cx);
     let shows = ws.shows_inspector;
@@ -189,6 +264,7 @@ pub fn buttons(workspace: &Entity<Workspace>, cx: &App) -> AnyElement {
         .flex()
         .items_center()
         .gap(px(2.))
+        .children(specialist(workspace, cx))
         .child(Button::new("thread-pulls").small().ghost().label("Pull Requests").tooltip("Pull requests this thread worked on or mentioned").on_click(move |_, _, cx| {
             w1.update(cx, |ws, cx| ws.show_panel(Panel::PullRequests, cx));
         }))

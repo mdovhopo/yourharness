@@ -411,6 +411,18 @@ impl Store {
         let _ = self.db.write(move |c, _| log_event(c, &scope, None, "injected", &actor, None, Some(count as i64), Some(bytes.to_string())));
     }
 
+    /// What one thread did to memory: (kind, memory ID, title, at), oldest first.
+    pub fn events_of_thread(&self, thread: &str, limit: usize) -> Vec<(String, Option<String>, Option<String>, f64)> {
+        let thread = thread.to_string();
+        self.db
+            .read_with(|c| {
+                let mut s = c.prepare("SELECT kind, memory_id, title, at FROM memory_events WHERE thread_id = ? ORDER BY at, id LIMIT ?")?;
+                let rows = s.query_map(params![thread, limit as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+                rows.collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// The activity log: (kind, title, actor, at, query, count), newest first.
     pub fn events(&self, scope: &str, limit: usize) -> Vec<(String, Option<String>, Option<String>, f64, Option<String>, Option<i64>)> {
         let scope = scope.to_string();

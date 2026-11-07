@@ -609,6 +609,32 @@ fn main() {
             })
             .detach();
         }
+        // `YH_MEMORY_SETUP=importer|reconciler`: a memory specialist's setup opened over the window
+        // after `YH_DRAFT_DELAY`, for the selected thread's project (else the first), with
+        // `YH_MEMORY_IMPORT_SOURCES=<a:b>` ticked; `YH_MEMORY_SETUP_START=1` then presses Start.
+        if let Some(role) = env("YH_MEMORY_SETUP") {
+            let delay: f64 = env("YH_DRAFT_DELAY").and_then(|v| v.parse().ok()).unwrap_or(1.0);
+            let workspace = workspace.clone();
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(Duration::from_secs_f64(delay)).await;
+                let setup = window.update(cx, |_, window, cx| {
+                    let project = workspace
+                        .read(cx)
+                        .selected_thread()
+                        .map(|t| t.read(cx).meta.project_id.clone())
+                        .or_else(|| workspace.read(cx).projects.first().map(|p| p.id.clone()))?;
+                    let sources: Vec<String> = env("YH_MEMORY_IMPORT_SOURCES").map(|s| s.split(':').map(str::to_string).collect()).unwrap_or_default();
+                    Some(ui::memory::open_setup(workspace.clone(), &role, project, sources, window, cx))
+                });
+                if env("YH_MEMORY_SETUP_START").as_deref() == Some("1") {
+                    cx.background_executor().timer(Duration::from_secs(2)).await;
+                    if let Ok(Some(setup)) = setup {
+                        let _ = window.update(cx, |_, window, cx| setup.update(cx, |s, cx| s.start(window, cx)));
+                    }
+                }
+            })
+            .detach();
+        }
         // `YH_OPEN_PROJECT=1`: the selected thread's project's page (its PRs and repos), else the
         // first project's, after `YH_DRAFT_DELAY`.
         if env("YH_OPEN_PROJECT").as_deref() == Some("1") {

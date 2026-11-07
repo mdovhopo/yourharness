@@ -8,7 +8,7 @@ use crate::theme::{Theme, MONO};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
-use gpui_kit::component::Sizable;
+use gpui_kit::component::{Disableable, Sizable, WindowExt};
 use gpui_kit::{div, prelude::*, px, App, Context, Entity, FontWeight, Hsla, SharedString, Subscription, Window};
 use yh_core::memory::{Actor, Memory, Store};
 
@@ -121,6 +121,8 @@ pub struct MemoryPage {
     graph: Graph,
     /// The graph's place, from its last paint: which dot a click is on.
     graph_bounds: std::rc::Rc<std::cell::Cell<gpui_kit::Bounds<gpui_kit::Pixels>>>,
+    /// Add a step, under a task's steps.
+    new_step: Entity<InputState>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -131,7 +133,17 @@ impl MemoryPage {
         let title = cx.new(|cx| InputState::new(window, cx).placeholder("Title"));
         let description = cx.new(|cx| InputState::new(window, cx).placeholder("One line: when it matters"));
         let body = cx.new(|cx| TextareaState::new(window, cx).placeholder("What to remember"));
+        let new_step = cx.new(|cx| InputState::new(window, cx).placeholder("Add a step"));
         let subscriptions = vec![
+            cx.subscribe_in(&new_step, window, |this, input, e: &InputEvent, window, cx| {
+                if let InputEvent::PressEnter { .. } = e {
+                    let text = input.read(cx).value().trim().to_string();
+                    if let (false, Some(id)) = (text.is_empty(), this.selection.clone()) {
+                        input.update(cx, |i, cx| i.set_value("", window, cx));
+                        this.add_step(&id, text, cx);
+                    }
+                }
+            }),
             cx.observe(&workspace, |this, ws, cx| {
                 if this.loaded_revision != Some(ws.read(cx).memory_revision) {
                     this.reload(cx);
@@ -185,6 +197,7 @@ impl MemoryPage {
             stats: None,
             graph: Graph::default(),
             graph_bounds: Default::default(),
+            new_step,
             _subscriptions: subscriptions,
         };
         page.reload(cx);
@@ -258,6 +271,17 @@ impl MemoryPage {
                 page.graph = graph;
                 page.loaded = true;
                 page.after_reload(cx);
+                // `YH_MEMORY_ADD_STEP=<text>`: opens the first task and adds a step to it, once.
+                static ADDED_STEP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                if let Ok(text) = std::env::var("YH_MEMORY_ADD_STEP") {
+                    if let Some(id) = page.memories.iter().find(|m| m.is_task() && m.status == "active").map(|m| m.id.clone()) {
+                        if !ADDED_STEP.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                            page.tab = Tab::Memories;
+                            page.select(&id, cx);
+                            page.add_step(&id, text, cx);
+                        }
+                    }
+                }
                 cx.notify();
             });
         })
@@ -471,23 +495,6 @@ impl MemoryPage {
         .detach();
     }
 
-    /// Asks for files or folders, then hands them to the Importer.
-    fn import_with_agent(&mut self, cx: &mut Context<Self>) {
-        let chosen = cx.prompt_for_paths(gpui_kit::PathPromptOptions { files: true, directories: true, multiple: true, prompt: Some("Import".into()) });
-        let (ws, project) = (self.workspace.clone(), self.project.clone());
-        cx.spawn(async move |_, cx| {
-            let Ok(Ok(Some(paths))) = chosen.await else { return };
-            let sources: Vec<String> = paths.iter().map(|p| p.to_string_lossy().into_owned()).collect();
-            let _ = cx.update(|cx| {
-                ws.update(cx, |ws, cx| {
-                    let message = yh_core::memory_agents::import_request(&sources, None);
-                    ws.open_memory_agent("importer", &project, sources, Some(message), cx)
-                })
-            });
-        })
-        .detach();
-    }
-
     pub fn new_memory(&mut self, cx: &mut Context<Self>) {
         let kind = self.kind_filter.unwrap_or("project");
         let m = Memory::new(&self.scope(), kind, "", "", "", "user");
@@ -544,6 +551,36 @@ impl MemoryPage {
         m.updated_at = yh_core::library::now_ms() / 1000.0;
         store.save(m, &user(), Some("updated"), None);
         self.written(cx);
+    }
+
+    /// A step at the end of a task's list; a done task with a new step is under way again.
+    pub fn add_step(&mut self, id: &str, text: String, cx: &mut Context<Self>) {
+        let Some(store) = self.store.clone() else { return };
+        let Some(mut m) = self.memories.iter().find(|m| m.id == id).cloned() else { return };
+        m.steps.push(yh_core::memory::Step { text, done: false });
+        if m.task_state.as_deref() == Some("done") {
+            m.task_state = Some("active".into());
+        }
+        m.updated_at = yh_core::library::now_ms() / 1000.0;
+        if std::env::var("YH_DATA_DIR").is_ok() {
+            eprintln!("MEMORY step added to {}: {} steps", m.title, m.steps.len());
+        }
+        store.save(m, &user(), Some("updated"), None);
+        self.written(cx);
+    }
+
+    /// The threads a task was worked on in (its sources), newest first: (id, title).
+    fn threads_of(&self, m: &Memory, cx: &App) -> Vec<(String, String)> {
+        let ws = self.workspace.read(cx);
+        let mut seen = std::collections::HashSet::new();
+        let mut out: Vec<(f64, String, String)> = m
+            .sources
+            .iter()
+            .filter(|(t, _)| seen.insert(t.clone()))
+            .filter_map(|(t, _)| ws.thread(t).map(|th| (th.read(cx).meta.updated_at, t.clone(), th.read(cx).title.clone())))
+            .collect();
+        out.sort_by(|a, b| b.0.total_cmp(&a.0));
+        out.into_iter().map(|(_, id, title)| (id, title)).collect()
     }
 
     fn summary(&self) -> String {
@@ -660,8 +697,11 @@ impl MemoryPage {
                 Button::new("memory-import").small().ghost().label("Import").dropdown_caret(true).dropdown_menu(move |mut menu, _, _| {
                     let (a, b, c) = (page.clone(), page.clone(), page.clone());
                     menu = menu
-                        .item(PopupMenuItem::new("With the Importer…").on_click(move |_, _, cx| {
-                            let _ = a.update(cx, |p, cx| p.import_with_agent(cx));
+                        .item(PopupMenuItem::new("With the Importer…").on_click(move |_, window, cx| {
+                            if let Some(p) = a.upgrade() {
+                                let (ws, project) = (p.read(cx).workspace.clone(), p.read(cx).project.clone());
+                                open_setup(ws, "importer", project, vec![], window, cx);
+                            }
                         }))
                         .item(PopupMenuItem::new("File or Folder…").on_click(move |_, _, cx| {
                             let _ = b.update(cx, |p, cx| p.import_file_dialog(cx));
@@ -686,9 +726,8 @@ impl MemoryPage {
                     }))
                 })
             })
-            .child(Button::new("memory-reconcile").small().ghost().label("Reconcile").tooltip("The Reconciler finds duplicates, stale and vague memories, and fixes them with you").on_click(cx.listener(|this, _, _, cx| {
-                let project = this.project.clone();
-                this.workspace.update(cx, |ws, cx| ws.open_memory_agent("reconciler", &project, vec![], Some(yh_core::memory_agents::RECONCILE_REQUEST.to_string()), cx));
+            .child(Button::new("memory-reconcile").small().ghost().label("Reconcile").tooltip("The Reconciler finds duplicates, stale and vague memories, and fixes them with you").on_click(cx.listener(|this, _, window, cx| {
+                open_setup(this.workspace.clone(), "reconciler", this.project.clone(), vec![], window, cx);
             })))
             .child(Button::new("new-memory").small().label("New Memory").on_click(cx.listener(|this, _, _, cx| this.new_memory(cx))))
     }
@@ -919,6 +958,7 @@ impl MemoryPage {
                         .on_click(cx.listener(move |this, _, _, cx| this.toggle_step(&tid, i, cx))),
                 );
             }
+            steps = steps.child(div().flex().items_center().gap(px(8.)).px(px(4.)).child(div().w(px(16.)).text_color(theme.secondary).child("+")).child(div().flex_1().child(Input::new(&self.new_step).small().appearance(false))));
             body = body.child(section("Task", theme)).child(states).child(steps);
         }
         if listed {
@@ -1043,6 +1083,7 @@ impl MemoryPage {
             column = column.child(section(&format!("{heading} · {}", group.len()), theme));
             for m in group {
                 let id = m.id.clone();
+                let threads = self.threads_of(m, cx);
                 column = column.child(
                     div()
                         .id(SharedString::from(format!("task-{id}")))
@@ -1065,6 +1106,30 @@ impl MemoryPage {
                         )
                         .when_some(m.next_step().filter(|_| state != "done").map(str::to_string), |d, next| {
                             d.child(div().text_size(px(12.)).text_color(theme.secondary).child(format!("Next: {next}")))
+                        })
+                        .when(!threads.is_empty(), |d| {
+                            // The threads working on it: click one to open it.
+                            let mut row = div().flex().items_center().gap(px(8.)).text_size(px(11.)).child(div().text_color(theme.secondary).child("Threads:"));
+                            for (tid, title) in threads.iter().take(3) {
+                                let (ws, tid) = (self.workspace.clone(), tid.clone());
+                                row = row.child(
+                                    div()
+                                        .id(SharedString::from(format!("task-thread-{id}-{tid}")))
+                                        .max_w(px(220.))
+                                        .truncate()
+                                        .text_color(theme.accent)
+                                        .cursor_pointer()
+                                        .child(title.clone())
+                                        .on_click(move |_, _, cx| {
+                                            cx.stop_propagation();
+                                            ws.update(cx, |ws, cx| ws.select(&tid, cx));
+                                        }),
+                                );
+                            }
+                            if threads.len() > 3 {
+                                row = row.child(div().text_color(theme.secondary).child(format!("+{}", threads.len() - 3)));
+                            }
+                            d.child(row)
                         })
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.tab = Tab::Memories;
@@ -1124,8 +1189,8 @@ impl MemoryPage {
         let mut how = div().p(px(14.)).rounded(px(8.)).bg(theme.card).flex().flex_col().gap(px(8.)).child(
             div().flex().items_center().child(div().flex_1().font_weight(FontWeight::SEMIBOLD).child("How your memory is working")).when(issues, |d| {
                 let (ws, project) = (self.workspace.clone(), self.project.clone());
-                d.child(Button::new("insights-reconcile").small().primary().label("Reconcile").on_click(move |_, _, cx| {
-                    ws.update(cx, |ws, cx| ws.open_memory_agent("reconciler", &project, vec![], Some(yh_core::memory_agents::RECONCILE_REQUEST.to_string()), cx))
+                d.child(Button::new("insights-reconcile").small().primary().label("Reconcile").on_click(move |_, window, cx| {
+                    open_setup(ws.clone(), "reconciler", project.clone(), vec![], window, cx);
                 }))
             }),
         );
@@ -1384,10 +1449,9 @@ impl MemoryPage {
                                 .gap(px(8.))
                                 .child(Button::new("one-memory").small().primary().label(primary).tooltip(if on { detail } else { "Brings Claude Code's memory files for this folder in." }).on_click(cx.listener(move |this, _, _, cx| this.use_one_memory(&s1, cx))))
                                 .when(count > 0, |d| {
-                                    d.child(Button::new("memory-importer").small().outline().label("Open in the Importer…").on_click(cx.listener(|this, _, _, cx| {
-                                        let dir = this.project_path(cx).map(|f| yh_core::memory_archive::claude_code::directory(&f, &yh_core::history::config_directory()));
-                                        let (ws, project) = (this.workspace.clone(), this.project.clone());
-                                        ws.update(cx, |ws, cx| ws.open_memory_agent("importer", &project, dir.into_iter().map(|d| d.to_string_lossy().into_owned()).collect(), None, cx));
+                                    d.child(Button::new("memory-importer").small().outline().label("Open in the Importer…").on_click(cx.listener(|this, _, window, cx| {
+                                        // Claude Code's memory for the folder is found and ticked by the setup.
+                                        open_setup(this.workspace.clone(), "importer", this.project.clone(), vec![], window, cx);
                                     })))
                                     .child(Button::new("memory-already-in").small().outline().label("They're Already In").on_click(cx.listener(|this, _, _, cx| this.mark_synced(cx))))
                                 })
@@ -1473,3 +1537,322 @@ impl Render for MemoryPage {
 }
 
 gpui_kit::actions!(memory, [SaveMemory]);
+
+// MARK: The specialists' setup
+
+/// A memory specialist's thread ID, as the workspace names it.
+pub fn agent_id(role: &str, project: &str) -> String {
+    format!("{}{role}:{project}", crate::state::workspace::MEMORY_AGENT)
+}
+
+/// One source the Importer could read, ticked or not.
+struct Source {
+    path: String,
+    title: String,
+    detail: String,
+    on: bool,
+}
+
+/// Before a specialist starts, as the Swift app's MemoryAgentWindow does: the Importer's
+/// sources (Claude Code's memory for the folder, instruction files, files you add, pasted text)
+/// and what it should know; the Reconciler's starting point and what to focus on; for both,
+/// the model and effort. Start opens the specialist's conversation and sets it going.
+pub struct SpecialistSetup {
+    workspace: Entity<Workspace>,
+    project: String,
+    role: &'static str,
+    sources: Vec<Source>,
+    pasted: Entity<TextareaState>,
+    note: Entity<InputState>,
+    model: Option<String>,
+    effort: Option<String>,
+    stats: Option<yh_core::memory_stats::Stats>,
+}
+
+/// Opens the setup for `role` (`importer` or `reconciler`) over the window; `sources` come
+/// ticked (a folder dropped on Import, Claude Code's memory from the nudge).
+pub fn open_setup(workspace: Entity<Workspace>, role: &str, project: String, sources: Vec<String>, window: &mut Window, cx: &mut App) -> Entity<SpecialistSetup> {
+    let role: &'static str = if role == "importer" { "importer" } else { "reconciler" };
+    let view = cx.new(|cx| SpecialistSetup::new(workspace, role, project, sources, window, cx));
+    let title = if role == "importer" { "Memory Importer" } else { "Memory Reconciler" };
+    let v = view.clone();
+    window.open_dialog(cx, move |d, _, _| d.title(title).w(px(640.)).child(v.clone()));
+    view
+}
+
+impl SpecialistSetup {
+    fn new(workspace: Entity<Workspace>, role: &'static str, project: String, given: Vec<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let pasted = cx.new(|cx| TextareaState::new(window, cx).placeholder("Paste notes, an export, anything to remember"));
+        let hint = if role == "importer" { "e.g. only what's about the iOS app; I'm the tech lead" } else { "e.g. merge the deploy notes; drop what's about the old API" };
+        let note = cx.new(|cx| InputState::new(window, cx).placeholder(hint));
+        if let Ok(n) = std::env::var("YH_MEMORY_AGENT_NOTE") {
+            note.update(cx, |i, cx| i.set_value(n, window, cx));
+        }
+        // The specialist's model: what it had, else what Settings gives the specialists.
+        let (model, effort) = {
+            let ws = workspace.read(cx);
+            let thread = ws.thread(&agent_id(role, &project));
+            let setting = |key: &str| ws.library.setting(key).and_then(|v| v.as_str().map(str::to_string)).filter(|v| !v.is_empty());
+            (
+                std::env::var("YH_MEMORY_AGENT_MODEL").ok().or_else(|| thread.as_ref().and_then(|t| t.read(cx).meta.model.clone())).or_else(|| setting("memoryAgentModel")),
+                thread.as_ref().and_then(|t| t.read(cx).meta.effort.clone()).or_else(|| setting("memoryAgentEffort")),
+            )
+        };
+        let sources = given.iter().map(|p| Source { path: p.clone(), title: file_name(p), detail: p.clone(), on: true }).collect();
+        let mut setup = SpecialistSetup { workspace, project, role, sources, pasted, note, model, effort, stats: None };
+        setup.find(cx);
+        setup
+    }
+
+    /// Looks, off the main thread, for what the Importer could read (Claude Code's memory for
+    /// the folder, CLAUDE.md and AGENTS.md), or what the Reconciler starts from.
+    fn find(&mut self, cx: &mut Context<Self>) {
+        let folder = self.workspace.read(cx).project(&self.project).map(|p| p.path.clone());
+        if self.role == "reconciler" {
+            let Some(store) = self.workspace.read(cx).memory_store() else { return };
+            let scope = yh_core::memory::scope_of(&self.project);
+            cx.spawn(async move |this, cx| {
+                let stats = cx.background_executor().spawn(async move { yh_core::memory_stats::compute(&store, &scope, 30) }).await;
+                let _ = this.update(cx, |s, cx| {
+                    s.stats = Some(stats);
+                    cx.notify();
+                });
+            })
+            .detach();
+            return;
+        }
+        let Some(folder) = folder else { return };
+        cx.spawn(async move |this, cx| {
+            let found = cx
+                .background_executor()
+                .spawn(async move {
+                    let config = yh_core::history::config_directory();
+                    let mut found = vec![];
+                    let memory = yh_core::memory_archive::claude_code::files(&folder, &config);
+                    if !memory.is_empty() {
+                        let dir = yh_core::memory_archive::claude_code::directory(&folder, &config);
+                        found.push(Source {
+                            path: dir.to_string_lossy().into_owned(),
+                            title: "Claude Code's memory for this folder".into(),
+                            detail: format!("{} memor{}", memory.len(), if memory.len() == 1 { "y" } else { "ies" }),
+                            on: true,
+                        });
+                    }
+                    for name in ["CLAUDE.md", "AGENTS.md", ".claude/CLAUDE.md", "CLAUDE.local.md"] {
+                        let path = std::path::Path::new(&folder).join(name);
+                        if path.is_file() {
+                            found.push(Source {
+                                path: path.to_string_lossy().into_owned(),
+                                title: name.to_string(),
+                                detail: "Agents already read this every session; import only what belongs in memory".into(),
+                                on: false,
+                            });
+                        }
+                    }
+                    found
+                })
+                .await;
+            let _ = this.update(cx, |s, cx| {
+                for f in found {
+                    if !s.sources.iter().any(|x| x.path == f.path) {
+                        s.sources.insert(0, f);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn add_sources(&mut self, cx: &mut Context<Self>) {
+        let chosen = cx.prompt_for_paths(gpui_kit::PathPromptOptions { files: true, directories: true, multiple: true, prompt: Some("Add".into()) });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = chosen.await else { return };
+            let _ = this.update(cx, |s, cx| {
+                for p in paths {
+                    let path = p.to_string_lossy().into_owned();
+                    if !s.sources.iter().any(|x| x.path == path) {
+                        s.sources.push(Source { title: file_name(&path), detail: path.clone(), path, on: true });
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn can_start(&self, cx: &App) -> bool {
+        self.role == "reconciler" || self.sources.iter().any(|s| s.on) || !self.pasted.read(cx).value().trim().is_empty()
+    }
+
+    /// Opens the specialist with its model, and sends what starts it.
+    pub fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.can_start(cx) {
+            return;
+        }
+        let note = self.note.read(cx).value().trim().to_string();
+        let mut sources: Vec<String> = self.sources.iter().filter(|s| s.on).map(|s| s.path.clone()).collect();
+        let pasted = self.pasted.read(cx).value().trim().to_string();
+        if !pasted.is_empty() {
+            // Pasted text is saved where state exports find it, then read like any file.
+            let dir = self.workspace.read(cx).data_dir.join("memory-imports");
+            let file = dir.join(format!("pasted-{}.txt", yh_core::library::now_ms() as u64));
+            if std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&file, &pasted)).is_ok() {
+                sources.push(file.to_string_lossy().into_owned());
+            }
+        }
+        let message = if self.role == "importer" {
+            yh_core::memory_agents::import_request(&sources, Some(&note))
+        } else if note.is_empty() {
+            yh_core::memory_agents::RECONCILE_REQUEST.to_string()
+        } else {
+            format!("{}\n{note}", yh_core::memory_agents::RECONCILE_REQUEST)
+        };
+        let (role, project, model, effort) = (self.role, self.project.clone(), self.model.clone(), self.effort.clone());
+        let id = agent_id(role, &project);
+        window.close_dialog(cx);
+        if std::env::var("YH_DATA_DIR").is_ok() {
+            eprintln!("MEMORY {role} starts with {} sources, model {model:?}, effort {effort:?}", sources.len());
+        }
+        self.workspace.update(cx, |ws, cx| {
+            ws.open_memory_agent(role, &project, if role == "importer" { sources } else { vec![] }, None, cx);
+            ws.set_model(&id, model, cx);
+            ws.set_effort(&id, effort, cx);
+            if let Some(t) = ws.thread(&id) {
+                ws.send(&t, &message, false, cx);
+            }
+        });
+    }
+}
+
+fn file_name(path: &str) -> String {
+    std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.to_string())
+}
+
+/// Model and effort menus for a memory specialist: `on_pick` gets (model, effort).
+pub fn model_menus(id: &str, ws: &Workspace, model: Option<String>, effort: Option<String>, on_pick: impl Fn(Option<String>, Option<String>, &mut App) + 'static) -> gpui_kit::AnyElement {
+    let models: Vec<(String, String, Vec<String>)> = if ws.models.is_empty() {
+        [("haiku", "Haiku"), ("sonnet", "Sonnet"), ("opus", "Opus")].iter().map(|(v, n)| (v.to_string(), n.to_string(), vec![])).collect()
+    } else {
+        ws.models.iter().map(|m| (m.value.clone(), m.display_name.clone(), m.efforts.clone())).collect()
+    };
+    let default = std::env::var("YH_MODEL").ok().or_else(|| ws.library.setting("defaults").and_then(|d| d["model"].as_str().map(str::to_string))).filter(|s| !s.is_empty());
+    let name = |m: &Option<String>| m.as_ref().map(|m| models.iter().find(|(v, ..)| v == m).map_or(m.clone(), |(_, n, _)| n.clone()));
+    let model_label = name(&model).unwrap_or_else(|| format!("Default ({})", name(&default).unwrap_or_else(|| "Claude Code's".into())));
+    let efforts = models.iter().find(|(v, ..)| Some(v) == model.as_ref().or(default.as_ref())).map(|(.., e)| e.clone()).filter(|e| !e.is_empty()).unwrap_or_else(|| vec!["low".into(), "medium".into(), "high".into()]);
+    let on_pick = std::rc::Rc::new(on_pick);
+    let (p1, p2) = (on_pick.clone(), on_pick);
+    let (e1, m2) = (effort.clone(), model.clone());
+    let effort_label = effort.clone().map(|e| { let mut c = e.chars(); c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default() }).unwrap_or_else(|| "Auto effort".into());
+    div()
+        .flex()
+        .gap(px(4.))
+        .child(Button::new(SharedString::from(format!("{id}-model"))).small().outline().label(model_label).dropdown_caret(true).dropdown_menu(move |mut menu, _, _| {
+            let p = p1.clone();
+            let e = e1.clone();
+            menu = menu.item(PopupMenuItem::new("Default").on_click(move |_, _, cx| p(None, e.clone(), cx)));
+            for (v, n, _) in &models {
+                let (p, v, e) = (p1.clone(), v.clone(), e1.clone());
+                menu = menu.item(PopupMenuItem::new(n.clone()).on_click(move |_, _, cx| p(Some(v.clone()), e.clone(), cx)));
+            }
+            menu
+        }))
+        .child(Button::new(SharedString::from(format!("{id}-effort"))).small().outline().label(effort_label).dropdown_caret(true).dropdown_menu(move |mut menu, _, _| {
+            let (p, m) = (p2.clone(), m2.clone());
+            menu = menu.item(PopupMenuItem::new("Auto").on_click(move |_, _, cx| p(m.clone(), None, cx)));
+            for level in &efforts {
+                let (p, m, l) = (p2.clone(), m2.clone(), level.clone());
+                let mut label = level.clone();
+                if let Some(f) = label.get_mut(0..1) {
+                    f.make_ascii_uppercase();
+                }
+                menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| p(m.clone(), Some(l.clone()), cx)));
+            }
+            menu
+        }))
+        .into_any_element()
+}
+
+impl Render for SpecialistSetup {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::get(cx);
+        let importer = self.role == "importer";
+        let project_name = self.workspace.read(cx).project(&self.project).map(|p| p.name.clone()).unwrap_or_default();
+        let label = |t: &str| div().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.secondary).child(t.to_uppercase());
+        let (title, detail) = if importer {
+            (format!("Bring memory into {project_name}"), "The Importer reads what you give it (Claude Code's memory, notes, CLAUDE.md files, exports from ChatGPT or other assistants) and turns it into this workspace's memory: one fact a memory, sorted into kinds, without duplicates or secrets. It asks when something's unclear.")
+        } else {
+            (format!("Tidy up {project_name}'s memory"), "The Reconciler goes through the memory with you: it merges duplicates, fixes or archives what's out of date (checking the code when a memory names it), tightens long or vague memories and links related ones. It shows you the plan before it changes anything, and every change keeps the old version.")
+        };
+        let mut column = div().id("specialist-setup").max_h(px(600.)).overflow_y_scroll().flex().flex_col().gap(px(16.)).child(
+            div().flex().flex_col().gap(px(4.)).child(div().text_size(px(17.)).font_weight(FontWeight::SEMIBOLD).child(title)).child(div().text_color(theme.secondary).child(detail)),
+        );
+        if importer {
+            let mut list = div().flex().flex_col().rounded(px(8.)).bg(theme.card).border_1().border_color(theme.separator);
+            if self.sources.is_empty() {
+                list = list.child(div().p(px(12.)).text_color(theme.secondary).child("No sources yet. Add files or folders, or paste text below."));
+            }
+            for (i, s) in self.sources.iter().enumerate() {
+                list = list.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(10.))
+                        .px(px(12.))
+                        .py(px(8.))
+                        .when(i > 0, |d| d.border_t_1().border_color(theme.separator))
+                        .child(gpui_kit::component::checkbox::Checkbox::new(SharedString::from(format!("source-{i}"))).checked(s.on).on_click(cx.listener(move |this, on: &bool, _, cx| {
+                            if let Some(s) = this.sources.get_mut(i) {
+                                s.on = *on;
+                            }
+                            cx.notify();
+                        })))
+                        .child(div().flex_1().min_w_0().flex().flex_col().child(div().child(s.title.clone())).child(div().text_size(px(11.)).text_color(theme.secondary).truncate().child(s.detail.clone()))),
+                );
+            }
+            column = column
+                .child(div().flex().flex_col().gap(px(8.)).child(label("Sources")).child(list).child(div().child(Button::new("add-sources").small().icon(gpui_kit::component::IconName::Plus).label("Add Files or Folders…").on_click(cx.listener(|this, _, _, cx| this.add_sources(cx))))))
+                .child(div().flex().flex_col().gap(px(8.)).child(label("Or paste text")).child(div().p(px(6.)).rounded(px(8.)).bg(theme.card).child(Textarea::new(&self.pasted).appearance(false).h(px(90.)))));
+        } else if let Some(st) = &self.stats {
+            let mut facts = vec![format!("{} memories in use, {:.1} KB", st.active, st.bytes as f64 / 1024.)];
+            if !st.never_recalled.is_empty() {
+                facts.push(format!("{} never read by an agent", st.never_recalled.len()));
+            }
+            if !st.likely_duplicates.is_empty() {
+                facts.push(format!("{} groups that look like duplicates", st.likely_duplicates.len()));
+            }
+            if !st.missed_queries.is_empty() {
+                facts.push(format!("{} searches that found nothing", st.missed_queries.len()));
+            }
+            if st.orphans > 0 {
+                facts.push(format!("{} memories without links", st.orphans));
+            }
+            column = column.child(div().flex().flex_col().gap(px(8.)).child(label("What it starts from")).child(div().p(px(12.)).rounded(px(8.)).bg(theme.card).flex().flex_col().gap(px(4.)).children(facts.into_iter().map(|f| div().child(f)))));
+        }
+        let this = cx.entity().downgrade();
+        let menus = model_menus(&format!("setup-{}", self.role), self.workspace.read(cx), self.model.clone(), self.effort.clone(), move |m, e, cx| {
+            let _ = this.update(cx, |s, cx| {
+                s.model = m;
+                s.effort = e;
+                cx.notify();
+            });
+        });
+        column = column
+            .child(
+                div().flex().flex_col().gap(px(8.)).child(label("Model")).child(
+                    div().flex().items_center().gap(px(10.)).child(menus).child(div().flex_1().min_w_0().text_size(px(11.)).text_color(theme.secondary).child("A stronger model sorts and merges memory more carefully.")),
+                ),
+            )
+            .child(div().flex().flex_col().gap(px(8.)).child(label(if importer { "Anything the Importer should know" } else { "Anything to focus on" })).child(Input::new(&self.note)))
+            .child(
+                div().flex().justify_end().gap(px(8.)).child(Button::new("setup-cancel").label("Cancel").on_click(|_, window, cx| window.close_dialog(cx))).child(
+                    Button::new("setup-start")
+                        .primary()
+                        .label(if importer { "Start Import" } else { "Start Review" })
+                        .disabled(!self.can_start(cx))
+                        .on_click(cx.listener(|this, _, window, cx| this.start(window, cx))),
+                ),
+            );
+        column
+    }
+}

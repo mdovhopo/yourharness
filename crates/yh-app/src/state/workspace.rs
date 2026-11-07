@@ -1108,7 +1108,8 @@ impl Workspace {
             let Some(db) = self.library.db.clone() else { return Err("No memory here.".into()) };
             let name = self.project(&project_id).map(|p| if self.home_project().as_deref() == Some(p.id.as_str()) { "Home".to_string() } else { p.name.clone() }).unwrap_or_default();
             let changed = self.tool_requests.clone();
-            let actor = yh_core::memory::Actor { kind: if role == "importer" { "importer".into() } else { "reconciler".into() }, thread: None };
+            // Its thread is named, so its window can list what this session changed.
+            let actor = yh_core::memory::Actor { kind: if role == "importer" { "importer".into() } else { "reconciler".into() }, thread: Some(thread.read(cx).id().to_string()) };
             let server = yh_core::memory_tools::MemoryTools {
                 store: yh_core::memory::Store { db },
                 scope: yh_core::memory::scope_of(&project_id),
@@ -2074,6 +2075,23 @@ impl Workspace {
             })
             .detach();
         }
+    }
+}
+
+// MARK: Memory specialists' sessions
+
+impl Workspace {
+    /// New Session: ends a memory specialist's conversation and opens it again empty, keeping
+    /// its model and effort.
+    pub fn restart_memory_agent(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some((role, project)) = id.strip_prefix(MEMORY_AGENT).and_then(|r| r.split_once(':')).map(|(a, b)| (a.to_string(), b.to_string())) else { return };
+        let (model, effort) = self.thread(id).map(|t| (t.read(cx).meta.model.clone(), t.read(cx).meta.effort.clone())).unwrap_or_default();
+        self.end_runtime(id, cx);
+        self.by_id.remove(id);
+        self.memory_agent_sources.remove(id);
+        self.open_memory_agent(&role, &project, vec![], None, cx);
+        self.set_model(id, model, cx);
+        self.set_effort(id, effort, cx);
     }
 }
 
