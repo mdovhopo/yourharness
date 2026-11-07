@@ -121,6 +121,10 @@ pub struct Session {
     pub tabs: Vec<Tab>,
     pub selected: Option<u32>,
     next_id: u32,
+    /// When the agent or you last used it, or it was last on screen.
+    last_active: Option<Instant>,
+    /// The pages closed for being idle, to open again from the panel.
+    pub restorable: Vec<String>,
 }
 
 impl Session {
@@ -162,9 +166,52 @@ impl Browsers {
         }
     }
 
+    fn touch(&mut self, thread: &str) {
+        if let Some(s) = self.sessions.get_mut(thread) {
+            s.last_active = Some(Instant::now());
+        }
+    }
+
+    /// Pages nobody has used or looked at for 30 minutes (`YH_BROWSER_IDLE_SECS`) are closed, as
+    /// the Swift app does: each tab is a web content process. Their addresses stay, to open again.
+    pub fn close_idle(&mut self) {
+        let limit = Duration::from_secs(std::env::var("YH_BROWSER_IDLE_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(30 * 60));
+        let shown = self.shown.as_ref().map(|(t, _)| t.clone());
+        let mut closed = 0;
+        for (thread, s) in self.sessions.iter_mut() {
+            let idle = s.last_active.is_none_or(|t| t.elapsed() > limit);
+            if s.tabs.is_empty() || !idle || shown.as_deref() == Some(thread.as_str()) {
+                continue;
+            }
+            s.restorable = s.tabs.iter().filter_map(|t| t.web.url()).filter(|u| u != "about:blank").collect();
+            closed += s.tabs.len();
+            s.tabs.clear();
+            s.selected = None;
+        }
+        if closed > 0 {
+            if std::env::var("YH_DATA_DIR").is_ok() {
+                eprintln!("BROWSER closed {closed} idle pages");
+            }
+            self.place();
+        }
+    }
+
+    /// Opens the pages closed for being idle again.
+    pub fn reopen(thread: &str, project: Option<&str>) {
+        Browsers::with(|b| {
+            let urls = b.sessions.get_mut(thread).map(|s| std::mem::take(&mut s.restorable)).unwrap_or_default();
+            for url in urls {
+                b.open_tab(thread, project, &url);
+            }
+        });
+    }
+
     /// The panel's place for a thread's browser, or None when it isn't showing.
     pub fn show(thread: Option<(String, (f64, f64, f64, f64))>) {
         Browsers::with(|b| {
+            if let Some((t, _)) = &thread {
+                b.touch(&t.clone());
+            }
             if b.shown != thread {
                 b.shown = thread;
                 b.place();
@@ -199,6 +246,8 @@ impl Browsers {
             color_scheme: None,
         });
         session.selected = Some(id);
+        session.last_active = Some(Instant::now());
+        session.restorable.clear();
         self.place();
         id
     }
@@ -297,6 +346,14 @@ pub fn start(host: cocoa::base::id, reveal: impl Fn(&str, &mut App) + 'static, c
     });
     let (jobs, rx) = flume::unbounded::<Job>();
     let _ = JOBS.set(jobs);
+    // Idle pages close, looked at every few minutes (every few seconds in a test with a short limit).
+    #[allow(clippy::infinite_loop)]
+    cx.spawn(async move |cx| loop {
+        let every = if std::env::var("YH_BROWSER_IDLE_SECS").is_ok() { 2 } else { 300 };
+        cx.background_executor().timer(Duration::from_secs(every)).await;
+        cx.update(|_| Browsers::with(|b| b.close_idle()));
+    })
+    .detach();
     cx.spawn(async move |cx| {
         while let Ok(job) = rx.recv_async().await {
             let _ = cx.update(|cx| BROWSERS.with(|b| job(&mut b.borrow_mut(), cx)));
@@ -402,7 +459,9 @@ impl BrowserTools {
     /// Runs `f` on the main thread with the browsers and waits for what it returns.
     fn main<T: Send + 'static>(&self, f: impl FnOnce(&mut Browsers, &mut App) -> T + Send + 'static) -> Result<T, Fail> {
         let (tx, rx) = flume::bounded(1);
+        let thread = self.thread.clone();
         let job: Job = Box::new(move |b, cx| {
+            b.touch(&thread);
             let _ = tx.send(f(b, cx));
         });
         JOBS.get().ok_or("The browser isn't ready.")?.send(job).map_err(|_| "The browser is gone.".to_string())?;

@@ -881,6 +881,7 @@ impl Inspector {
                 self.find_dev_servers(cx);
             }
             let servers = self.dev_servers.clone().unwrap_or_default();
+            let restorable = crate::browser::Browsers::with(|b| b.sessions.get(&thread).map(|s| s.restorable.len()).unwrap_or(0));
             let mut list = div().flex().flex_col().gap(px(4.)).w_full().px(px(16.));
             if !servers.is_empty() {
                 list = list.child(div().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.secondary).child("Running on this Mac"));
@@ -898,6 +899,15 @@ impl Inspector {
                 .gap(px(10.))
                 .child(div().px(px(8.)).pt(px(8.)).child(Input::new(&self.address).small()))
                 .child(div().flex_1().child(empty("No pages open. Type an address, or wait for Claude to open one: it shows here, and you can watch what it does.", theme)))
+                .when(restorable > 0, |d| {
+                    let (thread, project) = (thread.clone(), project.clone());
+                    d.child(div().flex().justify_center().child(
+                        Button::new("browser-reopen").small().outline().label(if restorable == 1 { "Reopen the Page Closed While Idle".to_string() } else { format!("Reopen {restorable} Pages Closed While Idle") }).on_click(cx.listener(move |_, _, _, cx| {
+                            crate::browser::Browsers::reopen(&thread, Some(&project));
+                            cx.notify();
+                        })),
+                    ))
+                })
                 .child(list)
                 .child(
                     div()
