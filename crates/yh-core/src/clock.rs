@@ -57,9 +57,99 @@ pub fn elapsed(seconds: f64) -> String {
     }
 }
 
+/// "now", "5m", "3h", "2d", "3w", "1mo", "2y": how long ago, as the sidebar says it.
+pub fn short_age(date: f64, now: f64) -> String {
+    let seconds = (now - date).max(0.0);
+    let (minutes, hours, days) = (seconds / 60.0, seconds / 3600.0, seconds / 86_400.0);
+    if seconds < 60.0 {
+        "now".into()
+    } else if seconds < 3600.0 {
+        format!("{}m", minutes as i64)
+    } else if seconds < 86_400.0 {
+        format!("{}h", hours as i64)
+    } else if seconds < 7.0 * 86_400.0 {
+        format!("{}d", days as i64)
+    } else if seconds < 30.0 * 86_400.0 {
+        format!("{}w", (days / 7.0) as i64)
+    } else if seconds < 365.0 * 86_400.0 {
+        format!("{}mo", ((days / 30.0) as i64).max(1))
+    } else {
+        format!("{}y", (days / 365.0) as i64)
+    }
+}
+
+/// "42m", "2h 14m", "3d 4h", "now": time left until `date`.
+pub fn countdown(date: f64, now: f64) -> String {
+    let minutes = (((date - now) / 60.0) as i64).max(0);
+    let (days, hours, rest) = (minutes / 1440, minutes % 1440 / 60, minutes % 60);
+    if days > 0 {
+        if hours > 0 { format!("{days}d {hours}h") } else { format!("{days}d") }
+    } else if hours > 0 {
+        if rest > 0 { format!("{hours}h {rest}m") } else { format!("{hours}h") }
+    } else if minutes > 0 {
+        format!("{minutes}m")
+    } else {
+        "now".into()
+    }
+}
+
+/// "in 2 hours", "3 minutes ago", "now", "tomorrow", "yesterday": as macOS's named relative
+/// dates say it.
+pub fn relative(date: f64, now: f64) -> String {
+    let delta = date - now;
+    let s = delta.abs();
+    let (n, unit) = if s < 60.0 {
+        return "now".into();
+    } else if s < 3600.0 {
+        ((s / 60.0) as i64, "minute")
+    } else if s < 86_400.0 {
+        ((s / 3600.0) as i64, "hour")
+    } else if s < 7.0 * 86_400.0 {
+        let days = (s / 86_400.0) as i64;
+        if days == 1 {
+            return if delta > 0.0 { "tomorrow".into() } else { "yesterday".into() };
+        }
+        (days, "day")
+    } else if s < 30.0 * 86_400.0 {
+        ((s / (7.0 * 86_400.0)) as i64, "week")
+    } else if s < 365.0 * 86_400.0 {
+        ((s / (30.0 * 86_400.0)) as i64, "month")
+    } else {
+        ((s / (365.0 * 86_400.0)) as i64, "year")
+    };
+    let unit = if n == 1 { unit.to_string() } else { format!("{unit}s") };
+    if delta > 0.0 { format!("in {n} {unit}") } else { format!("{n} {unit} ago") }
+}
+
+/// "Nov 7, 2026 at 17:00": a date and time, short.
+pub fn short_date_time(date: f64) -> String {
+    let (y, m, d, hh, mm, _) = local(date);
+    format!("{} {d}, {y} at {hh}:{mm:02}", MONTHS[(m as usize).saturating_sub(1).min(11)])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ages_and_countdowns() {
+        let now = 1_800_000_000.0;
+        assert_eq!(short_age(now - 30.0, now), "now");
+        assert_eq!(short_age(now - 300.0, now), "5m");
+        assert_eq!(short_age(now - 3.0 * 3600.0, now), "3h");
+        assert_eq!(short_age(now - 2.0 * 86_400.0, now), "2d");
+        assert_eq!(short_age(now - 21.0 * 86_400.0, now), "3w");
+        assert_eq!(short_age(now - 40.0 * 86_400.0, now), "1mo");
+        assert_eq!(short_age(now - 800.0 * 86_400.0, now), "2y");
+        assert_eq!(countdown(now + 42.0 * 60.0, now), "42m");
+        assert_eq!(countdown(now + 134.0 * 60.0, now), "2h 14m");
+        assert_eq!(countdown(now + 2.0 * 3600.0, now), "2h");
+        assert_eq!(countdown(now + 76.0 * 3600.0, now), "3d 4h");
+        assert_eq!(countdown(now - 5.0, now), "now");
+        assert_eq!(relative(now + 7200.0, now), "in 2 hours");
+        assert_eq!(relative(now - 180.0, now), "3 minutes ago");
+        assert_eq!(relative(now - 86_400.0 * 1.5, now), "yesterday");
+    }
 
     #[test]
     fn durations() {

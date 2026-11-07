@@ -280,3 +280,87 @@ pub fn config_directory() -> std::path::PathBuf {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| Path::new(&std::env::var("HOME").unwrap_or_default()).join(".claude"))
 }
+
+/// What the Resume sheet shows of a session before it's brought in.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Summary {
+    /// The folder it ran in.
+    pub cwd: Option<String>,
+    /// A name given with `/rename`, else Claude Code's own title for it.
+    pub title: Option<String>,
+    pub custom_title: bool,
+    pub first_message: Option<String>,
+    /// Your messages on its live branch.
+    pub messages: usize,
+    /// When its file last changed (seconds since 1970).
+    pub updated_at: Option<f64>,
+    /// The model of its last reply.
+    pub model: Option<String>,
+}
+
+/// Reads the whole file: off the main thread.
+pub fn summary(path: &Path) -> Summary {
+    let (cwd, first_message) = peek(path);
+    let messages = load(path).iter().filter(|e| e.kind == Kind::User).count();
+    let (mut custom, mut ai, mut model) = (None, None, None);
+    if let Ok(data) = std::fs::read(path) {
+        for line in data.split(|b| *b == b'\n') {
+            // Only the lines that can say a title or a model are parsed.
+            let text = std::str::from_utf8(line).unwrap_or("");
+            if !(text.contains("\"custom-title\"") || text.contains("\"ai-title\"") || text.contains("\"summary\"") || text.contains("\"model\"")) {
+                continue;
+            }
+            let Ok(o) = serde_json::from_slice::<Value>(line) else { continue };
+            match o["type"].as_str() {
+                Some("custom-title") => custom = o["customTitle"].as_str().map(str::to_string).or(custom),
+                Some("ai-title") => ai = o["aiTitle"].as_str().map(str::to_string).or(ai),
+                Some("summary") => ai = ai.or_else(|| o["summary"].as_str().map(str::to_string)),
+                Some("assistant") => {
+                    if let Some(m) = o["message"]["model"].as_str().filter(|m| !m.starts_with('<')) {
+                        model = Some(m.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let updated_at = std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs_f64());
+    let custom = custom.filter(|t| !t.is_empty());
+    Summary { cwd, custom_title: custom.is_some(), title: custom.or(ai.filter(|t| !t.is_empty())), first_message, messages, updated_at, model }
+}
+
+#[cfg(test)]
+mod summary_tests {
+    use super::*;
+
+    #[test]
+    fn summarizes_a_session() {
+        let dir = std::env::temp_dir().join(format!("yh-summary-{}", crate::library::new_uuid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.jsonl");
+        let lines = [
+            r#"{"type":"user","uuid":"a","parentUuid":null,"cwd":"/tmp/proj","message":{"role":"user","content":"Fix the login page"}}"#,
+            r#"{"type":"assistant","uuid":"b","parentUuid":"a","message":{"role":"assistant","model":"claude-haiku-4-5","content":[{"type":"text","text":"Done."}]}}"#,
+            r#"{"type":"user","uuid":"c","parentUuid":"b","message":{"role":"user","content":"Thanks"}}"#,
+            r#"{"type":"ai-title","aiTitle":"Login fix"}"#,
+        ];
+        std::fs::write(&path, lines.join("\n")).unwrap();
+        let s = summary(&path);
+        assert_eq!(s.cwd.as_deref(), Some("/tmp/proj"));
+        assert_eq!(s.first_message.as_deref(), Some("Fix the login page"));
+        assert_eq!(s.messages, 2);
+        assert_eq!(s.title.as_deref(), Some("Login fix"));
+        assert!(!s.custom_title);
+        assert_eq!(s.model.as_deref(), Some("claude-haiku-4-5"));
+        assert!(s.updated_at.is_some());
+        std::fs::write(&path, format!("{}\n{}", lines.join("\n"), r#"{"type":"custom-title","customTitle":"Mine"}"#)).unwrap();
+        let s = summary(&path);
+        assert_eq!(s.title.as_deref(), Some("Mine"));
+        assert!(s.custom_title);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

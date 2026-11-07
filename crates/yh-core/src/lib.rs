@@ -24,6 +24,7 @@ pub mod titles;
 pub mod markdown;
 pub mod links;
 pub mod clock;
+pub mod limits;
 pub mod mcp;
 pub mod memory;
 pub mod memory_archive;
