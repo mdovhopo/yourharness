@@ -20,6 +20,8 @@ block = "0.1"
 cocoa = "0.26"
 core-foundation = "0.10"
 raw-window-handle = "0.6"
+# Copy Image and Save as PNG for diagrams: the version GPUI already builds.
+resvg = "0.46"
 # Only for the snapshots feature: the same GPUI gpui-kit pins, with its test support turned on.
 gpui = { package = "gpui-pre", version = "=0.3.11", optional = true }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.11", optional = true }

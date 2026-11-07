@@ -106,6 +106,7 @@ impl Entry {
             turn_ended_at: self.data.turn_ended_at,
             delivery: self.delivery.clone(),
             attachments: (!self.data.attachments.is_empty()).then(|| serde_json::to_string(&self.data.attachments).unwrap_or_default()),
+            notice_style: (self.data.kind == Kind::Notice && self.data.is_error).then(|| "error".into()),
             ..Default::default()
         }
     }
@@ -130,6 +131,21 @@ pub struct Item {
     pub ty: ItemType,
     pub entries: Vec<EntryRef>,
     pub open: bool,
+}
+
+/// A call that changes or reads the plan, or loads only the task tools (`ToolSearch`
+/// `select:TaskCreate,TaskUpdate`): shown as the plan it leaves.
+pub fn is_plan_tool(name: &str, input: &str) -> bool {
+    if yh_core::plan::TOOLS.contains(&name) {
+        return true;
+    }
+    if name != "ToolSearch" || !input.contains("select:") {
+        return false;
+    }
+    let query = serde_json::from_str::<serde_json::Value>(input).ok().and_then(|v| v["query"].as_str().map(str::to_string)).unwrap_or_default();
+    let Some(names) = query.strip_prefix("select:") else { return false };
+    let names: Vec<&str> = names.split(',').map(str::trim).filter(|n| !n.is_empty()).collect();
+    !names.is_empty() && names.iter().all(|n| yh_core::plan::TOOLS.contains(n))
 }
 
 /// Tools whose call is a sub-agent: shown as a card of its own.
@@ -263,6 +279,15 @@ pub struct ThreadState {
     pub linker: Option<std::sync::Arc<yh_core::links::Linker>>,
     /// What Claude left running (background commands, watches): never saved.
     pub jobs: crate::state::jobs::Jobs,
+    /// The plan as of each run of task tool calls, by the run's last call (the transcript shows
+    /// the newest as the whole checklist, earlier ones as a line).
+    pub plan_steps: HashMap<String, yh_core::plan::Plan>,
+    /// Task tool calls followed by another: their run shows once, at its end.
+    pub folded_plan_calls: std::collections::HashSet<String>,
+    pub latest_plan_step: Option<String>,
+    /// What each running foreground command printed last, by its tool call: the transcript
+    /// reads it once a second.
+    pub job_lines: HashMap<String, String>,
 }
 
 impl ThreadState {
@@ -300,6 +325,10 @@ impl ThreadState {
             folds_dirty: false,
             linker: None,
             jobs: Default::default(),
+            plan_steps: HashMap::new(),
+            folded_plan_calls: Default::default(),
+            latest_plan_step: None,
+            job_lines: HashMap::new(),
         }
     }
 
@@ -342,7 +371,6 @@ impl ThreadState {
         let was_empty = self.items.is_empty();
         let top = self.list.logical_scroll_top();
         self.items.splice(0..0, items);
-        self.refresh_plan();
         self.before = before;
         if was_empty {
             self.list.reset(self.items.len());
@@ -350,6 +378,8 @@ impl ThreadState {
             self.list.splice(0..0, count as usize);
             self.list.scroll_to(ListOffset { item_ix: top.item_ix + count as usize, offset_in_item: top.offset_in_item });
         }
+        // After the list knows the rows: it may measure some of them again.
+        self.refresh_plan();
         self.refresh_folds();
     }
 
@@ -524,6 +554,34 @@ impl ThreadState {
         self.refresh_folds();
     }
 
+    /// What running foreground commands printed last, by tool call: rows whose line changed
+    /// are measured again. True when any did.
+    pub fn set_job_lines(&mut self, lines: Vec<(String, String)>) -> bool {
+        let mut changed = false;
+        for (tool, line) in lines {
+            if self.job_lines.get(&tool) == Some(&line) {
+                continue;
+            }
+            if let Some((_, pos)) = self.tools.get(&tool) {
+                let pos = *pos;
+                self.touch_pos(pos);
+            }
+            self.job_lines.insert(tool, line);
+            changed = true;
+        }
+        changed
+    }
+
+    /// A notice in the error colour (saved as such: `notice_style` "error").
+    pub fn error_notice(&mut self, text: &str) {
+        self.next_note += 1;
+        let id = format!("n{}", self.next_note);
+        let mut data = EntryData::new(id, Kind::Notice, text);
+        data.is_error = true;
+        self.append(data);
+        self.refresh_folds();
+    }
+
     /// Opens or closes a finished turn's work, by its first folded row.
     pub fn toggle_turn(&mut self, first: i64) {
         if !self.open_turns.remove(&first) {
@@ -645,13 +703,45 @@ impl ThreadState {
     /// Rebuilds the checklist from the task tool calls held, in order.
     pub fn refresh_plan(&mut self) {
         let mut plan = yh_core::plan::Plan::default();
+        let mut steps: HashMap<String, yh_core::plan::Plan> = HashMap::new();
+        let mut folded = std::collections::HashSet::new();
+        let mut previous: Option<String> = None;
         for item in &self.items {
             for e in &item.entries {
                 let b = e.borrow();
-                if let Some(name) = b.data.tool_name.as_deref().filter(|n| yh_core::plan::TOOLS.contains(n)) {
-                    plan.apply(name, b.data.tool_input.as_deref().unwrap_or(""), b.data.tool_result.as_deref(), &b.data.id);
+                let input = b.data.tool_input.as_deref().unwrap_or("");
+                let Some(name) = b.data.tool_name.as_deref().filter(|n| b.data.kind == Kind::Tool && is_plan_tool(n, input)) else {
+                    previous = None;
+                    continue;
+                };
+                if yh_core::plan::TOOLS.contains(&name) {
+                    plan.apply(name, input, b.data.tool_result.as_deref(), &b.data.id);
                 }
+                if let Some(previous) = previous.take() {
+                    steps.remove(&previous);
+                    folded.insert(previous);
+                }
+                steps.insert(b.data.id.clone(), plan.clone());
+                previous = Some(b.data.id.clone());
             }
+        }
+        let latest = self.items.iter().rev().flat_map(|i| i.entries.iter().rev()).map(|e| e.borrow().data.id.clone()).find(|id| steps.contains_key(id));
+        // Calls whose plan line changed are measured again.
+        let changed: Vec<i64> = self
+            .tools
+            .iter()
+            .filter(|(id, _)| {
+                steps.get(*id) != self.plan_steps.get(*id)
+                    || folded.contains(*id) != self.folded_plan_calls.contains(*id)
+                    || (latest.as_ref() == Some(*id)) != (self.latest_plan_step.as_ref() == Some(*id))
+            })
+            .map(|(_, (_, pos))| *pos)
+            .collect();
+        self.plan_steps = steps;
+        self.folded_plan_calls = folded;
+        self.latest_plan_step = latest;
+        for pos in changed {
+            self.touch_pos(pos);
         }
         if std::env::var("YH_EVENT_LOG").as_deref() == Ok("1") {
             eprintln!("plan: {:?}", plan.items.iter().map(|i| (&i.id, &i.subject, i.status)).collect::<Vec<_>>());
@@ -835,7 +925,10 @@ impl ThreadState {
                 }
                 let touches_plan = results.iter().any(|r| {
                     self.tools.get(&r.id).is_some_and(|(e, _)| {
-                        e.borrow().data.tool_name.as_deref().is_some_and(|n| yh_core::plan::TOOLS.contains(&n))
+                        {
+                            let b = e.borrow();
+                            b.data.tool_name.as_deref().is_some_and(|n| is_plan_tool(n, b.data.tool_input.as_deref().unwrap_or("")))
+                        }
                     })
                 });
                 let jobs_before = self.jobs.running.len();
@@ -907,7 +1000,7 @@ impl ThreadState {
             Event::Done { is_error, text } => {
                 self.end_turn();
                 if is_error && !text.is_empty() {
-                    self.notice(&text);
+                    self.error_notice(&text);
                 }
                 true
             }
@@ -918,8 +1011,10 @@ impl ThreadState {
             }
             Event::JobFinished { task_id, status, summary, output_file } => {
                 let code = summary.as_deref().and_then(yh_core::claude::job_exit_code);
-                if let Some(note) = self.jobs.finish(&task_id, &status, code, output_file) {
-                    self.notice(&note);
+                match self.jobs.finish(&task_id, &status, code, output_file) {
+                    Some((note, true)) => self.error_notice(&note),
+                    Some((note, false)) => self.notice(&note),
+                    None => {}
                 }
                 true
             }
@@ -940,7 +1035,7 @@ impl ThreadState {
                 }
                 self.end_turn();
                 if code != 0 {
-                    self.notice(&format!("claude exited ({code}) {tail}"));
+                    self.error_notice(&format!("claude exited ({code}) {tail}"));
                 }
                 true
             }

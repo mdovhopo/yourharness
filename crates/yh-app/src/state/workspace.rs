@@ -2121,6 +2121,8 @@ fn make_thread(meta: ThreadMeta, workspace: WeakEntity<Workspace>, cx: &mut Cont
     // Near the top of what's held: read the page before it.
     let weak = thread.downgrade();
     thread.read(cx).list.set_scroll_handler(move |event, _, cx| {
+        // The jump buttons over the transcript come and go as it scrolls.
+        crate::ui::working::scrolled(cx);
         if event.visible_range.start > 4 {
             return;
         }

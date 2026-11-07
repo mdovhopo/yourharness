@@ -8587,6 +8587,7 @@ dependencies = [
  "libc",
  "objc",
  "raw-window-handle",
+ "resvg 0.46.0",
  "serde_json",
  "yh-core",
 ]

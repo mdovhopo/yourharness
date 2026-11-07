@@ -730,7 +730,7 @@ impl BrowserTools {
         Ok(lines.join("\n"))
     }
 
-    fn screenshot(&self, id: u32, a: &Value) -> Result<ToolResult, Fail> {
+    fn screenshot(&self, id: u32, a: &Value, tool_use: Option<&str>) -> Result<ToolResult, Fail> {
         let rect = if Self::has_target(a) {
             let (_, _, r, _, _) = self.locate(id, a)?;
             Some((r.0 - 8., r.1 - 8., r.2 + 16., r.3 + 16.))
@@ -748,6 +748,12 @@ impl BrowserTools {
         let (pw, ph) = rx.recv_timeout(Duration::from_secs(20)).map_err(|_| if shown { "Couldn't capture the page." } else { "The browser isn't on screen: open it with open (show: true) first." }.to_string())??;
         let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
         let _ = std::fs::remove_file(&path);
+        // A copy for the transcript, whose step shows it (`<thread>-browser-<tool use>.jpg`).
+        if let Some(tool_use) = tool_use {
+            let dir = yh_core::library::data_directory().join("attachments");
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(dir.join(format!("{}-browser-{tool_use}.jpg", self.thread)), &bytes);
+        }
         let (w, h) = self.with_tab(id, |t| t.web.size())?;
         let css_width = rect.map_or(w, |r| r.2);
         let scale = pw as f64 / css_width.max(1.);
@@ -762,7 +768,7 @@ impl BrowserTools {
         Ok(result)
     }
 
-    fn perform(&self, name: &str, a: &Value) -> Result<ToolResult, Fail> {
+    fn perform(&self, name: &str, a: &Value, tool_use: Option<&str>) -> Result<ToolResult, Fail> {
         match name {
             "status" => Ok(ToolResult::text(self.status()?)),
             "open" => {
@@ -841,7 +847,7 @@ impl BrowserTools {
             }
             "screenshot" => {
                 let id = self.tab_id(a)?;
-                self.screenshot(id, a)
+                self.screenshot(id, a, tool_use)
             }
             "click" => {
                 let id = self.tab_id(a)?;
@@ -1394,10 +1400,10 @@ impl ToolServer for BrowserTools {
         }
     }
 
-    fn call(&self, name: &str, a: &Value, _: Option<&str>) -> ToolResult {
+    fn call(&self, name: &str, a: &Value, tool_use: Option<&str>) -> ToolResult {
         if self.read_only && !READ_ONLY_TOOLS.contains(&name) {
             return ToolResult::error("The side chat can look at the browser, not use it.");
         }
-        self.perform(name, a).unwrap_or_else(ToolResult::error)
+        self.perform(name, a, tool_use).unwrap_or_else(ToolResult::error)
     }
 }

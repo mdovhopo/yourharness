@@ -128,8 +128,9 @@ impl Jobs {
     }
 
     /// The CLI's word that a job ended. The note to leave in the thread, for a background one
-    /// (a foreground command shows how it went in its own call).
-    pub fn finish(&mut self, task_id: &str, status: &str, exit_code: Option<i32>, output_file: Option<String>) -> Option<String> {
+    /// (a foreground command shows how it went in its own call), and whether it failed (the
+    /// note is then in the error colour).
+    pub fn finish(&mut self, task_id: &str, status: &str, exit_code: Option<i32>, output_file: Option<String>) -> Option<(String, bool)> {
         let ix = self.running.iter().position(|j| j.id == task_id)?;
         let mut job = self.running.remove(ix);
         job.exit_code = exit_code;
@@ -143,7 +144,7 @@ impl Jobs {
             job.output_file = output_file;
         }
         self.version += 1;
-        job.background.then(|| job.end_note())
+        job.background.then(|| (job.end_note(), job.status == JobStatus::Failed))
     }
 
     /// What a watch saw: its last line.
@@ -266,7 +267,8 @@ mod tests {
     fn a_failed_background_job_leaves_a_note() {
         let mut jobs = jobs();
         assert_eq!(jobs.waiting(), 1);
-        let note = jobs.finish("b1", "failed", Some(3), Some("/tmp/x/tasks/b1.output".into())).unwrap();
+        let (note, failed) = jobs.finish("b1", "failed", Some(3), Some("/tmp/x/tasks/b1.output".into())).unwrap();
+        assert!(failed);
         assert!(note.starts_with("Background command “Build” failed with exit code 3 after "), "{note}");
         assert_eq!(jobs.waiting(), 0);
         // A foreground one's end says nothing: its call shows it.
@@ -316,7 +318,7 @@ mod tests {
         jobs.start("w".into(), None, Some("Monitor"), "Load".into(), true);
         jobs.saw("w", "sample 1: 2.58\nsample 2: 2.69\n");
         assert_eq!(jobs.running[0].last_line.as_deref(), Some("sample 2: 2.69"));
-        assert_eq!(jobs.finish("w", "completed", None, None).map(|n| n.starts_with("Watch “Load” ended after")), Some(true));
+        assert_eq!(jobs.finish("w", "completed", None, None).map(|(n, failed)| n.starts_with("Watch “Load” ended after") && !failed), Some(true));
     }
 
     #[test]
