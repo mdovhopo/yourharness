@@ -260,7 +260,7 @@ impl Render for TranscriptView {
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_size(px(12.5))
+                .text_size(px(crate::theme::text::FOOTNOTE))
                 .text_color(theme.secondary)
                 .when(self.slow_load, |d| d.child("Loading conversation…"))
                 .into_any_element();
