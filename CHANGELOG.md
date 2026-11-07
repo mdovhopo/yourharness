@@ -6,6 +6,26 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+### Changed
+- YourHarness is rebuilt from the ground up in Rust, on GPUI, the framework the Zed editor draws with. Everything you had carries over: projects, threads, memory, settings and usage history are read from where 0.0.16 kept them. The window draws at your display's full frame rate even with twenty threads streaming at once, switching threads takes a few hundredths of a second, and the app uses a fraction of the memory it did.
+- A new look throughout: quieter sidebar rows with a soft selection, icons instead of text symbols, SF Mono for code, one type scale, and Settings, Memory, Usage and the project page laid out like System Settings, with segmented controls and grouped rows.
+- Tool calls in the transcript read as what they did ("Read …/README.md", "Run command"), each a compact line that opens into a card; failed ones are red. A finished turn's work folds into one quiet line.
+
+### Added
+- Select text anywhere in a reply, a tool's output or a thinking block, and copy part of it.
+- Code blocks have a header with the language and a Copy button; tables copy as tab-separated text; diagrams open large, and copy or save as PNG.
+- Several permission requests at once (from parallel sub-agents) each get their own answer, one after another.
+- ⌘↩ answers a question once every question has an answer, or approves a plan in the recommended mode; ⌘⌫ skips or keeps planning.
+- The browser: back, forward and reload, an address field, closable tabs, console and network panes, Pick an element for your message, local dev servers offered when nothing's open, pages left alone for 30 minutes close (and reopen in one click), and the whole browser can open in its own window.
+- The thread's header shows the repos and worktrees it works in, with their state, and can run the thread in another one.
+- Settings → Agents shows where `claude` is (and lets you choose another), the account it's signed in with, `gh` and `glab`.
+- The sidebar's left column hides with ⌃⌘S and resizes by dragging; the window's size and place and the open thread come back at launch.
+- Drop files anywhere on a thread to attach them.
+
+### Fixed
+- A message sent while a thread was still loading no longer shows twice.
+- A finished turn no longer sends its notification twice.
+
 ## [0.0.16] - 2026-11-04
 
 ### Added
