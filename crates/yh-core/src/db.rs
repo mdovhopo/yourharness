@@ -9,7 +9,9 @@
 //! - **Rows keep every column the Swift app writes**, even the ones this app doesn't use yet, so
 //!   a row read and saved again comes back unchanged.
 
+use crate::legacy_import::{LegacyStore, LegacyTranscript};
 use crate::schema::STEPS;
+use unicode_segmentation::UnicodeSegmentation;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -77,7 +79,12 @@ enum Job {
     Rows { thread: String, count: usize, rows: Vec<(usize, Row)> },
     DeleteTranscript(String),
     Flush(flume::Sender<()>),
+    /// An old JSON transcript into the database (read already, or read here), then a reply.
+    ImportLegacy { thread: String, read: Option<LegacyTranscript>, done: Option<flume::Sender<()>> },
 }
+
+/// How long after opening old transcripts start coming in: the launch goes first.
+pub const LEGACY_IMPORT_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
 
 pub struct Database {
     path: PathBuf,
@@ -85,6 +92,8 @@ pub struct Database {
     readers: Mutex<Vec<Connection>>,
     /// Threads with rows waiting to be written.
     waiting: Arc<Mutex<HashSet<String>>>,
+    /// Old transcripts (`threads/<id>.json`) still to move in, by thread ID.
+    legacy_pending: Arc<Mutex<HashSet<String>>>,
 }
 
 fn now() -> f64 {
@@ -127,8 +136,16 @@ fn migrate(c: &Connection) -> rusqlite::Result<()> {
 }
 
 impl Database {
-    /// Opens (or creates) `harness.sqlite` in `directory`.
+    /// Opens (or creates) `harness.sqlite` in `directory`. The old JSON files there
+    /// (`state.json`, `threads/`) are moved in the first time: the state now, transcripts one
+    /// at a time in the background from `LEGACY_IMPORT_DELAY` on (see `legacy_import`).
     pub fn open(directory: &Path) -> Result<Database, String> {
+        Self::open_with(directory, Some(LEGACY_IMPORT_DELAY))
+    }
+
+    /// `legacy_delay`: when old transcripts start moving in on their own; `None`: only when
+    /// they're read (or `import_all_legacy`).
+    pub fn open_with(directory: &Path, legacy_delay: Option<std::time::Duration>) -> Result<Database, String> {
         std::fs::create_dir_all(directory).map_err(|e| e.to_string())?;
         let path = directory.join("harness.sqlite");
         let writer = open_connection(&path, false).map_err(|e| format!("can't open {}: {e}", path.display()))?;
@@ -137,6 +154,12 @@ impl Database {
             .map_err(|e| e.to_string())?;
         migrate(&writer).map_err(|e| format!("can't migrate {}: {e}", path.display()))?;
         let mut w = Writer::new(writer).map_err(|e| e.to_string())?;
+        let legacy = LegacyStore::new(directory);
+        if let Err(e) = w.import_legacy_state(&legacy) {
+            eprintln!("harness.sqlite: state.json didn't move in: {e}");
+        }
+        let legacy_pending = Arc::new(Mutex::new(w.unimported_legacy_transcripts(&legacy)));
+        w.legacy = Some((legacy.clone(), legacy_pending.clone()));
         let (jobs, inbox) = flume::unbounded::<Job>();
         let waiting: Arc<Mutex<HashSet<String>>> = Arc::default();
         let waiting2 = waiting.clone();
@@ -178,7 +201,35 @@ impl Database {
                 }
             })
             .map_err(|e| e.to_string())?;
-        Ok(Database { path, jobs, readers: Mutex::new(vec![]), waiting })
+        if let (Some(delay), false) = (legacy_delay, legacy_pending.lock().unwrap().is_empty()) {
+            spawn_legacy_import(legacy, legacy_pending.clone(), jobs.clone(), delay);
+        }
+        Ok(Database { path, jobs, readers: Mutex::new(vec![]), waiting, legacy_pending })
+    }
+
+    /// How many old transcripts are still to move in.
+    pub fn legacy_pending(&self) -> usize {
+        self.legacy_pending.lock().unwrap().len()
+    }
+
+    /// Every old transcript still to move in, now (on the caller's thread; not the main one).
+    pub fn import_all_legacy(&self) {
+        let mut ids: Vec<String> = self.legacy_pending.lock().unwrap().iter().cloned().collect();
+        ids.sort();
+        for id in ids {
+            self.import_legacy_now(&id);
+        }
+    }
+
+    /// A thread's old transcript, if it hasn't moved in yet: before anything reads it.
+    fn import_legacy_now(&self, thread: &str) {
+        if !self.legacy_pending.lock().unwrap().contains(thread) {
+            return;
+        }
+        let (tx, rx) = flume::bounded(1);
+        if self.jobs.send(Job::ImportLegacy { thread: thread.to_string(), read: None, done: Some(tx) }).is_ok() {
+            let _ = rx.recv();
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -237,6 +288,7 @@ impl Database {
     }
 
     fn before_reading(&self, thread: &str) {
+        self.import_legacy_now(thread);
         if self.waiting.lock().unwrap().contains(thread) {
             self.flush();
         }
@@ -418,6 +470,8 @@ struct Writer {
     c: Connection,
     rev: i64,
     state: StateRows,
+    /// The old files, and which transcripts are still to move in.
+    legacy: Option<(LegacyStore, Arc<Mutex<HashSet<String>>>)>,
 }
 
 impl Writer {
@@ -428,7 +482,7 @@ impl Writer {
             |r| r.get::<_, i64>(0),
         )?;
         let state = read_state(&c)?;
-        Ok(Writer { c, rev, state })
+        Ok(Writer { c, rev, state, legacy: None })
     }
 
     fn write(&mut self, jobs: Vec<Job>, flushes: &mut Vec<flume::Sender<()>>) -> rusqlite::Result<()> {
@@ -454,6 +508,15 @@ impl Writer {
                     deletes.push(thread);
                 }
                 Job::Flush(tx) => flushes.push(tx),
+                Job::ImportLegacy { thread, read, done } => {
+                    // Its own transaction, so one transcript costs one write at most.
+                    if let Err(e) = self.import_legacy_transcript(&thread, read) {
+                        eprintln!("harness.sqlite: couldn't move transcript {thread} in: {e}");
+                    }
+                    if let Some(done) = done {
+                        let _ = done.send(());
+                    }
+                }
                 Job::Exec(f, reply) => {
                     // Its own transaction, in the order it came.
                     let result = (|| {
@@ -473,6 +536,12 @@ impl Writer {
         if state.is_none() && transcripts.is_empty() && deletes.is_empty() {
             return Ok(());
         }
+        // A thread's old rows go in before new ones are written over them.
+        for (thread, ..) in &transcripts {
+            if let Err(e) = self.import_legacy_transcript(thread, None) {
+                eprintln!("harness.sqlite: couldn't move transcript {thread} in: {e}");
+            }
+        }
         self.c.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| {
             if let Some(s) = state {
@@ -481,14 +550,25 @@ impl Writer {
             for (thread, count, rows) in transcripts {
                 self.write_rows(&thread, count, rows)?;
             }
-            for thread in deletes {
-                self.truncate(&thread, 0)?;
-                self.c.execute("DELETE FROM transcripts WHERE thread_id = ?", [&thread])?;
+            for thread in &deletes {
+                self.truncate(thread, 0)?;
+                self.c.execute("DELETE FROM transcripts WHERE thread_id = ?", [thread])?;
+                // Its old file never comes back (an undone delete brings the thread back).
+                mark_imported(&self.c, thread)?;
             }
             Ok(())
         })();
         match result {
-            Ok(()) => self.c.execute_batch("COMMIT"),
+            Ok(()) => {
+                self.c.execute_batch("COMMIT")?;
+                if let Some((_, pending)) = &self.legacy {
+                    let mut pending = pending.lock().unwrap();
+                    for thread in &deletes {
+                        pending.remove(thread);
+                    }
+                }
+                Ok(())
+            }
             Err(e) => {
                 let _ = self.c.execute_batch("ROLLBACK");
                 // What we remember may be ahead of the disk now: read it again.
@@ -615,8 +695,9 @@ impl Writer {
             if let Some(text) = &row.tool_result {
                 if text.len() > BLOB_THRESHOLD {
                     result_blob = Some(self.store_blob(text.as_bytes())?);
-                    result_length = Some(text.chars().count() as i64);
-                    result = Some(text.chars().take(RESULT_HEAD).collect());
+                    // Characters as Swift counts them (`String.count`, `prefix`): graphemes.
+                    result_length = Some(text.graphemes(true).count() as i64);
+                    result = Some(text.graphemes(true).take(RESULT_HEAD).collect());
                 }
             }
         }
@@ -716,6 +797,128 @@ impl Writer {
             }
         }
         Ok(changes.len() == limit)
+    }
+}
+
+fn mark_imported(c: &Connection, name: &str) -> rusqlite::Result<()> {
+    c.execute("INSERT OR IGNORE INTO legacy_imports(name, imported_at) VALUES (?, ?)", params![name, now()])?;
+    Ok(())
+}
+
+fn is_imported(c: &Connection, name: &str) -> rusqlite::Result<bool> {
+    Ok(c.query_row("SELECT 1 FROM legacy_imports WHERE name = ?", [name], |_| Ok(())).optional()?.is_some())
+}
+
+/// Old transcripts moving in on a thread of their own, one at a time: each read here, then
+/// written by the writer between whatever else it has, so saves never wait behind them.
+fn spawn_legacy_import(legacy: LegacyStore, pending: Arc<Mutex<HashSet<String>>>, jobs: flume::Sender<Job>, delay: std::time::Duration) {
+    let _ = std::thread::Builder::new().name("harness.sqlite legacy import".into()).spawn(move || {
+        // Background work, as the Swift app's `.utility` queue.
+        unsafe { libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0) };
+        std::thread::sleep(delay);
+        let mut tried = HashSet::new();
+        loop {
+            let next = {
+                let pending = pending.lock().unwrap();
+                pending.iter().filter(|id| !tried.contains(*id)).min().cloned()
+            };
+            let Some(thread) = next else { break };
+            tried.insert(thread.clone());
+            let read = legacy.transcript(&thread);
+            let (tx, rx) = flume::bounded(1);
+            if jobs.send(Job::ImportLegacy { thread, read: Some(read), done: Some(tx) }).is_err() || rx.recv().is_err() {
+                break;
+            }
+        }
+    });
+}
+
+impl Writer {
+    /// `state.json`, the first time there is one, written over nothing (as the Swift app did:
+    /// what's in the database already stays).
+    fn import_legacy_state(&mut self, legacy: &LegacyStore) -> Result<(), String> {
+        if is_imported(&self.c, "state").map_err(|e| e.to_string())? {
+            return Ok(());
+        }
+        // Not JSON: kept for a later version to try; this launch starts without it.
+        let Some(state) = legacy.state()? else { return Ok(()) };
+        let threads = state.threads.len();
+        self.state = StateRows::default();
+        self.c.execute_batch("BEGIN IMMEDIATE").map_err(|e| e.to_string())?;
+        let result = self.write_state(state).and_then(|_| mark_imported(&self.c, "state"));
+        let result = match result {
+            Ok(()) => self.c.execute_batch("COMMIT"),
+            Err(e) => {
+                let _ = self.c.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        };
+        self.state = read_state(&self.c).map_err(|e| e.to_string())?;
+        result.map_err(|e| e.to_string())?;
+        eprintln!("harness.sqlite: moved state.json in ({threads} threads)");
+        Ok(())
+    }
+
+    /// Old transcripts of threads that still exist, not yet moved in.
+    fn unimported_legacy_transcripts(&self, legacy: &LegacyStore) -> HashSet<String> {
+        let ids = legacy.transcript_ids();
+        if ids.is_empty() {
+            return HashSet::new();
+        }
+        let column = |sql: &str| -> HashSet<String> {
+            self.c
+                .prepare(sql)
+                .and_then(|mut s| s.query_map([], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<HashSet<String>>>())
+                .unwrap_or_default()
+        };
+        let (threads, imported) = (column("SELECT id FROM threads"), column("SELECT name FROM legacy_imports"));
+        ids.into_iter().filter(|id| threads.contains(id) && !imported.contains(id)).collect()
+    }
+
+    /// One old transcript in, in a transaction of its own, and recorded, even when the file
+    /// didn't read (it counts as empty, so it never comes back). Rows already there were
+    /// written since, and are newer than the file: they stay.
+    fn import_legacy_transcript(&mut self, thread: &str, read: Option<LegacyTranscript>) -> rusqlite::Result<()> {
+        let Some((legacy, pending)) = self.legacy.clone() else { return Ok(()) };
+        if !pending.lock().unwrap().contains(thread) {
+            return Ok(());
+        }
+        if is_imported(&self.c, thread)? {
+            pending.lock().unwrap().remove(thread);
+            return Ok(());
+        }
+        let t = read.unwrap_or_else(|| legacy.transcript(thread));
+        if let Some(why) = &t.unreadable {
+            eprintln!("harness.sqlite: transcript {thread} didn't read ({why}): recorded as empty, the file left as it is");
+        } else if t.dropped > 0 {
+            eprintln!("harness.sqlite: transcript {thread}: {} entries didn't read and were left out", t.dropped);
+        }
+        self.c.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            let existing: i64 = self.c.query_row("SELECT count(*) FROM entries WHERE thread_id = ?", [thread], |r| r.get(0))?;
+            if existing == 0 {
+                for (seq, row) in t.rows.iter().enumerate() {
+                    self.upsert(thread, seq, row)?;
+                }
+                // When the file was written, so a session that went on elsewhere since is still noticed.
+                self.c.execute(
+                    "INSERT OR REPLACE INTO transcripts(thread_id, saved_at, entry_count) VALUES (?, ?, ?)",
+                    params![thread, t.modified.unwrap_or_else(now), t.rows.len() as i64],
+                )?;
+            }
+            mark_imported(&self.c, thread)
+        })();
+        match result {
+            Ok(()) => {
+                self.c.execute_batch("COMMIT")?;
+                pending.lock().unwrap().remove(thread);
+                Ok(())
+            }
+            Err(e) => {
+                let _ = self.c.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
     }
 }
 

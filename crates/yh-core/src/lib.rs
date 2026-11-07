@@ -18,6 +18,7 @@ pub mod stacks;
 pub mod workspace;
 pub mod schema;
 pub mod history;
+pub mod legacy_import;
 pub mod library;
 pub mod recovery;
 pub mod titles;
