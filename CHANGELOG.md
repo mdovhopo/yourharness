@@ -9,6 +9,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 ### Changed
 - YourHarness is rebuilt from the ground up in Rust, on GPUI, the framework the Zed editor draws with. Everything you had carries over: projects, threads, memory, settings and usage history are read from where 0.0.16 kept them. The window draws at your display's full frame rate even with twenty threads streaming at once, and switching threads takes a few hundredths of a second.
 - A new look throughout: quieter sidebar rows with a soft selection, icons instead of text symbols, SF Mono for code, one type scale, and Settings, Memory, Usage and the project page laid out like System Settings, with segmented controls and grouped rows.
+- The composer is one calm card with its controls as quiet icons along the bottom and a round Send; questions, plans and permission requests sit above it in matching cards. The right sidebar's tabs are a row of icons, each panel has a header like the thread's, and the Files tree, pull requests, sub-agents and browser have proper icons and tabs.
 - Tool calls in the transcript read as what they did ("Read …/README.md", "Run command"), each a compact line that opens into a card; failed ones are red. A finished turn's work folds into one quiet line.
 
 ### Added
