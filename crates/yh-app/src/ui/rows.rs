@@ -1508,6 +1508,11 @@ fn step(state: &ThreadState, ctx: &RowContext, pos: i64, n: usize, e: &EntryRef,
         details = match diff_of(&b) {
             Some(lines) => details.child(diff_view(lines, theme)),
             None if name == "Bash" && input["command"].is_string() => details.child(mono_box(format!("$ {}", input["command"].as_str().unwrap_or("")), None, theme)),
+            // A Read of a whole file: its header already says which.
+            None if name == "Read" && input.as_object().is_some_and(|o| o.keys().all(|k| k == "file_path")) => details,
+            None if name == "AskUserQuestion" && steps::questions_text(&input).is_some() => {
+                details.child(div().px(px(space::XS)).text_size(px(ts::BODY)).whitespace_normal().child(steps::questions_text(&input).unwrap_or_default()))
+            }
             None => match b.data.tool_input.as_deref() {
                 Some(raw) if !raw.is_empty() && raw != "{}" => details.child(mono_box(steps::pretty_json(raw), None, theme)),
                 _ => details,

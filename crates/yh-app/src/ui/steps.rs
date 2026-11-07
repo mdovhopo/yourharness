@@ -62,7 +62,7 @@ pub fn present(name: &str, input: &Value, result: Option<&str>) -> Presentation 
         "TaskUpdate" => p(IconName::CircleCheck, "Update task", s("subject")),
         "TaskList" | "TaskGet" => p(IconName::CircleCheck, "Read plan", String::new()),
         "ExitPlanMode" => p(IconName::Map, "Plan ready", String::new()),
-        "AskUserQuestion" => p(IconName::Info, "Ask", String::new()),
+        "AskUserQuestion" => p(IconName::Info, "Ask", input["questions"][0]["question"].as_str().map(|q| first_line(q, 200)).unwrap_or_default()),
         // Claude Code loads MCP tools when they're first needed.
         "ToolSearch" if query.starts_with("select:") && query.contains(BROWSER_PREFIX) => p(IconName::Globe, "Load browser tools", String::new()),
         "ToolSearch" if query.starts_with("select:") && query.contains(MEMORY_PREFIX) => p(IconName::MemoryStick, "Load memory tools", String::new()),
@@ -166,6 +166,23 @@ fn memory(tool: &str, input: &Value) -> Presentation {
 }
 
 /// The input as indented JSON, keys sorted; as it came when it isn't JSON.
+/// Claude's questions as you'd read them: each question, then its options and what they mean.
+pub fn questions_text(input: &Value) -> Option<String> {
+    let questions = input["questions"].as_array()?;
+    let mut out = vec![];
+    for q in questions {
+        out.push(q["question"].as_str()?.to_string());
+        for o in q["options"].as_array().into_iter().flatten() {
+            let label = o["label"].as_str().unwrap_or("");
+            match o["description"].as_str().filter(|d| !d.is_empty()) {
+                Some(d) => out.push(format!("  • {label} — {d}")),
+                None => out.push(format!("  • {label}")),
+            }
+        }
+    }
+    Some(out.join("\n"))
+}
+
 pub fn pretty_json(json: &str) -> String {
     fn sort(v: Value) -> Value {
         match v {
