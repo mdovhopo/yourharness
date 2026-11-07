@@ -57,6 +57,29 @@ pub enum Tab {
 }
 
 /// The memory as a map: active memories' IDs, their links as index pairs, their places (0…1).
+/// Claude Code's own memory for the project's folder, the Swift app's `ClaudeMemoryStatus`: on
+/// or off, its files, and the ones YourHarness doesn't have.
+#[derive(Clone, Default)]
+pub struct ClaudeMemory {
+    pub is_on: bool,
+    pub files: usize,
+    pub unimported: Vec<std::path::PathBuf>,
+    pub is_home: bool,
+}
+
+impl ClaudeMemory {
+    pub fn needs_nudge(&self) -> bool {
+        self.is_on || !self.unimported.is_empty()
+    }
+}
+
+/// When a project's Claude Code memory was last brought in (seconds since 1970). The Swift app
+/// saved dates from 2001; those are moved over.
+fn synced_at(lib: &yh_core::library::Library, project: &str) -> Option<f64> {
+    let v = lib.setting("claudeMemorySyncedAt")?.get(project)?.as_f64()?;
+    Some(if v < 1_500_000_000. { v + 978_307_200. } else { v })
+}
+
 #[derive(Default)]
 struct Graph {
     ids: Vec<String>,
@@ -74,6 +97,9 @@ pub struct MemoryPage {
     events: Vec<(String, Option<String>, Option<String>, f64, Option<String>, Option<i64>)>,
     loaded_revision: Option<u64>,
     pub loaded: bool,
+    /// Claude Code's own memory here, read with the rest.
+    claude: Option<ClaudeMemory>,
+    pressed_one_memory: bool,
     search: Entity<InputState>,
     kind_filter: Option<&'static str>,
     archived: bool,
@@ -140,6 +166,8 @@ impl MemoryPage {
             memories: vec![],
             events: vec![],
             loaded_revision: None,
+            claude: None,
+            pressed_one_memory: false,
             loaded: false,
             search,
             kind_filter: None,
@@ -177,8 +205,13 @@ impl MemoryPage {
         let revision = self.workspace.read(cx).memory_revision;
         self.loaded_revision = Some(revision);
         let scope = self.scope();
+        let (folder, since) = (self.project_path(cx), synced_at(&self.workspace.read(cx).library, &self.project));
+        let is_home = {
+            let ws = self.workspace.read(cx);
+            ws.home_project().as_deref() == Some(self.project.as_str()) || folder.as_deref() == std::env::var("HOME").ok().as_deref()
+        };
         cx.spawn(async move |this, cx| {
-            let (memories, events, stats, graph) = cx
+            let (memories, events, stats, graph, claude) = cx
                 .background_executor()
                 .spawn(async move {
                     store.db.flush();
@@ -194,10 +227,31 @@ impl MemoryPage {
                         .flat_map(|(i, m)| m.links.iter().filter_map(|(to, _)| ids.iter().position(|x| x == to)).map(move |j| (i, j)).collect::<Vec<_>>())
                         .collect();
                     let points = yh_core::memory_stats::graph_layout(&ids, &edges);
-                    (all, store.events(&scope, 300), stats, Graph { ids, edges, points })
+                    let claude = folder.map(|folder| {
+                        let config = yh_core::history::config_directory();
+                        let active: Vec<Memory> = all.iter().filter(|m| m.status == "active").cloned().collect();
+                        use yh_core::memory_archive::claude_code;
+                        ClaudeMemory {
+                            is_on: !claude_code::setting(&folder, &config).is_off(),
+                            files: claude_code::files(&folder, &config).len(),
+                            unimported: claude_code::unimported(&folder, &config, &active, since),
+                            is_home,
+                        }
+                    });
+                    (all, store.events(&scope, 300), stats, Graph { ids, edges, points }, claude)
                 })
                 .await;
             let _ = this.update(cx, |page, cx| {
+                // `YH_USE_ONE_MEMORY=1` presses the nudge's main button once, for checking it.
+                let press = claude.as_ref().is_some_and(|c| c.needs_nudge()) && std::env::var("YH_USE_ONE_MEMORY").is_ok() && !page.pressed_one_memory;
+                page.claude = claude;
+                if press {
+                    page.pressed_one_memory = true;
+                    if let Some(c) = page.claude.clone() {
+                        eprintln!("USE ONE MEMORY: on {}, {} to import", c.is_on, c.unimported.len());
+                        page.use_one_memory(&c, cx);
+                    }
+                }
                 page.memories = memories;
                 page.events = events;
                 page.stats = Some(stats);
@@ -553,6 +607,7 @@ impl MemoryPage {
         let (ws_overview, project_overview) = (self.workspace.clone(), self.project.clone());
         div()
             .flex()
+            .flex_wrap()
             .items_center()
             .gap(px(14.))
             .px(px(28.))
@@ -562,13 +617,27 @@ impl MemoryPage {
             .child(
                 div()
                     .flex_1()
-                    .min_w_0()
+                    .min_w(px(220.))
                     .flex()
                     .flex_col()
                     .gap(px(2.))
-                    .child(div().text_size(px(20.)).font_weight(FontWeight::SEMIBOLD).child(format!("{} Memory", name.unwrap_or_default())))
-                    .child(div().text_color(theme.secondary).child(if self.loaded { self.summary() } else { "Loading…".into() }))
-                    .when_some(self.notice.clone(), |d, n| d.child(div().text_size(px(12.)).text_color(theme.accent).child(n))),
+                    .child(div().text_size(px(20.)).font_weight(FontWeight::SEMIBOLD).truncate().child(format!("{} Memory", name.unwrap_or_default())))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .child(div().text_color(theme.secondary).truncate().child(if self.loaded { self.summary() } else { "Loading…".into() }))
+                            .children(self.claude.as_ref().filter(|c| !c.needs_nudge()).map(|c| {
+                        // One memory: Claude Code's own is off here and nothing of it is left out.
+                        let tip = if c.files > 0 {
+                            format!("Claude Code's own memory is off for this folder, and its {} memory files are in YourHarness.", c.files)
+                        } else {
+                            "Claude Code's own memory is off for this folder: YourHarness keeps the only memory.".to_string()
+                        };
+                        div().id("one-memory").ml(px(10.)).text_size(px(12.)).text_color(Theme::get(cx).secondary).child("✓ One memory").tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
+                    })),
+                    )
+                    .when_some(self.notice.clone(), |d, n| d.child(div().text_size(px(12.)).text_color(theme.accent).truncate().child(n))),
             )
             .when(!memory_on, |d| d.child(chip("Off for agents", theme.warning)))
             .child(
@@ -583,6 +652,7 @@ impl MemoryPage {
                     .child(tab_button("tab-insights", "Insights", Tab::Insights, cx))
                     .child(tab_button("tab-activity", "Activity", Tab::Activity, cx))
                     .child(tab_button("tab-graph", "Graph", Tab::Graph, cx)),
+
             )
             .child({
                 let page = cx.entity().downgrade();
@@ -1257,6 +1327,120 @@ impl MemoryPage {
     }
 }
 
+impl MemoryPage {
+    /// Toward one memory: shown while Claude Code still keeps its own for the folder, or has
+    /// memories YourHarness doesn't. One button brings them in and turns it off.
+    fn claude_nudge(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
+        let status = self.claude.clone()?;
+        let dismissed = self.workspace.read(cx).library.setting("claudeMemoryNudgeDismissed").and_then(|v| v.as_array().map(|a| a.iter().any(|x| x.as_str() == Some(self.project.as_str())))).unwrap_or(false);
+        if !status.needs_nudge() || (dismissed && status.unimported.is_empty()) {
+            return None;
+        }
+        let count = status.unimported.len();
+        let memories = if count == 1 { "1 memory".to_string() } else { format!("{count} memories") };
+        let message = match (status.is_on, count > 0) {
+            (true, true) => format!("Claude Code also keeps its own memory for this folder: {memories} there aren't in YourHarness, and claude sessions you start outside the app keep adding to it. Two memories drift apart; bring them in and keep one."),
+            (true, false) if status.is_home => "Claude Code still keeps its own memory when you run claude outside YourHarness, so two memories would drift apart.".into(),
+            (true, false) => "Claude Code still keeps its own memory when you run claude in this folder outside YourHarness, so two memories would drift apart.".into(),
+            _ => format!("Claude Code has {memories} for this folder that YourHarness doesn't."),
+        };
+        let primary = match (status.is_on, count > 0) {
+            (true, true) => "Import & Use One Memory",
+            (true, false) if status.is_home => "Use One Memory Everywhere",
+            (true, false) => "Use One Memory",
+            _ => "Import",
+        };
+        let detail = if status.is_home {
+            "Turns off Claude Code's memory in your Claude Code settings (autoMemoryEnabled: false), for every folder."
+        } else {
+            "Turns off Claude Code's memory for this folder only: autoMemoryEnabled: false in its .claude/settings.local.json, which stays out of git. Its memory files are left as they are."
+        };
+        let on = status.is_on;
+        let s1 = status.clone();
+        Some(
+            div()
+                .m(px(16.))
+                .mb(px(0.))
+                .p(px(14.))
+                .rounded(px(10.))
+                .bg(theme.warning.opacity(0.08))
+                .border_1()
+                .border_color(theme.warning.opacity(0.3))
+                .flex()
+                .gap(px(12.))
+                .child(div().text_color(theme.warning).text_size(px(16.)).child("⧉"))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.))
+                        .child(div().font_weight(FontWeight::SEMIBOLD).child(if on { "Two memories" } else { "Not in YourHarness yet" }))
+                        .child(div().child(message))
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(8.))
+                                .child(Button::new("one-memory").small().primary().label(primary).tooltip(if on { detail } else { "Brings Claude Code's memory files for this folder in." }).on_click(cx.listener(move |this, _, _, cx| this.use_one_memory(&s1, cx))))
+                                .when(count > 0, |d| {
+                                    d.child(Button::new("memory-importer").small().outline().label("Open in the Importer…").on_click(cx.listener(|this, _, _, cx| {
+                                        let dir = this.project_path(cx).map(|f| yh_core::memory_archive::claude_code::directory(&f, &yh_core::history::config_directory()));
+                                        let (ws, project) = (this.workspace.clone(), this.project.clone());
+                                        ws.update(cx, |ws, cx| ws.open_memory_agent("importer", &project, dir.into_iter().map(|d| d.to_string_lossy().into_owned()).collect(), None, cx));
+                                    })))
+                                    .child(Button::new("memory-already-in").small().outline().label("They're Already In").on_click(cx.listener(|this, _, _, cx| this.mark_synced(cx))))
+                                })
+                                .when(on, |d| {
+                                    d.child(Button::new("memory-not-now").small().ghost().label("Not Now").on_click(cx.listener(|this, _, _, cx| {
+                                        let lib = this.workspace.read(cx).library.clone();
+                                        let mut list = lib.setting("claudeMemoryNudgeDismissed").and_then(|v| v.as_array().cloned()).unwrap_or_default();
+                                        list.push(serde_json::Value::from(this.project.clone()));
+                                        lib.set_setting("claudeMemoryNudgeDismissed", &serde_json::Value::Array(list));
+                                        cx.notify();
+                                    })))
+                                }),
+                        )
+                        .when(on, |d| d.child(div().text_size(px(11.)).text_color(theme.secondary).child(detail))),
+                )
+                .into_any_element(),
+        )
+    }
+
+    fn mark_synced(&mut self, cx: &mut Context<Self>) {
+        let lib = self.workspace.read(cx).library.clone();
+        let mut all = lib.setting("claudeMemorySyncedAt").filter(|v| v.is_object()).unwrap_or(serde_json::json!({}));
+        all[self.project.as_str()] = serde_json::Value::from(yh_core::library::now_ms() / 1000.);
+        lib.set_setting("claudeMemorySyncedAt", &all);
+        self.reload(cx);
+    }
+
+    /// What Claude Code had comes in, then its own memory is turned off for the folder (or
+    /// everywhere, for Home), so `claude` in Terminal stops keeping a second one.
+    fn use_one_memory(&mut self, status: &ClaudeMemory, cx: &mut Context<Self>) {
+        if !status.unimported.is_empty() {
+            self.import_claude_code(cx);
+        }
+        let result = match (status.is_on, self.project_path(cx)) {
+            (true, Some(folder)) => {
+                use yh_core::memory_archive::claude_code;
+                if status.is_home {
+                    claude_code::turn_off(&yh_core::history::config_directory().join("settings.json"))
+                } else {
+                    let r = claude_code::turn_off(&claude_code::local_settings(&folder));
+                    claude_code::exclude_from_git(&folder);
+                    r
+                }
+            }
+            _ => Ok(()),
+        };
+        if let Err(e) = result {
+            self.notice = Some(format!("Couldn't turn off Claude Code's memory: {e}"));
+        }
+        self.mark_synced(cx);
+    }
+}
+
 impl Render for MemoryPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(m) = self.pending_fill.take() {
@@ -1264,7 +1448,14 @@ impl Render for MemoryPage {
         }
         let theme = Theme::get(cx);
         let content = match self.tab {
-            Tab::Memories => div().flex_1().min_h_0().flex().child(self.list(&theme, cx)).child(self.detail(&theme, cx)).into_any_element(),
+            Tab::Memories => div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .children(self.claude_nudge(&theme, cx))
+                .child(div().flex_1().min_h_0().flex().child(self.list(&theme, cx)).child(self.detail(&theme, cx)))
+                .into_any_element(),
             Tab::Tasks => div().flex_1().min_h_0().child(self.tasks(&theme, cx)).into_any_element(),
             Tab::Activity => div().flex_1().min_h_0().child(self.activity(&theme)).into_any_element(),
             Tab::Insights => div().flex_1().min_h_0().child(self.insights(&theme, cx)).into_any_element(),
