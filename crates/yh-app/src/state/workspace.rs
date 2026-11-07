@@ -145,6 +145,11 @@ pub struct Workspace {
     pub page: Option<Page>,
     /// Goes up whenever memory changes (an agent's tools, the Memory page), for views of it.
     pub memory_revision: u64,
+    /// Each project's repos and worktrees with their status, read aside when one of its threads
+    /// opens: which checkouts a thread works in, for the toolbar.
+    pub scans: HashMap<String, yh_core::workspace::Workspace>,
+    scanning: std::collections::HashSet<String>,
+    scanned_at: HashMap<String, Instant>,
     title_asked_at: HashMap<String, usize>,
 }
 
@@ -197,6 +202,9 @@ impl Workspace {
             shows_inspector: false,
             panel: Panel::SideChat,
             memory_revision: 0,
+            scans: HashMap::new(),
+            scanning: Default::default(),
+            scanned_at: HashMap::new(),
             title_asked_at: HashMap::new(),
         };
         if let Some(Value::Object(all)) = workspace.library.setting("slashCommands") {
@@ -361,6 +369,8 @@ impl Workspace {
             }
         });
         self.ensure_loaded(&thread, cx);
+        let project = thread.read(cx).meta.project_id.clone();
+        self.scan_project(&project, cx);
         cx.emit(WorkspaceEvent::Selected(id.to_string()));
         cx.notify();
     }
@@ -715,6 +725,71 @@ impl Workspace {
             t.meta.written_footprint = written_footprint;
             cx.notify();
         });
+    }
+
+    /// Reads a project's repos, worktrees and their status again, aside (no pull requests).
+    pub fn scan_project(&mut self, project: &str, cx: &mut Context<Self>) {
+        // Home is your home folder: not a workspace to look through. And once every 30 s at most.
+        let recent = self.scanned_at.get(project).is_some_and(|t| t.elapsed() < Duration::from_secs(30));
+        if recent || self.home_project().as_deref() == Some(project) {
+            return;
+        }
+        let Some(root) = self.project(project).map(|p| std::path::PathBuf::from(&p.path)) else { return };
+        if !root.is_dir() || !self.scanning.insert(project.to_string()) {
+            return;
+        }
+        self.scanned_at.insert(project.to_string(), Instant::now());
+        let mut copy = self.scans.get(project).cloned().unwrap_or_else(|| yh_core::workspace::Workspace::new(&root));
+        let project = project.to_string();
+        cx.spawn(async move |this, cx| {
+            let done = cx
+                .background_executor()
+                .spawn(async move {
+                    let tools = yh_core::workspace::WorkspaceTools::find(std::env::var("YH_PATH").ok().as_deref());
+                    copy.scan(&tools);
+                    copy.refresh_status(&tools, Duration::ZERO);
+                    copy
+                })
+                .await;
+            let _ = this.update(cx, |ws, cx| {
+                ws.scanning.remove(&project);
+                ws.scans.insert(project, done);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The checkouts a thread works in, as its project was last read.
+    pub fn checkouts_of(&self, thread: &ThreadState) -> Vec<yh_core::workspace::Checkout> {
+        let Some(scan) = self.scans.get(&thread.meta.project_id) else { return vec![] };
+        let folders = yh_core::workspace::ThreadFolders {
+            id: thread.id(),
+            footprint: &thread.meta.footprint,
+            written: &thread.meta.written_footprint,
+            working_directory: thread.meta.working_directory.as_deref(),
+            last_active: thread.meta.updated_at,
+        };
+        scan.checkouts_for(&folders)
+    }
+
+    /// Runs a thread somewhere else (a worktree), or in its project's folder again with None.
+    /// A Claude Code session belongs to its folder, so the next message starts a new one.
+    pub fn set_working_directory(&mut self, id: &str, folder: Option<String>, cx: &mut Context<Self>) {
+        self.end_runtime(id, cx);
+        self.update_meta(id, cx, |m, r| {
+            m.working_directory = folder.clone();
+            m.session_id = None;
+            r.insert("workingDirectory".into(), folder.clone().map_or(Value::Null, Value::from));
+            r.insert("sessionID".into(), Value::Null);
+        });
+        if let Some(t) = self.thread(id) {
+            t.update(cx, |t, cx| {
+                t.session_id = None;
+                cx.notify();
+            });
+        }
+        cx.notify();
     }
 
     /// Your rules for generated titles (`titlePrompt`, the Swift app's key; `titleRules` before).
