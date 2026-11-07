@@ -14,7 +14,8 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ### Added
 - Select text anywhere in a reply, a tool's output or a thinking block, and copy part of it.
-- Code blocks have a header with the language and a Copy button; tables copy as tab-separated text; diagrams open large, and copy or save as PNG.
+- Code blocks have a header with the language and a Copy button; tables copy as tab-separated text; diagrams open large, and copy or save as PNG. Copy buttons say "Copied" for a moment after a click, and a diagram's actions are icons with tooltips.
+- Narrow windows work down to the smallest size: the sidebars give way before the thread does (the left one folds away when there's no room beside the right one), and Memory, Usage and the project page switch to icons and one column at a time by their own width. A memory's text box grows with what you write.
 - Several permission requests at once (from parallel sub-agents) each get their own answer, one after another.
 - ⌘↩ answers a question once every question has an answer, or approves a plan in the recommended mode; ⌘⌫ skips or keeps planning.
 - The browser: back, forward and reload, an address field, closable tabs, console and network panes, Pick an element for your message, local dev servers offered when nothing's open, pages left alone for 30 minutes close (and reopen in one click), and the whole browser can open in its own window.
