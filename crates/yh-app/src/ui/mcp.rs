@@ -165,6 +165,11 @@ impl McpSheet {
                     Ok(v) => {
                         let first = !this.loaded;
                         this.servers = parse_status(&v);
+                        // The composer's chip for servers needing you follows what the sheet hears.
+                        if let (Some(t), false) = (this.thread.clone(), this.everywhere) {
+                            let servers = this.servers.iter().map(|s| (s.name.clone(), s.status.clone(), s.scope.clone())).collect();
+                            this.workspace.update(cx, |ws, cx| ws.note_mcp_servers(&t, servers, cx));
+                        }
                         this.loaded = true;
                         this.error = None;
                         if first && std::env::var("YH_OPEN_MCP").is_ok() {
@@ -582,9 +587,4 @@ impl Render for McpSheet {
                     .child(body),
             )
     }
-}
-
-/// Whether an `/mcp` typed in the composer is ours to answer.
-pub fn is_mcp_command(text: &str) -> bool {
-    text.trim() == "/mcp"
 }

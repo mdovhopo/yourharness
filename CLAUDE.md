@@ -55,7 +55,11 @@ Launch options: `YH_DATA_DIR`, `YH_CLAUDE_HISTORY=1` (also list Claude Code's ow
 `YH_MODE`: `ask` shows permission cards, `plan` plan cards), `YH_SELECT=<title or id>`, and
 `YH_SEND` / `YH_MODEL` / `YH_EFFORT` / `YH_ANSWER=allow|deny` (one real turn, prompts answered by
 themselves). Also
-`YH_SEND_FILES=<a.png:b.jpg>` (images with it), `YH_DRAFT=<text>` (typed in the composer:
+`YH_SEND_FILES=<a.png:b.pdf:folder>` (with it: images inline, the rest by path; alone: attached to the
+selected thread's composer, as a drop does), `YH_NEW_THREAD=1` (a new thread in the first project at launch:
+its empty state), `YH_QUEUE=<text>` (sent `YH_QUEUE_DELAY` s after launch, 3, so it queues behind the
+`YH_SEND` turn; `YH_QUEUE_ACTION=now|edit|remove` then does what its buttons do, `YH_QUEUE_ACTION_DELAY` s later),
+`YH_DRAFT=<text>` (typed in the composer:
 `/co` opens the command menu, `@no` the file menu; `YH_DRAFT_DELAY`), `YH_FIND=<words>` (Find
 opened), `YH_EXPAND_WORK=1` (folded work drawn open), `YH_ACTIONS_PROBE=1` (pin, rename, settle,
 delete on the first threads). Also `YH_SNAPSHOT=<png>` (`_DELAY`, `_QUIT`), `YH_BACKGROUND=1`,

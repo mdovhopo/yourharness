@@ -552,6 +552,7 @@ impl Render for RootView {
             crate::browser::Browsers::show(None);
         }
         let tasks = if selected.is_some() { self.tasks.clone() } else { vec![] };
+        let start = selected.as_ref().and_then(|t| start_prompt(&self.workspace.read(cx), &t.read(cx)));
         div()
             .id("root")
             .key_context("Harness")
@@ -684,7 +685,41 @@ impl Render for RootView {
                                 .child(crate::ui::thread_toolbar::buttons(&self.workspace, cx)),
                         )
                         .child(self.find.clone())
-                        .child(match transcript {
+                        .when_some(start.clone(), |d, (headline, folder)| {
+                            // A new thread: its composer in the middle, under where the work happens.
+                            d.child(
+                                div()
+                                    .flex_1()
+                                    .min_h_0()
+                                    .flex()
+                                    .flex_col()
+                                    .justify_center()
+                                    .pb(px(60.))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .items_center()
+                                            .gap(px(6.))
+                                            .pb(px(14.))
+                                            .px(px(20.))
+                                            .child(div().text_size(px(20.)).line_height(px(26.)).font_weight(FontWeight::SEMIBOLD).child(headline))
+                                            .child(
+                                                div()
+                                                    .max_w_full()
+                                                    .font_family(crate::theme::MONO)
+                                                    .text_size(px(12.))
+                                                    .text_color(theme.secondary)
+                                                    .overflow_hidden()
+                                                    .whitespace_nowrap()
+                                                    .text_ellipsis()
+                                                    .child(folder),
+                                            ),
+                                    )
+                                    .child(div().w_full().child(self.composer.clone())),
+                            )
+                        })
+                        .when(start.is_none(), |d| d.child(match transcript {
                             // Cached: typing in the composer or a sidebar change doesn't redraw the
                             // transcript; its own thread changing does.
                             Some(view) => div()
@@ -699,7 +734,7 @@ impl Render for RootView {
                         // Not cached: a cached view needs a fixed size, and the composer grows
                         // with its cards. Its render is a handful of elements.
                         .child(div().flex_none().w_full().child(self.jobs.clone()))
-                        .child(div().flex_none().w_full().child(self.composer.clone()))
+                        .child(div().flex_none().w_full().child(self.composer.clone())))
                     })
                     .when(selected.is_none() && self.workspace.read(cx).page.is_none(), |d| d.child(self.empty_state(&theme, cx))),
             )
@@ -732,4 +767,24 @@ impl Render for RootView {
             .child(self.resume.clone())
             .child(self.mcp.clone())
     }
+}
+
+/// Over a new thread's composer: where the work happens. None once it has rows (or is loading
+/// them).
+fn start_prompt(ws: &crate::state::workspace::Workspace, t: &crate::state::thread::ThreadState) -> Option<(String, String)> {
+    if !t.loaded || t.running || !t.items.is_empty() || t.before > 0 || t.total.unwrap_or(0) > 0 || t.id().contains(':') && !t.id().starts_with("new:") {
+        return None;
+    }
+    let project = ws.project(&t.meta.project_id);
+    let home = ws.home_project().as_deref() == Some(t.meta.project_id.as_str());
+    let headline = match project {
+        Some(p) if !home => format!("What are we working on in {}?", p.name),
+        _ => "What are we working on?".to_string(),
+    };
+    let folder = ws.folder_of(t);
+    let folder = match std::env::var("HOME") {
+        Ok(h) if !h.is_empty() && folder.starts_with(&h) => format!("~{}", &folder[h.len()..]),
+        _ => folder,
+    };
+    Some((headline, folder))
 }

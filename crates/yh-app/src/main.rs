@@ -267,7 +267,16 @@ fn main() {
                 }
             });
         }
-        // `YH_SEND_FILES=<a.png:b.jpg>` goes with it, through the composer as if attached.
+        // `YH_NEW_THREAD=1`: a new thread in the first project at launch (its empty state).
+        if env("YH_NEW_THREAD").as_deref() == Some("1") {
+            workspace.update(cx, |ws, cx| {
+                if let Some(project) = ws.projects.first().map(|p| p.id.clone()) {
+                    ws.new_thread(&project, cx);
+                }
+            });
+        }
+        // `YH_SEND_FILES=<a.png:b.pdf:folder>` goes with it, through the composer as if attached
+        // (images inline, the rest by path).
         if let Some(text) = env("YH_SEND") {
             workspace.update(cx, |ws, cx| {
                 if ws.selected.is_none() {
@@ -311,6 +320,50 @@ fn main() {
                 let _ = window.update(cx, |_, window, cx| {
                     let composer = root.read(cx).composer.clone();
                     composer.update(cx, |c, cx| c.type_draft(&text, window, cx));
+                });
+            })
+            .detach();
+        }
+        // `YH_SEND_FILES` without `YH_SEND`: attached to the selected thread's composer, as a drop
+        // does (images inline, anything else by path).
+        if let (Some(files), None) = (env("YH_SEND_FILES"), env("YH_SEND")) {
+            let paths: Vec<std::path::PathBuf> = files.split(':').map(std::path::PathBuf::from).collect();
+            let composer = root.read(cx).composer.clone();
+            composer.update(cx, |c, cx| c.add_files(&paths, cx));
+        }
+        // `YH_QUEUE=<text>`: sent `YH_QUEUE_DELAY` seconds after launch (3), while the first turn
+        // works, so it waits as a queued message; `YH_QUEUE_ACTION=now|edit|remove` then does to it
+        // what its buttons do, `YH_QUEUE_ACTION_DELAY` seconds later (1).
+        if let Some(text) = env("YH_QUEUE") {
+            let delay: f64 = env("YH_QUEUE_DELAY").and_then(|v| v.parse().ok()).unwrap_or(3.0);
+            let after: f64 = env("YH_QUEUE_ACTION_DELAY").and_then(|v| v.parse().ok()).unwrap_or(1.0);
+            let workspace = workspace.clone();
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(Duration::from_secs_f64(delay)).await;
+                let _ = cx.update(|cx| {
+                    workspace.update(cx, |ws, cx| {
+                        if let Some(t) = ws.selected_thread() {
+                            eprintln!("queue: sending while running={}", t.read(cx).running);
+                            ws.send(&t, &text, false, cx);
+                        }
+                    })
+                });
+                let Some(action) = env("YH_QUEUE_ACTION") else { return };
+                cx.background_executor().timer(Duration::from_secs_f64(after)).await;
+                let _ = cx.update(|cx| {
+                    workspace.update(cx, |ws, cx| {
+                        let Some(t) = ws.selected_thread() else { return };
+                        let Some((id, ..)) = t.read(cx).queued_messages().into_iter().next() else {
+                            eprintln!("queue: nothing queued for {action}");
+                            return;
+                        };
+                        eprintln!("queue: {action} {id}");
+                        match action.as_str() {
+                            "now" => ws.send_now(&t, &id, cx),
+                            "edit" => ws.withdraw(&t, &id, true, cx),
+                            _ => ws.withdraw(&t, &id, false, cx),
+                        }
+                    })
                 });
             })
             .detach();

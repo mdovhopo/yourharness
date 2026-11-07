@@ -290,10 +290,29 @@ pub struct ThreadState {
     /// What each running foreground command printed last, by its tool call: the transcript
     /// reads it once a second.
     pub job_lines: HashMap<String, String>,
+    /// The composer's: how full the context is, queued messages, MCP servers needing you.
+    pub composer: ComposerState,
+}
+
+/// What the composer shows of a thread beyond its rows (see `ui::composer`).
+#[derive(Default)]
+pub struct ComposerState {
+    /// Tokens in the context after Claude's latest message, and the model's window.
+    pub context_tokens: Option<u64>,
+    pub context_window: Option<u64>,
+    /// Queued messages you took back that go back into the composer when the CLI lets go of
+    /// them: (id, text, attachments).
+    pub restore_on_withdraw: std::collections::HashSet<String>,
+    pub restored: Vec<(String, String, Vec<String>)>,
+    /// Queued messages you asked to go now (Claude is being stopped for them).
+    pub sending_now: std::collections::HashSet<String>,
+    /// MCP servers as last heard: (name, status, scope).
+    pub mcp_servers: Vec<(String, String, String)>,
 }
 
 impl ThreadState {
     pub fn new(meta: ThreadMeta) -> Self {
+        let composer = ComposerState { context_tokens: meta.context_tokens, context_window: meta.context_window, ..Default::default() };
         ThreadState {
             title: meta.title.clone(),
             session_id: meta.session_id.clone(),
@@ -331,6 +350,7 @@ impl ThreadState {
             folded_plan_calls: Default::default(),
             latest_plan_step: None,
             job_lines: HashMap::new(),
+            composer,
         }
     }
 
@@ -535,18 +555,73 @@ impl ThreadState {
         self.jobs.turn = Some(id.to_string());
     }
 
-    /// The CLI says where your message is.
-    fn lifecycle(&mut self, id: &str, state: &str) {
+    /// The CLI says where your message is. True when the composer has to show it (a queued
+    /// message taken back).
+    fn lifecycle(&mut self, id: &str, state: &str) -> bool {
         let found = self.items.iter().rev().take(40).flat_map(|i| i.entries.iter()).find(|e| e.borrow().data.id == id).cloned();
-        let Some(e) = found else { return };
-        let queued = state == "queued";
-        if e.borrow().queued != queued {
-            e.borrow_mut().queued = queued;
-            self.touch(&e);
-        }
+        let Some(e) = found else { return false };
         if state == "cancelled" {
-            self.notice("That message was withdrawn before Claude read it.");
+            return self.withdrawn(&e);
         }
+        let queued = state == "queued";
+        let was_queued = e.borrow().queued;
+        if was_queued == queued {
+            return false;
+        }
+        e.borrow_mut().queued = queued;
+        if !queued && self.composer.sending_now.remove(id) {
+            e.borrow_mut().delivery = Some("interrupted".into());
+        }
+        self.touch(&e);
+        // Picked up after the turn was stopped for it: a turn of its own.
+        if was_queued && state == "started" && !self.running {
+            self.running = true;
+        }
+        // It left the queue above the composer.
+        was_queued
+    }
+
+    /// Queued messages still waiting for Claude, oldest first: (id, text, attachments).
+    pub fn queued_messages(&self) -> Vec<(String, String, usize)> {
+        let mut out: Vec<(String, String, usize)> = self
+            .items
+            .iter()
+            .rev()
+            .take(40)
+            .flat_map(|i| i.entries.iter())
+            .filter(|e| e.borrow().queued)
+            .map(|e| {
+                let b = e.borrow();
+                (b.data.id.clone(), b.data.text.clone(), b.data.attachments.len())
+            })
+            .collect();
+        out.reverse();
+        out
+    }
+
+    /// A queued message the CLI let go of: its row becomes a note, and its text goes back into
+    /// the composer when you asked for that.
+    fn withdrawn(&mut self, e: &EntryRef) -> bool {
+        let (id, text, attachments) = {
+            let b = e.borrow();
+            (b.data.id.clone(), b.data.text.clone(), b.data.attachments.clone())
+        };
+        let restore = self.composer.restore_on_withdraw.remove(&id);
+        {
+            let mut b = e.borrow_mut();
+            b.queued = false;
+            b.data.kind = Kind::Notice;
+            b.data.text = if restore { "Taken back into the composer before Claude read it.".into() } else { "Withdrawn before Claude read it.".into() };
+            b.data.attachments.clear();
+        }
+        if let Some(item) = self.items.iter_mut().rev().take(40).find(|i| i.entries.iter().any(|x| Rc::ptr_eq(x, e))) {
+            item.ty = ItemType::Notice;
+        }
+        self.touch(e);
+        if restore {
+            self.composer.restored.push((id, text, attachments));
+        }
+        true
     }
 
     pub fn notice(&mut self, text: &str) {
@@ -766,10 +841,32 @@ impl ThreadState {
                 self.session_id = Some(id);
                 false
             }
-            Event::Lifecycle { id, state } => {
-                self.lifecycle(&id, &state);
+            Event::Lifecycle { id, state } => self.lifecycle(&id, &state),
+            Event::CommandOutput(text) => {
+                self.next_note += 1;
+                let id = format!("c{}", self.next_note);
+                self.append(EntryData::new(id, Kind::Command, &text));
                 false
             }
+            Event::ContextUsage(tokens) => {
+                self.composer.context_tokens = Some(tokens);
+                false
+            }
+            Event::ContextWindows(windows) => {
+                self.composer.context_window = windows.iter().map(|(_, w)| *w).max();
+                false
+            }
+            Event::ConversationReset => {
+                self.notice("Context cleared. Claude starts fresh from here.");
+                self.composer.context_tokens = None;
+                true
+            }
+            Event::McpServers(servers) => {
+                let changed = self.composer.mcp_servers != servers;
+                self.composer.mcp_servers = servers;
+                changed
+            }
+            Event::TitleChanged(_) | Event::Skills(_) => false,
             Event::Catalog { .. } | Event::Limits(_) => false,
             Event::BlockStart { message, index, parent, kind } => {
                 if let Some(parent) = parent {

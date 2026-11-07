@@ -158,6 +158,8 @@ pub struct Workspace {
     scanning: std::collections::HashSet<String>,
     scanned_at: HashMap<String, Instant>,
     title_asked_at: HashMap<String, usize>,
+    /// The composer's: `/rename` waiting for the CLI's new title, skills by project.
+    composer: ComposerJobs,
 }
 
 impl EventEmitter<WorkspaceEvent> for Workspace {}
@@ -216,6 +218,7 @@ impl Workspace {
             scanning: Default::default(),
             scanned_at: HashMap::new(),
             title_asked_at: HashMap::new(),
+            composer: ComposerJobs::default(),
         };
         if let Some(Value::Object(all)) = workspace.library.setting("slashCommands") {
             for (project, list) in all {
@@ -393,6 +396,7 @@ impl Workspace {
         self.ensure_loaded(&thread, cx);
         let project = thread.read(cx).meta.project_id.clone();
         self.scan_project(&project, cx);
+        self.refresh_mcp_attention(&thread, cx);
         cx.emit(WorkspaceEvent::Selected(id.to_string()));
         cx.notify();
     }
@@ -968,9 +972,30 @@ impl Workspace {
 
     /// With images already saved in `attachments/` (by name).
     pub fn send_with_images(&mut self, thread: &Entity<ThreadState>, text: &str, images: Vec<String>, now: bool, cx: &mut Context<Self>) {
-        let text = text.trim().to_string();
-        if text.is_empty() && images.is_empty() {
+        self.send_message(thread, text, images, vec![], now, cx)
+    }
+
+    /// With images (saved in `attachments/`, by name) and other files or folders, which Claude
+    /// is told the paths of. Commands the app answers itself (`/btw`, `/model`…) stop here.
+    pub fn send_message(
+        &mut self,
+        thread: &Entity<ThreadState>,
+        text: &str,
+        images: Vec<String>,
+        files: Vec<yh_core::attachments::FileAttachment>,
+        now: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let mut text = text.trim().to_string();
+        if text.is_empty() && images.is_empty() && files.is_empty() {
             return;
+        }
+        if images.is_empty() && files.is_empty() {
+            match self.handle_command(thread, &text, cx) {
+                CommandHandling::Done => return,
+                CommandHandling::Send(rest) => text = rest,
+                CommandHandling::NotOurs => {}
+            }
         }
         let (id, running, title, chosen) = {
             let t = thread.read(cx);
@@ -984,14 +1009,25 @@ impl Workspace {
         let first_message = thread.read(cx).total == Some(0);
         let message_id = yh_core::library::new_uuid();
         let delivery = running.then_some(if now { "interrupted" } else { "steered" });
+        // Kept with the message as the Swift app keeps them: images by name, then files.
+        let file_names: Vec<String> = files.iter().map(|f| f.stored_name(&id)).collect();
+        let attachments: Vec<String> = images.iter().chain(&file_names).cloned().collect();
+        // The title is written from this: it should know what came with it.
+        let attached = (!files.is_empty()).then(|| format!("Attached {}", files.iter().map(|f| f.name()).collect::<Vec<_>>().join(", ")));
+        let subject = match (&attached, text.is_empty()) {
+            (Some(a), false) => format!("{text} ({a})"),
+            (Some(a), true) => a.clone(),
+            (None, false) => text.clone(),
+            (None, true) => if images.len() == 1 { "Attached image".into() } else { "Attached images".into() },
+        };
         thread.update(cx, |t, cx| {
-            t.add_user(&text, &images, &message_id, running && !now, delivery);
+            t.add_user(&text, &attachments, &message_id, running && !now, delivery);
             t.running = true;
             t.meta.turn_in_progress = true;
             t.meta.draft = None;
             if title == "New thread" && !chosen {
                 // Named after its first message until a title is generated or chosen.
-                t.title = text.lines().next().unwrap_or("").trim().chars().take(60).collect();
+                t.title = subject.lines().next().unwrap_or("").trim().chars().take(60).collect();
                 t.meta.title = t.title.clone();
             }
             cx.notify();
@@ -1005,8 +1041,8 @@ impl Workspace {
             r.insert("updatedAt".into(), iso_now().into());
         });
         self.note_working(cx);
-        if first_message && title == "New thread" && !chosen && !text.is_empty() {
-            self.generate_title(thread, &text, cx);
+        if first_message && title == "New thread" && !chosen && !subject.is_empty() {
+            self.generate_title(thread, &subject, cx);
         }
         if let Err(error) = self.ensure_runtime(thread, cx) {
             thread.update(cx, |t, cx| {
@@ -1017,6 +1053,8 @@ impl Workspace {
             self.turn_ended(thread, cx);
             return;
         }
+        let project = thread.read(cx).meta.project_id.clone();
+        let for_agent = if id.starts_with(SIDE) { text.clone() } else { self.message_for_agent(&text, &project) };
         if let Some(rt) = self.runtimes.get_mut(&id) {
             rt.idle = None;
             let blocks: Vec<(String, String)> = images
@@ -1026,7 +1064,27 @@ impl Workspace {
                     Some((yh_core::attachments::media_type(name).to_string(), yh_core::attachments::base64(&bytes)))
                 })
                 .collect();
-            rt.process.send(&text, &blocks, &message_id, now.then_some("now"));
+            if files.is_empty() {
+                rt.process.send(&for_agent, &blocks, &message_id, now.then_some("now"));
+            } else {
+                // Copied into the thread's attachments first (off the main thread), then sent with
+                // where each one is.
+                let dir = self.data_dir.clone();
+                cx.spawn(async move |this, cx| {
+                    let paths = cx
+                        .background_executor()
+                        .spawn(async move { files.iter().zip(&file_names).map(|(f, name)| (f.copy_in(&dir, name), f.is_dir)).collect::<Vec<_>>() })
+                        .await;
+                    let note = yh_core::attachments::files_note(&paths);
+                    let message = if for_agent.is_empty() { note } else { format!("{for_agent}\n\n{note}") };
+                    let _ = this.update(cx, |ws, _| {
+                        if let Some(rt) = ws.runtimes.get(&id) {
+                            rt.process.send(&message, &blocks, &message_id, now.then_some("now"));
+                        }
+                    });
+                })
+                .detach();
+            }
         }
         self.save_rows(thread, cx);
         cx.notify();
@@ -1274,6 +1332,7 @@ impl Workspace {
                                     r.insert("sessionID".into(), sid.into());
                                 });
                             }
+                            Event::TitleChanged(_) | Event::Skills(_) | Event::ContextWindows(_) => ws.note_composer_event(&thread, e, cx),
                             _ => {}
                         }
                     }
@@ -1298,8 +1357,11 @@ impl Workspace {
                     if exited {
                         ws.runtimes.remove(&id2);
                     }
-                    if ended {
+                    // A message sent now (after a stop) starts its own turn right after the stop's end.
+                    let restarted = !exited && thread2.read(cx).running;
+                    if ended && !restarted {
                         ws.turn_ended(&thread2, cx);
+                        ws.composer_turn_ended(&thread2, cx);
                     }
                     if chrome {
                         cx.notify();
@@ -2179,3 +2241,298 @@ arrows, +/- activation, Note, loop/alt/else/opt/par/critical/break). Other diagr
 For a big system, draw an overview plus focused diagrams (around 25 nodes each) and group with subgraphs. \
 To highlight things such as risks or gaps, use a class, e.g. `classDef gap stroke:#e5484d,stroke-dasharray:4` \
 then `class X,Y gap`. Quote labels that contain punctuation, e.g. A[\"Parse (v2)\"].";
+
+// MARK: Composer: the app's own commands, queued messages, context, MCP servers needing you
+
+/// What the composer's requests leave waiting.
+#[derive(Default)]
+struct ComposerJobs {
+    /// Threads that asked for `/rename`: the CLI's next title is theirs.
+    renames: std::collections::HashSet<String>,
+    /// By project: the skills a session there reported, which the agent can run itself.
+    skills: HashMap<String, Vec<String>>,
+}
+
+/// What became of a message that starts with a command.
+pub enum CommandHandling {
+    /// The app did it; nothing goes to Claude.
+    Done,
+    /// Goes to Claude as this (`/btw` in a side chat: just the question).
+    Send(String),
+    NotOurs,
+}
+
+/// Reasoning effort levels, as `/effort` takes them.
+const EFFORTS: &[(&str, &str)] = &[("low", "Low"), ("medium", "Medium"), ("high", "High"), ("xhigh", "Extra High"), ("max", "Max")];
+
+/// Commands the app answers itself, first in the "/" menu.
+pub fn app_commands() -> Vec<SlashCommand> {
+    vec![
+        SlashCommand::new("mcp", "[enable|disable|reconnect <server>]", "See your MCP servers: sign in, turn them on or off, reconnect."),
+        SlashCommand::new("btw", "<question>", "Ask a side question in the sidebar. Claude sees this thread; nothing is added to it."),
+    ]
+}
+
+/// Only mean something in the terminal UI.
+const TERMINAL_ONLY: &[&str] = &["color", "focus", "heapdump"];
+
+impl Workspace {
+    /// What the "/" menu offers in a project: the app's own, then the CLI's.
+    pub fn menu_commands(&self, project_id: &str) -> Vec<SlashCommand> {
+        let own = app_commands();
+        let theirs = self.commands(project_id).iter().filter(|c| !own.iter().any(|o| o.name == c.name) && !TERMINAL_ONLY.contains(&c.name.as_str())).cloned();
+        own.clone().into_iter().chain(theirs).collect()
+    }
+
+    /// Commands the agent can run itself partway through a message: skills, by what a session
+    /// reported; until one has, your own commands and skills.
+    fn chainable(&self, project_id: &str) -> std::collections::HashSet<String> {
+        let commands = self.commands(project_id);
+        let skills = self.composer.skills.get(project_id);
+        commands
+            .iter()
+            .filter(|c| match skills {
+                Some(s) => s.contains(&c.name) || c.aliases.iter().any(|a| s.contains(a)),
+                None => !c.builtin,
+            })
+            .flat_map(|c| std::iter::once(c.name.clone()).chain(c.aliases.iter().cloned()))
+            .chain(skills.into_iter().flatten().cloned())
+            .collect()
+    }
+
+    /// What the "/" menu offers partway through a message.
+    pub fn chainable_commands(&self, project_id: &str) -> Vec<SlashCommand> {
+        let known = self.chainable(project_id);
+        self.commands(project_id).iter().filter(|c| known.contains(&c.name)).cloned().collect()
+    }
+
+    /// Your message as the agent gets it: with skills named later in it (`then /review`), a note
+    /// to run them as they come up. Claude Code only runs the one a message starts with.
+    pub fn message_for_agent(&self, text: &str, project_id: &str) -> String {
+        let chained = yh_core::claude::chained_commands(text, &self.chainable(project_id));
+        match yh_core::claude::chain_note(&chained) {
+            Some(note) => format!("{text}\n\n{note}"),
+            None => text.to_string(),
+        }
+    }
+
+    /// Commands the app does itself, so its own state stays true: `/btw` opens the side chat,
+    /// `/mcp` the servers sheet, `/model` and `/effort` go through the pickers' own calls.
+    /// `/rename` goes to Claude Code, whose new title comes back (`note_composer_event`); the
+    /// rest (`/clear`, `/compact`, `/context`, `/usage`…) are Claude Code's, as in the Swift app.
+    fn handle_command(&mut self, thread: &Entity<ThreadState>, text: &str, cx: &mut Context<Self>) -> CommandHandling {
+        let Some((name, args)) = yh_core::claude::parse_command(text) else { return CommandHandling::NotOurs };
+        let id = thread.read(cx).id().to_string();
+        match name.as_str() {
+            // Already on the side: the question is all that's left.
+            "btw" if id.starts_with(SIDE) => {
+                if args.is_empty() {
+                    CommandHandling::Done
+                } else {
+                    CommandHandling::Send(args)
+                }
+            }
+            "btw" => {
+                self.ask_aside(&id, &args, cx);
+                CommandHandling::Done
+            }
+            "mcp" if args.is_empty() => {
+                self.open_mcp(cx);
+                CommandHandling::Done
+            }
+            "model" if !args.is_empty() => {
+                let fallback = [("default", "Default"), ("haiku", "Haiku"), ("sonnet", "Sonnet"), ("opus", "Opus"), ("fable", "Fable")];
+                let found = self
+                    .models
+                    .iter()
+                    .find(|m| m.value.eq_ignore_ascii_case(&args) || m.display_name.eq_ignore_ascii_case(&args))
+                    .map(|m| (m.value.clone(), m.display_name.clone()))
+                    .or_else(|| fallback.iter().find(|(v, _)| v.eq_ignore_ascii_case(&args)).map(|(v, n)| (v.to_string(), n.to_string())));
+                let Some((value, label)) = found else { return CommandHandling::NotOurs };
+                self.set_model(&id, (value != "default").then_some(value), cx);
+                self.composer_notice(thread, &format!("Model set to {label}"), cx);
+                CommandHandling::Done
+            }
+            "effort" if !args.is_empty() => {
+                let Some((level, label)) = EFFORTS.iter().find(|(v, _)| v.eq_ignore_ascii_case(&args)) else { return CommandHandling::NotOurs };
+                self.set_effort(&id, Some(level.to_string()), cx);
+                self.composer_notice(thread, &format!("Reasoning effort set to {label}"), cx);
+                CommandHandling::Done
+            }
+            "rename" => {
+                self.composer.renames.insert(id);
+                CommandHandling::NotOurs
+            }
+            _ => CommandHandling::NotOurs,
+        }
+    }
+
+    /// Opens the side chat in the right sidebar and asks it `question`, if there is one. It
+    /// starts from a copy of this conversation as it is now.
+    pub fn ask_aside(&mut self, parent: &str, question: &str, cx: &mut Context<Self>) {
+        let Some(chat) = self.side_chat(parent, cx) else { return };
+        self.show_panel(Panel::SideChat, cx);
+        if !question.is_empty() {
+            self.send(&chat, question, false, cx);
+        }
+    }
+
+    /// A note in the thread from the app (`Model set to Haiku`), saved with its rows.
+    fn composer_notice(&mut self, thread: &Entity<ThreadState>, text: &str, cx: &mut Context<Self>) {
+        let id = thread.read(cx).id().to_string();
+        if thread.read(cx).total.is_none() {
+            let total = self.library.db.as_ref().map_or(0, |db| db.transcript_count(&id));
+            thread.update(cx, |t, _| t.total = Some(total));
+        }
+        thread.update(cx, |t, cx| {
+            t.notice(text);
+            cx.notify();
+        });
+        self.save_rows(thread, cx);
+    }
+
+    /// What the workspace keeps from a thread's events for the composer.
+    fn note_composer_event(&mut self, thread: &Entity<ThreadState>, event: &Event, cx: &mut Context<Self>) {
+        let id = thread.read(cx).id().to_string();
+        match event {
+            // Only for your `/rename`: a title the CLI picks itself doesn't replace ours.
+            Event::TitleChanged(title) => {
+                if self.composer.renames.remove(&id) {
+                    self.rename(&id, title, cx);
+                }
+            }
+            Event::Skills(skills) => {
+                let project = thread.read(cx).meta.project_id.clone();
+                self.composer.skills.insert(project, skills.clone());
+            }
+            // Remembered by model (`contextWindows`, as the Swift app keeps them).
+            Event::ContextWindows(windows) => {
+                let mut all = match self.library.setting("contextWindows") {
+                    Some(Value::Object(m)) => m,
+                    _ => serde_json::Map::new(),
+                };
+                let before = all.clone();
+                for (model, window) in windows {
+                    all.insert(model.clone(), (*window).into());
+                }
+                if all != before {
+                    self.library.set_setting("contextWindows", &Value::Object(all));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A turn's end: how full the context is, saved with the thread; the MCP servers asked
+    /// again (only of a `claude` that's running anyway, never one started for it).
+    fn composer_turn_ended(&mut self, thread: &Entity<ThreadState>, cx: &mut Context<Self>) {
+        let (id, tokens, window) = {
+            let t = thread.read(cx);
+            (t.id().to_string(), t.composer.context_tokens, t.composer.context_window)
+        };
+        thread.update(cx, |t, _| {
+            t.meta.context_tokens = tokens;
+            t.meta.context_window = window;
+        });
+        self.library.update_thread(&id, |r| {
+            match tokens {
+                Some(t) => r.insert("contextTokens".into(), t.into()),
+                None => r.remove("contextTokens"),
+            };
+            if let Some(w) = window {
+                r.insert("contextWindow".into(), w.into());
+            }
+        });
+        self.refresh_mcp_attention(thread, cx);
+    }
+
+    /// The thread's MCP servers from its running `claude` (`mcp_status`), for the attention chip.
+    pub fn refresh_mcp_attention(&mut self, thread: &Entity<ThreadState>, cx: &mut Context<Self>) {
+        let id = thread.read(cx).id().to_string();
+        if id.starts_with(SIDE) || id.starts_with(MEMORY_AGENT) || !self.runtimes.contains_key(&id) {
+            return;
+        }
+        let task = self.mcp(thread, serde_json::json!({ "subtype": "mcp_status" }), cx);
+        let weak = thread.downgrade();
+        cx.spawn(async move |this, cx| {
+            let Ok(reply) = task.await else { return };
+            let servers: Vec<(String, String, String)> = crate::ui::mcp::parse_status(&reply).into_iter().map(|s| (s.name, s.status, s.scope)).collect();
+            let _ = this.update(cx, |_, cx| {
+                if let Some(t) = weak.upgrade() {
+                    t.update(cx, |t, cx| {
+                        if t.composer.mcp_servers != servers {
+                            t.composer.mcp_servers = servers;
+                            cx.notify();
+                        }
+                    });
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The `/mcp` sheet heard the servers: the chip follows.
+    pub fn note_mcp_servers(&mut self, thread: &Entity<ThreadState>, servers: Vec<(String, String, String)>, cx: &mut Context<Self>) {
+        if thread.read(cx).composer.mcp_servers != servers {
+            thread.update(cx, |t, _| t.composer.mcp_servers = servers);
+            cx.notify();
+        }
+    }
+
+    /// The thread's context window: as its last turn reported, else what was seen for its model.
+    pub fn context_window_of(&self, thread: &ThreadState) -> Option<u64> {
+        thread.composer.context_window.or_else(|| {
+            let model = self.model_of(thread)?;
+            let all = self.library.setting("contextWindows")?;
+            let all = all.as_object()?;
+            all.iter().find(|(k, _)| k.contains(&model)).and_then(|(_, v)| v.as_u64())
+        })
+    }
+
+    /// Takes back a message still waiting for Claude's current step; with `to_composer` its text
+    /// goes back into the composer once Claude Code lets go of it.
+    pub fn withdraw(&mut self, thread: &Entity<ThreadState>, message: &str, to_composer: bool, cx: &mut Context<Self>) {
+        let id = thread.read(cx).id().to_string();
+        thread.update(cx, |t, _| {
+            if to_composer {
+                t.composer.restore_on_withdraw.insert(message.to_string());
+            }
+        });
+        match self.runtimes.get_mut(&id) {
+            Some(rt) => rt.process.cancel_queued(message),
+            // No `claude` to hold it any more: it's simply gone.
+            None => {
+                thread.update(cx, |t, cx| {
+                    t.apply(Event::Lifecycle { id: message.to_string(), state: "cancelled".into() }, cx);
+                    cx.notify();
+                });
+                self.save_rows(thread, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// A queued message, right away: Claude is stopped, and the CLI hands it the message.
+    pub fn send_now(&mut self, thread: &Entity<ThreadState>, message: &str, cx: &mut Context<Self>) {
+        thread.update(cx, |t, cx| {
+            t.composer.sending_now.insert(message.to_string());
+            cx.notify();
+        });
+        self.interrupt(thread, cx);
+        cx.notify();
+    }
+}
+
+/// Servers waiting on you: to sign in, or to fix. Not claude.ai connectors you haven't
+/// connected, which stay that way on purpose more often than not.
+pub fn mcp_needing_you(servers: &[(String, String, String)]) -> Vec<(String, bool)> {
+    servers
+        .iter()
+        .filter(|(name, status, scope)| {
+            let claude_ai = scope == "claudeai" || name.starts_with("claude.ai ");
+            status == "failed" || (status == "needs-auth" && !claude_ai)
+        })
+        .map(|(name, status, _)| (name.clone(), status == "failed"))
+        .collect()
+}

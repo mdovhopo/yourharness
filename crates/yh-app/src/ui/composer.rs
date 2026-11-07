@@ -9,11 +9,13 @@ use crate::theme::{Theme, MONO};
 use crate::ui::rows;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
-use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::Sizable;
 use gpui_kit::{div, prelude::*, px, App, Context, Entity, FontWeight, SharedString, Subscription, Window};
 use serde_json::{json, Value};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
+use yh_core::attachments::FileAttachment;
 use std::rc::Rc;
 use yh_core::claude::Decision;
 use yh_core::markdown;
@@ -29,10 +31,14 @@ pub struct Composer {
     current: Option<String>,
     card: Option<(String, Card)>,
     plan_open: bool,
-    /// The menu under the caret: slash commands at the start, files after an `@`.
+    /// The menu under the caret: slash commands (at the start, or later to chain skills), files
+    /// after an `@`.
     suggest: Option<Suggest>,
-    /// Images waiting to go with the next message: names in `attachments/`.
-    images: Vec<String>,
+    /// What waits to go with each thread's next message: images (names in `attachments/`), files
+    /// and folders. Kept by thread until sent, not saved.
+    attached: HashMap<String, Vec<Attached>>,
+    /// Queued messages you asked to remove, until the CLI lets go of them.
+    withdrawing: HashSet<String>,
     _mentions: Option<gpui_kit::Task<()>>,
     /// An MCP server's question, as a card.
     elicit: Option<(String, Entity<ElicitCard>)>,
@@ -157,6 +163,7 @@ impl Composer {
             }),
             cx.observe_in(&workspace, window, |this, _, window, cx| {
                 this.sync_card(window, cx);
+                this.take_restored(window, cx);
                 cx.notify();
             }),
         ];
@@ -167,7 +174,8 @@ impl Composer {
             card: None,
             plan_open: false,
             suggest: None,
-            images: vec![],
+            attached: HashMap::new(),
+            withdrawing: HashSet::new(),
             _mentions: None,
             elicit: None,
             _subscriptions: subscriptions,
@@ -210,48 +218,88 @@ impl Composer {
 
     pub fn submit(&mut self, now: bool, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.input.read(cx).value().to_string();
-        if text.trim().is_empty() && self.images.is_empty() {
-            return;
-        }
         let Some(thread) = self.thread(cx) else { return };
-        // `/mcp` is the app's: the sheet, not Claude Code's headless one-line answer.
-        if crate::ui::mcp::is_mcp_command(&text) {
-            self.input.update(cx, |i, cx| i.set_value("", window, cx));
-            self.workspace.update(cx, |ws, cx| ws.open_mcp(cx));
+        let key = thread.read(cx).id().to_string();
+        if text.trim().is_empty() && self.attached.get(&key).is_none_or(Vec::is_empty) {
             return;
         }
-        let images = std::mem::take(&mut self.images);
+        let attached = self.attached.remove(&key).unwrap_or_default();
+        let (mut images, mut files) = (vec![], vec![]);
+        for a in attached {
+            match a {
+                Attached::Image(name) => images.push(name),
+                Attached::File(f) => files.push(f),
+            }
+        }
+        self.suggest = None;
         self.input.update(cx, |i, cx| i.set_value("", window, cx));
-        self.workspace.update(cx, |ws, cx| ws.send_with_images(&thread, &text, images, now, cx));
+        // The app's own commands (`/btw`, `/mcp`, `/model`…) are answered in `send_message`.
+        self.workspace.update(cx, |ws, cx| ws.send_message(&thread, &text, images, files, now, cx));
+        cx.notify();
+    }
+
+    /// The thread the composer is for (what's attached is kept by it).
+    fn key(&self, cx: &App) -> Option<String> {
+        self.current.clone().or_else(|| self.workspace.read(cx).selected.clone())
+    }
+
+    fn attach_ready(&mut self, key: String, ready: Vec<Attached>, cx: &mut Context<Self>) {
+        let list = self.attached.entry(key).or_default();
+        for a in ready {
+            // One already there isn't added twice; at most `ATTACH_LIMIT` in all.
+            let dup = matches!(&a, Attached::File(f) if list.iter().any(|b| matches!(b, Attached::File(g) if g.path == f.path)));
+            if !dup && list.len() < ATTACH_LIMIT {
+                list.push(a);
+            }
+        }
         cx.notify();
     }
 
     /// Images (any common format) prepared and kept for the next message, off the main thread.
     pub fn add_images(&mut self, sources: Vec<Vec<u8>>, cx: &mut Context<Self>) {
-        let Some(thread) = self.current.clone().or_else(|| self.workspace.read(cx).selected.clone()) else { return };
+        let Some(thread) = self.key(cx) else { return };
         let dir = self.workspace.read(cx).data_dir.clone();
         cx.spawn(async move |this, cx| {
-            let names: Vec<String> = cx
+            let key = thread.clone();
+            let ready: Vec<Attached> = cx
                 .background_executor()
-                .spawn(async move { sources.iter().filter_map(|b| yh_core::attachments::save(&dir, &thread, b)).collect() })
+                .spawn(async move { sources.iter().filter_map(|b| yh_core::attachments::save(&dir, &thread, b)).map(Attached::Image).collect() })
                 .await;
-            let _ = this.update(cx, |this, cx| {
-                this.images.extend(names);
-                cx.notify();
-            });
+            let _ = this.update(cx, |this, cx| this.attach_ready(key, ready, cx));
         })
         .detach();
     }
 
+    /// Files, folders and images for the next message, read off the main thread: images Claude
+    /// sees inline, anything else (a PDF, a log, a folder) by its path. An image that can't be
+    /// read goes as a file.
     pub fn add_files(&mut self, paths: &[std::path::PathBuf], cx: &mut Context<Self>) {
-        let sources: Vec<Vec<u8>> =
-            paths.iter().filter(|p| yh_core::attachments::is_image_path(p)).filter_map(|p| std::fs::read(p).ok()).collect();
-        if !sources.is_empty() {
-            self.add_images(sources, cx);
-        }
+        let Some(thread) = self.key(cx) else { return };
+        let dir = self.workspace.read(cx).data_dir.clone();
+        let paths: Vec<std::path::PathBuf> = paths.iter().take(ATTACH_LIMIT).cloned().collect();
+        cx.spawn(async move |this, cx| {
+            let key = thread.clone();
+            let ready: Vec<Attached> = cx
+                .background_executor()
+                .spawn(async move {
+                    paths
+                        .iter()
+                        .filter_map(|p| {
+                            let image = (yh_core::attachments::is_image_path(p) && p.is_file())
+                                .then(|| std::fs::read(p).ok().and_then(|b| yh_core::attachments::save(&dir, &thread, &b)))
+                                .flatten();
+                            image.map(Attached::Image).or_else(|| FileAttachment::from_path(p).map(Attached::File))
+                        })
+                        .collect()
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| this.attach_ready(key, ready, cx));
+        })
+        .detach();
     }
 
-    /// ⌘V with an image (or image files) on the clipboard attaches it; text goes to the field.
+    /// ⌘V with files (copied in Finder) or an image (a screenshot) on the clipboard attaches
+    /// them; text goes to the field.
     fn paste_image(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(item) = cx.read_from_clipboard() else { return false };
         let mut sources = vec![];
@@ -263,23 +311,62 @@ impl Composer {
                 _ => {}
             }
         }
-        paths.retain(|p| yh_core::attachments::is_image_path(p));
         if sources.is_empty() && paths.is_empty() {
             return false;
         }
-        sources.extend(paths.iter().filter_map(|p| std::fs::read(p).ok()));
-        self.add_images(sources, cx);
+        if !paths.is_empty() {
+            self.add_files(&paths, cx);
+        }
+        if !sources.is_empty() {
+            self.add_images(sources, cx);
+        }
         true
     }
 
+    /// The paperclip: pick files or folders.
     fn attach(&mut self, cx: &mut Context<Self>) {
-        let paths = cx.prompt_for_paths(gpui_kit::PathPromptOptions { files: true, directories: false, multiple: true, prompt: Some("Attach".into()) });
+        let paths = cx.prompt_for_paths(gpui_kit::PathPromptOptions { files: true, directories: true, multiple: true, prompt: Some("Attach".into()) });
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(paths))) = paths.await {
                 let _ = this.update(cx, |this, cx| this.add_files(&paths, cx));
             }
         })
         .detach();
+    }
+
+    /// Queued messages taken back into the composer: their text after what's there, their
+    /// images and files attached again.
+    fn take_restored(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(thread) = self.thread(cx) else { return };
+        if thread.read(cx).composer.restored.is_empty() {
+            return;
+        }
+        let restored = thread.update(cx, |t, _| std::mem::take(&mut t.composer.restored));
+        let key = thread.read(cx).id().to_string();
+        let dir = self.workspace.read(cx).data_dir.clone();
+        let mut draft = self.input.read(cx).value().to_string();
+        for (id, text, attachments) in restored {
+            self.withdrawing.remove(&id);
+            if !text.is_empty() {
+                draft = if draft.is_empty() { text } else { format!("{draft}\n{text}") };
+            }
+            let ready: Vec<Attached> = attachments
+                .into_iter()
+                .filter_map(|name| {
+                    if yh_core::attachments::is_image_name(&name) {
+                        return Some(Attached::Image(name));
+                    }
+                    let path = if name.starts_with('/') { std::path::PathBuf::from(name.trim_end_matches('/')) } else { yh_core::attachments::path(&dir, &name) };
+                    FileAttachment::from_path(&path).map(Attached::File)
+                })
+                .collect();
+            self.attach_ready(key.clone(), ready, cx);
+        }
+        let len = draft.len();
+        self.input.update(cx, |i, cx| {
+            i.set_value(draft, window, cx);
+            i.set_selected_range(len..len, cx);
+        });
     }
 
     /// The card follows the open thread's pending request.
@@ -391,6 +478,18 @@ impl Composer {
             .children(effort_menu)
             .child(mode_menu)
     }
+}
+
+/// At most this many attachments go with one message.
+const ATTACH_LIMIT: usize = 20;
+
+/// Something waiting to go with the next message.
+#[derive(Clone, Debug)]
+enum Attached {
+    /// An image Claude sees inline: its name in `attachments/`.
+    Image(String),
+    /// Any other file, or a folder: Claude is told where it is.
+    File(FileAttachment),
 }
 
 fn capitalize(s: &str) -> String {
@@ -527,42 +626,21 @@ impl Render for Composer {
         if let Some(menu) = self.suggestions(&theme, cx) {
             inner = inner.child(menu);
         }
+        if let Some(queued) = self.queued_strip(&thread, &theme, cx) {
+            inner = inner.child(queued);
+        }
+        let attached = self.attached_strip(&thread, &theme, cx);
+        let (context, mcp_chip) = {
+            let ws = self.workspace.read(cx);
+            let t = thread.read(cx);
+            let context = t.composer.context_tokens.map(|tokens| (tokens, ws.context_window_of(t)));
+            (context, crate::state::workspace::mcp_needing_you(&t.composer.mcp_servers))
+        };
         let stop_thread = thread.clone();
-        let thumbs = (!self.images.is_empty()).then(|| {
-            let dir = self.workspace.read(cx).data_dir.join("attachments");
-            div().flex().flex_wrap().gap(px(6.)).children(self.images.iter().enumerate().map(|(i, name)| {
-                div()
-                    .relative()
-                    .child(gpui_kit::img(dir.join(name)).h(px(56.)).max_w(px(120.)).rounded(px(6.)))
-                    .child(
-                        div()
-                            .id(("remove-image", i))
-                            .absolute()
-                            .top(px(-4.))
-                            .right(px(-4.))
-                            .w(px(16.))
-                            .h(px(16.))
-                            .rounded_full()
-                            .bg(theme.secondary)
-                            .text_color(gpui_kit::white())
-                            .text_size(px(11.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child("×")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if i < this.images.len() {
-                                    this.images.remove(i);
-                                }
-                                cx.notify();
-                            })),
-                    )
-            }))
-        });
         let composer = div()
             .capture_key_down(cx.listener(Self::on_key))
             .on_drop(cx.listener(|this, paths: &gpui_kit::ExternalPaths, _, cx| this.add_files(paths.paths(), cx)))
-            .children(thumbs)
+            .children(attached)
             .relative()
             .border_1()
             .border_color(theme.separator)
@@ -582,15 +660,29 @@ impl Render for Composer {
                     .items_center()
                     .gap(px(8.))
                     .child(
-                        Button::new("attach").ghost().xsmall().label("+").tooltip("Attach images").on_click(cx.listener(|this, _, _, cx| this.attach(cx))),
+                        Button::new("attach")
+                            .ghost()
+                            .xsmall()
+                            .label("+")
+                            .tooltip("Attach Files… (files, folders or images; or paste and drop them)")
+                            .on_click(cx.listener(|this, _, _, cx| this.attach(cx))),
                     )
                     .child(self.pickers(&thread, &theme, cx))
+                    .children((!mcp_chip.is_empty()).then(|| mcp_attention_chip(&mcp_chip, self.workspace.downgrade(), &theme)))
                     .child(div().flex_1())
+                    .children(context.map(|(tokens, window)| context_ring(tokens, window, &theme)))
                     .when(running, |d| {
                         let w = w.clone();
-                        d.child(Button::new("stop").small().label("Stop ⌘.").on_click(move |_, _, cx| {
+                        d.child(Button::new("stop").small().label("Stop ⌘.").on_click(cx.listener(move |this, _, _, cx| {
+                            // Anything queued goes back into the composer first, so stopping never sends it.
+                            let queued = stop_thread.read(cx).queued_messages();
+                            for (id, ..) in queued {
+                                if !this.withdrawing.contains(&id) {
+                                    let _ = w.update(cx, |ws, cx| ws.withdraw(&stop_thread, &id, true, cx));
+                                }
+                            }
                             let _ = w.update(cx, |ws, cx| ws.interrupt(&stop_thread, cx));
-                        }))
+                        })))
                     })
                     .child(
                         Button::new("send")
@@ -656,10 +748,354 @@ impl Composer {
     }
 }
 
+impl Composer {
+    /// Messages sent while Claude works, waiting for its current step. Each can still go now
+    /// (Claude is interrupted), come back to the composer, or be dropped.
+    fn queued_strip(&self, thread: &Entity<ThreadState>, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui_kit::Div> {
+        let queued = thread.read(cx).queued_messages();
+        if queued.is_empty() {
+            return None;
+        }
+        let mut list = div().flex().flex_col().gap(px(6.)).mb(px(8.));
+        for (i, (id, text, attachments)) in queued.into_iter().enumerate() {
+            let (sending, taking) = {
+                let c = &thread.read(cx).composer;
+                (c.sending_now.contains(&id), c.restore_on_withdraw.contains(&id) || self.withdrawing.contains(&id))
+            };
+            let status = if sending {
+                "Interrupting Claude to send this…"
+            } else if taking {
+                "Taking it back…"
+            } else {
+                "Queued · Claude reads it after its current step"
+            };
+            let label = match (text.is_empty(), attachments) {
+                (false, _) => text,
+                (true, 1) => "1 attachment".to_string(),
+                (true, n) => format!("{n} attachments"),
+            };
+            let mut row = div()
+                .flex()
+                .items_start()
+                .gap(px(8.))
+                .px(px(10.))
+                .py(px(7.))
+                .rounded(px(10.))
+                .border_1()
+                .border_color(theme.separator)
+                .bg(theme.card)
+                .text_size(px(12.))
+                .child(div().w(px(14.)).flex_none().text_color(theme.secondary).child(if sending { "↯" } else { "◷" }))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.))
+                        .child(div().max_h(px(34.)).overflow_hidden().child(label))
+                        .child(div().text_size(px(11.)).text_color(theme.secondary).child(status)),
+                );
+            if !sending && !taking {
+                let w = self.workspace.downgrade();
+                let (t1, t2, t3) = (thread.clone(), thread.clone(), thread.clone());
+                let (i1, i2, i3) = (id.clone(), id.clone(), id.clone());
+                let w2 = w.clone();
+                row = row.child(
+                    div()
+                        .flex()
+                        .flex_none()
+                        .gap(px(2.))
+                        .child(Button::new(SharedString::from(format!("queued-now-{i}"))).ghost().xsmall().label("Send Now").tooltip("Interrupt Claude and send this now").on_click(
+                            move |_, _, cx| {
+                                let _ = w.update(cx, |ws, cx| ws.send_now(&t1, &i1, cx));
+                            },
+                        ))
+                        .child(Button::new(SharedString::from(format!("queued-edit-{i}"))).ghost().xsmall().label("Edit").tooltip("Take it back into the composer").on_click(
+                            move |_, _, cx| {
+                                let _ = w2.update(cx, |ws, cx| ws.withdraw(&t2, &i2, true, cx));
+                            },
+                        ))
+                        .child(Button::new(SharedString::from(format!("queued-remove-{i}"))).ghost().xsmall().label("Remove").tooltip("Don't send it").on_click(cx.listener(
+                            move |this, _, _, cx| {
+                                this.withdrawing.insert(i3.clone());
+                                this.workspace.update(cx, |ws, cx| ws.withdraw(&t3, &i3, false, cx));
+                            },
+                        ))),
+                );
+            }
+            list = list.child(row);
+        }
+        Some(list)
+    }
+
+    /// What waits to go with the next message: images as thumbnails, files and folders as chips.
+    /// A click opens one; its menu opens it, shows it in Finder or removes it.
+    fn attached_strip(&self, thread: &Entity<ThreadState>, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui_kit::Div> {
+        let key = thread.read(cx).id().to_string();
+        let list = self.attached.get(&key).filter(|l| !l.is_empty())?;
+        let dir = self.workspace.read(cx).data_dir.join("attachments");
+        let mut strip = div().flex().flex_wrap().gap(px(6.));
+        for (i, a) in list.iter().enumerate() {
+            let path = match a {
+                Attached::Image(name) => dir.join(name),
+                Attached::File(f) => f.path.clone(),
+            };
+            let body = match a {
+                Attached::Image(_) => div().child(gpui_kit::img(path.clone()).h(px(56.)).max_w(px(120.)).rounded(px(6.))),
+                Attached::File(f) => file_chip(f, theme),
+            };
+            let (open, reveal) = (path.clone(), path.clone());
+            let this = cx.entity().downgrade();
+            let remove_key = key.clone();
+            let chip = div()
+                .id(("attached", i))
+                .relative()
+                .cursor_pointer()
+                .child(body)
+                .on_click(move |_, _, cx| cx.open_with_system(&open))
+                .context_menu(move |menu, _, _| {
+                    let (open, reveal, this, key) = (path.clone(), reveal.clone(), this.clone(), remove_key.clone());
+                    menu.item(PopupMenuItem::new("Open").on_click(move |_, _, cx| cx.open_with_system(&open)))
+                        .item(PopupMenuItem::new("Show in Finder").on_click(move |_, _, cx| cx.reveal_path(&reveal)))
+                        .separator()
+                        .item(PopupMenuItem::new("Remove").on_click(move |_, _, cx| {
+                            let _ = this.update(cx, |this, cx| this.remove_attached(&key, i, cx));
+                        }))
+                })
+                .child(
+                    div()
+                        .id(("remove-attached", i))
+                        .absolute()
+                        .top(px(-4.))
+                        .right(px(-4.))
+                        .w(px(16.))
+                        .h(px(16.))
+                        .rounded_full()
+                        .bg(theme.secondary)
+                        .text_color(gpui_kit::white())
+                        .text_size(px(11.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child("×")
+                        .on_click(cx.listener({
+                            let key = key.clone();
+                            move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.remove_attached(&key, i, cx);
+                            }
+                        })),
+                );
+            strip = strip.child(chip);
+        }
+        Some(strip)
+    }
+
+    fn remove_attached(&mut self, key: &str, index: usize, cx: &mut Context<Self>) {
+        if let Some(list) = self.attached.get_mut(key) {
+            if index < list.len() {
+                list.remove(index);
+            }
+        }
+        cx.notify();
+    }
+}
+
+/// A file or folder sent with a message: a badge for its kind, its name and size. No preview:
+/// Claude reads it, and a click opens it in its own app.
+pub fn file_chip(file: &FileAttachment, theme: &Theme) -> gpui_kit::Div {
+    let ext = file.path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    let (badge, color) = file_kind(&ext, file.is_dir, theme);
+    let detail = if file.is_dir {
+        "Folder".to_string()
+    } else {
+        let kind = if ext.is_empty() { "File".to_string() } else { ext.to_uppercase() };
+        file.size.map(|s| format!("{kind} · {}", byte_count(s))).unwrap_or(kind)
+    };
+    div()
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .h(px(56.))
+        .max_w(px(240.))
+        .pl(px(8.))
+        .pr(px(12.))
+        .rounded(px(8.))
+        .border_1()
+        .border_color(theme.separator)
+        .bg(theme.code)
+        .child(
+            div()
+                .flex_none()
+                .w(px(28.))
+                .h(px(28.))
+                .rounded(px(6.))
+                .bg(color)
+                .text_color(gpui_kit::white())
+                .text_size(px(9.))
+                .font_weight(FontWeight::BOLD)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(badge),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .child(div().text_size(px(12.)).font_weight(FontWeight::MEDIUM).overflow_hidden().whitespace_nowrap().text_ellipsis().child(file.name()))
+                .child(div().text_size(px(11.)).text_color(theme.secondary).overflow_hidden().whitespace_nowrap().text_ellipsis().child(detail)),
+        )
+}
+
+/// A file's badge and its color, by kind.
+fn file_kind(ext: &str, is_dir: bool, theme: &Theme) -> (String, gpui_kit::Hsla) {
+    if is_dir {
+        return ("DIR".into(), theme.accent);
+    }
+    let color = match ext {
+        "pdf" => theme.error,
+        "zip" | "gz" | "tgz" | "tar" | "dmg" | "7z" | "xz" => theme.warning,
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "heic" | "tiff" | "svg" | "psd" | "mov" | "mp4" => theme.string,
+        "rs" | "swift" | "js" | "ts" | "tsx" | "jsx" | "py" | "go" | "c" | "h" | "cpp" | "java" | "kt" | "rb" | "sh" | "json" | "toml" | "yml" | "yaml" | "html" | "css" => theme.keyword,
+        _ => theme.secondary,
+    };
+    let badge = if ext.is_empty() || ext.len() > 4 { "DOC".to_string() } else { ext.to_uppercase() };
+    (badge, color)
+}
+
+fn byte_count(bytes: u64) -> String {
+    let b = bytes as f64;
+    if b >= 1e9 {
+        format!("{:.1} GB", b / 1e9)
+    } else if b >= 1e6 {
+        format!("{:.1} MB", b / 1e6)
+    } else if b >= 1e3 {
+        format!("{:.0} KB", b / 1e3)
+    } else {
+        format!("{bytes} bytes")
+    }
+}
+
+/// Only when an MCP server needs you: one to sign in to, or one that won't start. Opens /mcp.
+fn mcp_attention_chip(needing: &[(String, bool)], workspace: gpui_kit::WeakEntity<Workspace>, theme: &Theme) -> impl IntoElement {
+    let label = match needing {
+        [(name, true)] => format!("{name} won't start"),
+        [(name, false)] => format!("Sign in to {name}"),
+        _ => format!("{} MCP servers need you", needing.len()),
+    };
+    let help = format!(
+        "MCP servers: {}",
+        needing.iter().map(|(n, failed)| format!("{n} {}", if *failed { "won't start" } else { "needs sign-in" })).collect::<Vec<_>>().join(", ")
+    );
+    div()
+        .id("mcp-attention")
+        .flex_none()
+        .px(px(9.))
+        .py(px(3.))
+        .rounded_full()
+        .bg(theme.warning.opacity(0.14))
+        .hover(|d| d.bg(theme.warning.opacity(0.22)))
+        .text_color(theme.warning)
+        .text_size(px(12.))
+        .font_weight(FontWeight::MEDIUM)
+        .cursor_pointer()
+        .child(label)
+        .tooltip(move |window, cx| Tooltip::new(help.clone()).build(window, cx))
+        .on_click(move |_, _, cx| {
+            let _ = workspace.update(cx, |ws, cx| ws.open_mcp(cx));
+        })
+}
+
+/// A ring showing how full the context window is, like a battery for the conversation, and the
+/// count beside it.
+fn context_ring(tokens: u64, window: Option<u64>, theme: &Theme) -> impl IntoElement {
+    use yh_core::claude::compact_tokens;
+    let fraction = window.filter(|w| *w > 0).map(|w| (tokens as f32 / w as f32).min(1.)).unwrap_or(0.);
+    let tint = if fraction < 0.6 {
+        theme.secondary
+    } else if fraction < 0.85 {
+        theme.warning
+    } else {
+        theme.error
+    };
+    let track = theme.separator;
+    let help = match window {
+        Some(w) => format!("{} of {} tokens in context ({:.0}%)", grouped(tokens), grouped(w), fraction * 100.),
+        None => format!("{} tokens in context", grouped(tokens)),
+    };
+    let text = match window {
+        Some(w) => format!("{} / {}", compact_tokens(tokens), compact_tokens(w)),
+        None => compact_tokens(tokens),
+    };
+    div()
+        .id("context-ring")
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .mr(px(4.))
+        .when(window.is_some(), |d| {
+            d.child(
+                gpui_kit::canvas(
+                    |_, _, _| {},
+                    move |bounds, _, window, _| {
+                        let side = f32::from(bounds.size.width.min(bounds.size.height));
+                        let (cx0, cy0) = (f32::from(bounds.origin.x) + side / 2., f32::from(bounds.origin.y) + side / 2.);
+                        let r = side / 2. - 1.5;
+                        let arc = |from: f32, to: f32| {
+                            let mut path = gpui_kit::PathBuilder::stroke(px(2.5));
+                            let steps = ((to - from) * 48.).ceil().max(1.) as usize;
+                            for n in 0..=steps {
+                                let a = (from + (to - from) * n as f32 / steps as f32) * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+                                let p = gpui_kit::point(px(cx0 + r * a.cos()), px(cy0 + r * a.sin()));
+                                if n == 0 {
+                                    path.move_to(p);
+                                } else {
+                                    path.line_to(p);
+                                }
+                            }
+                            path.build().ok()
+                        };
+                        if let Some(p) = arc(0., 1.) {
+                            window.paint_path(p, track);
+                        }
+                        if fraction > 0. {
+                            if let Some(p) = arc(0., fraction.max(0.02)) {
+                                window.paint_path(p, tint);
+                            }
+                        }
+                    },
+                )
+                .w(px(14.))
+                .h(px(14.)),
+            )
+        })
+        .child(div().text_size(px(11.)).text_color(theme.secondary).child(text))
+        .tooltip(move |window, cx| Tooltip::new(help.clone()).build(window, cx))
+}
+
+/// 1000000 → "1,000,000".
+fn grouped(value: u64) -> String {
+    let digits = value.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
 struct Suggestion {
     label: String,
     detail: String,
     insert: String,
+    /// ↩ sends this right away (a command that needs nothing more); ⇥ still completes.
+    run: Option<String>,
 }
 
 struct Suggest {
@@ -694,23 +1130,49 @@ impl Composer {
         };
         let before = text.get(..cursor).unwrap_or(&text);
         let Some(thread) = self.thread(cx) else { return };
-        // `/name` alone at the start: commands and skills.
-        if let Some(q) = before.strip_prefix('/').filter(|q| !q.contains(char::is_whitespace)) {
+        // `/name` at the start (commands and skills), or as a word later on (skills to chain:
+        // only what the agent can run itself).
+        if let Some((start, q)) = yh_core::claude::trailing_command(before) {
             let q = q.to_lowercase();
             let project = thread.read(cx).meta.project_id.clone();
-            let mut items: Vec<&yh_core::claude::SlashCommand> =
-                self.workspace.read(cx).commands(&project).iter().filter(|c| c.name.to_lowercase().contains(&q)).collect();
-            items.sort_by_key(|c| !c.name.to_lowercase().starts_with(&q));
-            let items: Vec<Suggestion> = items
+            let chained = start > 0;
+            let commands = {
+                let ws = self.workspace.read(cx);
+                if chained {
+                    ws.chainable_commands(&project)
+                } else {
+                    ws.menu_commands(&project)
+                }
+            };
+            let rank = |c: &yh_core::claude::SlashCommand| {
+                let name = c.name.to_lowercase();
+                if q.is_empty() || name == q {
+                    Some(0)
+                } else if name.starts_with(&q) {
+                    Some(1)
+                } else if c.aliases.iter().any(|a| a.to_lowercase().starts_with(&q)) {
+                    Some(2)
+                } else if name.contains(&q) {
+                    Some(3)
+                } else {
+                    None
+                }
+            };
+            let mut ranked: Vec<(usize, &yh_core::claude::SlashCommand)> = commands.iter().filter_map(|c| rank(c).map(|r| (r, c))).collect();
+            ranked.sort_by_key(|(r, _)| *r);
+            let items: Vec<Suggestion> = ranked
                 .into_iter()
                 .take(12)
-                .map(|c| Suggestion {
+                .map(|(_, c)| Suggestion {
                     label: format!("/{}", c.name),
                     detail: if c.hint.is_empty() { c.description.clone() } else { format!("{} · {}", c.hint, c.description) },
                     insert: format!("/{} ", c.name),
+                    // ↩ runs one that takes nothing more (`/compact`'s instructions are optional);
+                    // later in a message it's only put in.
+                    run: (!chained && (c.hint.is_empty() || c.hint.starts_with('[') || c.hint.to_lowercase().contains("optional"))).then(|| format!("/{}", c.name)),
                 })
                 .collect();
-            self.suggest = (!items.is_empty()).then_some(Suggest { items, index: 0, start: 0 });
+            self.suggest = (!items.is_empty()).then_some(Suggest { items, index: 0, start });
             cx.notify();
             return;
         }
@@ -732,6 +1194,7 @@ impl Composer {
                     .map(|f| Suggestion {
                         label: f.trim_end_matches('/').rsplit('/').next().unwrap_or(&f).to_string(),
                         insert: if f.contains(' ') { format!("@\"{f}\" ") } else { format!("@{f} ") },
+                        run: None,
                         detail: f,
                     })
                     .collect();
@@ -741,9 +1204,15 @@ impl Composer {
         }));
     }
 
-    fn accept(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+    /// Takes a menu item: `run` sends a command that needs nothing more, else it's put in.
+    fn accept(&mut self, index: usize, run: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(s) = self.suggest.take() else { return };
         let Some(choice) = s.items.into_iter().nth(index) else { return };
+        if let Some(command) = choice.run.filter(|_| run) {
+            self.input.update(cx, |i, cx| i.set_value(command, window, cx));
+            self.submit(false, window, cx);
+            return;
+        }
         self.input.update(cx, |i, cx| {
             let cursor = i.cursor();
             i.set_selected_range(s.start..cursor, cx);
@@ -764,9 +1233,10 @@ impl Composer {
         match event.keystroke.key.as_str() {
             "up" => s.index = (s.index + n - 1) % n,
             "down" => s.index = (s.index + 1) % n,
-            "enter" | "tab" if !event.keystroke.modifiers.shift => {
+            "enter" | "tab" if !event.keystroke.modifiers.shift && !event.keystroke.modifiers.alt => {
                 let index = s.index;
-                self.accept(index, window, cx);
+                let run = event.keystroke.key == "enter";
+                self.accept(index, run, window, cx);
             }
             "escape" => self.suggest = None,
             _ => return,
@@ -797,7 +1267,7 @@ impl Composer {
                     .when(i == s.index, |d| d.bg(theme.selected))
                     .child(div().flex_none().font_weight(FontWeight::MEDIUM).child(item.label.clone()))
                     .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_color(theme.secondary).child(item.detail.clone()))
-                    .on_mouse_down(gpui_kit::MouseButton::Left, cx.listener(move |this, _, window, cx| this.accept(i, window, cx))),
+                    .on_mouse_down(gpui_kit::MouseButton::Left, cx.listener(move |this, _, window, cx| this.accept(i, true, window, cx))),
             );
         }
         Some(list)
