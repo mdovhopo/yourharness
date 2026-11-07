@@ -33,6 +33,8 @@ pub struct RootView {
     deck: Vec<(String, Entity<TranscriptView>)>,
     /// The Memory page when one is open (or was last: it's kept for going back to).
     memory: Option<Entity<MemoryPage>>,
+    /// The open project's page (PRs and repos), kept while it's the same project.
+    project: Option<Entity<crate::ui::project::ProjectPage>>,
     /// Usage, made the first time it's opened.
     usage: Option<Entity<crate::ui::usage::UsagePage>>,
     /// The open thread's tasks from memory, for its header: (title, state, steps done, steps).
@@ -71,7 +73,7 @@ impl RootView {
                 cx.notify();
             }),
         ];
-        RootView { workspace, sidebar, composer, find, spotlight, inspector, mcp, deck: vec![], memory: None, usage: None, tasks: vec![], tasks_for: None, focus: cx.focus_handle(), _subscriptions: subscriptions }
+        RootView { workspace, sidebar, composer, find, spotlight, inspector, mcp, deck: vec![], memory: None, project: None, usage: None, tasks: vec![], tasks_for: None, focus: cx.focus_handle(), _subscriptions: subscriptions }
     }
 
     fn show(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -96,6 +98,16 @@ impl RootView {
     }
 
     fn open_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(crate::state::workspace::Page::Project(project)) = self.workspace.read(cx).page.clone() {
+            if self.project.as_ref().is_none_or(|p| p.read(cx).project != project) {
+                let ws = self.workspace.clone();
+                self.project = Some(cx.new(|cx| crate::ui::project::ProjectPage::new(ws, project, window, cx)));
+            } else if let Some(p) = &self.project {
+                p.update(cx, |p, cx| p.refresh(false, cx));
+            }
+            cx.notify();
+            return;
+        }
         let Some(crate::state::workspace::Page::Memory(project)) = self.workspace.read(cx).page.clone() else {
             if self.workspace.read(cx).page == Some(crate::state::workspace::Page::Usage) && self.usage.is_none() {
                 let ws = self.workspace.clone();
@@ -193,7 +205,11 @@ impl Focusable for RootView {
 impl Render for RootView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::get(cx);
-        let page: Option<AnyView> = self.memory_page(cx).map(AnyView::from).or_else(|| {
+        let project_page = match &self.workspace.read(cx).page {
+            Some(crate::state::workspace::Page::Project(p)) => self.project.clone().filter(|e| e.read(cx).project == *p),
+            _ => None,
+        };
+        let page: Option<AnyView> = project_page.map(AnyView::from).or_else(|| self.memory_page(cx).map(AnyView::from)).or_else(|| {
             (self.workspace.read(cx).page == Some(crate::state::workspace::Page::Usage)).then(|| self.usage.clone().map(AnyView::from)).flatten()
         });
         let selected = if page.is_some() { None } else { self.workspace.read(cx).selected_thread() };

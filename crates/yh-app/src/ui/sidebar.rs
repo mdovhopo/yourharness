@@ -387,7 +387,7 @@ impl Render for Sidebar {
                         .text_size(px(11.))
                         .font_weight(FontWeight::SEMIBOLD)
                         .child({
-                            // The name opens the project's Memory page.
+                            // The name opens the project's page: its PRs and repos, and its memory.
                             let (ws, pid) = (self.workspace.clone(), project.id.clone());
                             div()
                                 .id(SharedString::from(format!("project-{}", project.id)))
@@ -397,7 +397,7 @@ impl Render for Sidebar {
                                 .rounded(px(4.))
                                 .hover(|s| s.text_color(theme.text))
                                 .child(if home { "Home".to_string() } else { project.name.clone() })
-                                .on_click(move |_, _, cx| ws.update(cx, |ws, cx| ws.open_memory(&pid, cx)))
+                                .on_click(move |_, _, cx| ws.update(cx, |ws, cx| ws.open_project(&pid, cx)))
                         })
                         .child(
                             div()

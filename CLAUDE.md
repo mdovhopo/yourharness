@@ -73,7 +73,7 @@ to a server; with `YH_MCP_BROWSER=log` each such call prints `MCP sign-in asked:
 finish a real sign-in from a test), `YH_STATE_EXPORT=<file.yhstate>` (the whole state exported at launch, its manifest printed),
 `YH_STATE_IMPORT=<file>` (imported at launch, development data folders only: never into the real app),
 `YH_IMPORT_COOKIES=<Cookies.binarycookies>` (a Safari-format file's cookies into the selected thread's project's
-browser: a synthetic file only, never your real browsers, which would ask you for access), `YH_OPEN_USAGE=1` (Usage; `YH_USAGE_RANGE=week|month|quarter|halfYear|year`, `YH_USAGE_METRIC=cost`,
+browser: a synthetic file only, never your real browsers, which would ask you for access), `YH_OPEN_PROJECT=1` (the selected thread's project's page: PRs as stacks, repos, worktrees), `YH_OPEN_USAGE=1` (Usage; `YH_USAGE_RANGE=week|month|quarter|halfYear|year`, `YH_USAGE_METRIC=cost`,
 `YH_USAGE_HOVER=<days ago>`; test it on a clone of `test-harness-root/usage` with `CLAUDE_CONFIG_DIR` at its
 `claude-config`, never the real `~/.claude`), `YH_MEMORY_AGENT=importer|reconciler` (with `YH_MEMORY_AGENT_START=1`, `YH_MEMORY_IMPORT_SOURCES=<a:b>`),
 `YH_MEMORY_IMPORT=<file or folder>` and `YH_MEMORY_EXPORT=<folder>` (with `YH_OPEN_MEMORY=1`), `YH_OPEN_MEMORY=1` (the project's Memory page,

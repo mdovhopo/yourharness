@@ -45,6 +45,8 @@ struct Runtime {
 pub enum Page {
     /// A project's memory, by its id.
     Memory(String),
+    /// A project's pull requests and repos, by its id.
+    Project(String),
     Usage,
 }
 
@@ -1316,6 +1318,16 @@ impl Workspace {
     }
 
     // MARK: Memory
+
+    /// A project's page, from clicking its name: Home has no repos, so its page is its memory.
+    pub fn open_project(&mut self, project: &str, cx: &mut Context<Self>) {
+        if self.home_project().as_deref() == Some(project) {
+            return self.open_memory(project, cx);
+        }
+        self.page = Some(Page::Project(project.to_string()));
+        cx.emit(WorkspaceEvent::PageOpened);
+        cx.notify();
+    }
 
     /// Opens a project's Memory page in place of the open thread.
     pub fn open_memory(&mut self, project: &str, cx: &mut Context<Self>) {

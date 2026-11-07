@@ -548,6 +548,9 @@ impl MemoryPage {
             }))
         };
         let tasks = self.memories.iter().filter(|m| m.is_task() && m.status == "active").count();
+        // Back to the project's PRs and repos (Home has none).
+        let is_home = self.workspace.read(cx).home_project().as_deref() == Some(self.project.as_str());
+        let (ws_overview, project_overview) = (self.workspace.clone(), self.project.clone());
         div()
             .flex()
             .items_center()
@@ -572,6 +575,9 @@ impl MemoryPage {
                 div()
                     .flex()
                     .gap(px(2.))
+                    .when(!is_home, |d| {
+                        d.child(Button::new("tab-overview").small().ghost().label("Overview").on_click(move |_, _, cx| ws_overview.update(cx, |ws, cx| ws.open_project(&project_overview, cx))))
+                    })
                     .child(tab_button("tab-memories", "Memories", Tab::Memories, cx))
                     .child(tab_button("tab-tasks", if tasks > 0 { "Tasks ·" } else { "Tasks" }, Tab::Tasks, cx).when(tasks > 0, |b| b.label(format!("Tasks {tasks}"))))
                     .child(tab_button("tab-insights", "Insights", Tab::Insights, cx))

@@ -5,6 +5,7 @@ pub mod find;
 pub mod inspector;
 pub mod mcp;
 pub mod memory;
+pub mod project;
 pub mod root;
 pub mod settings;
 pub mod rows;

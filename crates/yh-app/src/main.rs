@@ -461,6 +461,22 @@ fn main() {
             })
             .detach();
         }
+        // `YH_OPEN_PROJECT=1`: the selected thread's project's page (its PRs and repos), else the
+        // first project's, after `YH_DRAFT_DELAY`.
+        if env("YH_OPEN_PROJECT").as_deref() == Some("1") {
+            let delay: f64 = env("YH_DRAFT_DELAY").and_then(|v| v.parse().ok()).unwrap_or(1.0);
+            let workspace = workspace.clone();
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(Duration::from_secs_f64(delay)).await;
+                let _ = cx.update(|cx| {
+                    let project = workspace.read(cx).selected_thread().map(|t| t.read(cx).meta.project_id.clone()).or_else(|| workspace.read(cx).projects.first().map(|p| p.id.clone()));
+                    if let Some(p) = project {
+                        workspace.update(cx, |ws, cx| ws.open_project(&p, cx));
+                    }
+                });
+            })
+            .detach();
+        }
         // `YH_OPEN_SETTINGS=1`: Settings opened after `YH_DRAFT_DELAY`.
         if env("YH_OPEN_SETTINGS").as_deref() == Some("1") {
             let delay: f64 = env("YH_DRAFT_DELAY").and_then(|v| v.parse().ok()).unwrap_or(1.0);
