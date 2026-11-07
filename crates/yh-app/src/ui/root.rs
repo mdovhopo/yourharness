@@ -11,6 +11,7 @@ use crate::ui::memory::MemoryPage;
 use crate::ui::spotlight::Spotlight;
 use crate::ui::sidebar::Sidebar;
 use crate::ui::transcript::TranscriptView;
+use gpui_kit::component::button::ButtonVariants;
 use gpui_kit::component::Sizable;
 use gpui_kit::{
     actions, div, prelude::*, px, AnyView, App, Context, Entity, FocusHandle, Focusable, FontWeight, StyleRefinement,
@@ -23,14 +24,24 @@ actions!(
     [
         Stop, Allow, Deny, Quit, NewThread, Find, FindNext, FindPrevious, OpenSettings, OpenSpotlight, ToggleInspector, OpenMemory, ToggleUsage,
         PreviousThread, NextThread, PreviousMessage, NextMessage, TopOfThread, EndOfThread, AddProject, ResumeSession, ExportState, ImportState,
-        CheckForUpdates, UndoThreadAction
+        CheckForUpdates, UndoThreadAction, ToggleSidebar
     ]
 );
 
 /// Transcripts kept made for going back and forth.
 const KEPT_TRANSCRIPTS: usize = 6;
 
+/// The sidebar's width, as dragged (`sidebarWidth`), and its limits.
+const SIDEBAR_DEFAULT: f32 = 260.;
+const SIDEBAR_MIN: f32 = 200.;
+const SIDEBAR_MAX: f32 = 440.;
+
 pub struct RootView {
+    /// The left sidebar: hidden with ⌃⌘S (`sidebarHidden`), and its width while resizing.
+    sidebar_hidden: bool,
+    sidebar_width: f32,
+    resizing_sidebar: bool,
+    save_frame: Option<gpui_kit::Task<()>>,
     pub workspace: Entity<Workspace>,
     pub sidebar: Entity<Sidebar>,
     pub composer: Entity<Composer>,
@@ -67,6 +78,18 @@ impl RootView {
             let _ = links.update(cx, |i, cx| i.open_file(path, lines, cx));
         })));
         let subscriptions = vec![
+            // The window's place and size, saved a moment after it stops changing, for next launch.
+            cx.observe_window_bounds(window, |this, window, cx| {
+                if std::env::var("YH_PERF").is_ok() || window.is_fullscreen() {
+                    return;
+                }
+                let b = window.bounds();
+                let frame = serde_json::json!([f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height)]);
+                this.save_frame = Some(cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(std::time::Duration::from_millis(400)).await;
+                    let _ = this.update(cx, |this, cx| this.workspace.read(cx).library.set_setting("windowFrame", &frame));
+                }));
+            }),
             cx.subscribe_in(&workspace, window, |this, _, event, window, cx| match event {
                 WorkspaceEvent::Selected(id) => this.show(id, window, cx),
                 WorkspaceEvent::Removed(id) => {
@@ -81,7 +104,14 @@ impl RootView {
                 cx.notify();
             }),
         ];
-        RootView { workspace, sidebar, composer, find, spotlight, inspector, mcp, deck: vec![], memory: None, project: None, usage: None, tasks: vec![], tasks_for: None, focus: cx.focus_handle(), _subscriptions: subscriptions }
+        let (sidebar_hidden, sidebar_width) = {
+            let lib = &workspace.read(cx).library;
+            (
+                lib.setting("sidebarHidden").and_then(|v| v.as_bool()).unwrap_or(false),
+                lib.setting("sidebarWidth").and_then(|v| v.as_f64()).map_or(SIDEBAR_DEFAULT, |w| (w as f32).clamp(SIDEBAR_MIN, SIDEBAR_MAX)),
+            )
+        };
+        RootView { sidebar_hidden, sidebar_width, resizing_sidebar: false, save_frame: None, workspace, sidebar, composer, find, spotlight, inspector, mcp, deck: vec![], memory: None, project: None, usage: None, tasks: vec![], tasks_for: None, focus: cx.focus_handle(), _subscriptions: subscriptions }
     }
 
     fn show(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -191,6 +221,17 @@ impl RootView {
         }
     }
 
+    fn end_sidebar_resize(&mut self, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.resizing_sidebar) || self.sidebar_width == SIDEBAR_DEFAULT {
+            self.workspace.read(cx).library.set_setting("sidebarWidth", &serde_json::Value::from(self.sidebar_width as f64));
+            cx.notify();
+        }
+    }
+
+    fn on_toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.dispatch_action(Box::new(ToggleSidebar), cx);
+    }
+
     /// The thread above or below the open one in the sidebar.
     fn adjacent_thread(&mut self, step: isize, cx: &mut Context<Self>) {
         let order = self.sidebar.read(cx).thread_order(cx);
@@ -291,6 +332,22 @@ impl Render for RootView {
                     ws.set_shows_inspector(on, cx)
                 })
             }))
+            .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
+                this.sidebar_hidden = !this.sidebar_hidden;
+                this.workspace.read(cx).library.set_setting("sidebarHidden", &serde_json::Value::Bool(this.sidebar_hidden));
+                cx.notify();
+            }))
+            .on_mouse_move(cx.listener(|this, e: &gpui_kit::MouseMoveEvent, _, cx| {
+                if this.resizing_sidebar {
+                    if e.dragging() {
+                        this.sidebar_width = f32::from(e.position.x).clamp(SIDEBAR_MIN, SIDEBAR_MAX);
+                        cx.notify();
+                    } else {
+                        this.end_sidebar_resize(cx);
+                    }
+                }
+            }))
+            .on_mouse_up(gpui_kit::MouseButton::Left, cx.listener(|this, _, _, cx| this.end_sidebar_resize(cx)))
             .on_action(cx.listener(|this, _: &UndoThreadAction, _, cx| this.workspace.update(cx, |ws, cx| ws.undo(cx))))
             .on_action(cx.listener(|this, _: &PreviousThread, _, cx| this.adjacent_thread(-1, cx)))
             .on_action(cx.listener(|this, _: &NextThread, _, cx| this.adjacent_thread(1, cx)))
@@ -330,7 +387,29 @@ impl Render for RootView {
             .line_height(px(19.5))
             .text_color(theme.text)
             .bg(theme.canvas)
-            .child(AnyView::from(self.sidebar.clone()).cached(StyleRefinement::default().h_full().w(px(260.)).flex_none()))
+            .when(!self.sidebar_hidden, |d| {
+                let width = self.sidebar_width;
+                d.child(AnyView::from(self.sidebar.clone()).cached(StyleRefinement::default().h_full().w(px(width)).flex_none())).child(
+                    // The sidebar's edge: drag to resize, double-click for the default width.
+                    div()
+                        .id("sidebar-resize")
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .left(px(width - 3.))
+                        .w(px(6.))
+                        .cursor_col_resize()
+                        .on_mouse_down(gpui_kit::MouseButton::Left, cx.listener(|this, e: &gpui_kit::MouseDownEvent, _, cx| {
+                            if e.click_count == 2 {
+                                this.sidebar_width = SIDEBAR_DEFAULT;
+                                this.end_sidebar_resize(cx);
+                            } else {
+                                this.resizing_sidebar = true;
+                            }
+                            cx.stop_propagation();
+                        })),
+                )
+            })
             .child(
                 div()
                     .flex_1()
@@ -348,6 +427,9 @@ impl Render for RootView {
                                 .items_center()
                                 .gap(px(10.))
                                 .px(px(20.))
+                                .when(self.sidebar_hidden, |d| d.pl(px(84.)).child(
+                                    gpui_kit::component::button::Button::new("show-sidebar").small().ghost().label("☰").tooltip("Show Sidebar (⌃⌘S)").on_click(cx.listener(|this, _, window, cx| this.on_toggle_sidebar(window, cx))),
+                                ))
                                 .border_b_1()
                                 .border_color(theme.separator)
                                 .child(div().flex_1().min_w_0().font_weight(FontWeight::SEMIBOLD).overflow_hidden().whitespace_nowrap().text_ellipsis().child(title))

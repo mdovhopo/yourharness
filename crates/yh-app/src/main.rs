@@ -59,6 +59,7 @@ fn main() {
             KeyBinding::new("cmd-n", NewThread, None),
             KeyBinding::new("cmd-f", Find, None),
             KeyBinding::new("alt-cmd-0", ui::root::ToggleInspector, None),
+            KeyBinding::new("ctrl-cmd-s", ui::root::ToggleSidebar, None),
             KeyBinding::new("shift-cmd-m", ui::root::OpenMemory, None),
             KeyBinding::new("shift-cmd-u", ui::root::ToggleUsage, None),
             KeyBinding::new("cmd-s", crate::ui::memory::SaveMemory, Some("MemoryPage")),
@@ -116,7 +117,7 @@ fn main() {
             },
             Menu {
                 name: "View".into(),
-                items: vec![MenuItem::action("Memory", OpenMemory), MenuItem::action("Usage", ToggleUsage), MenuItem::separator(), MenuItem::action("Right Sidebar", ToggleInspector)],
+                items: vec![MenuItem::action("Memory", OpenMemory), MenuItem::action("Usage", ToggleUsage), MenuItem::separator(), MenuItem::action("Sidebar", ui::root::ToggleSidebar), MenuItem::action("Right Sidebar", ToggleInspector)],
                 disabled: false,
             },
             Menu {
@@ -139,7 +140,15 @@ fn main() {
         ]);
 
         let background = env("YH_BACKGROUND").as_deref() == Some("1") || env("YH_PERF").is_some();
-        let bounds = Bounds::centered(None, size(px(1280.), px(820.)), cx);
+        // Where the window was last time, if that's still on a screen.
+        let saved = library.setting("windowFrame").and_then(|v| {
+            let a: Vec<f32> = v.as_array()?.iter().filter_map(|x| x.as_f64().map(|x| x as f32)).collect();
+            (a.len() == 4 && a[2] >= 640. && a[3] >= 420.).then(|| Bounds::new(point(px(a[0]), px(a[1])), size(px(a[2]), px(a[3]))))
+        });
+        let on_screen = |b: &Bounds<gpui_kit::Pixels>| cx.displays().iter().any(|d| d.bounds().intersects(b));
+        let bounds = saved
+            .filter(|b| env("YH_PERF").is_none() && on_screen(b))
+            .unwrap_or_else(|| Bounds::centered(None, size(px(1280.), px(820.)), cx));
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(TitlebarOptions {
@@ -213,6 +222,18 @@ fn main() {
         })
         .detach();
 
+        // The thread that was open at quit opens again (not in perf runs and probes, which start
+        // from nothing selected).
+        let probing = std::env::vars().any(|(k, _)| k == "YH_PERF" || k.ends_with("_PROBE"));
+        if !probing {
+            workspace.update(cx, |ws, cx| {
+                if let Some(id) = ws.library.setting("selectedThreadID").and_then(|v| v.as_str().map(str::to_string)) {
+                    if ws.page.is_none() {
+                        ws.select(&id, cx);
+                    }
+                }
+            });
+        }
         // `YH_SELECT=<title or id>`: open a thread at launch; `YH_SEND=<text>` then sends it.
         if let Some(wanted) = env("YH_SELECT") {
             workspace.update(cx, |ws, cx| {

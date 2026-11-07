@@ -350,6 +350,10 @@ impl Workspace {
             old.update(cx, |t, _| t.unread = false);
         }
         self.selected = Some(id.to_string());
+        // Opened again at the next launch, unless it's a thread that isn't kept.
+        if self.library.thread_record(id).is_some() {
+            self.library.set_setting("selectedThreadID", &Value::from(id));
+        }
         thread.update(cx, |t, cx| {
             if t.unread {
                 t.unread = false;
