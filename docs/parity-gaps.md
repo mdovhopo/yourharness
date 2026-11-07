@@ -33,30 +33,30 @@ Swift paths are under legacy/YourHarness/, Rust under crates/yh-app/src/. Tick i
 - [ ] 21. Plan card: "Plan ready for review", recommended default (Approve · Auto) with others in a menu; Auto disabled when the model can't.
 
 ## D. Sidebar
-- [ ] 22. Collapsible projects (saved; activity dot/count when collapsed; skipped by keyboard).
-- [ ] 23. Thread age ("5m", "3h", "2d").
-- [ ] 24. Hover actions on rows (Pin, Settle, …); pin glyph.
-- [ ] 25. New Thread and Search buttons at the top.
-- [ ] 26. "N PRs waiting for your review" badge on project headers.
-- [ ] 27. Hover Memory button on project headers; selected-project highlight; Home icon.
-- [ ] 28. ↑/↓ move between threads when the sidebar has focus.
-- [ ] 29. Home: Change Default Folder…; thread: Settle Automatically When Idle; Regenerate Title disabled while running, title dimmed while generating.
-- [ ] 55. Settled shelf open/closed and "Show N more" saved.
-- [ ] 56. Rename: Escape cancels.
+- [x] 22. Collapsible projects (saved; activity dot/count when collapsed; skipped by keyboard).
+- [x] 23. Thread age ("5m", "3h", "2d").
+- [x] 24. Hover actions on rows (Pin, Settle, …); pin glyph.
+- [x] 25. New Thread and Search buttons at the top.
+- [x] 26. "N PRs waiting for your review" badge on project headers.
+- [x] 27. Hover Memory button on project headers; selected-project highlight; Home icon.
+- [x] 28. ↑/↓ move between threads when the sidebar has focus.
+- [x] 29. Home: Change Default Folder…; thread: Settle Automatically When Idle; Regenerate Title disabled while running, title dimmed while generating.
+- [x] 55. Settled shelf open/closed and "Show N more" saved.
+- [x] 56. Rename: Escape cancels.
 
 ## E. Usage footer
-- [ ] 30. Refresh limits button (tiny Haiku request, spinner, error state).
-- [ ] 31. Limits saved between launches (rateLimit, rateLimitUpdatedAt).
-- [ ] 32. Reset countdown, tooltip, pre-reset reading as 0, Opus/Sonnet windows labelled, orange 70% / red 90%, click opens Usage.
-- [ ] 33. App memory use in the footer.
+- [x] 30. Refresh limits button (tiny Haiku request, spinner, error state).
+- [x] 31. Limits saved between launches (rateLimit, rateLimitUpdatedAt).
+- [x] 32. Reset countdown, tooltip, pre-reset reading as 0, Opus/Sonnet windows labelled, orange 70% / red 90%, click opens Usage.
+- [x] 33. App memory use in the footer.
 
 ## F. Window
-- [ ] 34. First-run empty state (Add Your First Project), No Thread Selected with New Thread.
-- [ ] 35. Thread header subtitle: project · worktree · model.
-- [ ] 36. Tasks chip opens a popover (state, progress, steps, Show in Memory).
-- [ ] 37. Notifications: click opens the thread, project subtitle, real body, sound, cleared on open.
-- [ ] 38. Spotlight: Recent Threads, Tasks, Memories, Projects, Actions; subtitles.
-- [ ] 39. Resume Claude Code Session sheet (preview, project choice, prefill from clipboard, Show Thread).
+- [x] 34. First-run empty state (Add Your First Project), No Thread Selected with New Thread.
+- [x] 35. Thread header subtitle: project · worktree · model.
+- [x] 36. Tasks chip opens a popover (state, progress, steps, Show in Memory).
+- [x] 37. Notifications: click opens the thread, project subtitle, real body, sound, cleared on open.
+- [x] 38. Spotlight: Recent Threads, Tasks, Memories, Projects, Actions; subtitles.
+- [x] 39. Resume Claude Code Session sheet (preview, project choice, prefill from clipboard, Show Thread).
 - [ ] 40. Drop files anywhere on the thread, with overlay (check after composer merge).
 - [ ] 41. Model picker details (check after composer merge).
 

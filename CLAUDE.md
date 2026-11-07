@@ -77,8 +77,17 @@ browser: a synthetic file only, never your real browsers, which would ask you fo
 `YH_USAGE_HOVER=<days ago>`; test it on a clone of `test-harness-root/usage` with `CLAUDE_CONFIG_DIR` at its
 `claude-config`, never the real `~/.claude`), `YH_MEMORY_AGENT=importer|reconciler` (with `YH_MEMORY_AGENT_START=1`, `YH_MEMORY_IMPORT_SOURCES=<a:b>`),
 `YH_MEMORY_IMPORT=<file or folder>` and `YH_MEMORY_EXPORT=<folder>` (with `YH_OPEN_MEMORY=1`), `YH_OPEN_MEMORY=1` (the project's Memory page,
-`YH_MEMORY_TAB=memories|tasks|activity`, after `YH_DRAFT_DELAY`), `YH_SPOTLIGHT=<words>` (⌘K typed;
-`YH_SPOTLIGHT_ENTER=1` with a session ID resumes it).
+`YH_MEMORY_TAB=memories|tasks|activity`, after `YH_DRAFT_DELAY`), `YH_SPOTLIGHT=<words>` (⌘K typed, its results
+printed as `SPOTLIGHT section · title · subtitle`; `YH_SPOTLIGHT_ENTER=1` with a session ID resumes it),
+`YH_RESUME_SESSION=<id or claude --resume …>` (the Resume Claude Code Session sheet filled in, after `YH_DRAFT_DELAY`;
+`YH_RESUME_CONFIRM=1` resumes into the suggested project; give it a scratch `CLAUDE_CONFIG_DIR` holding a copied or
+synthetic session file, never the real `~/.claude`), `YH_OPEN_TASKS=1` (the header's tasks popover open),
+`YH_HOVER=<x,y>` (the pointer moved there in window points after `YH_DRAFT_DELAY`, through the window as a real move:
+snapshots of hover states such as a sidebar row's Pin/Settle/… or a project's Memory button),
+`YH_REFRESH_LIMITS=1` (the footer's refresh at launch: a tiny Haiku request through `claude`, printing `LIMITS
+refreshed` or why not), `YH_NOTIFICATION_CLICK=<seconds>` (a click on the last notification posted, which
+`YH_NOTIFICATIONS=log` only printed as `NOTIFY <kind>: title · project · body`: it opens that thread, printing `NOTIFY
+clicked`; real notifications go through a `UNUserNotificationCenter` delegate, never from a test).
 
 ## Performance is the product
 
