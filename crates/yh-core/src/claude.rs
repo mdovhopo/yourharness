@@ -119,7 +119,8 @@ pub enum Event {
     Delta { message: String, index: u64, parent: Option<String>, kind: DeltaKind, text: String },
     Assistant { message: String, parent: Option<String>, blocks: Vec<Block> },
     ToolResults { parent: Option<String>, results: Vec<ToolResult> },
-    SubagentStarted { tool_id: String, description: String },
+    /// `task_id` is what `stop_task` takes to stop it.
+    SubagentStarted { tool_id: String, description: String, task_id: Option<String> },
     /// A sub-agent's end, with its summary (a background one's report comes only here).
     SubagentFinished { tool_id: String, status: String, summary: Option<String> },
     /// A job Claude left running: a command in the background (`run_in_background`), a
@@ -502,6 +503,7 @@ impl Parser {
                 "task_started" => vec![Event::SubagentStarted {
                     tool_id: object["tool_use_id"].as_str().unwrap_or("").into(),
                     description: object["description"].as_str().unwrap_or("Sub-agent").into(),
+                    task_id: object["task_id"].as_str().map(str::to_string),
                 }],
                 "task_notification" if object["task_id"].as_str().is_some_and(|id| self.jobs.remove(id)) => vec![Event::JobFinished {
                     task_id: object["task_id"].as_str().unwrap_or("").into(),

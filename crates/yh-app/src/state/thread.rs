@@ -21,6 +21,8 @@ pub struct Subagent {
     /// What it said and did, for following it in the right sidebar: its finished messages
     /// and tool calls, the newest `SUBAGENT_LOG` of them.
     pub log: Vec<SubStep>,
+    /// What `stop_task` takes to stop it (the right sidebar's Stop).
+    pub task_id: Option<String>,
 }
 
 /// One thing a sub-agent did: a message (`tool` None) or a tool call with its result.
@@ -37,7 +39,7 @@ const SUBAGENT_LOG: usize = 200;
 
 impl Subagent {
     fn new(description: String) -> Subagent {
-        Subagent { description, status: "running".into(), steps: 0, report: None, log: vec![] }
+        Subagent { description, status: "running".into(), steps: 0, report: None, log: vec![], task_id: None }
     }
 }
 
@@ -955,7 +957,7 @@ impl ThreadState {
                 }
                 self.jobs.running.len() != jobs_before
             }
-            Event::SubagentStarted { tool_id, description } => {
+            Event::SubagentStarted { tool_id, description, task_id } => {
                 if let Some((e, pos)) = self.tools.get(&tool_id).cloned() {
                     {
                         let mut b = e.borrow_mut();
@@ -963,6 +965,9 @@ impl ThreadState {
                         match &mut b.sub {
                             Some(sub) => sub.description = description,
                             None => b.sub = Some(Subagent::new(description)),
+                        }
+                        if let Some(sub) = &mut b.sub {
+                            sub.task_id = task_id.or(sub.task_id.take());
                         }
                     }
                     e.borrow_mut().version += 1;

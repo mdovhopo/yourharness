@@ -9,8 +9,8 @@ use yh_core::claude::Decision;
 use crate::theme::{Theme, MONO};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
-use gpui_kit::component::{Disableable, Sizable};
+use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
+use gpui_kit::component::{Disableable, IconName, Selectable, Sizable};
 use gpui_kit::{
     div, prelude::*, px, uniform_list, App, Context, Entity, FontWeight, ScrollHandle, ScrollStrategy, SharedString, Subscription,
     UniformListScrollHandle, WeakEntity, Window,
@@ -19,6 +19,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
 pub const WIDTH: f32 = 380.;
+
+/// What Split into a Stack asks Claude, as the Swift app does.
+const SPLIT_INTO_STACK: &str = "Split the work in this thread into a GitHub stack of small pull requests with `gh stack`. Group the changes into layers that each make sense on their own and build on the one below, bottom first, one branch per layer with its changes committed there (`gh stack init`, then `gh stack add` for each layer above). Then run `gh stack submit --auto --open` and tell me the stack number and its PRs. Don't merge anything.";
 
 /// Import Sign-ins: pick a browser, then the sites whose cookies to copy.
 enum CookieImport {
@@ -117,14 +120,124 @@ impl Tree {
     }
 }
 
+/// What an opened file turned out to be.
+enum FileContent {
+    Text(std::sync::Arc<Vec<SharedString>>),
+    /// A picture, drawn from its file.
+    Image(std::path::PathBuf),
+    /// Not text: its size, and Open in Default App.
+    Binary(u64),
+    Folder,
+    Missing,
+    Unreadable(String),
+}
+
 struct OpenFile {
     path: String,
-    lines: Rc<Vec<SharedString>>,
+    content: FileContent,
+    /// Only its first part is shown.
     note: Option<String>,
+    /// Some lines were longer than `LINE_LIMIT` and are cut.
+    cut_lines: bool,
     scroll: UniformListScrollHandle,
+    /// With Wrap Lines on: a list that measures each line (made when first wrapped).
+    wrapped: Option<gpui_kit::ListState>,
     /// Lines to show picked out, from a link (1-based).
     lines_picked: Option<(usize, usize)>,
+    /// Opened with a single click in the tree: the next one replaces it, until it's kept
+    /// (double-click its tab, or Keep Open).
+    preview: bool,
 }
+
+impl OpenFile {
+    fn lines(&self) -> Option<&std::sync::Arc<Vec<SharedString>>> {
+        if let FileContent::Text(l) = &self.content { Some(l) } else { None }
+    }
+}
+
+/// Lines longer than this are cut, as the Swift app's viewer does.
+const LINE_LIMIT: usize = 5_000;
+
+const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff", "ico", "svg"];
+
+/// Reads a file for the viewer. Blocks: off the main thread only.
+fn read_for_viewer(full: &str) -> (FileContent, Option<String>, bool) {
+    use std::io::Read;
+    let path = std::path::Path::new(full);
+    let Ok(meta) = std::fs::metadata(path) else { return (FileContent::Missing, None, false) };
+    if meta.is_dir() {
+        return (FileContent::Folder, None, false);
+    }
+    let size = meta.len();
+    let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    if IMAGE_EXTENSIONS.contains(&ext.as_str()) {
+        return (FileContent::Image(path.to_path_buf()), None, false);
+    }
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) => return (FileContent::Unreadable(e.to_string()), None, false),
+    };
+    let mut bytes = vec![];
+    let _ = file.take(MAX_FILE).read_to_end(&mut bytes);
+    if bytes.iter().take(8000).any(|b| *b == 0) {
+        return (FileContent::Binary(size), None, false);
+    }
+    let note = (size > MAX_FILE).then(|| format!("Showing the first {} MB of {} MB", MAX_FILE >> 20, size >> 20));
+    let text = String::from_utf8_lossy(&bytes);
+    // A last newline ends the last line; it doesn't start another.
+    let text = text.strip_suffix('\n').unwrap_or(&text);
+    let mut cut = false;
+    let lines: Vec<SharedString> = text
+        .split('\n')
+        .map(|l| {
+            let l = l.strip_suffix('\r').unwrap_or(l);
+            let l = if l.len() > LINE_LIMIT {
+                cut = true;
+                let mut end = LINE_LIMIT;
+                while !l.is_char_boundary(end) {
+                    end -= 1;
+                }
+                &l[..end]
+            } else {
+                l
+            };
+            SharedString::from(l.replace('\t', "    "))
+        })
+        .collect();
+    (FileContent::Text(std::sync::Arc::new(lines)), note, cut)
+}
+
+fn size_text(bytes: u64) -> String {
+    match bytes {
+        b if b < 1024 => format!("{b} bytes"),
+        b if b < 1024 * 1024 => format!("{:.0} KB", b as f64 / 1024.),
+        b => format!("{:.1} MB", b as f64 / 1024. / 1024.),
+    }
+}
+
+/// One line of code, coloured by `yh_core::markdown::highlight` (only lines on screen are).
+fn code_line(text: &SharedString, theme: &Theme) -> gpui_kit::StyledText {
+    use yh_core::markdown::Span;
+    let styled = yh_core::markdown::highlight(text, "");
+    let highlights: Vec<(std::ops::Range<usize>, gpui_kit::HighlightStyle)> = styled
+        .spans
+        .into_iter()
+        .filter_map(|(r, span)| {
+            let color = match span {
+                Span::Keyword => theme.keyword,
+                Span::Str => theme.string,
+                Span::Number => theme.number,
+                Span::Comment => theme.comment,
+                _ => return None,
+            };
+            Some((r, gpui_kit::HighlightStyle { color: Some(color), ..Default::default() }))
+        })
+        .collect();
+    gpui_kit::StyledText::new(text.clone()).with_highlights(highlights)
+}
+
+/// The longest a batch of a file's lines took to make, for `YH_FILES_PROBE` (µs).
+static LINES_WORST_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// One folder's Files tab: what's open in the tree, the files in tabs.
 #[derive(Default)]
@@ -135,6 +248,8 @@ struct Folder {
     files: Vec<OpenFile>,
     current: usize,
     loading: bool,
+    /// Hide Folder: only the open file shows.
+    hides_tree: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -173,6 +288,11 @@ pub struct Inspector {
     address: Entity<InputState>,
     browser_pane: Option<BrowserPane>,
     dev_servers: Option<Vec<yh_core::dev_servers::Server>>,
+    /// Wrap Lines in the Files tab's viewer.
+    wraps: bool,
+    /// Whether `gh stack` is installed, asked once when the PRs tab first shows: Split into a
+    /// Stack only shows with it.
+    stacks_installed: Option<bool>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -226,6 +346,8 @@ impl Inspector {
                 _ => None,
             },
             dev_servers: None,
+            wraps: std::env::var("YH_FILES_WRAP").as_deref() == Ok("1"),
+            stacks_installed: None,
             cookie_import: None,
             pulls: HashMap::new(),
             pulls_loading: false,
@@ -234,6 +356,9 @@ impl Inspector {
             _subscriptions: subscriptions,
         };
         inspector.follow_selection(cx);
+        if std::env::var("YH_FILES_PROBE").is_ok() {
+            inspector.files_probe(cx);
+        }
         inspector
     }
 
@@ -272,6 +397,18 @@ impl Inspector {
         if self.workspace.read(cx).panel != Panel::PullRequests {
             self._pulls_timer = None;
             return;
+        }
+        if self.stacks_installed.is_none() {
+            self.stacks_installed = Some(false);
+            let gh = yh_core::github::GitHubStacks::new(std::env::var("YH_PATH").ok().as_deref());
+            cx.spawn(async move |this, cx| {
+                let installed = cx.background_executor().spawn(async move { gh.is_installed() }).await;
+                let _ = this.update(cx, |this, cx| {
+                    this.stacks_installed = Some(installed);
+                    cx.notify();
+                });
+            })
+            .detach();
         }
         let Some(id) = self.thread.as_ref().map(|t| t.read(cx).id().to_string()) else { return };
         if self.pulls.get(&id).is_none_or(|(_, at)| at.elapsed().as_secs() > 25) {
@@ -417,50 +554,135 @@ impl Inspector {
     /// Opens a file of the thread's folder (relative or absolute path) in a tab, read off the
     /// main thread; `lines` picks out lines to scroll to.
     pub fn open_file(&mut self, path: &str, lines: Option<(usize, usize)>, cx: &mut Context<Self>) {
+        self.open_tab(path, lines, false, cx);
+    }
+
+    /// `preview`: from a single click in the tree, it takes the place of the last such tab.
+    fn open_tab(&mut self, path: &str, lines: Option<(usize, usize)>, preview: bool, cx: &mut Context<Self>) {
         let Some(folder) = self.folder(cx) else { return };
         let relative = path.strip_prefix(&format!("{}/", folder.trim_end_matches('/'))).unwrap_or(path).to_string();
         self.workspace.update(cx, |ws, cx| ws.show_panel(Panel::Files, cx));
+        // The tab may not have shown yet: its tree is read now too.
+        self.ensure_tree(cx);
         let state = self.folders.entry(folder.clone()).or_default();
         if let Some(i) = state.files.iter().position(|f| f.path == relative) {
             state.current = i;
+            if !preview {
+                state.files[i].preview = false;
+            }
             if let Some((start, _)) = lines {
                 state.files[i].lines_picked = lines;
                 state.files[i].scroll.scroll_to_item(start.saturating_sub(4), ScrollStrategy::Top);
+                if let Some(w) = &state.files[i].wrapped {
+                    w.scroll_to(gpui_kit::ListOffset { item_ix: start.saturating_sub(1), offset_in_item: px(0.) });
+                }
             }
             cx.notify();
             return;
         }
         let full = if relative.starts_with('/') { relative.clone() } else { format!("{}/{relative}", folder.trim_end_matches('/')) };
+        let started = std::time::Instant::now();
         cx.spawn(async move |this, cx| {
-            let (text, note) = cx
-                .background_executor()
-                .spawn(async move {
-                    use std::io::Read;
-                    let Ok(file) = std::fs::File::open(&full) else { return (vec![], Some("Can't open this file.".to_string())) };
-                    let size = file.metadata().map(|m| m.len()).unwrap_or(0);
-                    let mut bytes = vec![];
-                    let _ = file.take(MAX_FILE).read_to_end(&mut bytes);
-                    if bytes.iter().take(8000).any(|b| *b == 0) {
-                        return (vec![], Some("A binary file: nothing to show.".to_string()));
-                    }
-                    let note = (size > MAX_FILE).then(|| format!("Showing the first {} MB of {} MB.", MAX_FILE >> 20, size >> 20));
-                    let text = String::from_utf8_lossy(&bytes);
-                    // A last newline ends the last line; it doesn't start another.
-                    let text = text.strip_suffix('\n').unwrap_or(&text);
-                    let lines: Vec<SharedString> = text.split('\n').map(|l| SharedString::from(l.replace('\t', "    "))).collect();
-                    (lines, note)
-                })
-                .await;
+            let (content, note, cut_lines) = cx.background_executor().spawn(async move { read_for_viewer(&full) }).await;
             let _ = this.update(cx, |this, cx| {
                 let state = this.folders.entry(folder).or_default();
                 let scroll = UniformListScrollHandle::new();
                 if let Some((start, _)) = lines {
                     scroll.scroll_to_item(start.saturating_sub(4), ScrollStrategy::Top);
                 }
-                state.files.push(OpenFile { path: relative, lines: Rc::new(text), note, scroll, lines_picked: lines });
-                state.current = state.files.len() - 1;
+                if std::env::var("YH_FILES_PROBE").is_ok() {
+                    let n = if let FileContent::Text(l) = &content { l.len() } else { 0 };
+                    eprintln!("FILES opened {relative} ({n} lines) in {} ms", started.elapsed().as_millis());
+                }
+                let file = OpenFile { path: relative, content, note, cut_lines, scroll, wrapped: None, lines_picked: lines, preview };
+                // A preview takes the last preview's place.
+                match state.files.iter().position(|f| f.preview).filter(|_| preview) {
+                    Some(i) => {
+                        state.files[i] = file;
+                        state.current = i;
+                    }
+                    None => {
+                        state.files.push(file);
+                        state.current = state.files.len() - 1;
+                    }
+                }
+                this.ensure_wrapped();
                 cx.notify();
             });
+        })
+        .detach();
+    }
+
+    fn keep_file(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(f) = self.folder(cx).and_then(|folder| self.folders.get_mut(&folder)).and_then(|s| s.files.get_mut(index)) {
+            f.preview = false;
+            cx.notify();
+        }
+    }
+
+    fn close_others(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(folder) = self.folder(cx) else { return };
+        let Some(state) = self.folders.get_mut(&folder) else { return };
+        if index < state.files.len() {
+            let keep = state.files.remove(index);
+            state.files = vec![keep];
+            state.current = 0;
+        }
+        cx.notify();
+    }
+
+    /// With Wrap Lines on, each open file's text gets a list that measures its lines (made once).
+    fn ensure_wrapped(&mut self) {
+        if !self.wraps {
+            return;
+        }
+        for f in self.folders.values_mut().flat_map(|s| s.files.iter_mut()) {
+            if f.wrapped.is_none() {
+                if let FileContent::Text(l) = &f.content {
+                    let state = gpui_kit::ListState::new(l.len(), gpui_kit::ListAlignment::Top, px(400.));
+                    if let Some((start, _)) = f.lines_picked {
+                        state.scroll_to(gpui_kit::ListOffset { item_ix: start.saturating_sub(1), offset_in_item: px(0.) });
+                    }
+                    f.wrapped = Some(state);
+                }
+            }
+        }
+    }
+
+    fn toggle_tree(&mut self, cx: &mut Context<Self>) {
+        if let Some(state) = self.folder(cx).and_then(|folder| self.folders.get_mut(&folder)) {
+            state.hides_tree = !state.hides_tree;
+        }
+        cx.notify();
+    }
+
+    /// `YH_FILES_PROBE=1`, with `YH_OPEN_FILE`: once it's open, scrolls the file through in
+    /// steps and prints the longest any step's lines took to make (PASS under 50 ms).
+    fn files_probe(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(std::time::Duration::from_secs(3)).await;
+            let mut worst = 0u64;
+            for step in 0..40 {
+                LINES_WORST_US.store(0, std::sync::atomic::Ordering::Relaxed);
+                let done = this.update(cx, |this, cx| {
+                    let Some(folder) = this.folder(cx) else { return true };
+                    let Some(f) = this.folders.get(&folder).and_then(|s| s.files.get(s.current)) else { return true };
+                    let n = f.lines().map_or(0, |l| l.len());
+                    if let Some(w) = &f.wrapped {
+                        w.scroll_to(gpui_kit::ListOffset { item_ix: n * step / 40, offset_in_item: px(0.) });
+                    }
+                    f.scroll.scroll_to_item(n * step / 40, ScrollStrategy::Top);
+                    cx.notify();
+                    false
+                });
+                if done.unwrap_or(true) {
+                    break;
+                }
+                cx.background_executor().timer(std::time::Duration::from_millis(60)).await;
+                worst = worst.max(LINES_WORST_US.load(std::sync::atomic::Ordering::Relaxed));
+            }
+            let ms = worst as f64 / 1000.;
+            eprintln!("FILES scroll: longest lines step {ms:.2} ms {}", if ms < 50. { "PASS" } else { "FAIL" });
         })
         .detach();
     }
@@ -564,6 +786,27 @@ impl Inspector {
             v
         };
         let tools = log.iter().filter(|s| s.tool.is_some() && s.tool.as_deref() != Some("SubagentHandback")).count();
+        // Stop: `stop_task` on its task, the thread carries on.
+        let task_id = sub.as_ref().filter(|_| status == "running").and_then(|s| s.task_id.clone());
+        // `YH_SUBAGENT_STOP=<seconds>`: the probe presses Stop that long after it first shows.
+        static STOP_PROBE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if let (Some(task), Some(secs)) = (task_id.clone(), std::env::var("YH_SUBAGENT_STOP").ok().and_then(|s| s.parse::<u64>().ok())) {
+            if !STOP_PROBE.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                let (ws, t) = (self.workspace.clone(), thread.clone());
+                cx.spawn(async move |_, cx| {
+                    cx.background_executor().timer(std::time::Duration::from_secs(secs)).await;
+                    eprintln!("SUBAGENT stop {task}");
+                    let _ = cx.update(|cx| ws.update(cx, |ws, cx| ws.stop_job(&t, &task, cx)));
+                })
+                .detach();
+            }
+        }
+        let stop = task_id.map(|task| {
+            let (ws, t) = (self.workspace.clone(), thread.clone());
+            Button::new("subagent-stop").small().label("Stop").tooltip("Stop this sub-agent. The thread carries on.").on_click(move |_, _, cx| {
+                ws.update(cx, |ws, cx| ws.stop_job(&t, &task, cx));
+            })
+        });
         let mut detail = div()
             .id("subagent-detail")
             .flex_1()
@@ -574,7 +817,7 @@ impl Inspector {
             .flex()
             .flex_col()
             .gap(px(10.))
-            .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(description))
+            .child(div().flex().items_start().gap(px(8.)).child(div().flex_1().min_w_0().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(description)).when_some(stop, |d, b| d.child(b)))
             .child(
                 div()
                     .flex()
@@ -657,11 +900,54 @@ impl Inspector {
         column.child(detail).into_any_element()
     }
 
+    /// The Files tab: Show/Hide Folder, Go to File, Wrap Lines and More on top; the folder's
+    /// tree; the open files in tabs (a single click in the tree opens a preview tab, in
+    /// italics, that the next one replaces); and the file, coloured, or what it is instead.
     fn files(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let Some(folder) = self.folder(cx) else { return empty("No thread open.", theme) };
         let state = self.folders.get(&folder);
         let query = !self.goto.read(cx).value().trim().is_empty();
-        let mut column = div().size_full().flex().flex_col().child(div().p(px(10.)).child(Input::new(&self.goto).small().cleanable(true)));
+        let current = state.and_then(|s| s.files.get(s.current)).map(|f| f.path.clone());
+        let hides_tree = state.is_some_and(|s| s.hides_tree && !s.files.is_empty());
+        let has_files = state.is_some_and(|s| !s.files.is_empty());
+        let wraps = self.wraps;
+        let top = div()
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .p(px(8.))
+            .child(
+                Button::new("files-tree-toggle")
+                    .small()
+                    .ghost()
+                    .icon(if hides_tree { IconName::PanelLeftOpen } else { IconName::PanelLeftClose })
+                    .disabled(!has_files)
+                    .tooltip(if hides_tree { "Show the folder" } else { "Hide the folder" })
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_tree(cx))),
+            )
+            .child(div().flex_1().min_w_0().child(Input::new(&self.goto).small().cleanable(true)))
+            .child(
+                Button::new("files-wrap")
+                    .small()
+                    .ghost()
+                    .label("Wrap")
+                    .selected(wraps)
+                    .disabled(current.is_none())
+                    .tooltip(if wraps { "Don't wrap lines" } else { "Wrap lines" })
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.wraps = !this.wraps;
+                        this.ensure_wrapped();
+                        cx.notify();
+                    })),
+            )
+            .child({
+                let (folder, path) = (folder.clone(), current.clone());
+                Button::new("files-more").small().ghost().icon(IconName::Ellipsis).disabled(current.is_none()).tooltip("More").dropdown_menu(move |menu, _, _| match &path {
+                    Some(p) => file_menu(menu, &folder, p),
+                    None => menu,
+                })
+            });
+        let mut column = div().size_full().flex().flex_col().child(top);
         if query {
             let mut list = div().id("goto-results").flex_1().min_h_0().overflow_y_scroll().px(px(8.)).flex().flex_col();
             if self.goto_results.is_empty() {
@@ -686,113 +972,224 @@ impl Inspector {
             }
             return column.child(list).into_any_element();
         }
-        let Some(state) = state.filter(|s| s.tree.is_some()) else { return column.child(empty("Reading the folder…", theme)).into_any_element() };
-        let rows = state.rows.clone();
-        let this = cx.entity().downgrade();
-        let theme2 = *theme;
-        let has_file = !state.files.is_empty();
-        let tree = uniform_list("file-tree", rows.len(), move |range, _, _| {
-            range
-                .map(|i| {
-                    let (path, name, depth, dir) = rows[i].clone();
-                    let this: WeakEntity<Inspector> = this.clone();
-                    div()
-                        .id(i)
-                        .h(px(22.))
-                        .flex()
-                        .items_center()
-                        .gap(px(4.))
-                        .pl(px(10. + depth as f32 * 14.))
-                        .pr(px(8.))
-                        .text_size(px(12.))
-                        .hover(|s| s.bg(theme2.selected))
-                        .child(div().w(px(10.)).text_color(theme2.secondary).child(if dir { "›" } else { "" }))
-                        .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().when(dir, |d| d.font_weight(FontWeight::MEDIUM)).child(name))
-                        .on_click(move |_, _, cx| {
-                            let _ = this.update(cx, |this, cx| if dir { this.toggle_dir(&path, cx) } else { this.open_file(&path, None, cx) });
-                        })
-                })
-                .collect()
-        })
-        .track_scroll(&self.tree_scroll);
-        column = column.child(div().when(has_file, |d| d.h(px(220.)).flex_none()).when(!has_file, |d| d.flex_1()).min_h_0().child(tree.size_full()));
-        if has_file {
-            let mut tabs = div().id("file-tabs").flex().gap(px(4.)).px(px(8.)).py(px(6.)).border_t_1().border_b_1().border_color(theme.separator).overflow_x_scroll();
-            for (i, f) in state.files.iter().enumerate() {
-                let on = i == state.current;
-                let name = f.path.rsplit('/').next().unwrap_or(&f.path).to_string();
-                tabs = tabs.child(
-                    div()
-                        .id(SharedString::from(format!("file-tab-{i}")))
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .gap(px(4.))
-                        .px(px(8.))
-                        .py(px(2.))
-                        .rounded(px(10.))
-                        .text_size(px(11.))
-                        .bg(if on { theme.accent.opacity(0.16) } else { theme.selected })
-                        .text_color(if on { theme.text } else { theme.secondary })
-                        .child(name)
-                        .child(div().id(SharedString::from(format!("close-{i}"))).px(px(2.)).text_color(theme.secondary).child("×").on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.close_file(i, cx)
-                        })))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if let Some(folder) = this.folder(cx) {
-                                if let Some(s) = this.folders.get_mut(&folder) {
-                                    s.current = i;
-                                }
-                            }
-                            cx.notify();
-                        })),
-                );
-            }
-            column = column.child(tabs);
-            let file = &state.files[state.current];
-            column = column.child(
-                div()
-                    .px(px(10.))
-                    .py(px(4.))
-                    .text_size(px(11.))
-                    .font_family(MONO)
-                    .text_color(theme.secondary)
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .child(format!("{} · {} lines", file.path, file.lines.len()))
-                    .when_some(file.note.clone(), |d, n| d.child(div().text_color(theme.warning).child(n))),
-            );
-            let lines = file.lines.clone();
-            let picked = file.lines_picked;
-            let digits = lines.len().to_string().len();
-            let theme3 = *theme;
-            column = column.child(
-                div().flex_1().min_h_0().child(
-                    uniform_list("file-lines", lines.len(), move |range, _, _| {
-                        range
-                            .map(|i| {
-                                let on = picked.is_some_and(|(a, b)| i + 1 >= a && i + 1 <= b.max(a));
-                                div()
-                                    .h(px(17.))
-                                    .flex()
-                                    .font_family(MONO)
-                                    .text_size(px(11.5))
-                                    .whitespace_nowrap()
-                                    .when(on, |d| d.bg(theme3.warning.opacity(0.18)))
-                                    .child(div().flex_none().w(px(digits as f32 * 7.5 + 14.)).pr(px(8.)).text_right().text_color(theme3.secondary.opacity(0.7)).child(format!("{}", i + 1)))
-                                    .child(div().flex_none().child(lines[i].clone()))
+        let Some(state) = state.filter(|s| s.tree.is_some() || !s.files.is_empty()) else { return column.child(empty("Reading the folder…", theme)).into_any_element() };
+        // A file opened before the folder's been read shows at once, the tree when it's in.
+        if !hides_tree && state.tree.is_none() {
+            column = column.child(div().h(px(60.)).flex_none().child(empty("Reading the folder…", theme)));
+        } else if !hides_tree {
+            let rows = state.rows.clone();
+            let this = cx.entity().downgrade();
+            let theme2 = *theme;
+            let open_path = current.clone();
+            let tree = uniform_list("file-tree", rows.len(), move |range, _, _| {
+                range
+                    .map(|i| {
+                        let (path, name, depth, dir) = rows[i].clone();
+                        let this: WeakEntity<Inspector> = this.clone();
+                        let on = open_path.as_deref() == Some(path.as_str());
+                        div()
+                            .id(i)
+                            .h(px(22.))
+                            .flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .pl(px(10. + depth as f32 * 14.))
+                            .pr(px(8.))
+                            .text_size(px(12.))
+                            .when(on, |d| d.bg(theme2.accent.opacity(0.14)))
+                            .hover(|s| s.bg(theme2.selected))
+                            .child(div().w(px(10.)).text_color(theme2.secondary).child(if dir { "›" } else { "" }))
+                            .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().when(dir, |d| d.font_weight(FontWeight::MEDIUM)).child(name))
+                            .on_click(move |e, _, cx| {
+                                // One click opens a preview; a double click keeps it.
+                                let keep = e.click_count() >= 2;
+                                let _ = this.update(cx, |this, cx| if dir { this.toggle_dir(&path, cx) } else { this.open_tab(&path, None, !keep, cx) });
                             })
-                            .collect()
                     })
-                    .track_scroll(&file.scroll)
-                    .size_full(),
-                ),
+                    .collect()
+            })
+            .track_scroll(&self.tree_scroll);
+            column = column.child(div().when(has_files, |d| d.h(px(220.)).flex_none()).when(!has_files, |d| d.flex_1()).min_h_0().child(tree.size_full()));
+        }
+        if !has_files {
+            return column.into_any_element();
+        }
+        let mut tabs = div().id("file-tabs").flex().gap(px(4.)).px(px(8.)).py(px(6.)).border_t_1().border_b_1().border_color(theme.separator).overflow_x_scroll();
+        let count = state.files.len();
+        for (i, f) in state.files.iter().enumerate() {
+            let on = i == state.current;
+            let name = f.path.rsplit('/').next().unwrap_or(&f.path).to_string();
+            let (this, folder, path) = (cx.entity().downgrade(), folder.clone(), f.path.clone());
+            let preview = f.preview;
+            tabs = tabs.child(
+                div()
+                    .id(SharedString::from(format!("file-tab-{i}")))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .px(px(8.))
+                    .py(px(2.))
+                    .rounded(px(10.))
+                    .text_size(px(11.))
+                    .bg(if on { theme.accent.opacity(0.16) } else { theme.selected })
+                    .text_color(if on { theme.text } else { theme.secondary })
+                    .when(preview, |d| d.italic())
+                    .child(name)
+                    .child(div().id(SharedString::from(format!("close-{i}"))).px(px(2.)).text_color(theme.secondary).child("×").on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.close_file(i, cx)
+                    })))
+                    .on_click(cx.listener(move |this, e: &gpui_kit::ClickEvent, _, cx| {
+                        if let Some(folder) = this.folder(cx) {
+                            if let Some(s) = this.folders.get_mut(&folder) {
+                                s.current = i;
+                            }
+                        }
+                        if e.click_count() >= 2 {
+                            this.keep_file(i, cx);
+                        }
+                        cx.notify();
+                    }))
+                    .context_menu(move |menu, _, _| {
+                        let (t1, t2, t3) = (this.clone(), this.clone(), this.clone());
+                        let menu = menu
+                            .item(PopupMenuItem::new("Keep Open").disabled(!preview).on_click(move |_, _, cx| {
+                                let _ = t1.update(cx, |this, cx| this.keep_file(i, cx));
+                            }))
+                            .item(PopupMenuItem::new("Close").on_click(move |_, _, cx| {
+                                let _ = t2.update(cx, |this, cx| this.close_file(i, cx));
+                            }))
+                            .item(PopupMenuItem::new("Close Others").disabled(count < 2).on_click(move |_, _, cx| {
+                                let _ = t3.update(cx, |this, cx| this.close_others(i, cx));
+                            }))
+                            .separator();
+                        file_menu(menu, &folder, &path)
+                    }),
             );
         }
-        column.into_any_element()
+        column = column.child(tabs);
+        let file = &state.files[state.current];
+        let (dir, name) = file.path.rsplit_once('/').map_or((String::new(), file.path.clone()), |(d, n)| (format!("{d}/"), n.to_string()));
+        column = column.child(
+            div()
+                .flex()
+                .items_center()
+                .px(px(10.))
+                .py(px(4.))
+                .text_size(px(11.))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .child(div().min_w_0().text_ellipsis().overflow_hidden().text_color(theme.secondary).child(dir))
+                .child(div().flex_none().child(name))
+                .child(div().flex_1())
+                .when_some(file.lines().map(|l| l.len()), |d, n| d.child(div().flex_none().text_color(theme.secondary).child(if n == 1 { "1 line".to_string() } else { format!("{n} lines") }))),
+        );
+        let notice = |text: String| div().px(px(10.)).py(px(4.)).text_size(px(11.)).text_color(theme.secondary).border_b_1().border_color(theme.separator).child(text);
+        if file.cut_lines {
+            column = column.child(notice(format!("Lines over {} characters are cut", "5,000")));
+        }
+        if let Some(n) = file.note.clone() {
+            column = column.child(notice(n));
+        }
+        let full = if file.path.starts_with('/') { file.path.clone() } else { format!("{}/{}", folder.trim_end_matches('/'), file.path) };
+        let unavailable = |title: &str, detail: Option<String>, open: bool| {
+            let full = full.clone();
+            div()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap(px(6.))
+                .p(px(20.))
+                .child(div().font_weight(FontWeight::SEMIBOLD).child(title.to_string()))
+                .when_some(detail, |d, t| d.child(div().text_size(px(12.)).text_center().text_color(theme.secondary).child(t)))
+                .when(open, |d| d.child(Button::new("open-default").small().label("Open in Default App").on_click(move |_, _, _| open_default(&full))))
+                .into_any_element()
+        };
+        let body = match &file.content {
+            FileContent::Missing => unavailable("File Not Found", Some("It may have been moved or deleted.".into()), false),
+            FileContent::Unreadable(why) => unavailable("Can't Read This File", Some(why.clone()), false),
+            FileContent::Folder => unavailable("Folder", None, true),
+            FileContent::Binary(size) => unavailable("Binary File", Some(size_text(*size)), true),
+            FileContent::Image(path) => div()
+                .id("file-image")
+                .flex_1()
+                .min_h_0()
+                .overflow_scroll()
+                .p(px(12.))
+                .child(gpui_kit::img(path.clone()).max_w_full().object_fit(gpui_kit::ObjectFit::ScaleDown))
+                .into_any_element(),
+            FileContent::Text(lines) => {
+                let lines = lines.clone();
+                let picked = file.lines_picked;
+                let digits = lines.len().to_string().len();
+                let theme3 = *theme;
+                let gutter = digits as f32 * 7.5 + 14.;
+                let row = move |i: usize, wrap: bool| {
+                    let on = picked.is_some_and(|(a, b)| i + 1 >= a && i + 1 <= b.max(a));
+                    div()
+                        .when(!wrap, |d| d.h(px(17.)))
+                        .when(wrap, |d| d.w_full())
+                        .flex()
+                        .font_family(MONO)
+                        .text_size(px(11.5))
+                        .line_height(px(17.))
+                        .when(!wrap, |d| d.whitespace_nowrap())
+                        .when(on, |d| d.bg(theme3.warning.opacity(0.18)))
+                        .child(div().flex_none().w(px(gutter)).pr(px(8.)).text_right().text_color(theme3.secondary.opacity(0.7)).child(format!("{}", i + 1)))
+                        .child(div().when(!wrap, |d| d.flex_none()).when(wrap, |d| d.flex_1().min_w_0().overflow_hidden().whitespace_normal()).child(code_line(&lines[i], &theme3)))
+                };
+                if let Some(state) = file.wrapped.clone().filter(|_| wraps) {
+                    gpui_kit::list(state, move |i, _, _| {
+                        let started = std::time::Instant::now();
+                        let el = row(i, true).into_any_element();
+                        LINES_WORST_US.fetch_max(started.elapsed().as_micros() as u64, std::sync::atomic::Ordering::Relaxed);
+                        el
+                    })
+                    .flex_1()
+                    .min_h_0()
+                    .into_any_element()
+                } else {
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .child(
+                            uniform_list("file-lines", lines_len(&file.content), move |range, _, _| {
+                                let started = std::time::Instant::now();
+                                let rows: Vec<_> = range.map(|i| row(i, false)).collect();
+                                LINES_WORST_US.fetch_max(started.elapsed().as_micros() as u64, std::sync::atomic::Ordering::Relaxed);
+                                rows
+                            })
+                            .track_scroll(&file.scroll)
+                            .size_full(),
+                        )
+                        .into_any_element()
+                }
+            }
+        };
+        column.child(body).into_any_element()
     }
+}
+
+fn lines_len(content: &FileContent) -> usize {
+    if let FileContent::Text(l) = content { l.len() } else { 0 }
+}
+
+fn open_default(path: &str) {
+    let _ = std::process::Command::new("/usr/bin/open").arg(path).spawn();
+}
+
+/// A file's menu: Open in Default App, Show in Finder, Copy Path, Copy Relative Path.
+fn file_menu(menu: gpui_kit::component::menu::PopupMenu, folder: &str, path: &str) -> gpui_kit::component::menu::PopupMenu {
+    let full = if path.starts_with('/') { path.to_string() } else { format!("{}/{path}", folder.trim_end_matches('/')) };
+    let (f1, f2, f3, rel) = (full.clone(), full.clone(), full, path.to_string());
+    menu.item(PopupMenuItem::new("Open in Default App").on_click(move |_, _, _| open_default(&f1)))
+        .item(PopupMenuItem::new("Show in Finder").icon(IconName::Folder).on_click(move |_, _, cx| cx.reveal_path(std::path::Path::new(&f2))))
+        .separator()
+        .item(PopupMenuItem::new("Copy Path").icon(IconName::Copy).on_click(move |_, _, cx| cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(f3.clone()))))
+        .item(PopupMenuItem::new("Copy Relative Path").on_click(move |_, _, cx| cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(rel.clone()))))
 }
 
 impl Inspector {
@@ -1210,23 +1607,52 @@ impl Inspector {
         .detach();
     }
 
+    /// Split into a Stack: asks Claude to make the thread's work a stack of small PRs with
+    /// `gh stack`. Only with `gh stack` there, never in a side chat, and not while Claude works.
+    fn split_button(&self, compact: bool, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
+        let thread = self.thread.clone()?;
+        if self.stacks_installed != Some(true) || thread.read(cx).id().starts_with(crate::state::workspace::SIDE) {
+            return None;
+        }
+        let running = thread.read(cx).running;
+        let ws = self.workspace.clone();
+        let b = Button::new(if compact { "split-stack-compact" } else { "split-stack" }).xsmall().ghost();
+        let b = if compact { b.icon(IconName::GalleryVerticalEnd) } else { b.label("Split into a Stack") };
+        Some(
+            b.disabled(running)
+                .tooltip("Ask Claude to split this thread's work into a stack of small pull requests, with gh stack")
+                .on_click(move |_, _, cx| {
+                    let t = thread.clone();
+                    ws.update(cx, |ws, cx| ws.send(&t, SPLIT_INTO_STACK, false, cx));
+                })
+                .into_any_element(),
+        )
+    }
+
     fn pull_requests(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let Some(thread) = &self.thread else { return empty("No thread open.", theme) };
         let id = thread.read(cx).id().to_string();
         let Some((pulls, at)) = self.pulls.get(&id) else { return empty("Looking for this thread's pull requests…", theme) };
         if pulls.is_empty() {
-            return empty("No pull requests. When Claude opens, merges or comments on one in this thread, or one's linked here, it shows here and stays current.", theme);
+            return div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap(px(10.))
+                .child(div().px(px(24.)).text_center().text_color(theme.secondary).child("No pull requests. When Claude opens, merges or comments on one in this thread, or one's linked here, it shows here and stays current."))
+                .when_some(self.split_button(false, cx), |d, b| d.child(b))
+                .into_any_element();
         }
-        let rank = |p: &crate::state::pulls::ThreadPull| match p.pull.as_ref().map(|p| p.state.as_str()) {
-            Ok("open") => 0,
-            Ok("merged") => 1,
-            Ok(_) => 2,
-            Err(_) => 3,
-        };
-        let mut worked: Vec<&crate::state::pulls::ThreadPull> = pulls.iter().filter(|p| p.worked).collect();
-        worked.sort_by_key(|p| rank(p));
+        let state = |p: &crate::state::pulls::ThreadPull| p.pull.as_ref().map(|p| p.state.clone()).ok();
+        // Open ones (and ones whose state isn't known) first; then merged and closed, newest first.
+        let open: Vec<&crate::state::pulls::ThreadPull> = pulls.iter().filter(|p| p.worked && state(p).is_none_or(|s| s == "open")).collect();
+        let mut done: Vec<&crate::state::pulls::ThreadPull> = pulls.iter().filter(|p| p.worked && state(p).is_some_and(|s| s != "open")).collect();
+        let when = |p: &crate::state::pulls::ThreadPull| p.pull.as_ref().ok().and_then(|p| p.merged_at.clone().or(p.updated_at.clone())).unwrap_or_default();
+        done.sort_by_key(|p| std::cmp::Reverse(when(p)));
         let mentioned: Vec<&crate::state::pulls::ThreadPull> = pulls.iter().filter(|p| !p.worked).collect();
-        let open = pulls.iter().filter(|p| p.worked && p.pull.as_ref().is_ok_and(|p| p.state == "open")).count();
+        let open_count = open.iter().filter(|p| state(p).is_some()).count();
         let mut column = div().id("pulls").size_full().overflow_y_scroll().p(px(12.)).flex().flex_col().gap(px(8.)).child(
             div()
                 .flex()
@@ -1234,14 +1660,22 @@ impl Inspector {
                 .gap(px(6.))
                 .text_size(px(11.))
                 .text_color(theme.secondary)
-                .child(div().flex_1().child(format!("{open} open · updated {}", if at.elapsed().as_secs() < 5 { "just now".to_string() } else { format!("{} s ago", at.elapsed().as_secs()) })))
-                .child(Button::new("pulls-refresh").xsmall().ghost().label(if self.pulls_loading { "Looking…" } else { "Refresh" }).on_click(cx.listener(|this, _, _, cx| this.refresh_pulls(cx)))),
+                .child(div().flex_1().child(format!("{open_count} open · updated {}", if at.elapsed().as_secs() < 5 { "just now".to_string() } else { format!("{} s ago", at.elapsed().as_secs()) })))
+                .when_some(self.split_button(true, cx), |d, b| d.child(b))
+                .child(Button::new("pulls-refresh").xsmall().ghost().icon(IconName::RefreshCw).loading(self.pulls_loading).tooltip("Refresh").on_click(cx.listener(|this, _, _, cx| this.refresh_pulls(cx)))),
         );
-        for p in worked {
+        for p in open {
             column = column.child(pull_card(p, theme));
         }
+        let header = |t: &str| div().pt(px(8.)).text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.secondary).child(t.to_string());
+        if !done.is_empty() {
+            column = column.child(header("MERGED AND CLOSED"));
+            for p in done {
+                column = column.child(pull_card(p, theme));
+            }
+        }
         if !mentioned.is_empty() {
-            column = column.child(div().pt(px(8.)).text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.secondary).child("MENTIONED"));
+            column = column.child(header("MENTIONED"));
             for p in mentioned {
                 column = column.child(pull_card(p, theme));
             }
@@ -1323,7 +1757,7 @@ fn pull_card(p: &crate::state::pulls::ThreadPull, theme: &Theme) -> impl IntoEle
     let url = p.link.url.clone();
     let green: gpui_kit::Hsla = gpui_kit::rgb(0x34c759).into();
     let purple: gpui_kit::Hsla = gpui_kit::rgb(0xaf52de).into();
-    let mut card = div()
+    let card = div()
         .id(SharedString::from(format!("pull-{}", p.link.id())))
         .p(px(10.))
         .rounded(px(8.))
@@ -1333,6 +1767,19 @@ fn pull_card(p: &crate::state::pulls::ThreadPull, theme: &Theme) -> impl IntoEle
         .flex_col()
         .gap(px(4.))
         .on_click(move |_, _, cx| cx.open_url(&url));
+    // Open in Browser, Copy Link, Copy Branch Name.
+    let (u1, u2) = (p.link.url.clone(), p.link.url.clone());
+    let head = p.pull.as_ref().ok().map(|pr| pr.head.clone());
+    let mut card = card.context_menu(move |menu, _, _| {
+        let (u1, u2) = (u1.clone(), u2.clone());
+        let menu = menu
+            .item(PopupMenuItem::new("Open in Browser").icon(IconName::ExternalLink).on_click(move |_, _, cx| cx.open_url(&u1)))
+            .item(PopupMenuItem::new("Copy Link").icon(IconName::Copy).on_click(move |_, _, cx| cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(u2.clone()))));
+        match head.clone() {
+            Some(h) => menu.item(PopupMenuItem::new("Copy Branch Name").on_click(move |_, _, cx| cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(h.clone())))),
+            None => menu,
+        }
+    });
     match &p.pull {
         Ok(pr) => {
             let (dot, chip): (gpui_kit::Hsla, Option<&str>) = match pr.state.as_str() {
