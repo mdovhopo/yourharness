@@ -421,13 +421,21 @@ impl Workspace {
         let library = self.library.clone();
         let weak = thread.downgrade();
         cx.spawn(async move |_, cx| {
-            let page = cx.background_executor().spawn(async move { library.page(&id, before, PAGE) }).await;
+            let mut page = cx.background_executor().spawn(async move { library.page(&id, before, PAGE) }).await;
             let _ = weak.update(cx, |t, cx| {
                 if !t.loading {
                     return; // let go of meanwhile
                 }
+                // A message sent while this was read is held already and may be saved by now:
+                // its saved copy, at the end of the page, isn't added again.
+                let held: std::collections::HashSet<String> = t.items.iter().flat_map(|i| i.entries.iter().map(|e| e.borrow().data.id.clone())).collect();
+                let mut dropped = 0;
+                while page.entries.last().is_some_and(|e| held.contains(&e.id)) {
+                    page.entries.pop();
+                    dropped += 1;
+                }
                 if t.total.is_none() {
-                    t.total = Some(page.total);
+                    t.total = Some(page.total.saturating_sub(dropped));
                 }
                 t.prepend(page.entries, page.from);
                 t.loaded = true;
