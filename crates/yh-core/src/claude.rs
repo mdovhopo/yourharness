@@ -68,6 +68,9 @@ pub struct SlashCommand {
     pub name: String,
     pub description: String,
     pub hint: String,
+    pub aliases: Vec<String>,
+    /// One of Claude Code's own (`/compact`), not a skill or a command of yours.
+    pub builtin: bool,
 }
 
 impl SlashCommand {
@@ -77,7 +80,73 @@ impl SlashCommand {
             name: name.to_string(),
             description: v["description"].as_str().unwrap_or("").to_string(),
             hint: v["argumentHint"].as_str().unwrap_or("").to_string(),
+            aliases: v["aliases"].as_array().map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect()).unwrap_or_default(),
+            // The CLI says `builtin`, the Swift app saved `isBuiltin`.
+            builtin: v["builtin"].as_bool().or(v["isBuiltin"].as_bool()).unwrap_or(false),
         })
+    }
+
+    pub fn new(name: &str, hint: &str, description: &str) -> SlashCommand {
+        SlashCommand { name: name.into(), description: description.into(), hint: hint.into(), aliases: vec![], builtin: true }
+    }
+}
+
+/// "/name the rest" → ("name", "the rest"); None when the text isn't a command.
+pub fn parse_command(text: &str) -> Option<(String, String)> {
+    let body = text.trim().strip_prefix('/')?;
+    let name: String = body.chars().take_while(|c| !c.is_whitespace()).collect();
+    if name.is_empty() || name.contains('/') {
+        return None;
+    }
+    Some((name.clone(), body[name.len()..].trim().to_string()))
+}
+
+/// The `/name` being typed at the end of `text`: at its start or after a space, with nothing
+/// after it yet. (where its slash is, what follows it)
+pub fn trailing_command(text: &str) -> Option<(usize, String)> {
+    let slash = text.rfind('/')?;
+    if slash > 0 && !text[..slash].ends_with(char::is_whitespace) {
+        return None;
+    }
+    let query = &text[slash + 1..];
+    if query.contains(|c: char| c.is_whitespace() || c == '/') {
+        return None;
+    }
+    Some((slash, query.to_string()))
+}
+
+/// `/name` words after the start of a message that name one of `known`, in order, once each:
+/// skills to run along the way. The command a message starts with is Claude Code's to run.
+pub fn chained_commands(text: &str, known: &std::collections::HashSet<String>) -> Vec<String> {
+    let mut found: Vec<String> = vec![];
+    for (slash, _) in text.match_indices('/') {
+        // A word of its own, not the start of the message, not part of a path or `code`.
+        if slash == 0 || !text[..slash].ends_with(char::is_whitespace) {
+            continue;
+        }
+        let rest = &text[slash + 1..];
+        let name: String = rest.chars().take_while(|c| !c.is_whitespace() && !",.;!?)\"'`".contains(*c)).collect();
+        if name.is_empty() || name.contains('/') || rest[name.len()..].starts_with('/') {
+            continue;
+        }
+        if known.contains(&name) && !found.contains(&name) {
+            found.push(name);
+        }
+    }
+    found
+}
+
+/// What's added to a message that chains skills, so the agent runs each where it comes up.
+pub fn chain_note(names: &[String]) -> Option<String> {
+    let list: Vec<String> = names.iter().map(|n| format!("/{n}")).collect();
+    match list.len() {
+        0 => None,
+        1 => Some(format!("(Run the {} skill where it comes up above, with the Skill tool.)", list[0])),
+        n => Some(format!(
+            "(Run the {} and {} skills where they come up above, in that order, with the Skill tool.)",
+            list[..n - 1].join(", "),
+            list[n - 1]
+        )),
     }
 }
 
@@ -138,6 +207,20 @@ pub enum Event {
     /// An MCP server asks something mid-call: a form (`schema`) or a page to visit (`url`).
     Elicitation { request_id: String, server: String, message: String, mode: String, schema: Value, url: Option<String> },
     Notice(String),
+    /// What a built-in command printed (`/context`, `/usage`): markdown, not a reply.
+    CommandOutput(String),
+    /// Tokens in the context after Claude's latest message (everything it saw plus what it wrote).
+    ContextUsage(u64),
+    /// Each model's context window, from a turn's result.
+    ContextWindows(Vec<(String, u64)>),
+    /// `/clear`: the CLI starts a new session with empty context (its init brings the new ID).
+    ConversationReset,
+    /// The session's title changed (`/rename`).
+    TitleChanged(String),
+    /// What the agent can run itself with its Skill tool, from the session's start.
+    Skills(Vec<String>),
+    /// MCP servers as the session's start found them: (name, status, scope).
+    McpServers(Vec<(String, String, String)>),
     Done { is_error: bool, text: String },
     Exit { code: i32, tail: String },
 }
@@ -423,6 +506,11 @@ impl ClaudeProcess {
         self.control(json!({ "subtype": "stop_task", "task_id": task_id }));
     }
 
+    /// Takes back a message still waiting for the current step: its lifecycle ends `cancelled`.
+    pub fn cancel_queued(&mut self, id: &str) {
+        self.control(json!({ "subtype": "cancel_async_message", "message_uuid": id }));
+    }
+
     pub fn set_mode(&mut self, mode: &str) {
         self.control(json!({ "subtype": "set_permission_mode", "mode": mode }));
     }
@@ -488,7 +576,21 @@ impl Parser {
         let parent = object["parent_tool_use_id"].as_str().map(str::to_string);
         match object["type"].as_str().unwrap_or("") {
             "system" => match object["subtype"].as_str().unwrap_or("") {
-                "init" => object["session_id"].as_str().map(|id| vec![Event::Session { id: id.into() }]).unwrap_or_default(),
+                "init" => {
+                    let Some(id) = object["session_id"].as_str() else { return vec![] };
+                    let mut events = vec![Event::Session { id: id.into() }];
+                    if let Some(skills) = object["skills"].as_array() {
+                        events.push(Event::Skills(skills.iter().filter_map(|s| s.as_str().map(str::to_string)).collect()));
+                    }
+                    if let Some(servers) = object["mcp_servers"].as_array() {
+                        let s = |v: &Value, k: &str| v[k].as_str().unwrap_or("").to_string();
+                        events.push(Event::McpServers(
+                            servers.iter().map(|v| (s(v, "name"), s(v, "status"), v["scope"].as_str().or(v["source"].as_str()).unwrap_or("").to_string())).collect(),
+                        ));
+                    }
+                    events
+                }
+                "session_title_changed" => object["title"].as_str().map(|t| vec![Event::TitleChanged(t.into())]).unwrap_or_default(),
                 // A command or a watch (`local_bash`, `monitor`…) rather than a sub-agent (`local_agent`).
                 "task_started" if object["task_type"].as_str().is_some_and(|t| t != "local_agent") && object["task_id"].is_string() => {
                     let task_id = object["task_id"].as_str().unwrap_or("").to_string();
@@ -523,8 +625,17 @@ impl Parser {
                     summary: object["summary"].as_str().map(str::to_string),
                 }],
                 "compact_boundary" => {
-                    let trigger = object["compact_metadata"]["trigger"].as_str().unwrap_or("auto");
-                    vec![Event::Notice(format!("Conversation compacted ({trigger})"))]
+                    let meta = &object["compact_metadata"];
+                    let mut notice =
+                        if meta["trigger"] == "manual" { "Conversation compacted".to_string() } else { "Conversation compacted automatically".to_string() };
+                    if let (Some(before), Some(after)) = (meta["pre_tokens"].as_u64(), meta["post_tokens"].as_u64()) {
+                        notice += &format!(" · {} → {} tokens", compact_tokens(before), compact_tokens(after));
+                    }
+                    let mut events = vec![Event::Notice(notice)];
+                    if let Some(after) = meta["post_tokens"].as_u64() {
+                        events.push(Event::ContextUsage(after));
+                    }
+                    events
                 }
                 _ => vec![],
             },
@@ -564,11 +675,29 @@ impl Parser {
                         };
                         vec![Event::Delta { message, index, parent, kind, text: text.unwrap_or("").into() }]
                     }
+                    // A message's final usage: everything the model saw plus what it wrote.
+                    "message_delta" if parent.is_none() => {
+                        let usage = &event["usage"];
+                        let tokens: u64 = ["input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens"]
+                            .iter()
+                            .filter_map(|k| usage[*k].as_u64())
+                            .sum();
+                        if tokens > 0 {
+                            vec![Event::ContextUsage(tokens)]
+                        } else {
+                            vec![]
+                        }
+                    }
                     _ => vec![],
                 }
             }
             "assistant" => {
                 let message = &object["message"];
+                if !object["local_command_source"].is_null() {
+                    let text: Vec<&str> = message["content"].as_array().into_iter().flatten().filter_map(|b| b["text"].as_str()).collect();
+                    let text = strip_command_tags(&text.join("\n"));
+                    return if text.is_empty() { vec![] } else { vec![Event::CommandOutput(text)] };
+                }
                 let blocks = message["content"]
                     .as_array()
                     .into_iter()
@@ -648,10 +777,24 @@ impl Parser {
                 }
             }
             "rate_limit_event" => vec![Event::Limits(object["rate_limit_info"].clone())],
-            "result" => vec![Event::Done {
-                is_error: object["is_error"] == true,
-                text: object["result"].as_str().or(object["subtype"].as_str()).unwrap_or("").into(),
-            }],
+            "conversation_reset" => vec![Event::ConversationReset],
+            "result" => {
+                let mut events = vec![];
+                let windows: Vec<(String, u64)> = object["modelUsage"]
+                    .as_object()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|(model, u)| Some((model.clone(), u["contextWindow"].as_u64()?)))
+                    .collect();
+                if !windows.is_empty() {
+                    events.push(Event::ContextWindows(windows));
+                }
+                events.push(Event::Done {
+                    is_error: object["is_error"] == true,
+                    text: object["result"].as_str().or(object["subtype"].as_str()).unwrap_or("").into(),
+                });
+                events
+            }
             _ => vec![],
         }
     }
@@ -662,6 +805,31 @@ impl Parser {
             .map(str::to_string)
             .or_else(|| self.current.get(parent).cloned())
             .unwrap_or_default()
+    }
+}
+
+/// What a built-in command printed, without the tags Claude Code wraps it in.
+fn strip_command_tags(text: &str) -> String {
+    let mut out = text.to_string();
+    for tag in ["local-command-stdout", "local-command-stderr", "local-command-caveat"] {
+        out = out.replace(&format!("<{tag}>"), "").replace(&format!("</{tag}>"), "");
+    }
+    out.trim().to_string()
+}
+
+/// 26823 → "27k", 1000000 → "1M", as the context ring shows them.
+pub fn compact_tokens(value: u64) -> String {
+    if value >= 1_000_000 {
+        let m = value as f64 / 1_000_000.0;
+        if m.fract() == 0.0 {
+            format!("{}M", m as u64)
+        } else {
+            format!("{m:.1}M")
+        }
+    } else if value >= 1_000 {
+        format!("{}k", (value as f64 / 1000.0).round() as u64)
+    } else {
+        value.to_string()
     }
 }
 
@@ -759,5 +927,80 @@ mod tests {
         let events = events(&lines.join("\n"));
         assert!(events.iter().all(|e| !matches!(e, Event::JobStarted { .. } | Event::JobFinished { .. })));
         assert!(events.iter().any(|e| matches!(e, Event::JobsRunning(ids) if ids.is_empty())));
+    }
+
+    fn parse(line: &str) -> Vec<Event> {
+        Parser::default().parse(&serde_json::from_str(line).unwrap())
+    }
+
+    #[test]
+    fn finds_the_command_being_typed_anywhere() {
+        let q = |t: &str| trailing_command(t).map(|(_, q)| q);
+        assert_eq!(q("/rev").as_deref(), Some("rev"));
+        assert_eq!(q("fix the bug then /rev").as_deref(), Some("rev"));
+        assert_eq!(q("then /").as_deref(), Some(""));
+        assert_eq!(q("then /review "), None);
+        assert_eq!(q("see src/main"), None);
+        assert_eq!(q("open /usr/bin"), None);
+        assert_eq!(trailing_command("a /re").map(|(s, _)| s), Some(2));
+    }
+
+    #[test]
+    fn lists_skills_chained_in_a_message() {
+        let known: std::collections::HashSet<String> = ["review", "commit", "deploy:staging", "plan"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(chained_commands("/plan the work, then /review and /commit.", &known), vec!["review", "commit"]);
+        assert_eq!(chained_commands("do it then /deploy:staging", &known), vec!["deploy:staging"]);
+        assert_eq!(chained_commands("run /review twice: /review", &known), vec!["review"]);
+        assert!(chained_commands("look at /review/notes.md and src/commit", &known).is_empty());
+        assert!(chained_commands("unknown /nope here", &known).is_empty());
+        assert!(chained_commands("/review only", &known).is_empty());
+        assert!(chained_commands("then (/review)", &known).is_empty());
+    }
+
+    #[test]
+    fn notes_the_chain() {
+        assert_eq!(chain_note(&[]), None);
+        assert_eq!(chain_note(&["review".into()]).unwrap(), "(Run the /review skill where it comes up above, with the Skill tool.)");
+        assert_eq!(
+            chain_note(&["review".into(), "commit".into(), "deploy".into()]).unwrap(),
+            "(Run the /review, /commit and /deploy skills where they come up above, in that order, with the Skill tool.)"
+        );
+    }
+
+    #[test]
+    fn parses_commands() {
+        assert_eq!(parse_command("/rename  My title "), Some(("rename".into(), "My title".into())));
+        assert_eq!(parse_command("/clear"), Some(("clear".into(), String::new())));
+        assert_eq!(parse_command("hello /clear"), None);
+        assert_eq!(parse_command("/usr/bin"), None);
+    }
+
+    #[test]
+    fn reads_what_built_in_commands_say() {
+        let out = parse(r#"{"type":"assistant","local_command_source":"x","message":{"id":"m","model":"<synthetic>","content":[{"type":"text","text":"<local-command-stdout>## Context Usage</local-command-stdout>"}]}}"#);
+        assert!(matches!(&out[..], [Event::CommandOutput(t)] if t == "## Context Usage"));
+        assert!(matches!(&parse(r#"{"type":"conversation_reset","trigger":"clear"}"#)[..], [Event::ConversationReset]));
+        assert!(matches!(&parse(r#"{"type":"system","subtype":"session_title_changed","title":"T"}"#)[..], [Event::TitleChanged(t)] if t == "T"));
+        let compacted = parse(r#"{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"manual","pre_tokens":26823,"post_tokens":8253}}"#);
+        assert!(matches!(&compacted[..], [Event::Notice(n), Event::ContextUsage(8253)] if n == "Conversation compacted · 27k → 8k tokens"));
+    }
+
+    #[test]
+    fn reads_how_full_the_context_is() {
+        let delta = parse(r#"{"type":"stream_event","event":{"type":"message_delta","usage":{"input_tokens":2,"cache_creation_input_tokens":15164,"cache_read_input_tokens":11384,"output_tokens":7}}}"#);
+        assert!(matches!(&delta[..], [Event::ContextUsage(26557)]));
+        let sub = parse(r#"{"type":"stream_event","parent_tool_use_id":"t","event":{"type":"message_delta","usage":{"input_tokens":2}}}"#);
+        assert!(sub.is_empty());
+        let result = parse(r#"{"type":"result","is_error":false,"result":"ok","modelUsage":{"claude-haiku":{"contextWindow":1000000}}}"#);
+        assert!(matches!(&result[..], [Event::ContextWindows(w), Event::Done { .. }] if w == &vec![("claude-haiku".to_string(), 1_000_000)]));
+        assert_eq!(compact_tokens(1_000_000), "1M");
+        assert_eq!(compact_tokens(200_000), "200k");
+        assert_eq!(compact_tokens(512), "512");
+    }
+
+    #[test]
+    fn reads_the_session_start() {
+        let init = parse(r#"{"type":"system","subtype":"init","session_id":"s","skills":["review"],"mcp_servers":[{"name":"linear","status":"needs-auth","source":"user"}]}"#);
+        assert!(matches!(&init[..], [Event::Session { .. }, Event::Skills(s), Event::McpServers(m)] if s == &vec!["review".to_string()] && m[0].1 == "needs-auth"));
     }
 }

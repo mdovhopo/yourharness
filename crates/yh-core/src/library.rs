@@ -137,6 +137,9 @@ pub struct ThreadMeta {
     /// (`footprint`, `writtenFootprint`): which checkouts it works in.
     pub footprint: Vec<String>,
     pub written_footprint: Vec<String>,
+    /// How full its context was when last heard from (tokens), and its model's window.
+    pub context_tokens: Option<u64>,
+    pub context_window: Option<u64>,
 }
 
 impl ThreadMeta {
@@ -157,6 +160,8 @@ impl ThreadMeta {
             working_directory: None,
             footprint: vec![],
             written_footprint: vec![],
+            context_tokens: None,
+            context_window: None,
         }
     }
 
@@ -181,6 +186,8 @@ impl ThreadMeta {
             working_directory: s("workingDirectory"),
             footprint: list(o, "footprint"),
             written_footprint: list(o, "writtenFootprint"),
+            context_tokens: o.get("contextTokens").and_then(Value::as_u64),
+            context_window: o.get("contextWindow").and_then(Value::as_u64),
         }
     }
 }
