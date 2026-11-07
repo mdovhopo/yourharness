@@ -26,7 +26,7 @@ else
     APP="${APP:-$ROOT/build/YourHarness Next.app}"
 fi
 BUILD="$(git -C "$ROOT" rev-list --count HEAD 2>/dev/null || echo 1)"
-COMMIT="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)$([[ -n "$(git -C "$ROOT" status --porcelain 2>/dev/null)" ]] && echo -dirty)"
+COMMIT="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)$([[ -n "$(git -C "$ROOT" status --porcelain 2>/dev/null)" ]] && echo -dirty || true)"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/YourHarness"
