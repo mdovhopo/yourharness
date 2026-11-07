@@ -96,7 +96,21 @@ last reply through the window's events, prints `SELECT PASS` and what ⌘C would
 (the newest such step's file opens in the Files tab as clicking its path does), `YH_OPEN_DIAGRAM=<file.mmd>`
 (its diagram in the Open Large window; `YH_DIAGRAM_EXPORT=<file.png>` saves it as Save as PNG does,
 `YH_DIAGRAM_SNAPSHOT=<file.png>` draws that window). These need a selected thread (`YH_SELECT`): any
-`*_PROBE` variable stops the last thread from opening again.
+`*_PROBE` variable stops the last thread from opening again. Project page (with `YH_OPEN_PROJECT=1`):
+`YH_PROJECT_PROBE=<steps>` once its repos are read, commas between steps: `expand` (every repo's worktrees
+shown), `repos` (scrolled down to them), `remove:<worktree folder name>` (asks as its button does: the
+question, or none when nothing's lost), `merge` or `merge:<up to #>` (the first numbered stack's Squash and
+Merge question), `new-worktree`, `new-stack`, `add-branch` (their sheets); each question is printed as
+`PROJECT asks: …`. `YH_PROJECT_PROBE_ANSWER=ok` then says yes or presses Create (it merges, removes and
+pushes for real: the sandbox repo only), with `YH_NEW_WORKTREE_BRANCH=<name>` typed in New Worktree and
+`YH_NEW_STACK_BRANCHES=<a:b>` picked in New Stack (Submit off). Right sidebar: `YH_FILES_PROBE=1` (with
+`YH_OPEN_FILE`: the file scrolled through in 40 steps, printing how long it took to open and the longest
+step's lines took to make, PASS under 50 ms; try `test-harness-root/files`' 100,000-line catalog),
+`YH_FILES_WRAP=1` (Wrap Lines on), `YH_SUBAGENT_STOP=<seconds>` (Stop pressed on the open sub-agent that
+long after it shows, printing `SUBAGENT stop <task>`). Memory: `YH_MEMORY_SETUP=importer|reconciler` (the
+specialist's setup over the window, `YH_MEMORY_IMPORT_SOURCES=<a:b>` ticked, `YH_MEMORY_AGENT_NOTE`,
+`YH_MEMORY_AGENT_MODEL=haiku`; `YH_MEMORY_SETUP_START=1` presses Start: a real turn),
+`YH_MEMORY_ADD_STEP=<text>` (with `YH_OPEN_MEMORY=1`: the first task opened and the step added).
 
 ## Performance is the product
 

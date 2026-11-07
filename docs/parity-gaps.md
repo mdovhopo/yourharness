@@ -4,8 +4,8 @@ What the Swift app (legacy/YourHarness) does that the rewrite didn't yet, found 
 Swift paths are under legacy/YourHarness/, Rust under crates/yh-app/src/. Tick items as they land.
 
 ## A. Safety and correctness
-- [ ] 1. Worktree removal asks first ("Remove and Discard" when work would be lost); error alert on failure. Views/WorkspaceView.swift:1019-1035 · ui/project.rs
-- [ ] 2. Merging a stack asks first ("Squash and Merge"). Views/StackViews.swift:56 · ui/project.rs
+- [x] 1. Worktree removal asks first ("Remove and Discard" when work would be lost); error alert on failure. Views/WorkspaceView.swift:1019-1035 · ui/project.rs
+- [x] 2. Merging a stack asks first ("Squash and Merge"). Views/StackViews.swift:56 · ui/project.rs
 - [ ] 3. ⌘↩ / ⌘⌫ on question and plan cards: Answer (only once all answered) / approve in the recommended mode; Skip / Keep Planning. Views/AgentRequestCards.swift · ui/root.rs
 - [ ] 4. Several permission requests at once (parallel sub-agents), each answered. Views/ThreadView.swift:40 · state/thread.rs
 - [ ] 5. Long plans scroll inside the card's cap; question card capped too. AgentRequestCards.swift:167,206-225 · ui/composer.rs
@@ -61,24 +61,24 @@ Swift paths are under legacy/YourHarness/, Rust under crates/yh-app/src/. Tick i
 - [ ] 41. Model picker details (check after composer merge).
 
 ## G. Right sidebar
-- [ ] 42. Sub-agent Stop button.
-- [ ] 43. File viewer: syntax highlighting, image preview, Open in Default App for binaries, missing-file message, long-line notice.
-- [ ] 44. Files toolbar/menus: Show/Hide Folder, Wrap Lines, More menu; tab menu; preview tabs.
-- [ ] 45. PR rows: context menu, Merged and Closed group.
-- [ ] 46. Split into a Stack button.
+- [x] 42. Sub-agent Stop button. (Its task ID now comes with `task_started`; checked that the probe gets it and calls `stop_task`, not yet on a sub-agent that kept running.)
+- [x] 43. File viewer: syntax highlighting, image preview, Open in Default App for binaries, missing-file message, long-line notice. (Colouring is yh-core's light keyword/string/number/comment pass, line by line, so a comment or string spanning lines only colours its first line; the file isn't watched for changes.)
+- [x] 44. Files toolbar/menus: Show/Hide Folder, Wrap Lines, More menu; tab menu; preview tabs. (Wrap Lines draws the file in GPUI's measured `list`.)
+- [x] 45. PR rows: context menu, Merged and Closed group.
+- [x] 46. Split into a Stack button.
 
 ## H. Project page
-- [ ] 47. Context menus on PRs, repos, worktrees.
-- [ ] 48. New Worktree sheet: base branch, location.
-- [ ] 49. Worktree/repo badges (detached, landed, nothing committed, missing folder, ahead/behind, not on disk, not found).
-- [ ] 50. Stack actions: Merge Up to #N, Make GitHub Stack, Install gh stack, Add Branch on Top…, Sync, New Stack from Branches, disabled-Merge hints.
-- [ ] 51. Header: New Thread, Show in Finder.
-- [ ] Threads per worktree.
+- [x] 47. Context menus on PRs, repos, worktrees.
+- [x] 48. New Worktree sheet: base branch, location.
+- [x] 49. Worktree/repo badges (detached, landed, nothing committed, missing folder, ahead/behind, not on disk, not found).
+- [x] 50. Stack actions: Merge Up to #N, Make GitHub Stack, Install gh stack, Add Branch on Top…, Sync, New Stack from Branches, disabled-Merge hints. (New Stack from Branches checked end to end in the sandbox, without submitting; merge, link, sync and add only as far as their questions and sheets, so the shared sandbox's stacks stay. A command's progress and errors show in the page header, not on each stack.)
+- [x] 51. Header: New Thread, Show in Finder.
+- [x] Threads per worktree. (A chip per checkout with a menu of its active and settled threads.)
 
 ## I. Memory
-- [ ] 52. Importer/Reconciler setup screens, model/effort per specialist, New Session, live Changes pane.
-- [ ] 53. Task detail: Add a step.
-- [ ] 54. Task rows: threads working on each.
+- [x] 52. Importer/Reconciler setup screens, model/effort per specialist, New Session, live Changes pane. (The setup is a dialog over the window, not a window of its own; the specialist's model and effort, Changes, Open Memory and New Session are in its thread's header, Changes as a menu read when opened; Set Up… shows there before it starts. Specialists opened from ⌘K still start without the setup.)
+- [x] 53. Task detail: Add a step.
+- [x] 54. Task rows: threads working on each.
 
 ## Browser
 - [ ] Pick element, pop-out window, idle close.
