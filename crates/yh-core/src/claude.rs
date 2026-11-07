@@ -122,6 +122,17 @@ pub enum Event {
     SubagentStarted { tool_id: String, description: String },
     /// A sub-agent's end, with its summary (a background one's report comes only here).
     SubagentFinished { tool_id: String, status: String, summary: Option<String> },
+    /// A job Claude left running: a command in the background (`run_in_background`), a
+    /// foreground one that's taking a while, or a watch (Monitor). `task_id` is what
+    /// `stop_task` takes; `tool_id` the call that started it.
+    JobStarted { task_id: String, tool_id: Option<String>, description: String, background: bool },
+    /// Its end: `status` `completed`, `failed`, `killed`, `stopped`…; `summary` says the exit
+    /// code (`job_exit_code`), `output_file` holds everything it printed.
+    JobFinished { task_id: String, status: String, summary: Option<String>, output_file: Option<String> },
+    /// What a watch saw, as it wakes Claude with it (a `<task-notification>`'s `<event>`).
+    JobOutput { task_id: String, text: String },
+    /// Every job still running, sent whenever that changes: the list to trust over the ends.
+    JobsRunning(Vec<String>),
     Permission { request_id: String, tool: String, description: String, input: String },
     /// An MCP server asks something mid-call: a form (`schema`) or a page to visit (`url`).
     Elicitation { request_id: String, server: String, message: String, mode: String, schema: Value, url: Option<String> },
@@ -405,6 +416,12 @@ impl ClaudeProcess {
         self.control(json!({ "subtype": "interrupt" }));
     }
 
+    /// Stops a job Claude left running (a background command, a watch), as the Swift app's
+    /// Stop does; the CLI reports its end as for any other.
+    pub fn stop_task(&mut self, task_id: &str) {
+        self.control(json!({ "subtype": "stop_task", "task_id": task_id }));
+    }
+
     pub fn set_mode(&mut self, mode: &str) {
         self.control(json!({ "subtype": "set_permission_mode", "mode": mode }));
     }
@@ -437,11 +454,32 @@ impl ClaudeProcess {
     }
 }
 
+/// A job's exit code, from its end's summary: `Background command "Build" failed with exit
+/// code 127`, `… completed (exit code 0)`. A watch's (`Monitor "x" stream ended`) has none.
+pub fn job_exit_code(summary: &str) -> Option<i32> {
+    let rest = &summary[summary.find("exit code ")? + "exit code ".len()..];
+    let end = rest.char_indices().find(|(i, c)| !(c.is_ascii_digit() || (*i == 0 && *c == '-'))).map_or(rest.len(), |(i, _)| i);
+    rest[..end].parse().ok()
+}
+
+/// `<task-notification><task-id>b1</task-id>…<event>sample 3: 2.64</event></task-notification>`:
+/// what a watch saw, as the CLI wakes Claude with it. (task id, text).
+fn job_event(text: &str) -> Option<(String, String)> {
+    let text = text.strip_prefix("<task-notification>")?;
+    let id = &text[text.find("<task-id>")? + "<task-id>".len()..];
+    let id = &id[..id.find("</task-id>")?];
+    let start = text.find("<event>")? + "<event>".len();
+    let end = text.rfind("</event>")?;
+    (start <= end).then(|| (id.to_string(), text[start..end].to_string()))
+}
+
 /// stream-json lines into events. Unknown types and fields are ignored: the protocol changes.
 #[derive(Default)]
 struct Parser {
     /// The message being streamed, per sub-agent (`None`: the main conversation).
     current: HashMap<Option<String>, String>,
+    /// Tasks that are jobs rather than sub-agents: their end says only which task it was.
+    jobs: std::collections::HashSet<String>,
 }
 
 impl Parser {
@@ -450,10 +488,33 @@ impl Parser {
         match object["type"].as_str().unwrap_or("") {
             "system" => match object["subtype"].as_str().unwrap_or("") {
                 "init" => object["session_id"].as_str().map(|id| vec![Event::Session { id: id.into() }]).unwrap_or_default(),
+                // A command or a watch (`local_bash`, `monitor`…) rather than a sub-agent (`local_agent`).
+                "task_started" if object["task_type"].as_str().is_some_and(|t| t != "local_agent") && object["task_id"].is_string() => {
+                    let task_id = object["task_id"].as_str().unwrap_or("").to_string();
+                    self.jobs.insert(task_id.clone());
+                    vec![Event::JobStarted {
+                        task_id,
+                        tool_id: object["tool_use_id"].as_str().map(str::to_string),
+                        description: object["description"].as_str().unwrap_or("").into(),
+                        background: object["is_backgrounded"] == true,
+                    }]
+                }
                 "task_started" => vec![Event::SubagentStarted {
                     tool_id: object["tool_use_id"].as_str().unwrap_or("").into(),
                     description: object["description"].as_str().unwrap_or("Sub-agent").into(),
                 }],
+                "task_notification" if object["task_id"].as_str().is_some_and(|id| self.jobs.remove(id)) => vec![Event::JobFinished {
+                    task_id: object["task_id"].as_str().unwrap_or("").into(),
+                    status: object["status"].as_str().unwrap_or("completed").into(),
+                    summary: object["summary"].as_str().map(str::to_string),
+                    output_file: object["output_file"].as_str().filter(|f| !f.is_empty()).map(str::to_string),
+                }],
+                "background_tasks_changed" => match object["tasks"].as_array() {
+                    Some(tasks) => vec![Event::JobsRunning(
+                        tasks.iter().filter(|t| t["task_type"] != "local_agent").filter_map(|t| t["task_id"].as_str().map(str::to_string)).collect(),
+                    )],
+                    None => vec![],
+                },
                 "task_notification" => vec![Event::SubagentFinished {
                     tool_id: object["tool_use_id"].as_str().unwrap_or("").into(),
                     status: object["status"].as_str().unwrap_or("completed").into(),
@@ -524,6 +585,10 @@ impl Parser {
                 vec![Event::Assistant { message: message["id"].as_str().unwrap_or("").into(), parent, blocks }]
             }
             "user" => {
+                // What wakes Claude for a job, replayed: never a message of yours.
+                if let Some(text) = object["message"]["content"].as_str() {
+                    return job_event(text).map(|(task_id, text)| vec![Event::JobOutput { task_id, text }]).unwrap_or_default();
+                }
                 let results: Vec<ToolResult> = object["message"]["content"]
                     .as_array()
                     .into_iter()
@@ -595,5 +660,102 @@ impl Parser {
             .map(str::to_string)
             .or_else(|| self.current.get(parent).cloned())
             .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn events(fixture: &str) -> Vec<Event> {
+        let mut parser = Parser::default();
+        fixture.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).flat_map(|o| parser.parse(&o)).collect()
+    }
+
+    /// A real capture (sanitized), on Haiku: a 20-second foreground command, then two in the
+    /// background, one failing with exit code 3, Claude woken by each end in a turn of its own.
+    const JOBS: &str = include_str!("../fixtures/background-jobs.jsonl");
+    /// The Swift app's capture: a background command, a Monitor watching it.
+    const MONITOR: &str = include_str!("../fixtures/background-job-monitor.jsonl");
+
+    #[test]
+    fn jobs_start_and_end_by_task() {
+        let events = events(JOBS);
+        let starts: Vec<(&str, Option<&str>, bool)> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::JobStarted { task_id, tool_id, background, .. } => Some((task_id.as_str(), tool_id.as_deref(), *background)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            starts,
+            [
+                ("bgk54klt5", Some("toolu_01EeWLHRgvJ8xirFi9r6KjGf"), false),
+                ("bjr80s33k", Some("toolu_011qVMdMTJUenacvBFC3kZT9"), true),
+                ("bac339jo3", Some("toolu_0173CFzuEXafWCtcudftBpkD"), true),
+            ]
+        );
+        let ends: Vec<(&str, &str, Option<i32>, bool)> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::JobFinished { task_id, status, summary, output_file } => {
+                    Some((task_id.as_str(), status.as_str(), summary.as_deref().and_then(job_exit_code), output_file.is_some()))
+                }
+                _ => None,
+            })
+            .collect();
+        // The foreground one's end has an empty output file: none.
+        assert_eq!(ends, [("bgk54klt5", "completed", None, false), ("bac339jo3", "failed", Some(3), true), ("bjr80s33k", "completed", Some(0), true)]);
+        // None is taken for a sub-agent.
+        assert!(!events.iter().any(|e| matches!(e, Event::SubagentStarted { .. } | Event::SubagentFinished { .. })));
+        // Woken by each end: three turns, the first one yours.
+        assert_eq!(events.iter().filter(|e| matches!(e, Event::Done { .. })).count(), 3);
+    }
+
+    #[test]
+    fn the_running_list_follows_every_change() {
+        let lists: Vec<Vec<String>> = events(JOBS).into_iter().filter_map(|e| if let Event::JobsRunning(ids) = e { Some(ids) } else { None }).collect();
+        assert_eq!(lists, [vec!["bjr80s33k".to_string()], vec!["bjr80s33k".into(), "bac339jo3".into()], vec!["bjr80s33k".into()], vec![]]);
+    }
+
+    #[test]
+    fn what_a_watch_saw_is_an_event_not_a_message() {
+        let events = events(MONITOR);
+        let seen: Vec<String> = events.iter().filter_map(|e| if let Event::JobOutput { task_id, text } = e { Some(format!("{task_id}: {text}")) } else { None }).collect();
+        assert_eq!(seen.first().map(String::as_str), Some("bfyo780nc: sample 1: 2.58\nsample 2: 2.69"));
+        assert_eq!(seen.last().map(String::as_str), Some("bfyo780nc: sample 8: 3.05"));
+        let ends: Vec<(String, String)> = events
+            .iter()
+            .filter_map(|e| if let Event::JobFinished { task_id, status, .. } = e { Some((task_id.clone(), status.clone())) } else { None })
+            .collect();
+        assert_eq!(ends, [("b7xkqnlhn".to_string(), "failed".to_string()), ("bfyo780nc".into(), "completed".into())]);
+    }
+
+    #[test]
+    fn exit_code_comes_from_the_summary() {
+        assert_eq!(job_exit_code(r#"Background command "Build" failed with exit code 127"#), Some(127));
+        assert_eq!(job_exit_code(r#"Background command "x" completed (exit code 0)"#), Some(0));
+        assert_eq!(job_exit_code(r#"Background command "x" failed with exit code -1"#), Some(-1));
+        assert_eq!(job_exit_code(r#"Monitor "x" stream ended"#), None);
+        assert_eq!(job_exit_code("exit code "), None);
+    }
+
+    #[test]
+    fn job_lines_with_missing_or_odd_fields_never_crash() {
+        let lines = [
+            r#"{"type":"system","subtype":"task_started"}"#,
+            r#"{"type":"system","subtype":"task_started","task_type":"local_bash"}"#,
+            r#"{"type":"system","subtype":"task_started","task_type":"local_bash","task_id":7}"#,
+            r#"{"type":"system","subtype":"task_notification","task_id":"nope"}"#,
+            r#"{"type":"system","subtype":"background_tasks_changed","tasks":"x"}"#,
+            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[1,{"task_id":2},{"task_id":"a","task_type":"local_agent"}]}"#,
+            r#"{"type":"user","message":{"content":"<task-notification><task-id>b"}}"#,
+            r#"{"type":"user","message":{"content":"<task-notification><event>x</event><task-id>b</task-id>"}}"#,
+            r#"{"type":"system","subtype":"task_brand_new","task_id":"b"}"#,
+        ];
+        let events = events(&lines.join("\n"));
+        assert!(events.iter().all(|e| !matches!(e, Event::JobStarted { .. } | Event::JobFinished { .. })));
+        assert!(events.iter().any(|e| matches!(e, Event::JobsRunning(ids) if ids.is_empty())));
     }
 }
