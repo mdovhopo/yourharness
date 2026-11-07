@@ -10,6 +10,7 @@ use crate::theme::Theme;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::menu::DropdownMenu;
 use gpui_kit::component::{Sizable, WindowExt};
 use gpui_kit::{div, prelude::*, px, App, Context, Entity, FontWeight, ScrollHandle, SharedString, Subscription, Window};
 use std::collections::{HashMap, HashSet};
@@ -350,6 +351,39 @@ impl Sidebar {
             .border_t_1()
             .border_color(theme.separator)
             .child(bars)
+            .child({
+                // The cup: keep the Mac awake for a while, or let it sleep.
+                let ws = self.workspace.clone();
+                let awake = self.workspace.read(cx).keep_awake.reason.is_some();
+                let manual = self.workspace.read(cx).keep_awake.has_manual();
+                let label = self.workspace.read(cx).keep_awake.describe();
+                Button::new("keep-awake")
+                    .xsmall()
+                    .ghost()
+                    .label(if awake { "☕︎" } else { "☾" })
+                    .tooltip(label)
+                    .dropdown_menu(move |mut menu, _, _| {
+                        for (title, hours) in [("Keep Awake for 1 Hour", Some(1u64)), ("Keep Awake for 2 Hours", Some(2)), ("Keep Awake for 4 Hours", Some(4)), ("Keep Awake Until I Stop It", None)] {
+                            let ws = ws.clone();
+                            menu = menu.item(PopupMenuItem::new(title).on_click(move |_, _, cx| {
+                                ws.update(cx, |ws, cx| {
+                                    ws.keep_awake.keep_awake(hours.map(|h| std::time::Duration::from_secs(h * 3600)));
+                                    ws.schedule_keep_awake(cx);
+                                })
+                            }));
+                        }
+                        if manual {
+                            let ws = ws.clone();
+                            menu = menu.separator().item(PopupMenuItem::new("Let the Mac Sleep").on_click(move |_, _, cx| {
+                                ws.update(cx, |ws, cx| {
+                                    ws.keep_awake.stop_manual();
+                                    ws.schedule_keep_awake(cx);
+                                })
+                            }));
+                        }
+                        menu
+                    })
+            })
             .child(
                 div()
                     .id("settings")

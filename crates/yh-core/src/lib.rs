@@ -3,6 +3,7 @@
 //! markdown parsing. No GPUI here, so it's testable on its own and the app stays thin over it.
 
 pub mod attachments;
+pub mod agents;
 pub mod claude;
 pub mod db;
 pub mod files;

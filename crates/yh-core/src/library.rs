@@ -342,6 +342,11 @@ impl Library {
         self.save();
     }
 
+    /// A thread's record as saved.
+    pub fn thread_record(&self, id: &str) -> Option<Map<String, Value>> {
+        self.records.lock().unwrap().threads.iter().find(|t| t.get("id").and_then(Value::as_str) == Some(id)).cloned()
+    }
+
     /// Takes a thread's record out (its rows stay, for Undo); `purge` deletes them later.
     pub fn take_thread(&self, id: &str) -> Option<Map<String, Value>> {
         let mut records = self.records.lock().unwrap();
@@ -392,7 +397,9 @@ impl Library {
         object.insert("id".into(), id.clone().into());
         object.insert("name".into(), last_component(path).into());
         object.insert("path".into(), path.into());
-        object.insert("permissionMode".into(), "auto".into());
+        // Settings → General's permissions for new projects.
+        let mode = records.values.get("defaults").and_then(|v| serde_json::from_slice::<Value>(v).ok()).and_then(|d| d["permissionMode"].as_str().map(str::to_string));
+        object.insert("permissionMode".into(), mode.unwrap_or_else(|| "auto".into()).into());
         let meta = ProjectMeta::from_record(id, &object);
         records.projects.push(object);
         drop(records);

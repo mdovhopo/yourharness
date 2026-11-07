@@ -318,6 +318,33 @@ pub fn app_is_active() -> bool {
     }
 }
 
+static NOTIFICATIONS_DENIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether macOS has notifications off for the app, as last asked (`refresh_notification_status`).
+pub fn notifications_denied() -> bool {
+    NOTIFICATIONS_DENIED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Asks macOS whether the app may notify; the answer arrives a moment later.
+pub fn refresh_notification_status() {
+    if std::env::var("YH_NOTIFICATIONS").as_deref() == Ok("log") {
+        return;
+    }
+    unsafe {
+        let center: id = msg_send![class!(UNUserNotificationCenter), currentNotificationCenter];
+        if center == nil {
+            return;
+        }
+        let done = block::ConcreteBlock::new(|settings: id| {
+            // UNAuthorizationStatusDenied = 1
+            let status: i64 = msg_send![settings, authorizationStatus];
+            NOTIFICATIONS_DENIED.store(status == 1, std::sync::atomic::Ordering::Relaxed);
+        })
+        .copy();
+        let _: () = msg_send![center, getNotificationSettingsWithCompletionHandler: &*done];
+    }
+}
+
 /// A notification from the app (`YH_NOTIFICATIONS=log` prints it instead, so a test run never
 /// asks for permission). The first one asks macOS for permission.
 pub fn notify(title: &str, body: &str) {

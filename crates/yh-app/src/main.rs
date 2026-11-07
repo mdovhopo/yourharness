@@ -8,6 +8,7 @@ mod state;
 mod theme;
 mod ui;
 mod webview;
+mod keep_awake;
 mod browser;
 
 use gpui_kit::{
@@ -170,7 +171,8 @@ fn main() {
                 host,
                 move |thread, cx| {
                     ws.update(cx, |ws, cx| {
-                        if ws.selected.as_deref() == Some(thread) {
+                        let auto_show = ws.library.setting("browserAutoShow").and_then(|v| v.as_bool()).unwrap_or(true);
+                        if auto_show && ws.selected.as_deref() == Some(thread) {
                             ws.show_panel(state::workspace::Panel::Browser, cx);
                         }
                     })
@@ -532,13 +534,16 @@ fn main() {
             })
             .detach();
         }
-        // `YH_OPEN_SETTINGS=1`: Settings opened after `YH_DRAFT_DELAY`.
+        // `YH_OPEN_SETTINGS=1`: Settings opened after `YH_DRAFT_DELAY`, on `YH_SETTINGS_TAB`.
         if env("YH_OPEN_SETTINGS").as_deref() == Some("1") {
             let delay: f64 = env("YH_DRAFT_DELAY").and_then(|v| v.parse().ok()).unwrap_or(1.0);
             let workspace = workspace.clone();
             cx.spawn(async move |cx| {
                 cx.background_executor().timer(Duration::from_secs_f64(delay)).await;
-                let _ = window.update(cx, |_, window, cx| ui::settings::open(workspace.clone(), window, cx));
+                let _ = window.update(cx, |_, window, cx| {
+                    let tab = env("YH_SETTINGS_TAB").and_then(|t| ui::settings::Tab::from_name(&t)).unwrap_or(ui::settings::Tab::General);
+                    ui::settings::open_on(workspace.clone(), tab, window, cx)
+                });
             })
             .detach();
         }

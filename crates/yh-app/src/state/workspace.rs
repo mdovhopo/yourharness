@@ -125,6 +125,9 @@ pub struct Workspace {
     /// Threads whose title is being rewritten (`update_title`), and how many messages the user
     /// had sent when it was last asked for.
     titles_rewriting: std::collections::HashSet<String>,
+    /// Keeps the Mac awake while Claude works (Settings), or as asked from the sidebar.
+    pub keep_awake: crate::keep_awake::KeepAwake,
+    keep_awake_timer: Option<Task<()>>,
     /// The last thread action that can be undone, and whether its notice still shows.
     undo: Option<(String, Undo)>,
     undo_shown: bool,
@@ -185,6 +188,8 @@ impl Workspace {
             page: None,
             side_chats: HashMap::new(),
             memory_agent_sources: HashMap::new(),
+            keep_awake: crate::keep_awake::KeepAwake::new(crate::keep_awake::Settings::from(None)),
+            keep_awake_timer: None,
             undo: None,
             undo_shown: false,
             undo_serial: 0,
@@ -205,6 +210,18 @@ impl Workspace {
             workspace.panel = panel;
             workspace.shows_inspector = true;
         }
+        workspace.keep_awake.configure(crate::keep_awake::Settings::from(workspace.library.setting("keepAwake")));
+        let chosen = workspace.library.setting("cliPathOverrides").and_then(|o| o["claude"].as_str().map(std::path::PathBuf::from));
+        yh_core::claude::set_chosen_claude(chosen);
+        // Idle threads settle on their own: now, and every hour.
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(Duration::from_secs(5)).await;
+            if this.update(cx, |ws, cx| ws.settle_idle_threads(cx)).is_err() {
+                break;
+            }
+            cx.background_executor().timer(Duration::from_secs(3600)).await;
+        })
+        .detach();
         workspace.ensure_home(cx);
         workspace.recover_cut_off_turns(cx);
         workspace
@@ -252,6 +269,46 @@ impl Workspace {
     /// The Home project's ID, shown first and named Home.
     pub fn home_project(&self) -> Option<String> {
         self.library.setting("homeProjectID").and_then(|v| v.as_str().map(str::to_string))
+    }
+
+    /// Settings → General: Home, where threads outside a project run, moves to another folder.
+    /// Its threads keep their conversations; their next message starts there.
+    pub fn set_home_folder(&mut self, path: &str, cx: &mut Context<Self>) {
+        let Some(id) = self.home_project() else { return };
+        self.library.update_project(&id, |p| {
+            p.insert("path".into(), path.into());
+        });
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == id) {
+            p.path = path.to_string();
+        }
+        let ids: Vec<String> = self.threads.iter().filter(|t| t.read(cx).meta.project_id == id).map(|t| t.read(cx).id().to_string()).collect();
+        for thread in ids {
+            if !self.thread(&thread).is_some_and(|t| t.read(cx).running) {
+                self.end_runtime(&thread, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Settings → General → Sleep changed.
+    pub fn configure_keep_awake(&mut self, settings: crate::keep_awake::Settings, cx: &mut Context<Self>) {
+        self.library.set_setting("keepAwake", &settings.to_json());
+        self.keep_awake.configure(settings);
+        self.schedule_keep_awake(cx);
+    }
+
+    /// Settings → Agents: the `claude` to run (None: the one found). Running threads keep theirs.
+    pub fn choose_claude(&mut self, path: Option<String>, cx: &mut Context<Self>) {
+        let mut overrides = self.library.setting("cliPathOverrides").filter(Value::is_object).unwrap_or(serde_json::json!({}));
+        match &path {
+            Some(p) => overrides["claude"] = Value::from(p.clone()),
+            None => {
+                overrides.as_object_mut().unwrap().remove("claude");
+            }
+        }
+        self.library.set_setting("cliPathOverrides", &overrides);
+        yh_core::claude::set_chosen_claude(path.map(Into::into));
+        cx.notify();
     }
 
     pub fn running_count(&self, cx: &App) -> usize {
@@ -597,6 +654,71 @@ impl Workspace {
         .detach();
     }
 
+    /// Keep Awake follows whether Claude works anywhere; its one timer is for a deadline.
+    pub fn note_working(&mut self, cx: &mut Context<Self>) {
+        let working = self.threads.iter().any(|t| t.read(cx).running) || self.by_id.values().any(|t| t.read(cx).running);
+        self.keep_awake.set_working(working);
+        if std::env::var("YH_KEEP_AWAKE_LOG").is_ok() {
+            eprintln!("Keep awake: {}", self.keep_awake.describe());
+        }
+        self.schedule_keep_awake(cx);
+    }
+
+    pub fn schedule_keep_awake(&mut self, cx: &mut Context<Self>) {
+        self.keep_awake_timer = self.keep_awake.deadline().map(|at| {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(at.saturating_duration_since(std::time::Instant::now()) + Duration::from_millis(500)).await;
+                let _ = this.update(cx, |ws, cx| {
+                    ws.keep_awake.update();
+                    ws.schedule_keep_awake(cx);
+                    cx.notify();
+                });
+            })
+        });
+        cx.notify();
+    }
+
+    /// Your rules for generated titles (`titlePrompt`, the Swift app's key; `titleRules` before).
+    pub fn title_prompt(&self) -> Option<String> {
+        ["titlePrompt", "titleRules"].iter().find_map(|k| self.library.setting(k).and_then(|r| r.as_str().map(str::to_string))).filter(|r| !r.trim().is_empty())
+    }
+
+    /// Settles threads idle for `autoSettleDays` (3 by default; 0 never), the Swift app's way:
+    /// never while working or waiting on you, never the one on screen, never one opted out
+    /// or brought back since its last message, never an untouched blank.
+    pub fn settle_idle_threads(&mut self, cx: &mut Context<Self>) {
+        let days = self.library.setting("autoSettleDays").and_then(|v| v.as_i64()).unwrap_or(3);
+        if days <= 0 {
+            return;
+        }
+        let cutoff = yh_core::library::now_ms() - days as f64 * 86_400_000.;
+        let candidates: Vec<String> = self
+            .threads
+            .iter()
+            .filter_map(|t| {
+                let t = t.read(cx);
+                let id = t.id().to_string();
+                let record = self.library.thread_record(&id).unwrap_or_default();
+                let ok = t.meta.settled_at.is_none()
+                    && !t.running
+                    && t.permission.is_none()
+                    && self.selected.as_deref() != Some(id.as_str())
+                    && record.get("autoSettle").and_then(|v| v.as_bool()) != Some(false)
+                    && record.get("reactivatedAt").is_none_or(|v| v.is_null())
+                    && (t.session_id.is_some() || t.title != "New thread")
+                    && t.meta.updated_at < cutoff;
+                ok.then_some(id)
+            })
+            .collect();
+        if std::env::var("YH_DATA_DIR").is_ok() && !candidates.is_empty() {
+            eprintln!("Settled {} idle threads", candidates.len());
+        }
+        for id in candidates {
+            self.set_pinned(&id, false, cx);
+            self.set_settled(&id, true, cx);
+        }
+    }
+
     /// Unpins with Undo, or pins (from the sidebar).
     pub fn toggle_pin(&mut self, id: &str, cx: &mut Context<Self>) {
         let Some(t) = self.thread(id) else { return };
@@ -718,6 +840,7 @@ impl Workspace {
             r.insert("turnInProgress".into(), true.into());
             r.insert("updatedAt".into(), iso_now().into());
         });
+        self.note_working(cx);
         if first_message && title == "New thread" && !chosen && !text.is_empty() {
             self.generate_title(thread, &text, cx);
         }
@@ -885,9 +1008,15 @@ impl Workspace {
             return Ok(());
         }
         // The browser the user watches, driven with mcp__browser__*.
-        prompt.push(crate::browser::instructions().to_string());
-        allowed.push("mcp__browser".to_string());
-        servers.push(std::sync::Arc::new(crate::browser::BrowserTools { thread: t.id().to_string(), project: Some(t.meta.project_id.clone()), read_only: false }));
+        if self.library.setting("browserTools").and_then(|v| v.as_bool()).unwrap_or(true) {
+            prompt.push(crate::browser::instructions().to_string());
+            allowed.push("mcp__browser".to_string());
+            servers.push(std::sync::Arc::new(crate::browser::BrowserTools { thread: t.id().to_string(), project: Some(t.meta.project_id.clone()), read_only: false }));
+        }
+        // Mermaid blocks are always drawn; this tells agents they may use them.
+        if self.library.setting("diagramInstructions").and_then(|v| v.as_bool()).unwrap_or(true) {
+            prompt.push(DIAGRAM_PROMPT.to_string());
+        }
         let options = LaunchOptions {
             cwd,
             session_id: t.session_id.clone(),
@@ -1038,6 +1167,8 @@ impl Workspace {
     /// The turn is over: saved, unread if you were elsewhere, its `claude` let go of later.
     fn turn_ended(&mut self, thread: &Entity<ThreadState>, cx: &mut Context<Self>) {
         let id = thread.read(cx).id().to_string();
+        thread.update(cx, |t, _| t.running = false);
+        self.note_working(cx);
         let selected = self.selected.as_deref() == Some(id.strip_prefix(SIDE).unwrap_or(&id));
         if !self.looking_at(&id) && self.notifications_on() {
             crate::platform::notify(&thread.read(cx).title, "Claude finished");
@@ -1084,7 +1215,7 @@ impl Workspace {
             return;
         }
         let model = settings["model"].as_str().unwrap_or("haiku").to_string();
-        let rules = self.library.setting("titleRules").and_then(|r| r.as_str().map(str::to_string));
+        let rules = self.title_prompt();
         let prompt = yh_core::titles::initial_prompt(message, rules.as_deref());
         let Some(claude) = yh_core::claude::find_claude() else { return };
         let path = std::env::var("YH_PATH").ok();
@@ -1718,7 +1849,7 @@ impl Workspace {
             return format!("The title (“{current}”) can't be rewritten right now.");
         };
         let model = settings["model"].as_str().unwrap_or("haiku").to_string();
-        let rules = self.library.setting("titleRules").and_then(|r| r.as_str().map(str::to_string));
+        let rules = self.title_prompt();
         let prompt = yh_core::titles::regenerate_prompt(&messages, &current, rules.as_deref(), hint.as_deref());
         let path = std::env::var("YH_PATH").ok();
         self.titles_rewriting.insert(caller.to_string());
@@ -1821,3 +1952,18 @@ pub fn session_id_in(text: &str) -> Option<String> {
         ok.then_some(s.to_lowercase())
     })
 }
+
+/// What agents are told about diagrams (the Swift app's `AgentInstructions.diagrams`).
+pub const DIAGRAM_PROMPT: &str = "You are running inside YourHarness, a native macOS app that draws ```mermaid code blocks in your replies \
+as diagrams, right in the conversation, with zoom, copy and PNG export. When the user asks for a diagram, \
+chart, flow or visualization, or a picture would explain something better than prose, put ```mermaid \
+blocks in your reply. Do this instead of generating image files (Graphviz/dot, PlantUML, mermaid-cli, SVG, \
+PNG) or installing tools for it, unless the user explicitly asks for a file or the diagram has to live in \
+the repo. Don't add diagrams to simple answers.
+Supported: `flowchart` (TD, LR, BT, RL; shapes [box] (rounded) ([pill]) {decision} ((circle)) [(database)] \
+[[subroutine]] {{hexagon}}; edges --> --- -.-> ==> with |labels|; subgraph … end; classDef/class/:::name/style \
+with fill, stroke, stroke-width, stroke-dasharray) and `sequenceDiagram` (participant/actor, ->> -->> -x -) \
+arrows, +/- activation, Note, loop/alt/else/opt/par/critical/break). Other diagram types show as code.
+For a big system, draw an overview plus focused diagrams (around 25 nodes each) and group with subgraphs. \
+To highlight things such as risks or gaps, use a class, e.g. `classDef gap stroke:#e5484d,stroke-dasharray:4` \
+then `class X,Y gap`. Quote labels that contain punctuation, e.g. A[\"Parse (v2)\"].";

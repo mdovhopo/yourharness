@@ -179,16 +179,16 @@ pub struct ClaudeProcess {
     server_names: Vec<String>,
 }
 
-/// `claude` on `YH_PATH` (as the app's test runs pass it), else `PATH` and the usual places.
+static CHOSEN: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+
+/// The `claude` chosen in Settings → Agents (`cliPathOverrides.claude`), used in place of the one found.
+pub fn set_chosen_claude(path: Option<std::path::PathBuf>) {
+    *CHOSEN.lock().unwrap() = path;
+}
+
+/// The chosen `claude`, else the one on `YH_PATH` (as the app's test runs pass it), `PATH` and the usual places.
 pub fn find_claude() -> Option<std::path::PathBuf> {
-    let path = std::env::var("YH_PATH").or_else(|_| std::env::var("PATH")).unwrap_or_default();
-    let home = std::env::var("HOME").unwrap_or_default();
-    let extra = [format!("{home}/.local/bin"), format!("{home}/.claude/local"), "/opt/homebrew/bin".into(), "/usr/local/bin".into()];
-    path.split(':')
-        .map(str::to_string)
-        .chain(extra)
-        .map(|d| std::path::Path::new(&d).join("claude"))
-        .find(|p| p.is_file())
+    CHOSEN.lock().unwrap().clone().filter(|p| p.is_file()).or_else(|| crate::agents::which("claude"))
 }
 
 impl ClaudeProcess {
