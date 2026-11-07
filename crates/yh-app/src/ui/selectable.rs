@@ -8,8 +8,8 @@
 use gpui_kit::base::{TextSelectionHandle, TextSelectionRegistration, TextSelectionRun};
 use gpui_kit::{
     App, BorderStyle, Bounds, Corners, CursorStyle, DispatchPhase, Edges, Element, ElementId, GlobalElementId, Hitbox, HitboxBehavior, Hsla,
-    InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
-    SharedString, StyledText, Window, transparent_black,
+    HighlightStyle, InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
+    SharedString, StyledText, TextRun, TextStyle, Window, transparent_black,
 };
 use std::cell::Cell;
 use std::ops::Range;
@@ -37,6 +37,9 @@ pub struct SelText {
     color: Hsla,
     links: Vec<Range<usize>>,
     on_link: Option<OnLink>,
+    /// Styles laid over the inherited text style when laid out, and ranges set in SF Mono
+    /// (inline code): what `StyledText`'s own highlights can't do, as they can't change font.
+    rich: Option<(Vec<(Range<usize>, HighlightStyle)>, Vec<Range<usize>>)>,
 }
 
 /// What a `SelText` keeps between frames.
@@ -53,7 +56,7 @@ impl SelText {
     /// `order` places it in reading order among the others (rows, then blocks in a row);
     /// `color` paints what's selected.
     pub fn new(id: impl Into<ElementId>, text: SharedString, styled: StyledText, order: u64, color: Hsla) -> SelText {
-        SelText { id: id.into(), text, styled, order, color, links: vec![], on_link: None }
+        SelText { id: id.into(), text, styled, order, color, links: vec![], on_link: None, rich: None }
     }
 
     /// Clickable ranges; `on_link` gets the index of the one clicked.
@@ -61,6 +64,40 @@ impl SelText {
         self.links = ranges;
         self.on_link = Some(Rc::new(on_link));
         self
+    }
+
+    /// Highlights, and ranges in the monospaced font, over whatever text style it inherits.
+    pub fn rich(mut self, highlights: Vec<(Range<usize>, HighlightStyle)>, mono: Vec<Range<usize>>) -> SelText {
+        self.rich = Some((highlights, mono));
+        self
+    }
+
+    /// The runs for `rich`: cut wherever a style starts or ends, each piece the inherited
+    /// style with every highlight over it, in SF Mono where a mono range covers it.
+    fn rich_runs(text: &str, base: &TextStyle, highlights: &[(Range<usize>, HighlightStyle)], mono: &[Range<usize>]) -> Vec<TextRun> {
+        let mut cuts: Vec<usize> = vec![0, text.len()];
+        for r in highlights.iter().map(|(r, _)| r).chain(mono.iter()) {
+            cuts.push(r.start.min(text.len()));
+            cuts.push(r.end.min(text.len()));
+        }
+        cuts.sort_unstable();
+        cuts.dedup();
+        cuts.retain(|c| text.is_char_boundary(*c));
+        cuts.windows(2)
+            .filter(|w| w[1] > w[0])
+            .map(|w| {
+                let mut style = base.clone();
+                for (r, h) in highlights {
+                    if r.start <= w[0] && w[1] <= r.end {
+                        style = style.highlight(*h);
+                    }
+                }
+                if mono.iter().any(|r| r.start <= w[0] && w[1] <= r.end) {
+                    style.font_family = crate::theme::MONO.into();
+                }
+                style.to_run(w[1] - w[0])
+            })
+            .collect()
     }
 
     fn link_at(links: &[Range<usize>], layout: &gpui_kit::TextLayout, position: Point<Pixels>) -> Option<usize> {
@@ -108,6 +145,10 @@ impl Element for SelText {
             let state = kept.unwrap_or_else(|| State { handle: TextSelectionHandle::new(self.text.clone(), cx), down: Default::default(), hovered: Default::default() });
             (state.clone(), state)
         });
+        if let Some((highlights, mono)) = self.rich.take() {
+            let runs = Self::rich_runs(&self.text, &window.text_style(), &highlights, &mono);
+            self.styled = StyledText::new(self.text.clone()).with_runs(runs);
+        }
         let (layout, ()) = self.styled.request_layout(id, inspector_id, window, cx);
         (layout, state)
     }

@@ -6,7 +6,7 @@
 
 use crate::state::thread::{ItemType, ThreadState};
 use crate::state::workspace::Workspace;
-use crate::theme::Theme;
+use crate::theme::{space, text as ts, Theme};
 use gpui_kit::component::{Icon, IconName};
 use gpui_kit::{div, prelude::*, px, Action, App, Context, Entity, FontWeight, Global, WeakEntity, Window};
 use std::time::Duration;
@@ -131,8 +131,8 @@ fn jump_button(id: &'static str, name: IconName, tip: &'static str, action: Box<
         .border_color(theme.separator)
         .shadow_sm()
         .cursor_pointer()
-        .hover(|s| s.bg(theme.card))
-        .child(Icon::new(name).size(px(15.)).text_color(theme.secondary))
+        .hover(|s| s.bg(theme.card).border_color(theme.tertiary.opacity(0.5)))
+        .child(Icon::new(name).size(px(14.)).text_color(theme.secondary))
         .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip).build(window, cx))
         .on_click(move |_, window, cx| window.dispatch_action(action.boxed_clone(), cx))
 }
@@ -168,14 +168,14 @@ impl Render for WorkingTimer {
                     div()
                         .flex()
                         .items_center()
-                        .gap(px(6.))
+                        .gap(px(space::XS + 2.))
+                        .h(px(24.))
                         .px(px(10.))
-                        .py(px(3.))
-                        .rounded(px(10.))
-                        .bg(theme.card)
+                        .rounded_full()
+                        .bg(theme.canvas)
                         .border_1()
                         .border_color(theme.separator)
-                        .text_size(px(11.5))
+                        .text_size(px(ts::CAPTION))
                         .text_color(theme.secondary)
                         .child(div().w(px(6.)).h(px(6.)).rounded_full().bg(theme.accent))
                         .child(div().font_weight(FontWeight::MEDIUM).child(text)),

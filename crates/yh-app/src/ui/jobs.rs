@@ -10,9 +10,9 @@
 use crate::state::jobs::{self, Job};
 use crate::state::thread::ThreadState;
 use crate::state::workspace::Workspace;
-use crate::theme::{Theme, MONO};
+use crate::theme::{radius, space, text as ts, Theme, MONO};
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::Sizable;
+use gpui_kit::component::{Icon, IconName, Sizable};
 use gpui_kit::{
     div, prelude::*, px, AnyWindowHandle, App, Context, Entity, FontWeight, Global, PromptLevel, SharedString, Subscription, Task,
     Window,
@@ -154,9 +154,9 @@ impl JobsStrip {
         div()
             .flex()
             .flex_col()
-            .gap(px(4.))
-            .px(px(10.))
-            .py(px(4.))
+            .gap(px(space::XS))
+            .px(px(space::M))
+            .py(px(space::XS))
             .child(
                 div()
                     .flex()
@@ -171,7 +171,7 @@ impl JobsStrip {
                             .items_center()
                             .gap(px(10.))
                             .cursor_pointer()
-                            .child(div().flex_none().w(px(16.)).text_color(theme.secondary).font_family(MONO).text_size(px(11.)).child(if job.watch { "◉" } else { ">_" }))
+                            .child(div().flex_none().w(px(16.)).flex().justify_center().child(Icon::new(if job.watch { IconName::Eye } else { IconName::SquareTerminal }).size(px(14.)).text_color(theme.secondary)))
                             .child(
                                 div()
                                     .flex_1()
@@ -183,9 +183,9 @@ impl JobsStrip {
                                         d.child(
                                             div()
                                                 .font_family(MONO)
-                                                .text_size(px(11.))
+                                                .text_size(px(ts::CAPTION))
                                                 .line_height(px(15.))
-                                                .text_color(theme.secondary)
+                                                .text_color(theme.tertiary)
                                                 .overflow_hidden()
                                                 .whitespace_nowrap()
                                                 .text_ellipsis()
@@ -193,8 +193,8 @@ impl JobsStrip {
                                         )
                                     }),
                             )
-                            .child(div().flex_none().text_color(theme.secondary).child(elapsed))
-                            .child(div().flex_none().w(px(10.)).text_color(theme.secondary).child(if open { "⌄" } else { "›" }))
+                            .child(div().flex_none().text_size(px(ts::CAPTION)).text_color(theme.secondary).child(elapsed))
+                            .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).size(px(12.)).text_color(theme.tertiary))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if !this.expanded.remove(&toggle_id) {
                                     this.expanded.insert(toggle_id.clone());
@@ -226,10 +226,12 @@ impl JobsStrip {
                         .max_h(px(220.))
                         .overflow_y_scroll()
                         .font_family(MONO)
-                        .text_size(px(11.))
+                        .text_size(px(ts::CAPTION))
                         .line_height(px(15.))
                         .bg(theme.code)
-                        .rounded(px(6.))
+                        .border_1()
+                        .border_color(theme.separator)
+                        .rounded(px(radius::MEDIUM))
                         .px(px(8.))
                         .py(px(6.))
                         .text_color(theme.text)
@@ -259,15 +261,15 @@ impl Render for JobsStrip {
             .w_full()
             .max_w(px(828.))
             .mb(px(6.))
-            .pb(px(3.))
-            .rounded(px(10.))
+            .pb(px(space::XS))
+            .rounded(px(radius::LARGE))
             .bg(theme.card)
             .border_1()
             .border_color(theme.separator)
-            .text_size(px(12.))
+            .text_size(px(ts::FOOTNOTE))
             .flex()
             .flex_col()
-            .child(div().px(px(10.)).pt(px(7.)).pb(px(2.)).text_size(px(11.)).text_color(theme.secondary).child(header));
+            .child(div().px(px(space::M)).pt(px(space::S)).pb(px(2.)).text_size(px(ts::CAPTION)).font_weight(FontWeight::MEDIUM).text_color(theme.secondary).child(header));
         for job in &jobs {
             strip = strip.child(self.job_row(job, &thread, &theme, cx));
         }

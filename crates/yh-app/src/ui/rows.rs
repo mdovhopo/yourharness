@@ -6,7 +6,7 @@ use crate::state::harness_tools::{media_kind, media_name, media_paths, MediaKind
 use crate::state::thread::{EntryRef, Fold, Item, ItemType, ThreadState, TurnWork};
 use yh_core::library::Kind;
 use yh_core::links::Linker;
-use crate::theme::{Theme, MONO};
+use crate::theme::{radius, space, text as ts, Theme, MONO};
 use gpui_kit::{
     div, prelude::*, px, AnyElement, App, ClipboardItem, ElementId, Entity, FontStyle, FontWeight, HighlightStyle, Hsla,
     SharedString, StrikethroughStyle, StyledText, Window,
@@ -55,9 +55,31 @@ pub fn icon(name: IconName, size: f32, color: Hsla) -> Icon {
     Icon::new(name).size(px(size)).text_color(color)
 }
 
-/// Green, for done.
-fn green() -> Hsla {
-    gpui_kit::rgb(0x34c759).into()
+/// A Lucide icon the default set doesn't have, from its SVG paths.
+fn lucide(paths: &'static str) -> Icon {
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">{paths}</svg>"#
+    );
+    Icon::default().data(svg.as_bytes())
+}
+
+/// Lucide's list-checks: a plan.
+fn list_checks_icon() -> Icon {
+    lucide(r#"<path d="M13 5h8"/><path d="M13 12h8"/><path d="M13 19h8"/><path d="m3 17 2 2 4-4"/><path d="m3 7 2 2 4-4"/>"#)
+}
+
+/// Lucide's circle-dashed: a task not started yet.
+fn circle_dashed_icon() -> Icon {
+    lucide(r#"<path d="M10.1 2.182a10 10 0 0 1 3.8 0"/><path d="M13.9 21.818a10 10 0 0 1-3.8 0"/><path d="M17.609 3.721a10 10 0 0 1 2.69 2.7"/><path d="M2.182 13.9a10 10 0 0 1 0-3.8"/><path d="M20.279 17.609a10 10 0 0 1-2.7 2.69"/><path d="M21.818 10.1a10 10 0 0 1 0 3.8"/><path d="M3.721 6.391a10 10 0 0 1 2.7-2.69"/><path d="M6.391 20.279a10 10 0 0 1-2.69-2.7"/>"#)
+}
+
+/// Lucide's circle-dot: the task under way.
+fn circle_dot_icon() -> Icon {
+    lucide(r#"<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="1"/>"#)
+}
+
+fn sized(icon: Icon, size: f32, color: Hsla) -> Icon {
+    icon.size(px(size)).text_color(color)
 }
 
 /// A stable id from what a piece shows, for its buttons: rows have no ids of their own.
@@ -100,7 +122,7 @@ pub fn render_item(thread: &Entity<ThreadState>, ix: usize, window: &mut Window,
             div()
                 .flex()
                 .flex_col()
-                .gap(px(6.))
+                .gap(px(space::XS))
                 .children(summary)
                 .when(open, |d| d.child(work_box(content, &theme)))
                 .into_any_element()
@@ -109,6 +131,9 @@ pub fn render_item(thread: &Entity<ThreadState>, ix: usize, window: &mut Window,
         _ => content,
     };
     let hit = state.find_hit == Some(item.pos);
+    // Open work keeps its spacing inside its box, so the rule down its side runs unbroken
+    // from row to row.
+    let in_box = matches!(fold, Fold::Open);
     // The column: centred, at most 820 wide, as the web transcript's.
     div()
         .when(hit, |d| d.bg(theme.accent.opacity(0.10)))
@@ -116,14 +141,15 @@ pub fn render_item(thread: &Entity<ThreadState>, ix: usize, window: &mut Window,
         .flex()
         .justify_center()
         .px(px(28.))
-        .py(px(4.))
+        .when(!in_box, |d| d.py(px(space::XS)))
         .child(div().w_full().max_w(px(764.)).child(content))
         .into_any_element()
 }
 
-/// A finished turn's work shown open: a rule down its side, as one group under its summary.
+/// A finished turn's work shown open: a hairline down its side, under the summary's chevron,
+/// as one group.
 fn work_box(content: AnyElement, theme: &Theme) -> AnyElement {
-    div().border_l_2().border_color(theme.separator).ml(px(8.)).pl(px(12.)).child(content).into_any_element()
+    div().border_l_1().border_color(theme.separator).ml(px(13.)).pl(px(space::M)).py(px(space::XS)).child(content).into_any_element()
 }
 
 const EDIT_TOOLS: &[&str] = &["Edit", "MultiEdit", "Write", "NotebookEdit"];
@@ -179,21 +205,21 @@ fn turn_summary(state: &ThreadState, work: &TurnWork, open: bool, pos: i64, thre
     };
     let details = turn_details(state, work);
     let handle = thread.clone();
+    // Quiet, like a disclosure line: secondary text on the canvas, a fill under the pointer.
     div()
         .id(("turn", pos as u64 as usize))
         .flex()
         .items_center()
-        .gap(px(8.))
+        .gap(px(6.))
         .w_full()
-        .px(px(12.))
-        .py(px(6.))
-        .rounded(px(8.))
-        .border_1()
-        .border_color(theme.separator)
-        .bg(theme.card)
-        .hover(|s| s.bg(theme.selected))
+        .h(px(28.))
+        .px(px(6.))
+        .rounded(px(radius::MEDIUM))
+        .hover(|s| s.bg(theme.hover))
         .cursor_pointer()
-        .text_size(px(12.5))
+        .text_size(px(ts::FOOTNOTE))
+        .text_color(theme.secondary)
+        .child(div().flex_none().w(px(14.)).flex().justify_center().child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, 13., theme.secondary)))
         .child(div().flex_none().font_weight(FontWeight::MEDIUM).child(worked))
         .child(
             div()
@@ -202,11 +228,9 @@ fn turn_summary(state: &ThreadState, work: &TurnWork, open: bool, pos: i64, thre
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .text_ellipsis()
-                .text_color(theme.secondary)
+                .text_color(theme.tertiary)
                 .when(!details.is_empty(), |d| d.child(format!("· {details}"))),
         )
-        .child(div().flex_none().text_size(px(11.)).text_color(theme.secondary).child(if open { "Hide work" } else { "Show work" }))
-        .child(div().flex_none().w(px(10.)).text_color(theme.secondary).child(if open { "⌄" } else { "›" }))
         .on_click(move |_, _, cx| {
             handle.update(cx, |t, cx| {
                 t.toggle_turn(pos);
@@ -227,13 +251,18 @@ fn copy_button(id: ElementId, text: String, label: &'static str, theme: &Theme) 
     div()
         .id(id)
         .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(space::XS))
+        .h(px(20.))
         .px(px(6.))
-        .rounded(px(5.))
-        .text_size(px(11.))
-        .line_height(px(17.))
+        .rounded(px(radius::SMALL))
+        .font_family(crate::theme::UI)
+        .text_size(px(ts::CAPTION))
         .text_color(theme.secondary)
         .cursor_pointer()
-        .hover(|s| s.bg(theme.selected))
+        .hover(|s| s.bg(theme.hover).text_color(theme.text))
+        .child(icon(IconName::Copy, 12., theme.secondary))
         .child(label)
         .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(text.clone())))
 }
@@ -269,11 +298,11 @@ fn file_chip(name: &str, theme: &Theme) -> gpui_kit::Div {
         .gap(px(8.))
         .h(px(40.))
         .px(px(10.))
-        .rounded(px(8.))
+        .rounded(px(radius::MEDIUM))
         .border_1()
         .border_color(theme.separator)
         .bg(theme.card)
-        .text_size(px(12.))
+        .text_size(px(ts::FOOTNOTE))
         .child(icon(if folder { IconName::Folder } else { IconName::File }, 16., theme.secondary))
         .child(div().max_w(px(220.)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(yh_core::library::last_component(name.trim_end_matches('/')).to_string()))
 }
@@ -366,9 +395,10 @@ fn user_row(item: &Item, ctx: &RowContext, theme: &Theme, window: &Window) -> An
         .flex_col()
         .items_end()
         .gap(px(2.))
-        .py(px(4.))
+        .pt(px(space::S))
+        .pb(px(space::XS))
         .group("user-message")
-        .when_some(note, |d, n| d.child(div().text_size(px(11.)).text_color(theme.secondary).child(n)))
+        .when_some(note, |d, n| d.child(div().text_size(px(ts::CAPTION)).text_color(theme.secondary).child(n)))
         .when(!images.is_empty(), |d| {
             d.child(div().flex().flex_wrap().justify_end().gap(px(6.)).mb(px(2.)).children(images.iter().enumerate().map(|(n, name)| {
                 let path = attachments_dir().join(name).to_string_lossy().into_owned();
@@ -389,11 +419,11 @@ fn user_row(item: &Item, ctx: &RowContext, theme: &Theme, window: &Window) -> An
                         }
                     });
                 let tile = match kind {
-                    Some(MediaKind::Image) => tile.child(gpui_kit::img(std::path::PathBuf::from(&path)).max_w(px(240.)).max_h(px(180.)).rounded(px(8.))),
+                    Some(MediaKind::Image) => tile.child(gpui_kit::img(std::path::PathBuf::from(&path)).max_w(px(240.)).max_h(px(180.)).rounded(px(radius::LARGE))),
                     Some(MediaKind::Video) => tile
                         .w(px(220.))
                         .h(px(124.))
-                        .rounded(px(8.))
+                        .rounded(px(radius::LARGE))
                         .bg(gpui_kit::black().opacity(0.82))
                         .flex()
                         .items_center()
@@ -409,9 +439,9 @@ fn user_row(item: &Item, ctx: &RowContext, theme: &Theme, window: &Window) -> An
                 div()
                     .max_w(gpui_kit::relative(0.8))
                     .bg(theme.bubble)
-                    .px(px(12.))
-                    .py(px(8.))
-                    .rounded(px(14.))
+                    .px(px(14.))
+                    .py(px(space::S))
+                    .rounded(px(radius::LARGE))
                     .when(queued, |d| d.opacity(0.6))
                     .child(user_text(&text, ctx, theme, window)),
             )
@@ -422,8 +452,8 @@ fn user_row(item: &Item, ctx: &RowContext, theme: &Theme, window: &Window) -> An
             div()
                 .flex()
                 .items_center()
-                .gap(px(4.))
-                .h(px(17.))
+                .gap(px(space::XS))
+                .h(px(20.))
                 .when(!text.is_empty(), |d| {
                     d.child(copy_button(id_of("copy-user", (pos, &text)), text.clone(), "Copy", theme).opacity(0.).group_hover("user-message", |s| s.opacity(1.)))
                 })
@@ -432,8 +462,8 @@ fn user_row(item: &Item, ctx: &RowContext, theme: &Theme, window: &Window) -> An
                     d.child(
                         div()
                             .id(("user-time", pos as u64 as usize))
-                            .text_size(px(10.5))
-                            .text_color(theme.secondary.opacity(0.75))
+                            .text_size(px(ts::CAPTION))
+                            .text_color(theme.tertiary)
                             .child(yh_core::clock::message_time(date, yh_core::library::now_ms() / 1000.0))
                             .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(full.clone()).build(window, cx)),
                     )
@@ -470,7 +500,7 @@ fn text_row(e: &EntryRef, ctx: &RowContext, theme: &Theme, window: &Window) -> A
         .flex_col()
         .group("reply")
         .child(markdown_view_in(&md, theme, Some(ctx), Some(window)))
-        .child(div().h(px(17.)).mt(px(2.)).flex().when(!live, |d| {
+        .child(div().h(px(20.)).mt(px(space::XS)).ml(px(-6.)).flex().when(!live, |d| {
             d.child(copy_button(id_of("copy-reply", (ctx.pos, &text)), text, "Copy", theme).opacity(0.).group_hover("reply", |s| s.opacity(1.)))
         }))
         .into_any_element()
@@ -507,17 +537,18 @@ fn media_row(e: &EntryRef, ctx: &RowContext, theme: &Theme) -> AnyElement {
         .collect();
     let all: Vec<String> = items.iter().map(|(s, _, _)| s.clone()).collect();
     let single = items.len() == 1;
-    let mut column = div().flex().flex_col().gap(px(8.)).py(px(4.)).child(
+    let mut column = div().flex().flex_col().gap(px(space::S)).py(px(space::XS)).child(
         div()
             .flex()
+            .items_center()
             .gap(px(6.))
-            .text_size(px(12.5))
+            .text_size(px(ts::FOOTNOTE))
             .child(icon(IconName::GalleryVerticalEnd, 14., theme.secondary))
             .child(div().when(caption.is_none(), |d| d.text_color(theme.secondary)).child(caption.unwrap_or(summary)))
             .when(!done, |d| d.child(div().text_color(theme.secondary).child("…"))),
     );
     if failed {
-        column = column.child(div().text_size(px(12.5)).text_color(theme.error).child(result));
+        column = column.child(div().text_size(px(ts::FOOTNOTE)).text_color(theme.error).child(result));
     } else {
         column = column.child(div().flex().flex_wrap().gap(px(10.)).children(items.into_iter().enumerate().map(|(n, (stored, original, kind))| {
             let (menu_all, menu_path) = (all.clone(), stored.clone());
@@ -526,7 +557,7 @@ fn media_row(e: &EntryRef, ctx: &RowContext, theme: &Theme) -> AnyElement {
             let tile = div()
                 .id(id_of("media", (&stored, n)))
                 .cursor_pointer()
-                .rounded(px(8.))
+                .rounded(px(radius::LARGE))
                 .overflow_hidden()
                 .border_1()
                 .border_color(theme.separator)
@@ -543,8 +574,8 @@ fn media_row(e: &EntryRef, ctx: &RowContext, theme: &Theme) -> AnyElement {
                     .items_center()
                     .justify_center()
                     .gap(px(6.))
-                    .child(div().text_size(px(34.)).text_color(gpui_kit::white().opacity(0.9)).child("▶"))
-                    .child(div().text_size(px(11.)).text_color(gpui_kit::white().opacity(0.7)).child(yh_core::library::last_component(&original))),
+                    .child(icon(IconName::Play, 30., gpui_kit::white().opacity(0.9)))
+                    .child(div().text_size(px(ts::CAPTION)).text_color(gpui_kit::white().opacity(0.7)).child(yh_core::library::last_component(&original))),
             }
             .context_menu(move |menu, _, _| media_menu(menu, &menu_path, &menu_all, Some(kind)))
         })));
@@ -557,15 +588,39 @@ fn notice_row(e: &EntryRef, theme: &Theme) -> AnyElement {
     if b.data.kind == Kind::Command {
         drop(b);
         let md = markdown_of(e, None);
-        return div().bg(theme.card).rounded(px(10.)).px(px(12.)).py(px(8.)).child(markdown_view_in(&md, theme, None, None)).into_any_element();
+        return div()
+            .bg(theme.card)
+            .border_1()
+            .border_color(theme.separator)
+            .rounded(px(radius::LARGE))
+            .px(px(space::M))
+            .py(px(10.))
+            .text_size(px(ts::FOOTNOTE))
+            .child(markdown_view_in(&md, theme, None, None))
+            .into_any_element();
     }
+    let error = b.data.is_error;
+    // A line between turns, centred: what happened (compacted, model changed, an error).
     div()
         .w_full()
         .flex()
-        .justify_center()
-        .text_size(px(12.))
-        .text_color(if b.data.is_error { theme.error } else { theme.secondary })
-        .child(selectable(b.data.text.clone(), theme))
+        .items_center()
+        .gap(px(space::M))
+        .py(px(2.))
+        .text_size(px(ts::FOOTNOTE))
+        .text_color(if error { theme.error } else { theme.secondary })
+        .child(div().flex_1().h(px(1.)).bg(theme.separator))
+        .child(
+            div()
+                .flex_none()
+                .max_w(gpui_kit::relative(0.8))
+                .flex()
+                .items_start()
+                .gap(px(6.))
+                .when(error, |d| d.child(div().pt(px(3.)).child(icon(IconName::CircleAlert, 13., theme.error))))
+                .child(div().min_w_0().child(selectable(b.data.text.clone(), theme))),
+        )
+        .child(div().flex_1().h(px(1.)).bg(theme.separator))
         .into_any_element()
 }
 
@@ -573,7 +628,7 @@ fn notice_row(e: &EntryRef, theme: &Theme) -> AnyElement {
 fn status_icon(status: &str, theme: &Theme) -> Icon {
     match status {
         "running" => icon(IconName::LoaderCircle, 15., theme.accent),
-        "completed" => icon(IconName::CircleCheck, 15., green()),
+        "completed" => icon(IconName::CircleCheck, 15., theme.success),
         "failed" => icon(IconName::CircleX, 15., theme.error),
         _ => icon(IconName::Square, 13., theme.secondary),
     }
@@ -649,23 +704,25 @@ fn agent_row(thread: &Entity<ThreadState>, item: &Item, theme: &Theme) -> AnyEle
         .flex_col()
         .border_1()
         .border_color(if running {
-            theme.accent.opacity(0.5)
+            theme.accent.opacity(0.45)
         } else if failed {
-            theme.error.opacity(0.5)
+            theme.error.opacity(0.45)
         } else {
             theme.separator
         })
-        .rounded(px(10.))
+        .rounded(px(radius::LARGE))
         .bg(theme.card)
+        .overflow_hidden()
         .child(
             div()
                 .id(("agent", pos as u64 as usize))
                 .flex()
                 .items_center()
                 .gap(px(10.))
-                .px(px(12.))
-                .py(px(8.))
+                .px(px(space::M))
+                .py(px(space::S))
                 .cursor_pointer()
+                .hover(|s| s.bg(theme.hover))
                 .child(div().w(px(18.)).flex().justify_center().child(status_icon(&status, theme)))
                 .child(
                     div()
@@ -679,18 +736,20 @@ fn agent_row(thread: &Entity<ThreadState>, item: &Item, theme: &Theme) -> AnyEle
                                 .flex()
                                 .items_center()
                                 .gap(px(6.))
-                                .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_weight(FontWeight::MEDIUM).child(title))
-                                .when(!kind.is_empty(), |d| d.child(div().flex_none().text_size(px(11.)).px(px(6.)).rounded(px(6.)).bg(theme.selected).text_color(theme.secondary).child(kind))),
+                                .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_weight(FontWeight::SEMIBOLD).child(title))
+                                .when(!kind.is_empty(), |d| {
+                                    d.child(div().flex_none().text_size(px(ts::CAPTION)).line_height(px(16.)).px(px(6.)).rounded(px(radius::SMALL)).bg(theme.selected).text_color(theme.secondary).child(kind))
+                                }),
                         )
-                        .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(12.)).text_color(theme.secondary).child(subagent_stats(&status, steps, activity))),
+                        .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(ts::FOOTNOTE)).text_color(theme.secondary).child(subagent_stats(&status, steps, activity))),
                 )
                 .when(followable, |d| {
                     d.child(
                         div()
                             .id(("agent-follow", pos as u64 as usize))
                             .flex_none()
-                            .p(px(4.))
-                            .rounded(px(5.))
+                            .p(px(space::XS))
+                            .rounded(px(radius::SMALL))
                             .hover(|s| s.bg(theme.selected))
                             .child(icon(IconName::PanelRight, 14., theme.secondary))
                             .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Follow in Sidebar").build(window, cx))
@@ -706,7 +765,7 @@ fn agent_row(thread: &Entity<ThreadState>, item: &Item, theme: &Theme) -> AnyEle
                             }),
                     )
                 })
-                .when(!report.is_empty(), |d| d.child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, 12., theme.secondary.opacity(0.7))))
+                .when(!report.is_empty(), |d| d.child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, 13., theme.tertiary)))
                 .on_click(move |_, _, cx| {
                     handle.update(cx, |t, cx| {
                         t.toggle_item(pos);
@@ -715,17 +774,17 @@ fn agent_row(thread: &Entity<ThreadState>, item: &Item, theme: &Theme) -> AnyEle
                 }),
         );
     if !recent.is_empty() {
-        let mut list = div().flex().flex_col().gap(px(5.)).px(px(12.)).py(px(8.)).border_t_1().border_color(theme.separator).text_size(px(12.));
+        let mut list = div().flex().flex_col().gap(px(6.)).px(px(space::M)).py(px(space::S)).border_t_1().border_color(theme.separator).bg(theme.canvas).text_size(px(ts::FOOTNOTE));
         for (p, live, failed) in recent {
             list = list.child(
                 div()
                     .flex()
                     .items_center()
                     .gap(px(8.))
-                    .child(icon(p.icon, 13., theme.secondary))
-                    .child(div().flex_none().child(p.verb))
-                    .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_family(MONO).text_size(px(11.)).text_color(theme.secondary).child(p.detail))
-                    .when(live, |d| d.child(icon(IconName::LoaderCircle, 12., theme.secondary)))
+                    .child(div().w(px(18.)).flex().justify_center().child(icon(p.icon, 13., theme.secondary)))
+                    .child(div().flex_none().text_color(theme.text).child(p.verb))
+                    .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_family(MONO).text_size(px(ts::CAPTION)).text_color(theme.secondary).child(p.detail))
+                    .when(live, |d| d.child(icon(IconName::LoaderCircle, 12., theme.accent)))
                     .when(failed, |d| d.child(icon(IconName::CircleX, 12., theme.error))),
             );
         }
@@ -733,7 +792,7 @@ fn agent_row(thread: &Entity<ThreadState>, item: &Item, theme: &Theme) -> AnyEle
     }
     if open && !report.is_empty() {
         let md = markdown::parse(&report);
-        card = card.child(div().px(px(12.)).py(px(10.)).border_t_1().border_color(theme.separator).text_size(px(13.)).child(markdown_view_in(&md, theme, None, None)));
+        card = card.child(div().px(px(space::M)).py(px(space::M)).border_t_1().border_color(theme.separator).bg(theme.canvas).child(markdown_view_in(&md, theme, None, None)));
     }
     card.into_any_element()
 }
@@ -777,27 +836,60 @@ fn diff_of(e: &crate::state::thread::Entry) -> Option<Vec<(char, String)>> {
     Some(lines)
 }
 
+/// A change as a unified diff: its file as a header, then each line with its sign in a gutter,
+/// removed lines on red, added on green.
 fn diff_view(lines: Vec<(char, String)>, theme: &Theme) -> impl IntoElement {
-    let mut column = div().font_family(MONO).text_size(px(11.)).line_height(px(15.)).bg(theme.code).rounded(px(6.)).py(px(4.)).my(px(2.));
+    let mut column = div()
+        .font_family(MONO)
+        .text_size(px(ts::CAPTION))
+        .line_height(px(16.))
+        .bg(theme.code)
+        .border_1()
+        .border_color(theme.separator)
+        .rounded(px(radius::MEDIUM))
+        .overflow_hidden();
+    let mut body = div().py(px(space::XS));
     for (kind, text) in lines {
-        let row = div().px(px(8.)).whitespace_normal();
-        column = column.child(match kind {
-            '-' => row.bg(theme.error.opacity(0.12)).text_color(theme.text).child(format!("- {text}")),
-            '+' => row.bg(gpui_kit::Hsla::from(gpui_kit::rgb(0x34c759)).opacity(0.14)).text_color(theme.text).child(format!("+ {text}")),
-            'f' => row.text_color(theme.secondary).child(text),
-            _ => row.text_color(theme.secondary).child(text),
-        });
+        let line = |sign: &'static str, sign_color: Hsla, bg: Option<Hsla>| {
+            div()
+                .flex()
+                .when_some(bg, |d, bg| d.bg(bg))
+                .child(div().flex_none().w(px(22.)).pl(px(space::S)).text_color(sign_color).child(sign))
+                .child(div().flex_1().min_w_0().pr(px(space::S)).whitespace_normal().text_color(theme.text).child(text.clone()))
+        };
+        match kind {
+            'f' => {
+                column = column.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .h(px(26.))
+                        .px(px(space::S))
+                        .border_b_1()
+                        .border_color(theme.separator)
+                        .font_family(crate::theme::UI)
+                        .text_color(theme.secondary)
+                        .child(icon(IconName::File, 12., theme.secondary))
+                        .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(text)),
+                )
+            }
+            '-' => body = body.child(line("-", theme.error, Some(theme.error.opacity(0.10)))),
+            '+' => body = body.child(line("+", theme.success, Some(theme.success.opacity(0.12)))),
+            _ => body = body.child(div().pl(px(22.)).text_color(theme.tertiary).child(text)),
+        }
     }
-    column
+    column.child(body)
 }
 
 fn highlight_style(span: Span, theme: &Theme) -> HighlightStyle {
     match span {
         Span::Bold => HighlightStyle { font_weight: Some(FontWeight::BOLD), ..Default::default() },
         Span::Italic => HighlightStyle { font_style: Some(FontStyle::Italic), ..Default::default() },
-        Span::Code => HighlightStyle { background_color: Some(theme.code), color: Some(theme.string), ..Default::default() },
+        // Inline code: SF Mono (`SelText::rich`) on a quiet fill, in the text's own colour.
+        Span::Code => HighlightStyle { background_color: Some(theme.selected), ..Default::default() },
         Span::Link => HighlightStyle { color: Some(theme.accent), ..Default::default() },
-        Span::CodeLink => HighlightStyle { background_color: Some(theme.code), color: Some(theme.accent), ..Default::default() },
+        Span::CodeLink => HighlightStyle { background_color: Some(theme.accent_soft), color: Some(theme.accent), ..Default::default() },
         Span::Strike => HighlightStyle {
             strikethrough: Some(StrikethroughStyle { thickness: px(1.), color: None }),
             ..Default::default()
@@ -867,13 +959,14 @@ pub fn selectable(text: impl Into<SharedString>, theme: &Theme) -> AnyElement {
 
 fn styled_text(styled: &Text, theme: &Theme, ctx: Option<&RowContext>) -> AnyElement {
     let text: SharedString = styled.text.clone().into();
-    let shaped = if styled.spans.is_empty() {
-        StyledText::new(text.clone())
-    } else {
-        StyledText::new(text.clone()).with_highlights(styled.spans.iter().map(|(r, s)| (r.clone(), highlight_style(*s, theme))))
-    };
     let (order, id) = next_reading_order(&styled.text);
-    let element = SelText::new(id, text, shaped, order, theme.accent.opacity(0.28));
+    let mut element = SelText::new(id, text.clone(), StyledText::new(text), order, theme.accent.opacity(0.28));
+    if !styled.spans.is_empty() {
+        let mut highlights: Vec<(std::ops::Range<usize>, HighlightStyle)> = styled.spans.iter().map(|(r, s)| (r.clone(), highlight_style(*s, theme))).collect();
+        highlights.sort_by_key(|(r, _)| r.start);
+        let mono = styled.spans.iter().filter(|(_, s)| matches!(s, Span::Code | Span::CodeLink)).map(|(r, _)| r.clone()).collect();
+        element = element.rich(highlights, mono);
+    }
     if styled.links.is_empty() {
         return element.into_any_element();
     }
@@ -899,67 +992,126 @@ pub fn markdown_view(md: &markdown::Markdown, theme: &Theme) -> impl IntoElement
     view
 }
 
-/// A code block, with Copy over its corner while the pointer is over it.
-fn code_block(code: &Text, theme: &Theme, ctx: Option<&RowContext>, n: usize) -> AnyElement {
+/// A fence's language as a reader would name it: `py` → Python. Empty: none shown.
+fn language_name(lang: &str) -> String {
+    let lang = lang.split_whitespace().next().unwrap_or("");
+    let known = match lang.to_ascii_lowercase().as_str() {
+        "" => "",
+        "rs" | "rust" => "Rust",
+        "py" | "python" | "python3" => "Python",
+        "ts" | "typescript" => "TypeScript",
+        "tsx" => "TSX",
+        "js" | "javascript" => "JavaScript",
+        "jsx" => "JSX",
+        "sh" | "bash" | "zsh" | "shell" | "console" => "Shell",
+        "swift" => "Swift",
+        "go" | "golang" => "Go",
+        "json" => "JSON",
+        "toml" => "TOML",
+        "yaml" | "yml" => "YAML",
+        "html" => "HTML",
+        "css" => "CSS",
+        "sql" => "SQL",
+        "md" | "markdown" => "Markdown",
+        "diff" | "patch" => "Diff",
+        "c" => "C",
+        "cpp" | "cxx" => "C++",
+        "java" => "Java",
+        "kotlin" | "kt" => "Kotlin",
+        "ruby" | "rb" => "Ruby",
+        "mermaid" => "Mermaid",
+        "text" | "txt" | "plain" => "Text",
+        _ => return lang.to_string(),
+    };
+    known.to_string()
+}
+
+/// A code block: a header with its language and Copy, then the code in SF Mono.
+fn code_block(code: &Text, lang: &str, theme: &Theme, ctx: Option<&RowContext>, n: usize) -> AnyElement {
+    let name = language_name(lang);
+    let has_header = ctx.is_some() || !name.is_empty();
     div()
-        .relative()
-        .group("code")
+        .flex()
+        .flex_col()
         .bg(theme.code)
         .border_1()
         .border_color(theme.separator)
-        .rounded(px(8.))
-        .px(px(12.))
-        .py(px(10.))
-        .font_family(MONO)
-        .text_size(px(12.))
-        .line_height(px(17.))
-        .child(styled_text(code, theme, None))
-        .when_some(ctx, |d, ctx| {
+        .rounded(px(radius::MEDIUM))
+        .overflow_hidden()
+        .when(has_header, |d| {
             d.child(
-                div().absolute().top(px(4.)).right(px(4.)).font_family(crate::theme::UI).child(
-                    copy_button(id_of("copy-code", (ctx.pos, n, &code.text)), code.text.clone(), "Copy", theme)
-                        .bg(theme.code)
-                        .opacity(0.)
-                        .group_hover("code", |s| s.opacity(1.)),
-                ),
+                div()
+                    .flex()
+                    .items_center()
+                    .h(px(30.))
+                    .pl(px(space::M))
+                    .pr(px(space::XS))
+                    .border_b_1()
+                    .border_color(theme.separator)
+                    .text_size(px(ts::CAPTION))
+                    .text_color(theme.secondary)
+                    .child(div().flex_1().min_w_0().font_weight(FontWeight::MEDIUM).child(name))
+                    .when_some(ctx, |d, ctx| d.child(copy_button(id_of("copy-code", (ctx.pos, n, &code.text)), code.text.clone(), "Copy", theme))),
             )
         })
+        .child(
+            div()
+                .px(px(space::M))
+                .py(px(10.))
+                .font_family(MONO)
+                .text_size(px(ts::CODE))
+                .line_height(px(ts::CODE_LINE + 2.))
+                .child(styled_text(code, theme, None)),
+        )
         .into_any_element()
 }
 
 /// Markdown blocks; in a row (`ctx`), with links that know the thread, Copy on code and
 /// tables, and Mermaid diagrams drawn.
 pub fn markdown_view_in(md: &markdown::Markdown, theme: &Theme, ctx: Option<&RowContext>, window: Option<&Window>) -> impl IntoElement {
-    let mut column = div().flex().flex_col().gap(px(8.)).w_full();
+    let mut column = div().flex().flex_col().gap(px(10.)).w_full();
     for (n, block) in md.blocks.iter().enumerate() {
         let element: AnyElement = match block {
             MdBlock::Paragraph(s) => div().child(styled_text(s, theme, ctx)).into_any_element(),
+            // Sizes from the type scale; the space above sets a heading apart from what's before.
             MdBlock::Heading(level, s) => div()
-                .pt(px(6.))
+                .when(n > 0, |d| d.pt(px(if *level <= 2 { space::S } else { space::XS })))
                 .text_size(px(match level {
-                    1 => 18.,
-                    2 => 16.,
-                    3 => 14.,
-                    _ => 13.,
+                    1 | 2 => ts::TITLE,
+                    _ => ts::HEADLINE,
                 }))
-                .font_weight(FontWeight::SEMIBOLD)
+                .line_height(px(if *level <= 2 { 22. } else { ts::BODY_LINE }))
+                .font_weight(if *level == 1 { FontWeight::BOLD } else { FontWeight::SEMIBOLD })
+                .when(*level >= 4, |d| d.text_color(theme.secondary))
                 .child(styled_text(s, theme, ctx))
                 .into_any_element(),
             MdBlock::Code { lang, code } if lang.eq_ignore_ascii_case("mermaid") => match (ctx, window) {
                 (Some(ctx), Some(window)) => crate::ui::diagram::diagram_block(&code.text, ctx, n, theme, window)
-                    .unwrap_or_else(|| code_block(code, theme, Some(ctx), n)),
-                _ => code_block(code, theme, ctx, n),
+                    .unwrap_or_else(|| code_block(code, lang, theme, Some(ctx), n)),
+                _ => code_block(code, lang, theme, ctx, n),
             },
-            MdBlock::Code { code, .. } => code_block(code, theme, ctx, n),
+            MdBlock::Code { lang, code } => code_block(code, lang, theme, ctx, n),
             MdBlock::List(items) => {
-                let mut list = div().flex().flex_col().gap(px(2.));
+                let mut list = div().flex().flex_col().gap(px(space::XS));
                 for (depth, number, s) in items {
-                    let marker = number.map_or("•".to_string(), |n| format!("{n}."));
+                    let marker = match number {
+                        Some(n) => format!("{n}."),
+                        None => ["•", "◦", "▪"][depth % 3].to_string(),
+                    };
                     list = list.child(
                         div()
                             .flex()
-                            .pl(px(4. + 18. * *depth as f32))
-                            .child(div().w(px(18.)).flex_none().text_color(theme.secondary).child(marker))
+                            .pl(px(2. + 20. * *depth as f32))
+                            .child(
+                                div()
+                                    .w(px(20.))
+                                    .pr(px(6.))
+                                    .flex_none()
+                                    .flex()
+                                    .justify_end()
+                                    .text_color(theme.secondary)
+                                    .child(marker),
+                            )
                             .child(div().flex_1().min_w_0().child(styled_text(s, theme, ctx))),
                     );
                 }
@@ -968,45 +1120,55 @@ pub fn markdown_view_in(md: &markdown::Markdown, theme: &Theme, ctx: Option<&Row
             MdBlock::Quote(s) => div()
                 .border_l(px(3.))
                 .border_color(theme.separator)
-                .pl(px(10.))
+                .pl(px(space::M))
+                .py(px(2.))
                 .text_color(theme.secondary)
                 .child(styled_text(s, theme, ctx))
                 .into_any_element(),
             MdBlock::Table { header, rows } => {
                 let columns = header.len().max(rows.iter().map(|r| r.len()).max().unwrap_or(0));
-                let cell = |s: Option<&Text>, bold: bool| {
-                    let mut c = div().flex_1().min_w_0().px(px(8.)).py(px(4.)).border_1().border_color(theme.separator);
-                    if bold {
-                        c = c.font_weight(FontWeight::SEMIBOLD);
-                    }
+                let cell = |s: Option<&Text>| {
+                    let mut c = div().flex_1().min_w_0().px(px(space::M)).py(px(6.));
                     if let Some(s) = s {
                         c = c.child(styled_text(s, theme, ctx));
                     }
                     c
                 };
-                let mut table = div().flex().flex_col();
-                table = table.child(div().flex().children((0..columns).map(|i| cell(header.get(i), true))));
+                // Rules between rows only, the header on a quiet fill: a Mac list, not a grid.
+                let mut table = div()
+                    .flex()
+                    .flex_col()
+                    .border_1()
+                    .border_color(theme.separator)
+                    .rounded(px(radius::MEDIUM))
+                    .overflow_hidden()
+                    .child(div().flex().bg(theme.card).font_weight(FontWeight::SEMIBOLD).children((0..columns).map(|i| cell(header.get(i)))));
                 for row in rows {
-                    table = table.child(div().flex().children((0..columns).map(|i| cell(row.get(i), false))));
+                    table = table.child(div().flex().border_t_1().border_color(theme.separator).children((0..columns).map(|i| cell(row.get(i)))));
                 }
-                // Copy as tab-separated values, over its top corner (its room kept).
+                // Copy as tab-separated values, over the header's corner while the pointer is
+                // over the table: no room of its own, so nothing moves.
                 match ctx {
                     Some(ctx) => {
                         let tsv = markdown::table_tsv(header, rows);
                         div()
-                            .flex()
-                            .flex_col()
+                            .relative()
                             .group("table")
-                            .child(div().h(px(17.)).flex().justify_end().child(
-                                copy_button(id_of("copy-table", (ctx.pos, n, &tsv)), tsv, "Copy table", theme).opacity(0.).group_hover("table", |s| s.opacity(1.)),
-                            ))
                             .child(table)
+                            .child(
+                                div().absolute().top(px(5.)).right(px(5.)).child(
+                                    copy_button(id_of("copy-table", (ctx.pos, n, &tsv)), tsv, "Copy", theme)
+                                        .bg(theme.card)
+                                        .opacity(0.)
+                                        .group_hover("table", |s| s.opacity(1.)),
+                                ),
+                            )
                             .into_any_element()
                     }
                     None => table.into_any_element(),
                 }
             }
-            MdBlock::Rule => div().h(px(1.)).bg(theme.separator).into_any_element(),
+            MdBlock::Rule => div().my(px(space::XS)).h(px(1.)).bg(theme.separator).into_any_element(),
         };
         column = column.child(element);
     }
@@ -1045,6 +1207,14 @@ fn summary(entries: &[EntryRef]) -> String {
 
 fn work_row(state: &ThreadState, ctx: &RowContext, item: &Item, theme: &Theme) -> AnyElement {
     let pos = item.pos;
+    // One step on its own needs no group around it: the step itself, with its own disclosure
+    // (a lone plan call folded into a later one keeps its group's line, so it still shows).
+    if item.entries.len() == 1 {
+        let id = item.entries[0].borrow().data.id.clone();
+        if !state.folded_plan_calls.contains(&id) {
+            return step(state, ctx, pos, 0, &item.entries[0], theme);
+        }
+    }
     let last = item.entries.last().unwrap().borrow();
     let live = last.live
         || (last.data.kind == Kind::Tool && last.data.tool_result.is_none() && last.sub.as_ref().is_some_and(|s| s.status == "running"))
@@ -1067,13 +1237,16 @@ fn work_row(state: &ThreadState, ctx: &RowContext, item: &Item, theme: &Theme) -
         .items_center()
         .gap(px(6.))
         .w_full()
-        .py(px(3.))
-        .text_size(px(12.))
+        .h(px(26.))
+        .px(px(6.))
+        .rounded(px(radius::MEDIUM))
+        .hover(|s| s.bg(theme.hover))
+        .text_size(px(ts::FOOTNOTE))
         .cursor_pointer()
-        .child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, 12., theme.secondary))
-        .child(div().flex_none().child(summary(&item.entries)))
+        .child(div().flex_none().w(px(14.)).flex().justify_center().child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, 13., theme.secondary)))
+        .child(div().flex_none().font_weight(FontWeight::MEDIUM).child(summary(&item.entries)))
         .when(live, |d| {
-            d.child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_family(MONO).text_size(px(11.)).opacity(0.8).child(latest))
+            d.child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_family(MONO).text_size(px(ts::CAPTION)).text_color(theme.tertiary).child(latest))
         })
         .on_click(move |_, _, cx| {
             handle.update(cx, |t, cx| {
@@ -1083,10 +1256,10 @@ fn work_row(state: &ThreadState, ctx: &RowContext, item: &Item, theme: &Theme) -
         });
     let mut row = div().flex().flex_col().text_color(theme.secondary).child(head);
     if let (Some(line), false) = (job_line, open) {
-        row = row.child(div().pl(px(18.)).pb(px(3.)).overflow_hidden().whitespace_nowrap().text_ellipsis().font_family(MONO).text_size(px(11.)).child(line));
+        row = row.child(div().pl(px(26.)).pb(px(3.)).overflow_hidden().whitespace_nowrap().text_ellipsis().font_family(MONO).text_size(px(ts::CAPTION)).text_color(theme.tertiary).child(line));
     }
     if open {
-        let mut body = div().flex().flex_col().gap(px(4.)).border_l_2().border_color(theme.separator).ml(px(5.)).pl(px(10.)).mb(px(6.));
+        let mut body = div().flex().flex_col().gap(px(2.)).pl(px(space::M)).pt(px(2.)).pb(px(space::XS));
         for (n, e) in item.entries.iter().enumerate() {
             body = body.child(step(state, ctx, pos, n, e, theme));
         }
@@ -1099,12 +1272,12 @@ fn work_row(state: &ThreadState, ctx: &RowContext, item: &Item, theme: &Theme) -
 fn mono_box(text: String, tint: Option<Hsla>, theme: &Theme) -> impl IntoElement {
     div()
         .font_family(MONO)
-        .text_size(px(11.))
-        .line_height(px(15.))
+        .text_size(px(ts::CAPTION))
+        .line_height(px(16.))
         .bg(theme.code)
-        .rounded(px(6.))
-        .px(px(8.))
-        .py(px(6.))
+        .rounded(px(radius::MEDIUM))
+        .px(px(10.))
+        .py(px(space::S))
         .text_color(tint.unwrap_or(theme.text))
         .child(selectable(text, theme))
 }
@@ -1128,11 +1301,11 @@ fn plan_step(plan: &yh_core::plan::Plan, latest: bool, theme: &Theme) -> AnyElem
         return div()
             .flex()
             .items_center()
-            .gap(px(8.))
-            .px(px(12.))
-            .py(px(3.))
-            .text_size(px(12.5))
-            .child(icon(IconName::CircleCheck, 14., theme.secondary))
+            .gap(px(space::S))
+            .h(px(28.))
+            .px(px(6.))
+            .text_size(px(ts::FOOTNOTE))
+            .child(div().w(px(16.)).flex_none().flex().justify_center().child(sized(list_checks_icon(), 14., theme.secondary)))
             .child(div().flex_none().font_weight(FontWeight::MEDIUM).text_color(theme.text).child("Plan"))
             .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(theme.secondary).child(parts.join(" · ")))
             .into_any_element();
@@ -1142,20 +1315,20 @@ fn plan_step(plan: &yh_core::plan::Plan, latest: bool, theme: &Theme) -> AnyElem
         None if plan.is_finished() => "Plan done".into(),
         None => "Plan".into(),
     };
-    let mut list = div().flex().flex_col().gap(px(6.)).px(px(12.)).py(px(10.)).border_t_1().border_color(theme.separator).text_size(px(12.5));
+    let mut list = div().flex().flex_col().gap(px(6.)).px(px(space::M)).py(px(10.)).border_t_1().border_color(theme.separator).bg(theme.canvas).text_size(px(ts::BODY));
     for item in &plan.items {
-        let (name, color) = match item.status {
-            Status::Pending => (IconName::Square, theme.secondary.opacity(0.6)),
-            Status::InProgress => (IconName::LoaderCircle, theme.accent),
-            Status::Completed => (IconName::CircleCheck, green()),
+        let mark = match item.status {
+            Status::Pending => sized(circle_dashed_icon(), 14., theme.tertiary),
+            Status::InProgress => sized(circle_dot_icon(), 14., theme.accent),
+            Status::Completed => icon(IconName::CircleCheck, 14., theme.success),
         };
         let text = if item.status == Status::InProgress { item.active_form.clone().unwrap_or_else(|| item.subject.clone()) } else { item.subject.clone() };
         list = list.child(
             div()
                 .flex()
                 .items_start()
-                .gap(px(8.))
-                .child(div().w(px(16.)).pt(px(2.)).flex().justify_center().child(icon(name, 13., color)))
+                .gap(px(space::S))
+                .child(div().w(px(16.)).pt(px(2.5)).flex_none().flex().justify_center().child(mark))
                 .child(
                     div()
                         .flex_1()
@@ -1170,20 +1343,26 @@ fn plan_step(plan: &yh_core::plan::Plan, latest: bool, theme: &Theme) -> AnyElem
     div()
         .flex()
         .flex_col()
-        .rounded(px(8.))
+        .rounded(px(radius::LARGE))
         .border_1()
         .border_color(theme.separator)
         .bg(theme.card)
+        .overflow_hidden()
+        .my(px(2.))
         .child(
             div()
                 .flex()
                 .items_center()
-                .gap(px(10.))
-                .px(px(12.))
-                .py(px(8.))
-                .text_size(px(12.5))
-                .child(icon(if plan.is_finished() { IconName::CircleCheck } else { IconName::LoaderCircle }, 15., if plan.is_finished() { green() } else { theme.accent }))
-                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_weight(FontWeight::MEDIUM).text_color(theme.text).child(heading))
+                .gap(px(space::S))
+                .px(px(space::M))
+                .py(px(space::S))
+                .text_size(px(ts::FOOTNOTE))
+                .child(div().w(px(16.)).flex_none().flex().justify_center().child(if plan.is_finished() {
+                    icon(IconName::CircleCheck, 15., theme.success)
+                } else {
+                    sized(list_checks_icon(), 15., theme.accent)
+                }))
+                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(heading))
                 .child(div().flex_none().text_color(theme.secondary).child(format!("{done} of {total}"))),
         )
         .child(list)
@@ -1253,17 +1432,20 @@ fn step(state: &ThreadState, ctx: &RowContext, pos: i64, n: usize, e: &EntryRef,
     let last_line = (running && !open).then(|| state.job_lines.get(&id).cloned()).flatten().filter(|l| !l.is_empty());
     let handle = ctx.thread.clone();
     let entry = e.clone();
-    let detail: AnyElement = match target {
-        Some((path, line, written)) if !p.detail.is_empty() => div()
-            .id(id_of("step-path", (&id, n)))
+    let detail_base = || {
+        div()
             .flex_1()
             .min_w_0()
             .overflow_hidden()
             .whitespace_nowrap()
             .text_ellipsis()
             .font_family(MONO)
-            .text_size(px(11.5))
+            .text_size(px(ts::CAPTION))
             .text_color(theme.secondary)
+    };
+    let detail: AnyElement = match target {
+        Some((path, line, written)) if !p.detail.is_empty() => detail_base()
+            .id(id_of("step-path", (&id, n)))
             .cursor_pointer()
             .hover(|s| s.text_color(theme.accent))
             .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Show in Files").build(window, cx))
@@ -1273,34 +1455,28 @@ fn step(state: &ThreadState, ctx: &RowContext, pos: i64, n: usize, e: &EntryRef,
                 open_target(path.clone(), line, written.clone(), cx);
             })
             .into_any_element(),
-        _ => div()
-            .flex_1()
-            .min_w_0()
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .text_ellipsis()
-            .font_family(MONO)
-            .text_size(px(11.5))
-            .text_color(theme.secondary)
-            .child(p.detail.clone())
-            .into_any_element(),
+        _ => detail_base().child(p.detail.clone()).into_any_element(),
     };
+    // Closed: one quiet line (an icon, what it did, on what), a fill under the pointer. Open:
+    // the same line heading a card with what went in and what came back.
     let head = div()
         .id(("step", ((pos as u64) << 20 | n as u64) as usize))
         .flex()
         .items_center()
-        .gap(px(8.))
+        .gap(px(space::S))
         .w_full()
-        .px(px(10.))
-        .py(px(6.))
-        .text_size(px(12.5))
+        .h(px(28.))
+        .px(px(6.))
+        .rounded(px(radius::MEDIUM))
+        .when(!open, |d| d.hover(|s| s.bg(theme.hover)))
+        .text_size(px(ts::FOOTNOTE))
         .cursor_pointer()
-        .child(div().w(px(16.)).flex_none().flex().justify_center().child(icon(p.icon, 14., theme.secondary)))
-        .child(div().flex_none().font_weight(FontWeight::MEDIUM).text_color(theme.text).child(p.verb.clone()))
+        .child(div().w(px(16.)).flex_none().flex().justify_center().child(icon(p.icon, 14., if failed { theme.error } else { theme.secondary })))
+        .child(div().flex_none().font_weight(FontWeight::MEDIUM).text_color(if failed { theme.error } else { theme.text }).child(p.verb.clone()))
         .child(detail)
         .when(running, |d| d.child(icon(IconName::LoaderCircle, 13., theme.accent)))
         .when(failed, |d| d.child(icon(IconName::CircleX, 13., theme.error)))
-        .child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, 11., theme.secondary.opacity(0.7)))
+        .child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, 12., theme.tertiary))
         .on_click(move |_, _, cx| {
             let entry = entry.clone();
             handle.update(cx, |t, cx| {
@@ -1308,35 +1484,27 @@ fn step(state: &ThreadState, ctx: &RowContext, pos: i64, n: usize, e: &EntryRef,
                 cx.notify();
             })
         });
-    let mut column = div()
-        .flex()
-        .flex_col()
-        .rounded(px(8.))
-        .border_1()
-        .border_color(if failed { theme.error.opacity(0.5) } else { theme.separator })
-        .bg(theme.card)
-        .child(head);
+    let mut column = div().flex().flex_col().child(head);
     if let Some(line) = last_line {
         column = column.child(
             div()
-                .pl(px(34.))
+                .pl(px(30.))
                 .pr(px(10.))
-                .pb(px(6.))
-                .mt(px(-2.))
+                .pb(px(space::XS))
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .text_ellipsis()
                 .font_family(MONO)
-                .text_size(px(11.))
-                .text_color(theme.secondary)
+                .text_size(px(ts::CAPTION))
+                .text_color(theme.tertiary)
                 .child(line),
         );
     }
     if let (Some(shot), false) = (&shot, open) {
-        column = column.child(div().px(px(10.)).pb(px(8.)).child(gpui_kit::img(shot.clone()).max_w(px(260.)).max_h(px(160.)).rounded(px(6.)).border_1().border_color(theme.separator)));
+        column = column.child(div().pl(px(30.)).pb(px(space::S)).child(gpui_kit::img(shot.clone()).max_w(px(260.)).max_h(px(160.)).rounded(px(radius::MEDIUM)).border_1().border_color(theme.separator)));
     }
     if open {
-        let mut details = div().flex().flex_col().gap(px(8.)).px(px(10.)).py(px(8.)).border_t_1().border_color(theme.separator);
+        let mut details = div().flex().flex_col().gap(px(space::S)).px(px(10.)).pt(px(space::XS)).pb(px(10.));
         details = match diff_of(&b) {
             Some(lines) => details.child(diff_view(lines, theme)),
             None if name == "Bash" && input["command"].is_string() => details.child(mono_box(format!("$ {}", input["command"].as_str().unwrap_or("")), None, theme)),
@@ -1351,7 +1519,7 @@ fn step(state: &ThreadState, ctx: &RowContext, pos: i64, n: usize, e: &EntryRef,
             details = details.child(mono_box(text, failed.then_some(theme.error), theme));
         }
         if let Some(shot) = shot {
-            details = details.child(gpui_kit::img(shot).max_w_full().max_h(px(480.)).rounded(px(6.)).border_1().border_color(theme.separator));
+            details = details.child(gpui_kit::img(shot).max_w_full().max_h(px(480.)).rounded(px(radius::MEDIUM)).border_1().border_color(theme.separator));
         }
         if is_browser {
             details = details.child(
@@ -1361,23 +1529,30 @@ fn step(state: &ThreadState, ctx: &RowContext, pos: i64, n: usize, e: &EntryRef,
                         .flex()
                         .items_center()
                         .gap(px(6.))
+                        .h(px(26.))
                         .px(px(10.))
-                        .py(px(4.))
-                        .rounded(px(6.))
+                        .rounded(px(radius::MEDIUM))
                         .border_1()
                         .border_color(theme.separator)
                         .bg(theme.canvas)
-                        .text_size(px(12.))
+                        .text_size(px(ts::FOOTNOTE))
                         .text_color(theme.text)
                         .cursor_pointer()
-                        .hover(|s| s.bg(theme.selected))
+                        .hover(|s| s.bg(theme.hover))
                         .child(icon(IconName::Globe, 13., theme.secondary))
                         .child("Show Browser")
                         .on_click(|_, _, cx| show_panel(crate::state::workspace::Panel::Browser, cx)),
                 ),
             );
         }
-        column = column.child(details);
+        column = column
+            .rounded(px(radius::LARGE))
+            .border_1()
+            .border_color(if failed { theme.error.opacity(0.45) } else { theme.separator })
+            .bg(theme.canvas)
+            .overflow_hidden()
+            .my(px(2.))
+            .child(details);
     }
     column.into_any_element()
 }
@@ -1387,7 +1562,9 @@ fn thinking_step(thread: &Entity<ThreadState>, pos: i64, n: usize, e: &EntryRef,
     let b = e.borrow();
     let gist: String = b.data.text.lines().find(|l| !l.trim().is_empty()).unwrap_or("").chars().take(160).collect();
     let live = b.live;
-    let open = b.open || expand_all();
+    // Thinking kept from view (redacted): only the line, nothing to open.
+    let empty = b.data.text.trim().is_empty();
+    let open = (b.open || expand_all()) && !empty;
     drop(b);
     let handle = thread.clone();
     let entry = e.clone();
@@ -1395,16 +1572,19 @@ fn thinking_step(thread: &Entity<ThreadState>, pos: i64, n: usize, e: &EntryRef,
         .id(("step", ((pos as u64) << 20 | n as u64) as usize))
         .flex()
         .items_center()
-        .gap(px(8.))
+        .gap(px(space::S))
         .w_full()
-        .px(px(10.))
-        .py(px(3.))
-        .text_size(px(12.5))
+        .h(px(28.))
+        .px(px(6.))
+        .rounded(px(radius::MEDIUM))
+        .hover(|s| s.bg(theme.hover))
+        .text_size(px(ts::FOOTNOTE))
+        .text_color(theme.secondary)
         .cursor_pointer()
-        .child(div().w(px(16.)).flex_none().flex().justify_center().child(icon(IconName::Asterisk, 13., theme.secondary)))
+        .child(div().w(px(16.)).flex_none().flex().justify_center().child(sized(crate::ui::icons::brain(), 14., theme.secondary)))
         .child(div().flex_none().font_weight(FontWeight::MEDIUM).child(if live { "Thinking…" } else { "Thought" }))
-        .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(theme.secondary).when(!open, |d| d.child(gist)))
-        .child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, 11., theme.secondary.opacity(0.7)))
+        .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(theme.tertiary).when(!open, |d| d.child(gist)))
+        .when(!empty, |d| d.child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, 12., theme.tertiary)))
         .on_click(move |_, _, cx| {
             let entry = entry.clone();
             handle.update(cx, |t, cx| {
@@ -1415,7 +1595,19 @@ fn thinking_step(thread: &Entity<ThreadState>, pos: i64, n: usize, e: &EntryRef,
     let mut column = div().flex().flex_col().child(head);
     if open {
         let md = markdown_of(e, None);
-        column = column.child(div().text_size(px(12.)).pl(px(34.)).pr(px(10.)).py(px(4.)).text_color(theme.secondary).child(markdown_view_in(&md, theme, None, None)));
+        column = column.child(
+            div()
+                .ml(px(13.))
+                .pl(px(17.))
+                .pr(px(10.))
+                .py(px(space::XS))
+                .border_l_1()
+                .border_color(theme.separator)
+                .text_size(px(ts::FOOTNOTE))
+                .line_height(px(18.))
+                .text_color(theme.secondary)
+                .child(markdown_view_in(&md, theme, None, None)),
+        );
     }
     column.into_any_element()
 }
