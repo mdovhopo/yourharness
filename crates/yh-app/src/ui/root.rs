@@ -103,6 +103,7 @@ impl RootView {
                 }
                 WorkspaceEvent::PageOpened => this.open_page(window, cx),
                 WorkspaceEvent::OpenMcp => this.mcp.update(cx, |m, cx| m.show(cx)),
+                WorkspaceEvent::AppendToComposer(text) => this.composer.update(cx, |c, cx| c.append_draft(text, window, cx)),
             }),
             cx.observe(&workspace, |this, _, cx| {
                 this.refresh_tasks(cx);

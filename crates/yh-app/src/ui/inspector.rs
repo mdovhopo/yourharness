@@ -820,6 +820,29 @@ impl Inspector {
         cx.notify();
     }
 
+    /// Pick an element on the page: what you click goes into the composer, described so the
+    /// agent can find it again.
+    fn pick_button(&self, thread: &str, cx: &mut Context<Self>) -> Button {
+        let thread = thread.to_string();
+        Button::new("browser-pick").xsmall().ghost().label("⌖").tooltip("Pick an element for your message (Esc cancels)").on_click(cx.listener(move |this, _, _, cx| this.pick(&thread, cx)))
+    }
+
+    pub fn pick(&mut self, thread: &str, cx: &mut Context<Self>) {
+        let Some(reply) = crate::browser::Browsers::pick(thread) else { return };
+        let ws = self.workspace.clone();
+        cx.spawn(async move |_, cx| {
+            if let Ok(Ok(json)) = reply.recv_async().await {
+                if let Some(text) = crate::browser::Browsers::picked_text(&json) {
+                    if std::env::var("YH_DATA_DIR").is_ok() {
+                        eprintln!("PICKED {text}");
+                    }
+                    let _ = ws.update(cx, |_, cx| cx.emit(crate::state::workspace::WorkspaceEvent::AppendToComposer(text)));
+                }
+            }
+        })
+        .detach();
+    }
+
     fn find_dev_servers(&mut self, cx: &mut Context<Self>) {
         let task = cx.background_executor().spawn(async { yh_core::dev_servers::list() });
         cx.spawn(async move |this, cx| {
@@ -1057,6 +1080,7 @@ impl Inspector {
                     .child(nav("browser-forward", "›", "Forward", can_forward, |w| w.go_forward()))
                     .child(nav("browser-reload", "↻", "Reload", true, |w| w.reload()))
                     .child(div().flex_1().min_w_0().child(Input::new(&self.address).xsmall().font_family(MONO)))
+                    .child(self.pick_button(&thread, cx))
                     .child(menu),
             )
             .child(

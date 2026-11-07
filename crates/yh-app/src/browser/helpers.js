@@ -562,9 +562,9 @@
       stop(e);
       const info = yh.pickInfo(e.target);
       yh.stopPicking();
-      window.webkit.messageHandlers.yourHarnessPick.postMessage(info);
+      (yh.onPicked || (() => {}))(info);
     };
-    const key = (e) => { if (e.key === 'Escape') { stop(e); yh.stopPicking(); window.webkit.messageHandlers.yourHarnessPick.postMessage(null); } };
+    const key = (e) => { if (e.key === 'Escape') { stop(e); yh.stopPicking(); (yh.onPicked || (() => {}))(null); } };
     picking = { box, move, click, stop, key };
     addEventListener('mousemove', move, true);
     addEventListener('click', click, true);
@@ -572,6 +572,8 @@
     addEventListener('mouseup', stop, true);
     addEventListener('keydown', key, true);
   };
+  // The picker as a promise: what you click (or null for Escape), for the browser panel's Pick.
+  yh.pick = () => new Promise((resolve) => { yh.onPicked = (info) => { yh.onPicked = null; resolve(info); }; yh.startPicking(); });
   yh.stopPicking = () => {
     if (!picking) return;
     removeEventListener('mousemove', picking.move, true);

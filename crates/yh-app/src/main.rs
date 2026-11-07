@@ -241,6 +241,17 @@ fn main() {
             let found = workspace.read(cx).selected_thread().map(|t| (t.read(cx).id().to_string(), t.read(cx).meta.project_id.clone()));
             if let Some((thread, project)) = found {
                 browser::Browsers::open_for_user(&thread, Some(&project), Some(&url));
+                // `YH_BROWSER_PICK=<x,y>`: then the element picker, and a click at that point.
+                if let Some((x, y)) = env("YH_BROWSER_PICK").and_then(|p| p.split_once(',').map(|(a, b)| (a.trim().parse::<f64>().ok(), b.trim().parse::<f64>().ok()))).and_then(|(a, b)| Some((a?, b?))) {
+                    let inspector = root.read(cx).inspector.clone();
+                    cx.spawn(async move |cx| {
+                        cx.background_executor().timer(Duration::from_secs(3)).await;
+                        let _ = cx.update(|cx| inspector.update(cx, |i, cx| i.pick(&thread, cx)));
+                        cx.background_executor().timer(Duration::from_millis(600)).await;
+                        let _ = cx.update(|_| browser::Browsers::with_tab(&thread, |t| t.web.click(x, y, false, 1, 0)));
+                    })
+                    .detach();
+                }
             }
         }
         // `YH_SELECT=<title or id>`: open a thread at launch; `YH_SEND=<text>` then sends it.

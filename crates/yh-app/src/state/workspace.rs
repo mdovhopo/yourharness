@@ -28,6 +28,8 @@ pub enum WorkspaceEvent {
     PageOpened,
     /// `/mcp` was typed: the MCP sheet opens for the open thread.
     OpenMcp,
+    /// Text goes at the end of the open thread's composer (an element picked in the browser).
+    AppendToComposer(String),
 }
 
 /// One thread's `claude`, between turns too.

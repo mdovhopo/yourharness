@@ -219,6 +219,22 @@ impl Browsers {
         })
     }
 
+    /// The element picker in the thread's current tab: the reply comes when you click something
+    /// (its description, selector, HTML and the page's address as JSON) or press Escape (null).
+    pub fn pick(thread: &str) -> Option<flume::Receiver<Result<String, String>>> {
+        let (tx, rx) = flume::bounded(1);
+        Browsers::with_tab(thread, |t| t.web.call("const info = await __yh.pick(); return info && { ...info, url: location.href };", false, tx))?;
+        Some(rx)
+    }
+
+    /// What a picked element reads like in your message: enough for the agent to find it again
+    /// (the Swift app's `PickedElement.promptText`).
+    pub fn picked_text(json: &str) -> Option<String> {
+        let v: Value = serde_json::from_str(json).ok()?;
+        let s = |k: &str| v[k].as_str().unwrap_or("").to_string();
+        v.is_object().then(|| format!("[Picked in the browser at {}: {}, selector `{}`]\n```html\n{}\n```", s("url"), s("describe"), s("selector"), s("html")))
+    }
+
     pub fn close_tab_now(thread: &str, id: u32) {
         Browsers::with(|b| b.close_tab(thread, id));
     }

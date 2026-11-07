@@ -671,6 +671,13 @@ struct Suggest {
 
 impl Composer {
     /// `YH_DRAFT`: text put in the composer as if typed, the caret at its end.
+    /// Adds text at the end of what's typed, on a line of its own.
+    pub fn append_draft(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let current = self.input.read(cx).value().to_string();
+        let separator = if current.is_empty() || current.ends_with('\n') { "" } else { "\n" };
+        self.type_draft(&format!("{current}{separator}{text}\n"), window, cx);
+    }
+
     pub fn type_draft(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         let len = text.len();
         self.input.update(cx, |i, cx| {
