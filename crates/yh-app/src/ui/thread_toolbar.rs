@@ -4,11 +4,12 @@
 //! runs git or reads files.
 
 use crate::state::workspace::{Panel, Workspace};
-use crate::theme::{Theme, MONO};
+use crate::theme::{radius, space, text, Theme, MONO};
+use crate::ui::icons;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::popover::Popover;
-use gpui_kit::component::{Disableable, Sizable};
+use gpui_kit::component::{Disableable, Icon, IconName, Sizable};
 use gpui_kit::{div, prelude::*, px, AnyElement, App, Entity, FontWeight, SharedString};
 use yh_core::git::RepoStatus;
 
@@ -94,11 +95,12 @@ pub fn checkouts(workspace: &Entity<Workspace>, theme: &Theme, cx: &App) -> Opti
                 Button::new("thread-checkouts-button")
                     .small()
                     .ghost()
-                    .label(format!("⎇ {count}"))
+                    .icon(icons::branch().size(px(14.)).text_color(theme.secondary))
+                    .label(count.to_string())
                     .tooltip(if count == 1 { "The checkout this thread works in".to_string() } else { format!("The {count} checkouts this thread works in") }),
             )
             .content(move |_, _, _| {
-                let mut list = div().w(px(400.)).flex().flex_col().child(div().px(px(14.)).pt(px(12.)).pb(px(8.)).font_weight(FontWeight::SEMIBOLD).child("Works In"));
+                let mut list = div().w(px(400.)).flex().flex_col().child(div().px(px(space::L)).pt(px(space::M)).pb(px(space::S)).font_weight(FontWeight::SEMIBOLD).child("Works In"));
                 for (i, row) in rows.iter().enumerate() {
                     let (path, path2, path3, path4) = (row.path.clone(), row.path.clone(), row.path.clone(), row.path.clone());
                     let (ws, thread) = (workspace.clone(), thread.clone());
@@ -108,10 +110,14 @@ pub fn checkouts(workspace: &Entity<Workspace>, theme: &Theme, cx: &App) -> Opti
                             .flex()
                             .items_start()
                             .gap(px(10.))
-                            .px(px(14.))
-                            .py(px(8.))
+                            .px(px(space::L))
+                            .py(px(space::S))
                             .when(i > 0, |d| d.border_t_1().border_color(theme.separator))
-                            .child(div().w(px(16.)).text_color(theme.secondary).child(if row.of_repo.is_some() { "↳" } else { "▣" }))
+                            .child(
+                                div()
+                                    .pt(px(2.))
+                                    .child(if row.of_repo.is_some() { icons::branch() } else { icons::folder_repo() }.size(px(14.)).text_color(theme.secondary)),
+                            )
                             .child(
                                 div()
                                     .flex_1()
@@ -127,13 +133,22 @@ pub fn checkouts(workspace: &Entity<Workspace>, theme: &Theme, cx: &App) -> Opti
                                             .child(div().font_weight(FontWeight::MEDIUM).child(row.name.clone()))
                                             .when_some(row.of_repo.clone(), |d, repo| d.child(div().text_color(theme.secondary).child(format!("of {repo}"))))
                                             .when(row.runs_here, |d| {
-                                                d.child(div().px(px(5.)).rounded(px(6.)).bg(theme.accent.opacity(0.15)).text_size(px(10.)).font_weight(FontWeight::SEMIBOLD).child("Runs here"))
+                                                d.child(
+                                                    div()
+                                                        .px(px(5.))
+                                                        .rounded(px(radius::SMALL))
+                                                        .bg(theme.accent_soft)
+                                                        .text_color(theme.accent)
+                                                        .text_size(px(text::CAPTION))
+                                                        .font_weight(FontWeight::MEDIUM)
+                                                        .child("Runs here"),
+                                                )
                                             }),
                                     )
-                                    .child(div().text_size(px(11.)).text_color(if row.attention { theme.warning } else { theme.secondary }).child(row.state.clone()))
-                                    .child(div().text_size(px(10.5)).font_family(MONO).text_color(theme.secondary).truncate().child(row.path.clone())),
+                                    .child(div().text_size(px(text::FOOTNOTE)).text_color(if row.attention { theme.warning } else { theme.secondary }).child(row.state.clone()))
+                                    .child(div().text_size(px(text::CAPTION)).font_family(MONO).text_color(theme.tertiary).truncate().child(row.path.clone())),
                             )
-                            .child(Button::new(SharedString::from(format!("checkout-menu-{i}"))).xsmall().ghost().label("⋯").dropdown_menu(move |menu, _, _| {
+                            .child(Button::new(SharedString::from(format!("checkout-menu-{i}"))).xsmall().ghost().icon(Icon::new(IconName::Ellipsis).size(px(14.)).text_color(theme.secondary)).tooltip("More").dropdown_menu(move |menu, _, _| {
                                 let (p1, p2, p3, p4) = (path.clone(), path2.clone(), path3.clone(), path4.clone());
                                 let (ws, thread) = (ws.clone(), thread.clone());
                                 let menu = menu
@@ -158,8 +173,8 @@ pub fn checkouts(workspace: &Entity<Workspace>, theme: &Theme, cx: &App) -> Opti
                         .flex()
                         .items_center()
                         .justify_between()
-                        .px(px(14.))
-                        .py(px(10.))
+                        .px(px(space::S))
+                        .py(px(space::S))
                         .border_t_1()
                         .border_color(theme.separator)
                         .child(if elsewhere {
@@ -256,7 +271,7 @@ fn specialist(workspace: &Entity<Workspace>, cx: &App) -> Option<AnyElement> {
 }
 
 /// Pull requests and the right sidebar; for a memory specialist, its own buttons too.
-pub fn buttons(workspace: &Entity<Workspace>, cx: &App) -> AnyElement {
+pub fn buttons(workspace: &Entity<Workspace>, theme: &Theme, cx: &App) -> AnyElement {
     let ws = workspace.read(cx);
     let shows = ws.shows_inspector;
     let (w1, w2) = (workspace.clone(), workspace.clone());
@@ -265,13 +280,18 @@ pub fn buttons(workspace: &Entity<Workspace>, cx: &App) -> AnyElement {
         .items_center()
         .gap(px(2.))
         .children(specialist(workspace, cx))
-        .child(Button::new("thread-pulls").small().ghost().label("Pull Requests").tooltip("Pull requests this thread worked on or mentioned").on_click(move |_, _, cx| {
+        .child(icon_button("thread-pulls", icons::pull_request(), "Pull requests this thread worked on or mentioned", theme).on_click(move |_, _, cx| {
             w1.update(cx, |ws, cx| ws.show_panel(Panel::PullRequests, cx));
         }))
         .when(!shows, |d| {
-            d.child(Button::new("thread-sidebar").small().ghost().label("◧").tooltip("Show the right sidebar (⌥⌘0)").on_click(move |_, _, cx| {
+            d.child(icon_button("thread-sidebar", Icon::new(IconName::PanelRight), "Show the right sidebar (⌥⌘0)", theme).on_click(move |_, _, cx| {
                 w2.update(cx, |ws, cx| ws.set_shows_inspector(true, cx));
             }))
         })
         .into_any_element()
+}
+
+/// A toolbar action: a small ghost button with a 14 pt icon and a tooltip saying what it does.
+pub fn icon_button(id: &'static str, icon: Icon, tip: &'static str, theme: &Theme) -> Button {
+    Button::new(id).small().ghost().icon(icon.size(px(14.)).text_color(theme.secondary)).tooltip(tip)
 }

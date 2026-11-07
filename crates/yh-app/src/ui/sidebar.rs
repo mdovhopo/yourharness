@@ -9,7 +9,7 @@
 use crate::probe;
 use crate::state::thread::ThreadState;
 use crate::state::workspace::{Page, Workspace};
-use crate::theme::Theme;
+use crate::theme::{radius, space, text, Theme};
 use crate::ui::icons;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -24,6 +24,16 @@ use std::collections::{HashMap, HashSet};
 use yh_core::library::ProjectMeta;
 
 const SHOWN_PER_PROJECT: usize = 12;
+
+/// The rows' grid: every row is 28 pt; a project's chevron, then its icon, then its name, and
+/// each thread's status under the project's icon and its title under the name.
+const ROW_HEIGHT: f32 = 28.;
+const ROW_INSET: f32 = 6.;
+const CHEVRON: f32 = 12.;
+const ICON: f32 = 14.;
+const GAP: f32 = 6.;
+/// Where titles start, from the row's edge.
+const TITLE_X: f32 = ROW_INSET + CHEVRON + GAP + ICON + GAP;
 
 /// Settings: projects folded away (the Swift app's key), shelves open, projects showing all.
 const COLLAPSED: &str = "collapsedProjectIDs";
@@ -388,29 +398,28 @@ impl Sidebar {
         });
     }
 
+    /// New Thread and Search: rows like the threads under them, the shortcut quiet at the end.
     fn top_buttons(&self, theme: &Theme) -> impl IntoElement {
         let action = |id: &'static str, icon: Icon, label: &'static str, key: &'static str, strong: bool, tip: &'static str| {
             div()
                 .id(id)
                 .flex()
                 .items_center()
-                .gap(px(9.))
-                .px(px(10.))
-                .py(px(6.))
-                .rounded(px(9.))
-                .bg(theme.selected.opacity(0.6))
-                .hover(|s| s.bg(theme.selected))
-                .child(icon.size(px(15.)).text_color(if strong { theme.accent } else { theme.secondary }))
-                .child(div().flex_1().when(strong, |d| d.font_weight(FontWeight::MEDIUM)).when(!strong, |d| d.text_color(theme.secondary)).child(label))
-                .child(key_cap(key, theme))
+                .gap(px(GAP))
+                .h(px(ROW_HEIGHT))
+                .px(px(ROW_INSET))
+                .rounded(px(radius::MEDIUM))
+                .hover(|s| s.bg(theme.hover))
+                .child(div().flex_none().w(px(CHEVRON + GAP + ICON)).flex().justify_end().child(icon.size(px(ICON)).text_color(if strong { theme.accent } else { theme.secondary })))
+                .child(div().flex_1().when(!strong, |d| d.text_color(theme.secondary)).child(label))
+                .child(div().flex_none().text_size(px(text::CAPTION)).text_color(theme.tertiary).child(key))
                 .tooltip(tooltip(tip))
         };
         div()
             .flex()
             .flex_col()
-            .gap(px(6.))
-            .px(px(10.))
-            .pb(px(8.))
+            .px(px(8.))
+            .pb(px(space::S))
             .child(action("new-thread", icons::square_pen(), "New Thread", "⌘N", true, "New Thread (⌘N)").on_click(|_, window, cx| {
                 window.dispatch_action(Box::new(crate::ui::root::NewThread), cx)
             }))
@@ -420,7 +429,7 @@ impl Sidebar {
             )
     }
 
-    fn project_row(&self, project: &ProjectMeta, home: bool, theme: &Theme, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+    fn project_row(&self, project: &ProjectMeta, home: bool, first: bool, theme: &Theme, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let ws = self.workspace.read(cx);
         let collapsed = self.collapsed.contains(&project.id);
         let threads: Vec<&Entity<ThreadState>> = ws.threads.iter().filter(|t| t.read(cx).meta.project_id == project.id && t.read(cx).meta.settled_at.is_none()).collect();
@@ -479,23 +488,25 @@ impl Sidebar {
             .group(group.clone())
             .flex()
             .items_center()
-            .gap(px(6.))
-            .mt(px(8.))
-            .px(px(4.))
-            .h(px(28.))
-            .rounded(px(8.))
-            .text_size(px(12.))
+            .gap(px(GAP))
+            .mt(px(if first { 0. } else { space::M }))
+            .px(px(ROW_INSET))
+            .h(px(ROW_HEIGHT))
+            .rounded(px(radius::MEDIUM))
+            .text_size(px(text::FOOTNOTE))
+            .text_color(theme.secondary)
             .when(selected, |d| d.bg(theme.selected))
-            .when(!selected && !home, |d| d.hover(|s| s.bg(theme.selected.opacity(0.5))))
+            .when(!selected, |d| d.hover(|s| s.bg(theme.hover)))
             .child(
                 div()
                     .id(SharedString::from(format!("chevron-{}", project.id)))
-                    .w(px(12.))
+                    .flex_none()
+                    .w(px(CHEVRON))
                     .h(px(18.))
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(Icon::new(if collapsed { IconName::ChevronRight } else { IconName::ChevronDown }).size(px(11.)).text_color(theme.secondary.opacity(0.7)))
+                    .child(Icon::new(if collapsed { IconName::ChevronRight } else { IconName::ChevronDown }).size(px(10.)).text_color(theme.tertiary))
                     .tooltip(tooltip(if collapsed { "Show threads" } else { "Hide threads" }))
                     .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -512,13 +523,11 @@ impl Sidebar {
                     .min_w_0()
                     .flex()
                     .items_center()
-                    .gap(px(6.))
-                    .child(icon.size(px(14.)).text_color(if home { theme.accent } else { theme.secondary }))
+                    .gap(px(GAP))
+                    .child(icon.size(px(ICON)).text_color(theme.secondary))
                     .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_weight(FontWeight::SEMIBOLD).child(name.clone()))
                     .when(collapsed && activity, |d| d.child(div().flex_none().w(px(6.)).h(px(6.)).rounded_full().bg(theme.accent)))
-                    .when(collapsed && !activity && count > 0, |d| {
-                        d.child(div().flex_none().px(px(5.)).rounded(px(8.)).bg(theme.selected).text_size(px(10.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.secondary).child(count.to_string()))
-                    })
+                    .when(collapsed && !activity && count > 0, |d| d.child(div().flex_none().text_size(px(text::CAPTION)).text_color(theme.tertiary).child(count.to_string())))
                     .child(div().flex_1())
                     .when(reviews > 0, |d| {
                         d.child(
@@ -529,10 +538,10 @@ impl Sidebar {
                                 .items_center()
                                 .gap(px(3.))
                                 .px(px(5.))
-                                .rounded(px(8.))
-                                .bg(theme.accent.opacity(0.14))
+                                .rounded(px(radius::SMALL))
+                                .bg(theme.accent_soft)
                                 .text_color(theme.accent)
-                                .text_size(px(10.))
+                                .text_size(px(text::CAPTION))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .child(Icon::new(IconName::Eye).size(px(11.)).text_color(theme.accent))
                                 .child(reviews.to_string())
@@ -547,14 +556,14 @@ impl Sidebar {
                 div()
                     .id(SharedString::from(format!("memory-{}", project.id)))
                     .flex_none()
-                    .w(px(20.))
-                    .h(px(20.))
-                    .rounded(px(5.))
+                    .w(px(22.))
+                    .h(px(22.))
+                    .rounded(px(radius::SMALL))
                     .flex()
                     .items_center()
                     .justify_center()
                     .hover(|s| s.bg(theme.selected))
-                    .child(icons::brain().size(px(13.)).text_color(if memory_open { theme.accent } else { theme.secondary }))
+                    .child(icons::brain().size(px(ICON)).text_color(if memory_open { theme.accent } else { theme.secondary }))
                     .map(|d| if memory_open { d } else { hidden(d).group_hover(group.clone(), |s| visible(s)) })
                     .tooltip(tooltip(memory_tip))
                     .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -567,14 +576,14 @@ impl Sidebar {
                 div()
                     .id(SharedString::from(format!("new-{}", project.id)))
                     .flex_none()
-                    .w(px(20.))
-                    .h(px(20.))
-                    .rounded(px(5.))
+                    .w(px(22.))
+                    .h(px(22.))
+                    .rounded(px(radius::SMALL))
                     .flex()
                     .items_center()
                     .justify_center()
                     .hover(|s| s.bg(theme.selected))
-                    .child(Icon::new(IconName::Plus).size(px(13.)).text_color(theme.secondary))
+                    .child(Icon::new(IconName::Plus).size(px(ICON)).text_color(theme.secondary))
                     .tooltip(tooltip(format!("New thread in {name}")))
                     .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -593,8 +602,9 @@ impl Sidebar {
         if let Some((rid, input, _)) = &self.renaming {
             if *rid == id {
                 return div()
-                    .h(px(28.))
-                    .px(px(4.))
+                    .h(px(ROW_HEIGHT))
+                    .pl(px(TITLE_X - 8.))
+                    .pr(px(ROW_INSET))
                     .flex()
                     .items_center()
                     .capture_key_down(cx.listener(|this, e: &gpui_kit::KeyDownEvent, window, cx| {
@@ -616,7 +626,8 @@ impl Sidebar {
         let generating = ws.is_generating_title(&id);
         let tracking = probe::enabled();
         let jobs = jobs_marker(t, running || waiting);
-        let fg: Hsla = if is_selected { gpui_kit::white() } else { theme.secondary };
+        // Selection is a soft fill: text keeps its colours, as in Finder's sidebar.
+        let fg: Hsla = theme.secondary;
         let menu = ThreadMenu {
             this: cx.entity().downgrade(),
             ws: self.workspace.downgrade(),
@@ -626,17 +637,18 @@ impl Sidebar {
             settled,
             can_regenerate: !t.running && (t.session_id.is_some() || t.total.unwrap_or(0) > 0 || !t.items.is_empty()),
         };
-        // Working, waiting on you, waiting on a job, unread, or idle: under the project's icon.
+        // Working, waiting on you, waiting on a job, unread, or nothing when idle: under the
+        // project's icon. Still icons: the sidebar is cached, nothing in it spins.
         let (status, status_tip): (gpui_kit::AnyElement, &str) = if waiting {
-            (icons::hand().size(px(12.)).text_color(if is_selected { gpui_kit::white() } else { theme.warning }).into_any_element(), "Waiting for your approval")
+            (icons::hand().size(px(13.)).text_color(theme.warning).into_any_element(), "Waiting for your approval")
         } else if running {
-            (Icon::new(IconName::LoaderCircle).size(px(12.)).text_color(if is_selected { gpui_kit::white() } else { theme.accent }).into_any_element(), "Working…")
+            (Icon::new(IconName::LoaderCircle).size(px(13.)).text_color(theme.accent).into_any_element(), "Working…")
         } else if jobs.is_some() {
-            (icons::hourglass().size(px(11.)).text_color(fg).into_any_element(), "")
+            (icons::hourglass().size(px(12.)).text_color(fg).into_any_element(), "")
         } else if unread {
             (div().w(px(7.)).h(px(7.)).rounded_full().bg(theme.accent).into_any_element(), "New reply")
         } else {
-            (div().w(px(5.)).h(px(5.)).rounded_full().bg(fg.opacity(0.45)).into_any_element(), "")
+            (div().into_any_element(), "")
         };
         let status_tip: SharedString = jobs.clone().unwrap_or_else(|| status_tip.into());
         let group: SharedString = format!("thread-row-{id}").into();
@@ -645,21 +657,21 @@ impl Sidebar {
         let this = cx.entity().downgrade();
         let age = yh_core::clock::short_age(t.meta.updated_at / 1000.0, now);
         // Hover covers the end of the title with the row's own colour, so nothing moves.
-        let cover = if is_selected { theme.accent } else { theme.sidebar };
+        let cover = theme.sidebar;
         let actions = {
             let (ws1, ws2, i1, i2) = (self.workspace.clone(), self.workspace.clone(), id.clone(), id.clone());
             let m = menu.clone();
             let button = |name: &str, icon: Icon, tip: &'static str| {
                 div()
                     .id(SharedString::from(format!("{name}-{id}")))
-                    .w(px(20.))
-                    .h(px(20.))
-                    .rounded(px(5.))
+                    .w(px(22.))
+                    .h(px(22.))
+                    .rounded(px(radius::SMALL))
                     .flex()
                     .items_center()
                     .justify_center()
-                    .hover(|s| s.bg(if is_selected { gpui_kit::white().opacity(0.2) } else { theme.selected }))
-                    .child(icon.size(px(12.)).text_color(fg))
+                    .hover(|s| s.bg(theme.selected))
+                    .child(icon.size(px(13.)).text_color(fg))
                     .tooltip(tooltip(tip))
             };
             hidden(div())
@@ -670,15 +682,18 @@ impl Sidebar {
                 .right_0()
                 .flex()
                 .items_center()
+                .rounded_r(px(radius::MEDIUM))
                 .bg(cover)
                 .child(
                     div()
                         .h_full()
                         .flex()
                         .items_center()
-                        .gap(px(2.))
+                        .gap(px(1.))
                         .pl(px(4.))
-                        .bg(if is_selected { theme.accent } else { theme.selected })
+                        .rounded_r(px(radius::MEDIUM))
+                        // The row's own fill over the sidebar, so the cover can't be told apart.
+                        .bg(if is_selected { theme.selected } else { theme.hover })
                         .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .when(!settled, |d| {
                             d.child(
@@ -704,11 +719,11 @@ impl Sidebar {
                             Button::new(SharedString::from(format!("more-{id}")))
                                 .xsmall()
                                 .ghost()
-                                .icon(Icon::new(IconName::Ellipsis).size(px(12.)).text_color(fg))
+                                .icon(Icon::new(IconName::Ellipsis).size(px(13.)).text_color(fg))
                                 .tooltip("More")
                                 .dropdown_menu(move |menu, _, cx| m.build(menu, cx)),
                         )
-                        .child(div().w(px(4.))),
+                        .child(div().w(px(2.))),
                 )
         };
         div()
@@ -717,21 +732,21 @@ impl Sidebar {
             .relative()
             .flex()
             .items_center()
-            .gap(px(6.))
+            .gap(px(GAP))
             .w_full()
-            .h(px(28.))
-            .px(px(4.))
-            .rounded(px(7.))
+            .h(px(ROW_HEIGHT))
+            .px(px(ROW_INSET))
+            .rounded(px(radius::MEDIUM))
             .overflow_hidden()
-            .when(is_selected, |d| d.bg(theme.accent).text_color(gpui_kit::white()))
-            .when(!is_selected, |d| d.hover(|s| s.bg(theme.selected)))
-            .child(div().flex_none().w(px(12.)))
+            .when(is_selected, |d| d.bg(theme.selected))
+            .when(!is_selected, |d| d.hover(|s| s.bg(theme.hover)))
+            .child(div().flex_none().w(px(CHEVRON)))
             .child(
                 div()
                     .id(SharedString::from(format!("status-{id}")))
                     .flex_none()
-                    .w(px(14.))
-                    .h(px(14.))
+                    .w(px(ICON))
+                    .h(px(ICON))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -745,14 +760,14 @@ impl Sidebar {
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
-                    .when(settled && !is_selected, |d| d.text_color(theme.secondary))
+                    .when(settled, |d| d.text_color(theme.secondary))
                     .when(unread, |d| d.font_weight(FontWeight::SEMIBOLD))
                     // A placeholder until the generated title arrives.
                     .when(generating, |d| d.opacity(0.55))
                     .child(t.title.clone()),
             )
-            .when(pinned, |d| d.child(icons::pin().size(px(10.)).text_color(fg.opacity(0.7)).rotate(gpui_kit::radians(0.7))))
-            .child(div().flex_none().text_size(px(11.)).text_color(fg).child(age))
+            .when(pinned, |d| d.child(icons::pin().size(px(11.)).text_color(theme.tertiary).rotate(gpui_kit::radians(0.7))))
+            .child(div().flex_none().text_size(px(text::CAPTION)).text_color(if is_selected { theme.secondary } else { theme.tertiary }).child(age))
             .child(actions)
             .when(tracking, |d| d.child(probe::tracker(format!("thread:{id}"))))
             .on_click(move |event, window, cx| {
@@ -777,19 +792,6 @@ fn visible(mut s: gpui_kit::StyleRefinement) -> gpui_kit::StyleRefinement {
     s
 }
 
-
-fn key_cap(text: &'static str, theme: &Theme) -> impl IntoElement {
-    div()
-        .px(px(5.))
-        .rounded(px(4.))
-        .border_1()
-        .border_color(theme.separator)
-        .bg(theme.canvas.opacity(0.6))
-        .text_size(px(10.))
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(theme.secondary)
-        .child(text)
-}
 
 /// "312 MB", "1.2 GB": this app's memory, as macOS's byte counts say it.
 fn memory_label() -> String {
@@ -821,7 +823,7 @@ impl Sidebar {
                 .flex()
                 .items_center()
                 .gap(px(6.))
-                .text_size(px(11.))
+                .text_size(px(text::CAPTION))
                 .child(div().flex_1().min_w_0().text_color(theme.secondary).line_clamp(2).child(text))
                 .when_some(action, |d, (label, restart)| {
                     d.child(Button::new("update-action").xsmall().primary().label(label).on_click(move |_, _, cx| {
@@ -863,16 +865,17 @@ impl Sidebar {
             .id(SharedString::from(format!("meter-{name}")))
             .flex()
             .items_center()
-            .gap(px(8.))
-            .text_size(px(10.))
-            .child(div().w(px(36.)).flex_none().font_weight(FontWeight::SEMIBOLD).text_color(theme.secondary).child(yh_core::limits::short_label(name)))
+            .gap(px(space::S))
+            .h(px(16.))
+            .text_size(px(text::CAPTION))
+            .child(div().w(px(22.)).flex_none().font_weight(FontWeight::MEDIUM).text_color(theme.secondary).child(yh_core::limits::short_label(name)))
             .child(
-                div().flex_1().h(px(4.)).rounded(px(2.)).bg(theme.selected).when_some(used, |d, u| {
-                    d.child(div().h_full().rounded(px(2.)).min_w(px(4.)).w(gpui_kit::relative(u as f32)).bg(tint))
+                div().flex_1().h(px(4.)).rounded_full().bg(theme.selected).when_some(used, |d, u| {
+                    d.child(div().h_full().rounded_full().min_w(px(4.)).w(gpui_kit::relative(u as f32)).bg(tint))
                 }),
             )
             .child(div().w(px(30.)).flex_none().flex().justify_end().text_color(theme.secondary).child(used.map(|u| format!("{}%", (u * 100.).round() as i64)).unwrap_or_else(|| "–".into())))
-            .child(div().w(px(40.)).flex_none().flex().justify_end().text_color(theme.secondary.opacity(0.7)).whitespace_nowrap().child(countdown))
+            .child(div().w(px(44.)).flex_none().flex().justify_end().text_color(theme.tertiary).whitespace_nowrap().child(countdown))
             .tooltip(tooltip(tip))
             .into_any_element()
     }
@@ -900,7 +903,7 @@ impl Sidebar {
             .id("limits")
             .flex()
             .flex_col()
-            .gap(px(7.))
+            .gap(px(space::XS))
             .on_click(move |_, _, cx| {
                 usage_ws.update(cx, |ws, cx| {
                     if ws.page != Some(Page::Usage) {
@@ -915,30 +918,34 @@ impl Sidebar {
         let awake = ws.keep_awake.reason.is_some();
         let manual = ws.keep_awake.has_manual();
         let awake_label = ws.keep_awake.describe();
+        // No box: a hairline above, the meters, then a row of quiet controls.
         div()
-            .m(px(10.))
-            .p(px(12.))
+            .flex_none()
+            .px(px(space::L))
+            .pt(px(space::M))
+            .pb(px(space::S))
             .flex()
             .flex_col()
-            .gap(px(9.))
-            .rounded(px(14.))
-            .bg(theme.selected.opacity(0.35))
+            .gap(px(space::S))
+            .border_t_1()
+            .border_color(theme.separator)
             .children(self.update_row(theme, cx))
             .child(bars)
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(6.))
+                    .gap(px(2.))
+                    .mr(px(-6.))
                     .child(
                         div()
                             .id("app-memory")
                             .flex()
                             .items_center()
-                            .gap(px(4.))
-                            .text_size(px(10.))
-                            .text_color(theme.secondary.opacity(0.75))
-                            .child(Icon::new(IconName::MemoryStick).size(px(11.)).text_color(theme.secondary.opacity(0.75)))
+                            .gap(px(space::XS))
+                            .text_size(px(text::CAPTION))
+                            .text_color(theme.tertiary)
+                            .child(Icon::new(IconName::MemoryStick).size(px(12.)).text_color(theme.tertiary))
                             .child(memory_label())
                             .tooltip(tooltip("This app's memory use")),
                     )
@@ -947,7 +954,7 @@ impl Sidebar {
                         Button::new("keep-awake")
                             .xsmall()
                             .ghost()
-                            .icon(Icon::new(if awake { IconName::Sun } else { IconName::Moon }).size(px(13.)).text_color(if awake { theme.accent } else { theme.secondary }))
+                            .icon(Icon::new(if awake { IconName::Sun } else { IconName::Moon }).size(px(ICON)).text_color(if awake { theme.accent } else { theme.secondary }))
                             .tooltip(awake_label)
                             .dropdown_menu(move |mut menu, _, _| {
                                 // The cup: keep the Mac awake for a while, or let it sleep.
@@ -985,7 +992,7 @@ impl Sidebar {
                                 } else {
                                     IconName::RefreshCw
                                 })
-                                .size(px(13.))
+                                .size(px(ICON))
                                 .text_color(if error.is_some() { theme.warning } else { theme.secondary }),
                             )
                             .tooltip(refresh_tip)
@@ -995,7 +1002,7 @@ impl Sidebar {
                         Button::new("settings")
                             .xsmall()
                             .ghost()
-                            .icon(Icon::new(IconName::Settings).size(px(13.)).text_color(theme.secondary))
+                            .icon(Icon::new(IconName::Settings).size(px(ICON)).text_color(theme.secondary))
                             .tooltip("Settings (⌘,)")
                             .on_click(move |_, window, cx| crate::ui::settings::open(settings_ws.clone(), window, cx)),
                     ),
@@ -1003,17 +1010,20 @@ impl Sidebar {
     }
 }
 
+/// "Show 12 more" and friends: a footnote under the titles, in a row of its own height.
 fn small_row(id: SharedString, label: String, theme: &Theme) -> gpui_kit::Stateful<gpui_kit::Div> {
     div()
         .id(id)
         .relative()
-        .pl(px(36.))
-        .pr(px(8.))
-        .py(px(3.))
-        .text_size(px(11.))
+        .flex()
+        .items_center()
+        .h(px(24.))
+        .pl(px(TITLE_X))
+        .pr(px(space::S))
+        .text_size(px(text::FOOTNOTE))
         .text_color(theme.secondary)
-        .rounded(px(5.))
-        .hover(|s| s.bg(theme.selected))
+        .rounded(px(radius::MEDIUM))
+        .hover(|s| s.bg(theme.hover))
         .child(label)
 }
 
@@ -1032,9 +1042,13 @@ impl Render for Sidebar {
             .track_scroll(&self.scroll)
             .px(px(8.))
             .pb(px(16.));
+        let mut first_project = true;
         for row in self.rows(cx) {
             let element = match row {
-                SidebarRow::Project(project, home) => self.project_row(&project, home, &theme, cx),
+                SidebarRow::Project(project, home) => {
+                    let first = std::mem::replace(&mut first_project, false);
+                    self.project_row(&project, home, first, &theme, cx)
+                }
                 SidebarRow::Thread(thread) => self.thread_row(&thread, selected.as_deref(), &theme, now, cx),
                 SidebarRow::More(project, count, all) => {
                     let key = project.clone();
@@ -1053,18 +1067,18 @@ impl Render for Sidebar {
                         .id(SharedString::from(format!("shelf-{project}")))
                         .flex()
                         .items_center()
-                        .gap(px(6.))
-                        .pl(px(20.))
-                        .pr(px(8.))
-                        .py(px(4.))
-                        .rounded(px(5.))
-                        .text_size(px(11.))
+                        .gap(px(GAP))
+                        .h(px(24.))
+                        .pl(px(ROW_INSET + CHEVRON + GAP))
+                        .pr(px(space::S))
+                        .rounded(px(radius::MEDIUM))
+                        .text_size(px(text::FOOTNOTE))
                         .text_color(theme.secondary)
-                        .hover(|s| s.bg(theme.selected))
-                        .child(Icon::new(IconName::CircleCheck).size(px(11.)).text_color(theme.secondary))
+                        .hover(|s| s.bg(theme.hover))
+                        .child(div().w(px(ICON)).flex().justify_center().child(Icon::new(IconName::CircleCheck).size(px(12.)).text_color(theme.tertiary)))
                         .child("Settled")
-                        .child(div().text_color(theme.secondary.opacity(0.7)).child(count.to_string()))
-                        .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).size(px(9.)).text_color(theme.secondary))
+                        .child(div().text_color(theme.tertiary).child(count.to_string()))
+                        .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).size(px(10.)).text_color(theme.tertiary))
                         .tooltip(tooltip(if open { "Hide settled threads" } else { "Show settled threads" }))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             Self::toggle(&mut this.shelves, &key);
@@ -1073,8 +1087,20 @@ impl Render for Sidebar {
                         }))
                         .into_any_element()
                 }
-                SidebarRow::AddProject => small_row("add-project".into(), "+ Add Project…".into(), &theme)
-                    .mt(px(8.))
+                SidebarRow::AddProject => div()
+                    .id("add-project")
+                    .flex()
+                    .items_center()
+                    .gap(px(GAP))
+                    .mt(px(space::M))
+                    .h(px(ROW_HEIGHT))
+                    .pl(px(ROW_INSET + CHEVRON + GAP))
+                    .rounded(px(radius::MEDIUM))
+                    .text_color(theme.secondary)
+                    .hover(|s| s.bg(theme.hover))
+                    .child(icons::folder_plus().size(px(ICON)).text_color(theme.secondary))
+                    .child("Add Project…")
+                    .tooltip(tooltip("Add a folder to work in (⌘O)"))
                     .on_click(cx.listener(|this, _, _, cx| this.add_project(cx)))
                     .into_any_element(),
             };
@@ -1101,6 +1127,7 @@ impl Render for Sidebar {
             .bg(theme.sidebar)
             .border_r_1()
             .border_color(theme.separator)
+            // Room for the traffic lights.
             .child(div().h(px(44.)).flex_none())
             .child(self.top_buttons(&theme))
             .child(column)

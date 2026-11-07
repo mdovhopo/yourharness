@@ -157,9 +157,12 @@ pub fn apply_appearance(appearance: WindowAppearance, window: &mut Window, cx: &
     };
     ComponentTheme::change(mode, Some(window), cx);
     // Its primary buttons in the app's accent, as macOS's default buttons are.
-    let accent = Theme::get(cx).accent;
+    let ours = Theme::get(cx);
+    let accent = ours.accent;
     let theme = ComponentTheme::global_mut(cx);
     let colors = &mut theme.colors;
+    // Dialogs and fields on the app's canvas, not the kit's near-black in dark mode.
+    colors.background = ours.canvas;
     colors.primary = accent;
     colors.primary_hover = accent.opacity(0.9);
     colors.primary_active = accent.opacity(0.8);

@@ -3,7 +3,7 @@
 //! the rest let go of their rows) and moves the composer to it.
 
 use crate::state::workspace::{Workspace, WorkspaceEvent};
-use crate::theme::{Theme, UI};
+use crate::theme::{radius, space, text, Theme, UI};
 use crate::ui::composer::Composer;
 use crate::ui::find::FindBar;
 use crate::ui::inspector::Inspector;
@@ -346,7 +346,7 @@ impl RootView {
                         .tooltip(tip),
                 )
                 .content(move |_, _, _| {
-                    let mut list = div().w(px(340.)).p(px(16.)).flex().flex_col().gap(px(14.));
+                    let mut list = div().w(px(340.)).p(px(space::L)).flex().flex_col().gap(px(space::M + 2.));
                     for task in &tasks {
                         let state = task.task_state.clone().unwrap_or_else(|| "active".into());
                         let mut card = div().flex().flex_col().gap(px(6.)).child(
@@ -358,11 +358,11 @@ impl RootView {
                                 .child(
                                     div()
                                         .flex_none()
-                                        .px(px(7.))
-                                        .rounded(px(8.))
+                                        .px(px(6.))
+                                        .rounded(px(radius::SMALL))
                                         .bg(color(&state).opacity(0.15))
                                         .text_color(color(&state))
-                                        .text_size(px(11.))
+                                        .text_size(px(text::CAPTION))
                                         .child(yh_core::memory::state_label(&state)),
                                 ),
                         );
@@ -375,7 +375,7 @@ impl RootView {
                                         .flex()
                                         .items_start()
                                         .gap(px(6.))
-                                        .text_size(px(12.))
+                                        .text_size(px(text::FOOTNOTE))
                                         .when(step.done, |d| d.text_color(theme.secondary))
                                         .child(Icon::new(if step.done { IconName::CircleCheck } else { IconName::Square }).size(px(12.)).text_color(if step.done { theme.secondary } else { theme.text }))
                                         .child(step.text.clone()),
@@ -389,7 +389,7 @@ impl RootView {
                         div()
                             .id("tasks-show-in-memory")
                             .text_color(theme.accent)
-                            .text_size(px(12.))
+                            .text_size(px(text::FOOTNOTE))
                             .child("Show in Memory")
                             .on_click(move |_, window, cx| {
                                 let Some(project) = project.clone() else { return };
@@ -473,10 +473,10 @@ impl RootView {
         let ws = self.workspace.read(cx);
         let home = ws.home_project();
         let first_run = ws.threads.is_empty() && ws.projects.iter().all(|p| Some(&p.id) == home.as_ref());
-        let (icon, title, text): (Icon, &str, &str) = if first_run {
-            (Icon::new(IconName::FolderOpen), "Add Your First Project", "Pick a folder to work in. Claude runs there, using your own Claude Code login.")
+        let (icon, title, body): (Icon, &str, &str) = if first_run {
+            (crate::ui::icons::folder_plus(), "Add Your First Project", "Pick a folder to work in. Claude runs there, using your own Claude Code login.")
         } else {
-            (Icon::new(IconName::FileText), "No Thread Selected", "Choose a thread in the sidebar, or start a new one with ⌘N.")
+            (crate::ui::icons::message_square(), "No Thread Selected", "Choose a thread in the sidebar, or start a new one.")
         };
         div()
             .flex_1()
@@ -485,32 +485,33 @@ impl RootView {
             .flex_col()
             .items_center()
             .justify_center()
-            .gap(px(10.))
+            .pb(px(40.))
             .when(self.sidebar_hidden, |d| {
                 d.child(
                     div().absolute().top(px(8.)).left(px(84.)).child(
-                        Button::new("show-sidebar-empty")
-                            .small()
-                            .ghost()
-                            .icon(Icon::new(IconName::PanelLeft))
-                            .tooltip("Show Sidebar (⌃⌘S)")
+                        crate::ui::thread_toolbar::icon_button("show-sidebar-empty", Icon::new(IconName::PanelLeft), "Show Sidebar (⌃⌘S)", theme)
                             .on_click(cx.listener(|this, _, window, cx| this.on_toggle_sidebar(window, cx))),
                     ),
                 )
             })
-            .child(icon.size(px(40.)).text_color(theme.secondary))
-            .child(div().text_size(px(18.)).font_weight(FontWeight::SEMIBOLD).child(title))
-            .child(div().max_w(px(380.)).text_color(theme.secondary).text_center().child(text))
-            .child(if first_run {
+            .child(icon.size(px(36.)).text_color(theme.tertiary))
+            .child(div().mt(px(space::L)).text_size(px(text::TITLE)).font_weight(FontWeight::SEMIBOLD).child(title))
+            .child(div().mt(px(space::XS)).max_w(px(340.)).text_color(theme.secondary).text_center().child(body))
+            .child(div().mt(px(space::L)).child(if first_run {
                 Button::new("empty-add-project")
                     .primary()
-                    .large()
                     .label("Add Project…")
                     .on_click(cx.listener(|this, _, _, cx| this.sidebar.update(cx, |s, cx| s.add_project(cx))))
                     .into_any_element()
             } else {
-                Button::new("empty-new-thread").label("New Thread").on_click(|_, window, cx| window.dispatch_action(Box::new(NewThread), cx)).into_any_element()
-            })
+                Button::new("empty-new-thread")
+                    .outline()
+                    .icon(crate::ui::icons::square_pen().size(px(14.)))
+                    .label("New Thread")
+                    .tooltip("New Thread (⌘N)")
+                    .on_click(|_, window, cx| window.dispatch_action(Box::new(NewThread), cx))
+                    .into_any_element()
+            }))
     }
 
     fn on_new_thread(&mut self, _: &NewThread, _: &mut Window, cx: &mut Context<Self>) {
@@ -629,7 +630,7 @@ impl Render for RootView {
             .relative()
             .flex()
             .font_family(UI)
-            .text_size(px(13.))
+            .text_size(px(text::BODY))
             .line_height(px(19.5))
             .text_color(theme.text)
             .bg(theme.canvas)
@@ -671,10 +672,11 @@ impl Render for RootView {
                                 .flex_none()
                                 .flex()
                                 .items_center()
-                                .gap(px(10.))
-                                .px(px(20.))
+                                .gap(px(space::M))
+                                .px(px(space::XL - 4.))
                                 .when(self.sidebar_hidden, |d| d.pl(px(84.)).child(
-                                    gpui_kit::component::button::Button::new("show-sidebar").small().ghost().label("☰").tooltip("Show Sidebar (⌃⌘S)").on_click(cx.listener(|this, _, window, cx| this.on_toggle_sidebar(window, cx))),
+                                    crate::ui::thread_toolbar::icon_button("show-sidebar", gpui_kit::component::Icon::new(gpui_kit::component::IconName::PanelLeft), "Show Sidebar (⌃⌘S)", &theme)
+                                        .on_click(cx.listener(|this, _, window, cx| this.on_toggle_sidebar(window, cx))),
                                 ))
                                 .border_b_1()
                                 .border_color(theme.separator)
@@ -684,13 +686,22 @@ impl Render for RootView {
                                         .min_w_0()
                                         .flex()
                                         .items_baseline()
-                                        .gap(px(8.))
-                                        .child(div().flex_none().max_w(gpui_kit::relative(0.7)).font_weight(FontWeight::SEMIBOLD).overflow_hidden().whitespace_nowrap().text_ellipsis().child(title))
-                                        .child(div().min_w_0().text_size(px(12.)).text_color(theme.secondary).overflow_hidden().whitespace_nowrap().text_ellipsis().child(subtitle)),
+                                        .gap(px(space::S))
+                                        .child(div().flex_none().max_w(gpui_kit::relative(0.7)).text_size(px(text::HEADLINE)).font_weight(FontWeight::SEMIBOLD).overflow_hidden().whitespace_nowrap().text_ellipsis().child(title))
+                                        .child(div().min_w_0().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).overflow_hidden().whitespace_nowrap().text_ellipsis().child(subtitle)),
                                 )
-                                .children(self.tasks_chip(tasks, &theme, cx))
-                                .children(crate::ui::thread_toolbar::checkouts(&self.workspace, &theme, cx))
-                                .child(crate::ui::thread_toolbar::buttons(&self.workspace, cx)),
+                                .child(
+                                    // The toolbar: icons right-aligned, close together.
+                                    div()
+                                        .flex_none()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(2.))
+                                        .mr(px(-6.))
+                                        .children(self.tasks_chip(tasks, &theme, cx))
+                                        .children(crate::ui::thread_toolbar::checkouts(&self.workspace, &theme, cx))
+                                        .child(crate::ui::thread_toolbar::buttons(&self.workspace, &theme, cx)),
+                                ),
                         )
                         .child(self.find.clone())
                         .when_some(start.clone(), |d, (headline, folder)| {
@@ -708,20 +719,20 @@ impl Render for RootView {
                                             .flex()
                                             .flex_col()
                                             .items_center()
-                                            .gap(px(6.))
-                                            .pb(px(14.))
-                                            .px(px(20.))
-                                            .child(div().text_size(px(20.)).line_height(px(26.)).font_weight(FontWeight::SEMIBOLD).child(headline))
+                                            .gap(px(space::S))
+                                            .pb(px(space::L))
+                                            .px(px(space::XL))
+                                            .child(div().text_size(px(text::LARGE_TITLE)).line_height(px(28.)).font_weight(FontWeight::SEMIBOLD).child(headline))
                                             .child(
                                                 div()
                                                     .max_w_full()
-                                                    .font_family(crate::theme::MONO)
-                                                    .text_size(px(12.))
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap(px(space::XS + 2.))
+                                                    .text_size(px(text::FOOTNOTE))
                                                     .text_color(theme.secondary)
-                                                    .overflow_hidden()
-                                                    .whitespace_nowrap()
-                                                    .text_ellipsis()
-                                                    .child(folder),
+                                                    .child(gpui_kit::component::Icon::new(gpui_kit::component::IconName::Folder).size(px(13.)).text_color(theme.tertiary))
+                                                    .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(folder)),
                                             ),
                                     )
                                     .child(div().w_full().child(self.composer.clone())),
@@ -759,21 +770,40 @@ impl Render for RootView {
             .when_some(self.workspace.read(cx).undo_notice().map(str::to_string), |d, message| {
                 // What the last thread action did, with a way back.
                 let ws = self.workspace.clone();
+                // Centred over the content just under its header, where it covers neither the
+                // sidebar's footer nor the composer.
+                let left = if self.sidebar_hidden { 0. } else { self.sidebar_width };
+                let right = if selected.is_some() && self.workspace.read(cx).shows_inspector { crate::ui::inspector::WIDTH } else { 0. };
                 d.child(
-                    div().absolute().bottom(px(16.)).left(px(16.)).child(
+                    div().absolute().top(px(44. + space::M)).left(px(left)).right(px(right)).flex().justify_center().child(
                         div()
                             .flex()
                             .items_center()
-                            .gap(px(10.))
-                            .px(px(12.))
-                            .py(px(8.))
-                            .rounded(px(10.))
-                            .bg(theme.canvas)
+                            .gap(px(space::S))
+                            .h(px(40.))
+                            .pl(px(space::M))
+                            .pr(px(space::XS + 2.))
+                            .rounded(px(radius::LARGE))
+                            .bg(theme.card)
                             .border_1()
                             .border_color(theme.separator)
-                            .shadow_lg()
-                            .child(div().max_w(px(260.)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(message))
-                            .child(gpui_kit::component::button::Button::new("undo").small().label("Undo ⌘Z").on_click(move |_, _, cx| ws.update(cx, |ws, cx| ws.undo(cx)))),
+                            .shadow_md()
+                            .child(div().max_w(px(320.)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(message))
+                            .child(div().w(px(1.)).h(px(18.)).bg(theme.separator))
+                            .child(
+                                gpui_kit::component::button::Button::new("undo")
+                                    .small()
+                                    .ghost()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(space::XS + 2.))
+                                            .child(div().text_color(theme.accent).font_weight(FontWeight::MEDIUM).child("Undo"))
+                                            .child(div().text_size(px(text::CAPTION)).text_color(theme.tertiary).child("⌘Z")),
+                                    )
+                                    .on_click(move |_, _, cx| ws.update(cx, |ws, cx| ws.undo(cx))),
+                            ),
                     ),
                 )
             })

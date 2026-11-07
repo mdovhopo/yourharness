@@ -5,13 +5,14 @@
 //! with each thread's next `claude`.
 
 use crate::state::workspace::Workspace;
-use crate::theme::Theme;
+use crate::theme::{radius, space, text, Theme, MONO};
+use crate::ui::icons;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{Disableable, Sizable, WindowExt};
-use gpui_kit::{div, prelude::*, px, AnyElement, App, Context, Entity, FontWeight, SharedString, Window};
+use gpui_kit::component::{Disableable, Icon, IconName, Sizable, WindowExt};
+use gpui_kit::{div, prelude::*, px, AnyElement, App, Context, Entity, FontWeight, IntoElement, RenderOnce, SharedString, Window};
 use serde_json::{json, Value};
 use yh_core::agents::{Account, Status};
 
@@ -154,7 +155,7 @@ impl SettingsView {
                     .items_center()
                     .gap(px(6.))
                     .min_w_0()
-                    .child(div().text_color(theme.secondary).font_family("Menlo").text_size(px(11.)).truncate().child(claude.as_ref().and_then(|s| s.path.clone()).map_or("Not found".into(), |p| p.display().to_string())))
+                    .child(div().text_color(theme.secondary).font_family(MONO).text_size(px(text::FOOTNOTE)).truncate().child(claude.as_ref().and_then(|s| s.path.clone()).map_or("Not found".into(), |p| p.display().to_string())))
                     .when_some(claude.as_ref().and_then(|s| s.path.clone()), |d, path| {
                         d.child(Button::new("claude-reveal").small().ghost().label("Show in Finder").on_click(move |_, _, cx| cx.reveal_path(&path)))
                     }),
@@ -166,7 +167,9 @@ impl SettingsView {
                 div()
                     .flex()
                     .justify_end()
-                    .gap(px(6.))
+                    .gap(px(space::S))
+                    .px(px(space::M))
+                    .py(px(space::S))
                     .when(chosen.is_some(), |d| {
                         d.child(Button::new("claude-detected").small().outline().label("Use Detected").on_click(move |_, _, cx| {
                             ws2.update(cx, |ws, cx| ws.choose_claude(None, cx));
@@ -191,22 +194,23 @@ impl SettingsView {
                     }))
             });
         if claude.as_ref().is_some_and(|s| !s.is_ready() && s.path.is_none()) {
-            claude_section = claude_section.child(footer("Install Claude Code from docs.claude.com, then Detect Again.", theme));
+            claude_section = claude_section.footer("Install Claude Code from docs.claude.com, then Detect Again.");
         }
-        let account = match &self.found.account {
+        let account: Group = match &self.found.account {
             Some(a) if a.logged_in => section("Account")
                 .when_some(a.email.clone(), |s, e| s.child(row("Signed in as", div().text_color(theme.secondary).child(e))))
                 .when_some(a.plan_name(), |s, p| s.child(row("Plan", div().font_weight(FontWeight::MEDIUM).child(p))))
                 .when_some(a.sign_in_method(), |s, m| s.child(row("Signed in with", div().text_color(theme.secondary).child(m))))
                 .when_some(a.org_name.clone(), |s, o| s.child(row("Organization", div().text_color(theme.secondary).child(o)))),
-            Some(_) => section("Account").child(footer("Not signed in. Run `claude` in Terminal and sign in, then Detect Again.", theme)),
-            None => div(),
+            Some(_) => section("Account").footer("Not signed in. Run `claude` in Terminal and sign in, then Detect Again."),
+            None => Group::untitled(),
         };
+        let account = (!account.is_empty()).then_some(account);
         let tool = |id: &str, name: &'static str| row(name, div().text_color(theme.secondary).child(self.status(id).map_or_else(checking, Status::describe)));
         let git = section("Git & Code Hosting")
             .child(tool("gh", "GitHub CLI (gh)"))
             .child(tool("glab", "GitLab CLI (glab)"))
-            .child(footer("Pull requests come from `gh` and `glab`, signed in as you. YourHarness never sees their tokens.", theme));
+            .footer("Pull requests come from `gh` and `glab`, signed in as you. YourHarness never sees their tokens.");
         let mut others = section("Other Agents");
         for cli in yh_core::agents::ALL.iter().filter(|c| !c.supported) {
             let url = cli.install_url;
@@ -221,23 +225,23 @@ impl SettingsView {
                     .when(!found, |d| d.child(Button::new(cli.id).small().ghost().label("Get…").on_click(move |_, _, cx| cx.open_url(url)))),
             ));
         }
-        others = others.child(footer("Support for these is coming. YourHarness detects them now, so they're ready when it lands.", theme));
+        others = others.footer("Support for these is coming. YourHarness detects them now, so they're ready when it lands.");
         let refreshing = self.found.refreshing;
         div()
             .flex()
             .flex_col()
-            .gap(px(14.))
+            .gap(px(space::L + 4.))
             .child(claude_section)
-            .child(account)
+            .when_some(account, |d, a| d.child(a))
             .child(git)
             .child(others)
-            .child(row(
+            .child(Group::untitled().child(row(
                 "Installed or signed in just now?",
                 Button::new("detect-again").small().outline().label(if refreshing { "Detecting…" } else { "Detect Again" }).disabled(refreshing).on_click(cx.listener(|this, _, _, cx| {
                     this.detect(cx);
                     cx.notify();
                 })),
-            ))
+            )))
             .into_any_element()
     }
 
@@ -280,7 +284,7 @@ impl SettingsView {
         div()
             .flex()
             .flex_col()
-            .gap(px(14.))
+            .gap(px(space::L + 4.))
             .child(
                 section("Appearance")
                     .child(row(
@@ -292,13 +296,26 @@ impl SettingsView {
                             cx.refresh_windows();
                         }),
                     ))
-                    .child(footer("System follows macOS, including its automatic switch between light and dark.", theme)),
+                    .footer("System follows macOS, including its automatic switch between light and dark."),
             )
             .child(
                 section("Notifications")
                     .child(self.toggle("notifications", "Notify when Claude finishes or needs you", cx))
-                    .when(denied, |s| s.child(div().text_color(theme.warning).text_size(px(12.)).child("⚠︎ Notifications are off for YourHarness in System Settings.")))
-                    .child(footer("Only for threads you aren't looking at: a turn that finishes while YourHarness is in the background, and Claude asking for approval, an answer or a plan review. The Dock icon counts threads waiting for you.", theme)),
+                    .when(denied, |s| {
+                        s.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(space::S))
+                                .px(px(space::M))
+                                .py(px(space::S))
+                                .text_color(theme.warning)
+                                .text_size(px(text::FOOTNOTE))
+                                .child(Icon::new(IconName::TriangleAlert).size(px(14.)).text_color(theme.warning))
+                                .child("Notifications are off for YourHarness in System Settings."),
+                        )
+                    })
+                    .footer("Only for threads you aren't looking at: a turn that finishes while YourHarness is in the background, and Claude asking for approval, an answer or a plan review. The Dock icon counts threads waiting for you."),
             )
             .child(
                 section("Sleep")
@@ -331,14 +348,14 @@ impl SettingsView {
                         "Keep the display on too",
                         Switch::new("keep-display").checked(keep.keeps_display_on).on_change(move |on, _, cx| update_keep(&k4, cx, |k| k.keeps_display_on = *on)),
                     ))
-                    .child(footer("The cup in the sidebar keeps it awake for a while on its own.", theme)),
+                    .footer("The cup in the sidebar keeps it awake for a while on its own."),
             )
             .child(
                 section("New Thread Defaults")
                     .child(row("Model", picker("settings-model", s("model"), models, set_default("model"))))
                     .child(row("Reasoning effort", picker("settings-effort", s("effort"), efforts, set_default("effort"))))
                     .child(row("Permissions for new projects", picker("settings-mode", if s("permissionMode").is_empty() { "auto".into() } else { s("permissionMode") }, modes, set_default("permissionMode"))))
-                    .child(footer("Each thread can override these from the composer. Threads that haven't overridden them follow these defaults.", theme)),
+                    .footer("Each thread can override these from the composer. Threads that haven't overridden them follow these defaults."),
             )
             .child(
                 section("Threads")
@@ -354,7 +371,7 @@ impl SettingsView {
                             },
                         ),
                     ))
-                    .child(footer("Settled threads move to a shelf at the end of their project and stop their Claude process; the conversation stays. Threads that are working or waiting on you never settle.", theme))
+                    .footer("Settled threads move to a shelf at the end of their project and stop their Claude process; the conversation stays. Threads that are working or waiting on you never settle.")
                     .child(row(
                         "Home",
                         div()
@@ -362,7 +379,7 @@ impl SettingsView {
                             .items_center()
                             .gap(px(6.))
                             .min_w_0()
-                            .child(div().text_color(theme.secondary).font_family("Menlo").text_size(px(11.)).truncate().child(home))
+                            .child(div().text_color(theme.secondary).font_family(MONO).text_size(px(text::FOOTNOTE)).truncate().child(home))
                             .child(Button::new("home-change").small().outline().label("Change…").on_click(move |_, _, cx| {
                                 let paths = cx.prompt_for_paths(gpui_kit::PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some("Use as Home".into()) });
                                 let ws = wsc.clone();
@@ -377,7 +394,7 @@ impl SettingsView {
                                 .detach();
                             })),
                     ))
-                    .child(footer("New threads that aren't in a project run here.", theme)),
+                    .footer("New threads that aren't in a project run here."),
             )
             .child(
                 section("Thread Titles")
@@ -405,15 +422,36 @@ impl SettingsView {
                             ),
                         ))
                     })
-                    .child(div().pt(px(4.)).text_color(theme.secondary).text_size(px(12.)).child("Title prompt"))
-                    .child(div().p(px(6.)).rounded(px(6.)).bg(theme.card).child(Textarea::new(&title_prompt).appearance(false).h(px(110.))))
-                    .child({
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(space::S))
+                            .px(px(space::M))
+                            .pt(px(space::S + 2.))
+                            .child("Title prompt")
+                            .child(
+                                div()
+                                    .p(px(space::S))
+                                    .rounded(px(radius::MEDIUM))
+                                    .bg(theme.canvas)
+                                    .border_1()
+                                    .border_color(theme.separator)
+                                    .font_family(MONO)
+                                    .text_size(px(text::CODE))
+                                    .child(Textarea::new(&title_prompt).appearance(false).h(px(110.))),
+                            ),
+                    )
+                    .inline({
                         let (a, b) = (title_prompt.clone(), title_prompt.clone());
                         let (wa, wb) = (wse.clone(), wse.clone());
                         div()
                             .flex()
                             .justify_end()
-                            .gap(px(6.))
+                            .gap(px(space::S))
+                            .px(px(space::M))
+                            .pt(px(space::S))
+                            .pb(px(space::S + 2.))
                             .child(Button::new("title-reset").small().ghost().label("Use Built-in").on_click(move |_, window, cx: &mut App| {
                                 wa.read(cx).library.set_setting("titlePrompt", &Value::Null);
                                 a.update(cx, |s, cx| s.set_value(yh_core::titles::DEFAULT_RULES, window, cx));
@@ -430,23 +468,23 @@ impl SettingsView {
                 section("Memory")
                     .child(self.toggle("memoryEnabled", "Give agents the workspace's memory", cx))
                     .child(self.toggle("claudeCodeMemoryOff", "Turn off Claude Code's own memory files", cx))
-                    .child(footer("Each project has its own memory, which every thread there starts with: an index of what's remembered and tools to search, read and save. With the second switch on, Claude Code's memory files are off in YourHarness's threads, so there's one memory, not two.", theme)),
+                    .footer("Each project has its own memory, which every thread there starts with: an index of what's remembered and tools to search, read and save. With the second switch on, Claude Code's memory files are off in YourHarness's threads, so there's one memory, not two."),
             )
             .child(
                 section("Plans")
                     .child(self.toggle("planChecklist", "Let Claude keep a plan checklist", cx))
-                    .child(footer("For work with several steps, Claude lists them and ticks them off: the checklist shows in the thread and above the composer while it works.", theme)),
+                    .footer("For work with several steps, Claude lists them and ticks them off: the checklist shows in the thread and above the composer while it works."),
             )
             .child(
                 section("Browser")
                     .child(self.toggle("browserTools", "Let Claude use the browser", cx))
                     .child(self.toggle("browserAutoShow", "Show the browser when Claude opens a page", cx))
-                    .child(footer("Claude opens, reads, clicks and types in a browser built into the app, to test what it builds; you watch in the sidebar and can take control. Each project keeps its own cookies.", theme)),
+                    .footer("Claude opens, reads, clicks and types in a browser built into the app, to test what it builds; you watch in the sidebar and can take control. Each project keeps its own cookies."),
             )
             .child(
                 section("Diagrams")
                     .child(self.toggle("diagramInstructions", "Let agents draw diagrams", cx))
-                    .child(footer("Mermaid flowcharts and sequence diagrams are always drawn. With this on, agents are also told they can use them (about 150 tokens per session).", theme)),
+                    .footer("Mermaid flowcharts and sequence diagrams are always drawn. With this on, agents are also told they can use them (about 150 tokens per session)."),
             )
             .child(
                 section("Data")
@@ -454,7 +492,7 @@ impl SettingsView {
                         "Everything the app keeps",
                         div()
                             .flex()
-                            .gap(px(6.))
+                            .gap(px(space::XS + 2.))
                             .child(Button::new("data-reveal").small().ghost().label("Show in Finder").on_click(move |_, _, cx| cx.reveal_path(&data_dir)))
                             .child(Button::new("state-export").small().outline().label("Export State…").on_click({
                                 let ws = self.workspace.clone();
@@ -465,12 +503,12 @@ impl SettingsView {
                                 move |_, window, cx| crate::ui::state_transfer::import(ws.clone(), window, cx)
                             })),
                     ))
-                    .child(footer("Export State writes every project, thread, memory and setting into one file: for another Mac, or for reproducing a bug exactly. Import State replaces everything you have with a file's, after asking.", theme)),
+                    .footer("Export State writes every project, thread, memory and setting into one file: for another Mac, or for reproducing a bug exactly. Import State replaces everything you have with a file's, after asking."),
             )
             .into_any_element()
     }
 
-    fn mcp(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn mcp(&self, _theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let mcp = cx.try_global::<SettingsLinks>().map(|l| l.mcp.clone());
         section("MCP Servers")
             .child(row(
@@ -482,7 +520,7 @@ impl SettingsView {
                     }
                 }),
             ))
-            .child(footer("Your servers for every project, and claude.ai connectors: sign in, add and remove. A project's own servers are in its threads' /mcp.", theme))
+            .footer("Your servers for every project, and claude.ai connectors: sign in, add and remove. A project's own servers are in its threads' /mcp.")
             .into_any_element()
     }
 
@@ -496,14 +534,30 @@ impl SettingsView {
         };
         let mut notes = section("What's New");
         for (version, body) in changelog(3) {
-            notes = notes
-                .child(div().pt(px(6.)).font_weight(FontWeight::SEMIBOLD).child(version))
-                .children(body.into_iter().map(|line| div().text_size(px(12.)).text_color(if line.starts_with("###") { theme.text } else { theme.secondary }).child(line.trim_start_matches("### ").trim_start_matches("- ").to_string())));
+            let mut block = div().flex().flex_col().gap(px(space::XS)).px(px(space::M)).py(px(space::M - 2.)).child(div().font_weight(FontWeight::SEMIBOLD).child(version));
+            for line in body {
+                let heading = line.starts_with("###");
+                let item = line.trim_start().starts_with("- ");
+                let line = line.trim_start_matches("### ").trim_start().trim_start_matches("- ").to_string();
+                block = block.child(if heading {
+                    div().pt(px(space::XS)).text_size(px(text::FOOTNOTE)).font_weight(FontWeight::SEMIBOLD).text_color(theme.secondary).child(line).into_any_element()
+                } else {
+                    div()
+                        .flex()
+                        .gap(px(space::S))
+                        .text_size(px(text::FOOTNOTE))
+                        .text_color(theme.secondary)
+                        .child(div().flex_none().w(px(6.)).child(if item { "•" } else { "" }))
+                        .child(div().flex_1().min_w_0().child(line))
+                        .into_any_element()
+                });
+            }
+            notes = notes.child(block);
         }
         div()
             .flex()
             .flex_col()
-            .gap(px(14.))
+            .gap(px(space::L + 4.))
             .child(section("YourHarness").child(row_owned(
                 version_line,
                 Button::new("settings-updates").small().outline().label("Check for Updates").on_click(move |_, _, cx| {
@@ -542,8 +596,63 @@ fn update_keep(ws: &Entity<Workspace>, cx: &mut App, change: impl FnOnce(&mut cr
     ws.update(cx, |ws, cx| ws.configure_keep_awake(k, cx));
 }
 
-fn section(title: &'static str) -> gpui_kit::Div {
-    div().flex().flex_col().gap(px(4.)).child(div().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).child(title))
+/// A group of settings as System Settings draws one: its title above, its rows in a rounded
+/// box with hairlines between them, what it means in a footnote under them.
+#[derive(IntoElement)]
+struct Group {
+    title: Option<&'static str>,
+    /// Each item, and whether a hairline goes above it (rows) or not (parts of the row above).
+    items: Vec<(AnyElement, bool)>,
+    footers: Vec<&'static str>,
+}
+
+impl Group {
+    fn untitled() -> Group {
+        Group { title: None, items: vec![], footers: vec![] }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.items.is_empty() && self.footers.is_empty()
+    }
+
+    /// A row, under a hairline.
+    fn child(mut self, item: impl IntoElement) -> Group {
+        self.items.push((item.into_any_element(), true));
+        self
+    }
+
+    /// More of the row above, no hairline between.
+    fn inline(mut self, item: impl IntoElement) -> Group {
+        self.items.push((item.into_any_element(), false));
+        self
+    }
+
+    fn footer(mut self, text: &'static str) -> Group {
+        self.footers.push(text);
+        self
+    }
+}
+
+impl RenderOnce for Group {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let theme = Theme::get(cx);
+        let has_rows = !self.items.is_empty();
+        let mut card = div().flex().flex_col().rounded(px(radius::LARGE - 2.)).bg(theme.card).border_1().border_color(theme.separator).overflow_hidden();
+        for (i, (item, ruled)) in self.items.into_iter().enumerate() {
+            card = card.child(div().when(i > 0 && ruled, |d| d.border_t_1().border_color(theme.separator)).child(item));
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(space::S - 2.))
+            .when_some(self.title, |d, t| d.child(div().px(px(space::XS)).text_size(px(text::FOOTNOTE)).font_weight(FontWeight::SEMIBOLD).text_color(theme.secondary).child(t)))
+            .when(has_rows, |d| d.child(card))
+            .children(self.footers.into_iter().map(move |f| div().px(px(space::XS)).text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child(f)))
+    }
+}
+
+fn section(title: &'static str) -> Group {
+    Group { title: Some(title), items: vec![], footers: vec![] }
 }
 
 fn row(label: &'static str, control: impl IntoElement) -> AnyElement {
@@ -551,23 +660,45 @@ fn row(label: &'static str, control: impl IntoElement) -> AnyElement {
 }
 
 fn row_owned(label: String, control: impl IntoElement) -> AnyElement {
-    div().flex().items_center().justify_between().gap(px(16.)).py(px(3.)).child(div().flex_shrink_0().child(label)).child(control).into_any_element()
-}
-
-fn footer(text: &'static str, theme: &Theme) -> AnyElement {
-    div().text_size(px(11.)).text_color(theme.secondary).child(text).into_any_element()
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(space::L))
+        .min_h(px(40.))
+        .px(px(space::M))
+        .py(px(space::XS + 2.))
+        .child(div().flex_shrink_0().child(label))
+        .child(div().min_w_0().flex().justify_end().child(control))
+        .into_any_element()
 }
 
 impl Render for SettingsView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::get(cx);
-        let tab_button = |id: &'static str, label: &'static str, tab: Tab, cx: &mut Context<Self>| {
-            let b = Button::new(id).small().label(label);
-            let b = if self.tab == tab { b.primary() } else { b.ghost() };
-            b.on_click(cx.listener(move |this, _, _, cx| {
-                this.tab = tab;
-                cx.notify();
-            }))
+        // A segmented control, each tab with its icon.
+        let current = self.tab;
+        // The chosen segment stands up from the track: white in light, a lighter grey in dark.
+        let raised = if theme.canvas.l < 0.5 { theme.bubble } else { theme.canvas };
+        let tab_button = |id: &'static str, icon: Icon, label: &'static str, tab: Tab, cx: &mut Context<Self>| {
+            let on = current == tab;
+            div()
+                .id(id)
+                .flex()
+                .items_center()
+                .gap(px(space::XS + 2.))
+                .h(px(26.))
+                .px(px(space::M))
+                .rounded(px(radius::MEDIUM - 1.))
+                .text_color(if on { theme.text } else { theme.secondary })
+                .when(on, |d| d.bg(raised).border_1().border_color(theme.separator).font_weight(FontWeight::MEDIUM))
+                .when(!on, |d| d.hover(|s| s.bg(theme.hover)))
+                .child(icon.size(px(14.)).text_color(if on { theme.accent } else { theme.secondary }))
+                .child(label)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.tab = tab;
+                    cx.notify();
+                }))
         };
         let body = match self.tab {
             Tab::Agents => self.agents(&theme, cx),
@@ -578,19 +709,24 @@ impl Render for SettingsView {
         div()
             .flex()
             .flex_col()
-            .gap(px(10.))
-            .text_size(px(13.))
+            .gap(px(space::L))
+            .text_size(px(text::BODY))
             .child(
-                div()
-                    .flex()
-                    .justify_center()
-                    .gap(px(4.))
-                    .child(tab_button("settings-tab-agents", "Agents", Tab::Agents, cx))
-                    .child(tab_button("settings-tab-general", "General", Tab::General, cx))
-                    .child(tab_button("settings-tab-mcp", "MCP", Tab::Mcp, cx))
-                    .child(tab_button("settings-tab-releases", "Releases", Tab::Releases, cx)),
+                div().flex().justify_center().child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(2.))
+                        .p(px(2.))
+                        .rounded(px(radius::MEDIUM + 1.))
+                        .bg(theme.selected)
+                        .child(tab_button("settings-tab-agents", icons::bot(), "Agents", Tab::Agents, cx))
+                        .child(tab_button("settings-tab-general", Icon::new(IconName::Settings), "General", Tab::General, cx))
+                        .child(tab_button("settings-tab-mcp", icons::plug(), "MCP", Tab::Mcp, cx))
+                        .child(tab_button("settings-tab-releases", icons::download(), "Releases", Tab::Releases, cx)),
+                ),
             )
-            .child(div().id("settings-body").max_h(px(560.)).overflow_y_scroll().pr(px(6.)).child(body))
+            .child(div().id("settings-body").max_h(px(560.)).overflow_y_scroll().pr(px(space::XS)).pb(px(space::XS)).child(body))
     }
 }
 

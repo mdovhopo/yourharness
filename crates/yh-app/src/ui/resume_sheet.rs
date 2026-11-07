@@ -4,7 +4,7 @@
 //! thread instead.
 
 use crate::state::workspace::{session_id_in, Workspace};
-use crate::theme::{Theme, MONO};
+use crate::theme::{radius, space, text, Theme, MONO};
 use crate::ui::icons;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -204,7 +204,7 @@ impl ResumeSheet {
     }
 
     fn preview(&self, theme: &Theme, cx: &Context<Self>) -> gpui_kit::AnyElement {
-        let row = |icon: Icon, text: String, color| div().flex().items_center().gap(px(6.)).text_color(color).child(icon.size(px(13.)).text_color(color)).child(text);
+        let row = |icon: Icon, line: String, color| div().flex().items_center().gap(px(space::S - 2.)).text_size(px(text::FOOTNOTE)).text_color(color).child(icon.size(px(14.)).text_color(color)).child(line);
         match &self.lookup {
             Lookup::Idle if !self.input.read(cx).value().trim().is_empty() => {
                 row(Icon::new(IconName::Info), "That doesn't look like a session ID.".into(), theme.secondary).into_any_element()
@@ -226,9 +226,9 @@ impl ResumeSheet {
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(6.))
-                    .p(px(12.))
-                    .rounded(px(10.))
+                    .gap(px(space::XS + 2.))
+                    .p(px(space::M))
+                    .rounded(px(radius::MEDIUM + 1.))
                     .bg(theme.card)
                     .border_1()
                     .border_color(theme.separator)
@@ -237,16 +237,15 @@ impl ResumeSheet {
                         div()
                             .flex()
                             .items_center()
-                            .gap(px(6.))
+                            .gap(px(space::S - 2.))
                             .font_family(MONO)
-                            .text_size(px(12.))
-                            .child(Icon::new(IconName::Folder).size(px(13.)).text_color(theme.secondary))
+                            .text_size(px(text::CODE))
+                            .text_color(theme.secondary)
+                            .child(Icon::new(IconName::Folder).size(px(14.)).text_color(theme.tertiary))
                             .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(folder)),
                     )
-                    .child(div().text_size(px(12.)).text_color(theme.secondary).child(details.join(" · ")))
-                    .when_some(self.existing(cx), |d, (_, title)| {
-                        d.child(row(Icon::new(IconName::CircleCheck), format!("Already open as “{title}”."), theme.secondary).text_size(px(12.)))
-                    })
+                    .child(div().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child(details.join(" · ")))
+                    .when_some(self.existing(cx), |d, (_, title)| d.child(row(Icon::new(IconName::CircleCheck), format!("Already open as “{title}”."), theme.secondary)))
                     .into_any_element()
             }
         }
@@ -266,10 +265,11 @@ impl ResumeSheet {
         div()
             .flex()
             .items_center()
-            .gap(px(10.))
+            .justify_between()
+            .gap(px(space::M))
             .child(div().text_color(theme.secondary).child("Add to"))
             .child(
-                Button::new("resume-destination").small().outline().label(label).dropdown_menu(move |mut menu, _, _| {
+                Button::new("resume-destination").small().outline().label(label).dropdown_caret(true).dropdown_menu(move |mut menu, _, _| {
                     if offer_new {
                         let this = this.clone();
                         menu = menu
@@ -316,8 +316,8 @@ impl Render for ResumeSheet {
             .flex()
             .justify_center()
             .items_start()
-            .pt(px(60.))
-            .bg(gpui_kit::black().opacity(0.2))
+            .pt(px(88.))
+            .bg(gpui_kit::black().opacity(0.12))
             .on_mouse_down(gpui_kit::MouseButton::Left, cx.listener(|this, _, _, cx| this.close(cx)))
             .child(
                 div()
@@ -325,9 +325,9 @@ impl Render for ResumeSheet {
                     .w(px(480.))
                     .flex()
                     .flex_col()
-                    .gap(px(14.))
-                    .p(px(20.))
-                    .rounded(px(14.))
+                    .gap(px(space::M + 2.))
+                    .p(px(space::L + 4.))
+                    .rounded(px(radius::LARGE + 2.))
                     .bg(theme.canvas)
                     .border_1()
                     .border_color(theme.separator)
@@ -343,21 +343,29 @@ impl Render for ResumeSheet {
                         div()
                             .flex()
                             .flex_col()
-                            .gap(px(4.))
-                            .child(div().font_weight(FontWeight::SEMIBOLD).child("Resume a Claude Code Session"))
-                            .child(div().text_size(px(12.)).text_color(theme.secondary).child(
+                            .gap(px(space::XS))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(space::S))
+                                    .child(icons::rotate_ccw().size(px(16.)).text_color(theme.secondary))
+                                    .child(div().text_size(px(text::TITLE)).font_weight(FontWeight::SEMIBOLD).child("Resume a Claude Code Session")),
+                            )
+                            .child(div().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child(
                                 "Paste a session ID or a `claude --resume` command. The thread shows the session's history and continues where it left off.",
                             )),
                     )
                     .child(div().font_family(MONO).child(Input::new(&self.input)))
-                    .child(div().min_h(px(64.)).child(self.preview(&theme, cx)))
+                    .child(div().min_h(px(56.)).child(self.preview(&theme, cx)))
                     .children(picker)
                     .child(
                         div()
                             .flex()
                             .justify_end()
-                            .gap(px(8.))
-                            .child(Button::new("resume-cancel").label("Cancel").on_click(cx.listener(|this, _, _, cx| this.close(cx))))
+                            .gap(px(space::S))
+                            .pt(px(space::XS))
+                            .child(Button::new("resume-cancel").outline().label("Cancel").on_click(cx.listener(|this, _, _, cx| this.close(cx))))
                             .child(
                                 Button::new("resume-go")
                                     .primary()

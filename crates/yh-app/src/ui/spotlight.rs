@@ -6,7 +6,7 @@
 //! ⎋ closes.
 
 use crate::state::workspace::{session_id_in, Workspace};
-use crate::theme::Theme;
+use crate::theme::{radius, space, text, Theme};
 use crate::ui::icons;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::{Icon, IconName, Sizable};
@@ -437,9 +437,19 @@ impl Render for Spotlight {
             return div();
         }
         let resuming = session_id_in(&self.input.read(cx).value()).is_some();
-        let mut list = div().id("spotlight-results").flex().flex_col().max_h(px(440.)).overflow_y_scroll().track_scroll(&self.scroll).p(px(8.));
+        let mut list = div().id("spotlight-results").flex().flex_col().max_h(px(440.)).overflow_y_scroll().track_scroll(&self.scroll).p(px(space::S - 2.));
         if resuming {
-            list = list.child(div().px(px(12.)).py(px(8.)).text_color(theme.secondary).child("↩ Resume this Claude Code session as a thread"));
+            list = list.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(space::M - 2.))
+                    .px(px(space::M - 2.))
+                    .py(px(space::S))
+                    .text_color(theme.secondary)
+                    .child(div().w(px(20.)).flex().justify_center().child(icons::corner_down_left().size(px(14.)).text_color(theme.secondary)))
+                    .child("Resume this Claude Code session as a thread"),
+            );
         }
         for (i, hit) in self.results.iter().enumerate() {
             let selected = i == self.index;
@@ -455,12 +465,12 @@ impl Render for Spotlight {
                     .when(first, |d| {
                         d.child(
                             div()
-                                .px(px(12.))
-                                .pt(px(if i == 0 { 4. } else { 10. }))
-                                .pb(px(2.))
-                                .text_size(px(11.))
+                                .px(px(space::M - 2.))
+                                .pt(px(if i == 0 { space::XS } else { space::M }))
+                                .pb(px(space::XS))
+                                .text_size(px(text::CAPTION))
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(theme.secondary)
+                                .text_color(theme.tertiary)
                                 .child(hit.section.title()),
                         )
                     })
@@ -469,13 +479,15 @@ impl Render for Spotlight {
                             .id(("spotlight", i))
                             .flex()
                             .items_center()
-                            .gap(px(10.))
-                            .px(px(10.))
-                            .py(px(6.))
-                            .rounded(px(10.))
+                            .gap(px(space::M - 2.))
+                            .px(px(space::M - 2.))
+                            .min_h(px(32.))
+                            .py(px(space::XS + 1.))
+                            .rounded(px(radius::MEDIUM))
                             .text_color(fg)
                             .when(selected, |d| d.bg(theme.accent))
-                            .child(div().w(px(22.)).flex().justify_center().child(icon.size(px(15.)).text_color(if selected { gpui_kit::white() } else { tint.unwrap_or(theme.secondary) })))
+                            .when(!selected, |d| d.hover(|s| s.bg(theme.hover)))
+                            .child(div().flex_none().w(px(20.)).flex().justify_center().child(icon.size(px(15.)).text_color(if selected { gpui_kit::white() } else { tint.unwrap_or(theme.secondary) })))
                             .child(
                                 div()
                                     .flex_1()
@@ -489,11 +501,11 @@ impl Render for Spotlight {
                                             .gap(px(6.))
                                             .min_w_0()
                                             .child(div().flex_none().max_w(px(360.)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(hit.title.clone()))
-                                            .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(12.)).text_color(dim).child(hit.subtitle.clone())),
+                                            .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(text::FOOTNOTE)).text_color(dim).child(hit.subtitle.clone())),
                                     )
-                                    .when_some(hit.snippet.clone(), |d, s| d.child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(12.)).text_color(dim).child(s))),
+                                    .when_some(hit.snippet.clone(), |d, s| d.child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(text::FOOTNOTE)).text_color(dim).child(s))),
                             )
-                            .when_some(hit.shortcut, |d, k| d.child(div().flex_none().text_size(px(12.)).text_color(if selected { gpui_kit::white().opacity(0.8) } else { theme.secondary.opacity(0.7) }).child(k)))
+                            .when_some(hit.shortcut, |d, k| d.child(div().flex_none().text_size(px(text::FOOTNOTE)).text_color(if selected { gpui_kit::white().opacity(0.8) } else { theme.tertiary }).child(k)))
                             .on_click(cx.listener(move |this, _, _, cx| this.choose(i, cx))),
                     ),
             );
@@ -505,16 +517,16 @@ impl Render for Spotlight {
             .flex()
             .justify_center()
             .items_start()
-            .pt(px(80.))
-            .bg(gpui_kit::black().opacity(0.15))
+            .pt(px(88.))
+            .bg(gpui_kit::black().opacity(0.12))
             .on_mouse_down(gpui_kit::MouseButton::Left, cx.listener(|this, _, _, cx| this.close(cx)))
             .child(
                 div()
-                    .w(px(660.))
+                    .w(px(640.))
                     .h_auto()
                     .flex()
                     .flex_col()
-                    .rounded(px(18.))
+                    .rounded(px(radius::LARGE + 2.))
                     .bg(theme.canvas)
                     .border_1()
                     .border_color(theme.separator)
@@ -526,14 +538,47 @@ impl Render for Spotlight {
                         div()
                             .flex()
                             .items_center()
-                            .gap(px(10.))
-                            .px(px(14.))
-                            .py(px(10.))
-                            .child(Icon::new(IconName::Search).size(px(18.)).text_color(theme.secondary))
+                            .gap(px(space::S))
+                            .px(px(space::L))
+                            .h(px(52.))
+                            .child(Icon::new(IconName::Search).size(px(18.)).text_color(theme.tertiary))
                             .child(div().flex_1().child(Input::new(&self.input).appearance(false).large())),
                     )
-                    .when_some(self.error.clone(), |d, e| d.child(div().px(px(16.)).pb(px(8.)).text_color(theme.error).child(e)))
-                    .when(!self.results.is_empty() || resuming, |d| d.child(div().h(px(1.)).bg(theme.separator)).child(list)),
+                    .when_some(self.error.clone(), |d, e| {
+                        d.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(space::S))
+                                .px(px(space::L))
+                                .pb(px(space::S + 2.))
+                                .text_color(theme.error)
+                                .child(Icon::new(IconName::TriangleAlert).size(px(14.)).text_color(theme.error))
+                                .child(e),
+                        )
+                    })
+                    .when(!self.results.is_empty() || resuming, |d| {
+                        d.child(div().h(px(1.)).bg(theme.separator)).child(list).child(
+                            // How to move about, as a footer that never moves.
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(space::L))
+                                .h(px(30.))
+                                .px(px(space::L))
+                                .border_t_1()
+                                .border_color(theme.separator)
+                                .text_size(px(text::CAPTION))
+                                .text_color(theme.tertiary)
+                                .child(hint(icons::arrow_up_down(), "Move", &theme))
+                                .child(hint(icons::corner_down_left(), "Open", &theme))
+                                .child(div().flex().items_center().gap(px(space::XS + 1.)).child(div().font_weight(FontWeight::MEDIUM).child("esc")).child("Close")),
+                        )
+                    }),
             )
     }
+}
+
+fn hint(icon: Icon, label: &'static str, theme: &Theme) -> impl IntoElement {
+    div().flex().items_center().gap(px(space::XS + 1.)).child(icon.size(px(12.)).text_color(theme.tertiary)).child(label)
 }
