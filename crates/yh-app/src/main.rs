@@ -77,7 +77,8 @@ fn main() {
             KeyBinding::new("cmd-o", ui::root::AddProject, None),
             KeyBinding::new("shift-cmd-o", ui::root::ResumeSession, None),
         ]);
-        cx.on_action(|_: &Quit, cx| cx.quit());
+        // Asks first while background jobs run (`ui::jobs::guard_quit`).
+        cx.on_action(|_: &Quit, cx| ui::jobs::quit(cx));
 
         cx.set_menus(vec![
             Menu {
@@ -213,6 +214,7 @@ fn main() {
             });
         }
 
+        ui::jobs::guard_quit(workspace.clone(), window.into(), cx);
         cx.on_app_quit({
             let workspace = workspace.clone();
             move |cx| {
@@ -605,12 +607,18 @@ fn main() {
         }
         // `YH_SNAPSHOT=<png>`: the window drawn into a PNG after `YH_SNAPSHOT_DELAY` seconds, for
         // looking without capturing the screen (test builds: `--features snapshots`).
+        // Several delays (`12,40`) draw it at each, into `<file>-<seconds>.png`.
         if let Some(file) = env("YH_SNAPSHOT") {
-            let delay: f64 = env("YH_SNAPSHOT_DELAY").and_then(|v| v.parse().ok()).unwrap_or(3.0);
+            let delays: Vec<f64> = env("YH_SNAPSHOT_DELAY").unwrap_or_else(|| "3".into()).split(',').filter_map(|v| v.trim().parse().ok()).collect();
             let quit = env("YH_SNAPSHOT_QUIT").as_deref() == Some("1");
             cx.spawn(async move |cx| {
-                cx.background_executor().timer(Duration::from_secs_f64(delay)).await;
-                let _ = window.update(cx, |_, window, _| snapshot(window, &file));
+                let mut waited = 0.0;
+                for delay in &delays {
+                    cx.background_executor().timer(Duration::from_secs_f64((delay - waited).max(0.0))).await;
+                    waited = *delay;
+                    let file = if delays.len() > 1 { format!("{}-{delay}.png", file.trim_end_matches(".png")) } else { file.clone() };
+                    let _ = window.update(cx, |_, window, _| snapshot(window, &file));
+                }
                 if quit {
                     cx.background_executor().timer(Duration::from_millis(300)).await;
                     cx.update(|cx| cx.quit());

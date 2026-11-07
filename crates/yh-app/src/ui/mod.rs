@@ -4,6 +4,7 @@ pub mod composer;
 pub mod diagram;
 pub mod find;
 pub mod inspector;
+pub mod jobs;
 pub mod mcp;
 pub mod memory;
 pub mod project;

@@ -18,6 +18,21 @@ use yh_core::library::ProjectMeta;
 
 const SHOWN_PER_PROJECT: usize = 12;
 
+/// An idle thread with background jobs running: what its hourglass says, as the Swift app.
+fn jobs_marker(t: &ThreadState, busy: bool) -> Option<SharedString> {
+    let count = t.jobs.background().count();
+    if busy || count == 0 {
+        return None;
+    }
+    let waiting = t.jobs.waiting();
+    Some(match waiting {
+        0 if count == 1 => "A background job is running".into(),
+        0 => format!("{count} background jobs are running").into(),
+        1 => "Claude is waiting on a background job".into(),
+        n => format!("Claude is waiting on {n} background jobs").into(),
+    })
+}
+
 pub struct Sidebar {
     workspace: Entity<Workspace>,
     /// A new version, when there's one: said at the bottom.
@@ -226,6 +241,17 @@ impl Sidebar {
                 d.child(div().w(px(7.)).h(px(7.)).rounded_full().bg(if is_selected { gpui_kit::white() } else { theme.accent }))
             })
             .when(unread && !running && !waiting, |d| d.child(div().w(px(7.)).h(px(7.)).rounded_full().bg(theme.accent)))
+            .when_some(jobs_marker(t, running || waiting), |d, tip| {
+                // Claude left jobs running (it's back when they report): an hourglass.
+                d.child(
+                    div()
+                        .id(SharedString::from(format!("jobs-{id}")))
+                        .text_size(px(11.))
+                        .text_color(if is_selected { gpui_kit::white() } else { theme.secondary })
+                        .child("⧗")
+                        .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)),
+                )
+            })
             .when(tracking, |d| d.child(probe::tracker(format!("thread:{id}"))))
             .on_click(move |event, window, cx| {
                 let id = click_id.clone();

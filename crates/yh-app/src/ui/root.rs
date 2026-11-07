@@ -49,6 +49,8 @@ pub struct RootView {
     pub spotlight: Entity<Spotlight>,
     pub inspector: Entity<Inspector>,
     pub mcp: Entity<crate::ui::mcp::McpSheet>,
+    /// What Claude left running, above the composer.
+    pub jobs: Entity<crate::ui::jobs::JobsStrip>,
     deck: Vec<(String, Entity<TranscriptView>)>,
     /// The Memory page when one is open (or was last: it's kept for going back to).
     memory: Option<Entity<MemoryPage>>,
@@ -74,6 +76,7 @@ impl RootView {
         let spotlight = cx.new(|cx| Spotlight::new(workspace.clone(), window, cx));
         let inspector = cx.new(|cx| Inspector::new(workspace.clone(), window, cx));
         let mcp = cx.new(|cx| crate::ui::mcp::McpSheet::new(workspace.clone(), window, cx));
+        let jobs = cx.new(|_| crate::ui::jobs::JobsStrip::new(workspace.clone()));
         cx.set_global(crate::ui::settings::SettingsLinks { mcp: mcp.clone(), updater: updater.clone() });
         let links = inspector.downgrade();
         cx.set_global(crate::ui::inspector::FileLinks(std::rc::Rc::new(move |path, lines, cx| {
@@ -114,7 +117,7 @@ impl RootView {
             )
         };
         let working = cx.new(|cx| crate::ui::working::WorkingTimer::new(workspace.clone(), cx));
-        RootView { sidebar_hidden, sidebar_width, resizing_sidebar: false, save_frame: None, workspace, sidebar, composer, find, spotlight, inspector, mcp, deck: vec![], memory: None, project: None, usage: None, tasks: vec![], tasks_for: None, focus: cx.focus_handle(), working, _subscriptions: subscriptions }
+        RootView { sidebar_hidden, sidebar_width, resizing_sidebar: false, save_frame: None, workspace, sidebar, composer, find, spotlight, inspector, mcp, jobs, deck: vec![], memory: None, project: None, usage: None, tasks: vec![], tasks_for: None, focus: cx.focus_handle(), working, _subscriptions: subscriptions }
     }
 
     fn show(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -136,6 +139,7 @@ impl RootView {
             }
         }
         self.composer.update(cx, |c, cx| c.switch_to(id, window, cx));
+        self.jobs.update(cx, |j, cx| j.switch_to(id, cx));
         cx.notify();
     }
 
@@ -471,6 +475,7 @@ impl Render for RootView {
                         })
                         // Not cached: a cached view needs a fixed size, and the composer grows
                         // with its cards. Its render is a handful of elements.
+                        .child(div().flex_none().w_full().child(self.jobs.clone()))
                         .child(div().flex_none().w_full().child(self.composer.clone()))
                     })
                     .when(selected.is_none() && self.workspace.read(cx).page.is_none(), |d| {
