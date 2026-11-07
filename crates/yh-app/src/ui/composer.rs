@@ -11,7 +11,7 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::Sizable;
+use gpui_kit::component::{Disableable, Sizable};
 use gpui_kit::{div, prelude::*, px, App, Context, Entity, FontWeight, SharedString, Subscription, Window};
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -149,6 +149,24 @@ enum Card {
 }
 
 impl Composer {
+    /// ⌘↩ (`allow`) and ⌘⌫ on a question or plan card: Answer or approve in the recommended mode;
+    /// Skip or Keep Planning. False when the card is a plain permission, which takes Allow/Deny.
+    pub fn card_shortcut(&mut self, allow: bool, cx: &mut Context<Self>) -> bool {
+        match self.card.as_ref().map(|(_, c)| c) {
+            Some(Card::Question(q)) => {
+                let q = q.clone();
+                q.update(cx, |q, cx| if allow { q.submit(cx) } else { q.skip(cx) });
+                true
+            }
+            Some(Card::Plan(p)) => {
+                let p = p.clone();
+                p.update(cx, |p, cx| if allow { p.approve(cx) } else { p.keep_planning(cx) });
+                true
+            }
+            _ => false,
+        }
+    }
+
     pub fn new(workspace: Entity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let input = cx.new(|cx| TextareaState::new(window, cx).placeholder("Ask Claude…").submit_on_enter(true));
         let subscriptions = vec![
@@ -1285,6 +1303,9 @@ struct Question {
     other: Entity<InputState>,
 }
 
+/// What Claude hears when you skip its question (the Swift app's words).
+const SKIP_MESSAGE: &str = "The user chose not to answer. Continue with your best judgment, or ask in chat.";
+
 /// Claude asks (`AskUserQuestion`): pick options or write your own; Skip declines.
 pub struct QuestionCard {
     workspace: Option<gpui_kit::WeakEntity<Workspace>>,
@@ -1315,6 +1336,29 @@ impl QuestionCard {
         (!questions.is_empty()).then(|| QuestionCard { workspace: Some(workspace), input: p.input.clone(), questions })
     }
 
+    /// Every question has an answer: an option picked, or one written.
+    fn all_answered(&self, cx: &App) -> bool {
+        self.questions.iter().all(|q| !q.chosen.is_empty() || !q.other.read(cx).value().trim().is_empty())
+    }
+
+    fn submit(&self, cx: &mut App) {
+        if !self.all_answered(cx) {
+            return;
+        }
+        let input = self.answered_input(cx);
+        let Some(ws) = self.workspace.as_ref().and_then(|w| w.upgrade()) else { return };
+        if let Some(t) = ws.read(cx).selected_thread() {
+            ws.update(cx, |ws, cx| ws.respond(&t, Decision::Allow { updated_input: Some(input), mode: None }, cx));
+        }
+    }
+
+    fn skip(&self, cx: &mut App) {
+        let Some(ws) = self.workspace.as_ref().and_then(|w| w.upgrade()) else { return };
+        if let Some(t) = ws.read(cx).selected_thread() {
+            ws.update(cx, |ws, cx| ws.respond(&t, Decision::Deny { message: SKIP_MESSAGE.into() }, cx));
+        }
+    }
+
     /// The tool's input with `answers` added, keyed by question; several joined with ", ".
     fn answered_input(&self, cx: &App) -> String {
         let mut input: Value = serde_json::from_str(&self.input).unwrap_or(json!({}));
@@ -1337,15 +1381,15 @@ impl Render for QuestionCard {
         let theme = Theme::get(cx);
         let mut card = card_frame(&theme);
         for (qi, q) in self.questions.iter().enumerate() {
-            let mut options = div().flex().flex_wrap().gap(px(6.));
+            // With descriptions, each option on its own line with what it means beside it.
+            let described = q.options.iter().any(|o| o.1.is_some());
+            let mut options = if described { div().flex().flex_col().gap(px(4.)) } else { div().flex().flex_wrap().gap(px(6.)) };
             for (oi, (label, description)) in q.options.iter().enumerate() {
                 let on = q.chosen.contains(&oi);
-                options = options.child(
-                    Button::new(SharedString::from(format!("q{qi}-{oi}")))
+                let button = Button::new(SharedString::from(format!("q{qi}-{oi}")))
                         .small()
                         .when(on, |b| b.primary())
                         .label(label.clone())
-                        .when_some(description.clone(), |b, d| b.tooltip(d))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let q = &mut this.questions[qi];
                             if !q.chosen.remove(&oi) {
@@ -1355,7 +1399,14 @@ impl Render for QuestionCard {
                                 q.chosen.insert(oi);
                             }
                             cx.notify();
-                        })),
+                        }));
+                options = options.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(div().flex_none().child(button))
+                        .when_some(description.clone().filter(|_| described), |d, text| d.child(div().min_w_0().text_size(px(12.)).text_color(theme.secondary).child(text))),
                 );
             }
             card = card.child(
@@ -1369,27 +1420,23 @@ impl Render for QuestionCard {
                     .child(Input::new(&q.other).small()),
             );
         }
-        let ws = self.workspace.clone();
-        let ws2 = self.workspace.clone();
-        card.child(
+        let ready = self.all_answered(cx);
+        div().id("question-card").max_h(px(460.)).overflow_y_scroll().child(card.child(
             div()
                 .flex()
                 .justify_end()
                 .gap(px(8.))
-                .child(Button::new("skip").small().label("Skip").on_click(move |_, _, cx| {
-                    let Some(ws) = ws2.as_ref().and_then(|w| w.upgrade()) else { return };
-                    if let Some(t) = ws.read(cx).selected_thread() {
-                        ws.update(cx, |ws, cx| ws.respond(&t, Decision::Deny { message: "The user skipped this question.".into() }, cx));
-                    }
-                }))
-                .child(Button::new("answer").small().primary().label("Answer").on_click(cx.listener(move |this, _, _, cx| {
-                    let input = this.answered_input(cx);
-                    let Some(ws) = ws.as_ref().and_then(|w| w.upgrade()) else { return };
-                    if let Some(t) = ws.read(cx).selected_thread() {
-                        ws.update(cx, |ws, cx| ws.respond(&t, Decision::Allow { updated_input: Some(input), mode: None }, cx));
-                    }
-                }))),
-        )
+                .child(Button::new("skip").small().label("Skip").tooltip("⌘⌫").on_click(cx.listener(|this, _, _, cx| this.skip(cx))))
+                .child(
+                    Button::new("answer")
+                        .small()
+                        .primary()
+                        .label("Answer")
+                        .tooltip(if ready { "⌘↩" } else { "Answer every question first" })
+                        .disabled(!ready)
+                        .on_click(cx.listener(|this, _, _, cx| this.submit(cx))),
+                ),
+        ))
     }
 }
 
@@ -1410,6 +1457,26 @@ impl PlanCard {
             workspace,
             plan: std::rc::Rc::new(markdown::parse(&text)),
             feedback: cx.new(|cx| InputState::new(window, cx).placeholder("What should change?")),
+        }
+    }
+}
+
+impl PlanCard {
+    /// ⌘↩: approve in the recommended mode (Auto).
+    fn approve(&self, cx: &mut App) {
+        let Some(ws) = self.workspace.upgrade() else { return };
+        if let Some(t) = ws.read(cx).selected_thread() {
+            ws.update(cx, |ws, cx| ws.approve_plan(&t, "auto", cx));
+        }
+    }
+
+    /// ⌘⌫: keep planning, with what's written as feedback.
+    fn keep_planning(&self, cx: &mut App) {
+        let message = self.feedback.read(cx).value().trim().to_string();
+        let message = if message.is_empty() { "Keep planning.".to_string() } else { message };
+        let Some(ws) = self.workspace.upgrade() else { return };
+        if let Some(t) = ws.read(cx).selected_thread() {
+            ws.update(cx, |ws, cx| ws.respond(&t, Decision::Deny { message }, cx));
         }
     }
 }
@@ -1440,8 +1507,8 @@ impl Render for PlanCard {
             }));
         }
         card_frame(&theme)
-            .child(div().font_weight(FontWeight::SEMIBOLD).child("Claude's plan"))
-            .child(div().max_h(px(320.)).overflow_hidden().child(rows::markdown_view(&self.plan, &theme)))
+            .child(div().font_weight(FontWeight::SEMIBOLD).child("Plan ready for review"))
+            .child(div().id("plan-body").max_h(px(320.)).overflow_y_scroll().child(rows::markdown_view(&self.plan, &theme)))
             .child(Input::new(&self.feedback).small())
             .child(buttons)
     }

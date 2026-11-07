@@ -558,8 +558,16 @@ impl Render for RootView {
             .key_context("Harness")
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::on_stop))
-            .on_action(cx.listener(|this, _: &Allow, _, cx| this.respond(Decision::allow(), cx)))
-            .on_action(cx.listener(|this, _: &Deny, _, cx| this.respond(Decision::deny(), cx)))
+            .on_action(cx.listener(|this, _: &Allow, _, cx| {
+                if !this.composer.update(cx, |c, cx| c.card_shortcut(true, cx)) {
+                    this.respond(Decision::allow(), cx)
+                }
+            }))
+            .on_action(cx.listener(|this, _: &Deny, _, cx| {
+                if !this.composer.update(cx, |c, cx| c.card_shortcut(false, cx)) {
+                    this.respond(Decision::deny(), cx)
+                }
+            }))
             .on_action(cx.listener(Self::on_new_thread))
             .on_action(cx.listener(|this, _: &OpenSpotlight, window, cx| this.spotlight.update(cx, |s, cx| s.show(window, cx))))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| crate::ui::settings::open(this.workspace.clone(), window, cx)))
