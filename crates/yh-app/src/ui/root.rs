@@ -465,7 +465,7 @@ impl Render for RootView {
                                 .min_h_0()
                                 .relative()
                                 .child(AnyView::from(view).cached(StyleRefinement::default().size_full()))
-                                .child(div().absolute().bottom(px(6.)).left(px(28.)).child(self.working.clone()))
+                                .child(div().absolute().bottom(px(6.)).right(px(28.)).child(self.working.clone()))
                                 .into_any_element(),
                             None => div().flex_1().into_any_element(),
                         })

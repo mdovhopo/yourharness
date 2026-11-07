@@ -462,10 +462,10 @@ pub fn quick_look_visible(close: bool) -> bool {
         }
         let panel: id = msg_send![class!(QLPreviewPanel), sharedPreviewPanel];
         let visible: BOOL = msg_send![panel, isVisible];
-        let count: isize = msg_send![panel, numberOfPreviewItems];
+        let item: id = msg_send![panel, currentPreviewItem];
         if close {
             let _: () = msg_send![panel, orderOut: nil];
         }
-        visible == YES && count > 0
+        visible == YES && item != nil
     }
 }
