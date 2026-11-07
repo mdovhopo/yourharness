@@ -332,6 +332,49 @@ fn main() {
             })
             .detach();
         }
+        // `YH_REFRESH_LIMITS=1`: the footer's refresh, clicked (a tiny Haiku request through
+        // `claude`; prints `LIMITS refreshed` or why not).
+        if env("YH_REFRESH_LIMITS").as_deref() == Some("1") {
+            workspace.update(cx, |ws, cx| ws.refresh_limits(cx));
+        }
+        // `YH_HOVER=<x,y>`: the pointer moved there (window points) after `YH_DRAFT_DELAY`, through
+        // the window as a real move goes, for snapshots of hover states (a sidebar row's actions).
+        if let Some((x, y)) = env("YH_HOVER").and_then(|v| v.split_once(',').and_then(|(x, y)| Some((x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?)))) {
+            let delay: f64 = env("YH_DRAFT_DELAY").and_then(|v| v.parse().ok()).unwrap_or(1.0);
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(Duration::from_secs_f64(delay)).await;
+                if let Ok(ns) = window.update(cx, |_, window, _| crate::platform::ns_window(window)) {
+                    crate::platform::mouse_move(ns, x, y);
+                }
+            })
+            .detach();
+        }
+        // `YH_RESUME_SESSION=<id>`: the Resume Claude Code Session sheet, filled in, after
+        // `YH_DRAFT_DELAY` (`YH_RESUME_CONFIRM=1` then resumes into the suggested project).
+        if env("YH_RESUME_SESSION").is_some() {
+            let delay: f64 = env("YH_DRAFT_DELAY").and_then(|v| v.parse().ok()).unwrap_or(1.0);
+            let root = root.clone();
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(Duration::from_secs_f64(delay)).await;
+                let _ = window.update(cx, |_, window, cx| {
+                    let sheet = root.read(cx).resume.clone();
+                    sheet.update(cx, |s, cx| s.show(window, cx));
+                });
+            })
+            .detach();
+        }
+        // `YH_NOTIFICATION_CLICK=<seconds>`: then a click on the last notification posted (a test
+        // run only prints them), which opens its thread as a real click does.
+        if let Some(delay) = env("YH_NOTIFICATION_CLICK").and_then(|v| v.parse::<f64>().ok()) {
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(Duration::from_secs_f64(delay)).await;
+                let _ = cx.update(|_| match crate::platform::click_last_notification() {
+                    Some(thread) => eprintln!("NOTIFY click on {thread}"),
+                    None => eprintln!("NOTIFY click: nothing posted yet"),
+                });
+            })
+            .detach();
+        }
         // `YH_SPOTLIGHT=<words>`: ⌘K with them typed, after `YH_DRAFT_DELAY` (a session ID
         // and `YH_SPOTLIGHT_ENTER=1` resumes it).
         if let Some(words) = env("YH_SPOTLIGHT") {
@@ -347,6 +390,13 @@ fn main() {
                         s.input.update(cx, |i, cx| i.set_value(words.clone(), window, cx));
                         s.query(window, cx);
                     });
+                });
+                // What it found, once the indexes have answered.
+                cx.background_executor().timer(Duration::from_millis(700)).await;
+                let _ = window.update(cx, |_, _, cx| {
+                    for line in root.read(cx).spotlight.read(cx).describe() {
+                        eprintln!("SPOTLIGHT {line}");
+                    }
                 });
                 if enter {
                     cx.background_executor().timer(Duration::from_millis(600)).await;

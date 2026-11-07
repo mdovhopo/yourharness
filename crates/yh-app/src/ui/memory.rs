@@ -298,7 +298,7 @@ impl MemoryPage {
             .collect()
     }
 
-    fn select(&mut self, id: &str, cx: &mut Context<Self>) {
+    pub fn select(&mut self, id: &str, cx: &mut Context<Self>) {
         self.selection = Some(id.to_string());
         self.pending_fill = self.selected().cloned();
         self.shown_version = None;

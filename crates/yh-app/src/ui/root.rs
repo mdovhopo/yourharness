@@ -47,6 +47,7 @@ pub struct RootView {
     pub composer: Entity<Composer>,
     pub find: Entity<FindBar>,
     pub spotlight: Entity<Spotlight>,
+    pub resume: Entity<crate::ui::resume_sheet::ResumeSheet>,
     pub inspector: Entity<Inspector>,
     pub mcp: Entity<crate::ui::mcp::McpSheet>,
     /// What Claude left running, above the composer.
@@ -58,8 +59,8 @@ pub struct RootView {
     project: Option<Entity<crate::ui::project::ProjectPage>>,
     /// Usage, made the first time it's opened.
     usage: Option<Entity<crate::ui::usage::UsagePage>>,
-    /// The open thread's tasks from memory, for its header: (title, state, steps done, steps).
-    tasks: Vec<(String, String, usize, usize)>,
+    /// The open thread's tasks from memory, for its header's chip and its popover.
+    tasks: Vec<yh_core::memory::Memory>,
     tasks_for: Option<(String, u64)>,
     focus: FocusHandle,
     /// "Working 0:12" over the transcript's bottom: outside it, so its tick doesn't redraw it.
@@ -74,6 +75,7 @@ impl RootView {
         let composer = cx.new(|cx| Composer::new(workspace.clone(), window, cx));
         let find = cx.new(|cx| FindBar::new(workspace.clone(), window, cx));
         let spotlight = cx.new(|cx| Spotlight::new(workspace.clone(), window, cx));
+        let resume = cx.new(|cx| crate::ui::resume_sheet::ResumeSheet::new(workspace.clone(), window, cx));
         let inspector = cx.new(|cx| Inspector::new(workspace.clone(), window, cx));
         let mcp = cx.new(|cx| crate::ui::mcp::McpSheet::new(workspace.clone(), window, cx));
         let jobs = cx.new(|_| crate::ui::jobs::JobsStrip::new(workspace.clone()));
@@ -109,6 +111,7 @@ impl RootView {
                 this.refresh_tasks(cx);
                 cx.notify();
             }),
+            cx.subscribe_in(&spotlight, window, |this, _, event: &crate::ui::spotlight::SpotlightEvent, window, cx| this.spotlight_action(event.0.clone(), window, cx)),
         ];
         let (sidebar_hidden, sidebar_width) = {
             let lib = &workspace.read(cx).library;
@@ -118,7 +121,7 @@ impl RootView {
             )
         };
         let working = cx.new(|cx| crate::ui::working::WorkingTimer::new(workspace.clone(), cx));
-        RootView { sidebar_hidden, sidebar_width, resizing_sidebar: false, save_frame: None, workspace, sidebar, composer, find, spotlight, inspector, mcp, jobs, deck: vec![], memory: None, project: None, usage: None, tasks: vec![], tasks_for: None, focus: cx.focus_handle(), working, _subscriptions: subscriptions }
+        RootView { sidebar_hidden, sidebar_width, resizing_sidebar: false, save_frame: None, workspace, sidebar, composer, find, spotlight, resume, inspector, mcp, jobs, deck: vec![], memory: None, project: None, usage: None, tasks: vec![], tasks_for: None, focus: cx.focus_handle(), working, _subscriptions: subscriptions }
     }
 
     fn show(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -189,8 +192,7 @@ impl RootView {
                     store
                         .tasks_of_thread(&id)
                         .into_iter()
-                        .filter(|m| m.status == "active" && m.task_state.as_deref() != Some("done"))
-                        .map(|m| (m.title.clone(), m.task_state.clone().unwrap_or_else(|| "active".into()), m.steps_done(), m.steps.len()))
+                        .filter(|m| m.status == "active")
                         .collect::<Vec<_>>()
                 })
                 .await;
@@ -286,6 +288,231 @@ impl RootView {
         });
     }
 
+    /// "Project · worktree · model", under the title.
+    fn subtitle(&self, thread: &Entity<crate::state::thread::ThreadState>, cx: &App) -> String {
+        let ws = self.workspace.read(cx);
+        let t = thread.read(cx);
+        let mut parts = vec![ws.project(&t.meta.project_id).map(|p| p.name.clone()).unwrap_or_default()];
+        // Running in a worktree: which one.
+        if let Some(folder) = &t.meta.working_directory {
+            parts.push(std::path::Path::new(folder).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| folder.clone()));
+        }
+        if let Some(model) = ws.model_of(t) {
+            parts.push(ws.models.iter().find(|m| m.value == model).map(|m| m.display_name.clone()).unwrap_or(model));
+        }
+        parts.retain(|p| !p.is_empty());
+        parts.join(" · ")
+    }
+
+    /// The tasks this thread works on, from memory: the first's state and steps, "+N" for the
+    /// rest; it opens a popover with each one's steps and the way to them in Memory.
+    fn tasks_chip(&self, tasks: Vec<yh_core::memory::Memory>, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
+        use gpui_kit::component::popover::Popover;
+        use gpui_kit::component::{Icon, IconName};
+        let first = tasks.iter().find(|m| m.task_state.as_deref() != Some("done")).or(tasks.first())?.clone();
+        let state = first.task_state.clone().unwrap_or_else(|| "active".into());
+        let theme = *theme;
+        let color = move |state: &str| -> gpui_kit::Hsla {
+            match state {
+                "blocked" => theme.warning,
+                "done" => gpui_kit::rgb(0x34c759).into(),
+                "todo" => theme.secondary,
+                _ => theme.accent,
+            }
+        };
+        let label = if first.steps.is_empty() { yh_core::memory::state_label(&state).to_string() } else { format!("{}/{}", first.steps_done(), first.steps.len()) };
+        let tip = format!("Tasks this thread is working on: {}", tasks.iter().map(|t| t.title.as_str()).collect::<Vec<_>>().join(", "));
+        let more = tasks.len().saturating_sub(1);
+        let ws = self.workspace.clone();
+        let project = self.workspace.read(cx).selected_thread().map(|t| t.read(cx).meta.project_id.clone());
+        let this = cx.entity().downgrade();
+        Some(
+            Popover::new("thread-tasks")
+                // `YH_OPEN_TASKS=1` opens it, for checking it without a click.
+                .default_open(std::env::var("YH_OPEN_TASKS").is_ok())
+                .trigger(
+                    gpui_kit::component::button::Button::new("thread-tasks-button")
+                        .small()
+                        .ghost()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(5.))
+                                .child(div().w(px(7.)).h(px(7.)).rounded_full().bg(color(&state)))
+                                .child(label)
+                                .when(more > 0, |d| d.child(div().text_color(theme.secondary).child(format!("+{more}")))),
+                        )
+                        .tooltip(tip),
+                )
+                .content(move |_, _, _| {
+                    let mut list = div().w(px(340.)).p(px(16.)).flex().flex_col().gap(px(14.));
+                    for task in &tasks {
+                        let state = task.task_state.clone().unwrap_or_else(|| "active".into());
+                        let mut card = div().flex().flex_col().gap(px(6.)).child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.))
+                                .child(div().flex_1().min_w_0().font_weight(FontWeight::SEMIBOLD).child(task.title.clone()))
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .px(px(7.))
+                                        .rounded(px(8.))
+                                        .bg(color(&state).opacity(0.15))
+                                        .text_color(color(&state))
+                                        .text_size(px(11.))
+                                        .child(yh_core::memory::state_label(&state)),
+                                ),
+                        );
+                        if !task.steps.is_empty() {
+                            let done = task.steps_done() as f32 / task.steps.len() as f32;
+                            card = card.child(div().h(px(4.)).rounded(px(2.)).bg(theme.selected).child(div().h_full().rounded(px(2.)).w(gpui_kit::relative(done)).bg(color(&state))));
+                            for step in &task.steps {
+                                card = card.child(
+                                    div()
+                                        .flex()
+                                        .items_start()
+                                        .gap(px(6.))
+                                        .text_size(px(12.))
+                                        .when(step.done, |d| d.text_color(theme.secondary))
+                                        .child(Icon::new(if step.done { IconName::CircleCheck } else { IconName::Square }).size(px(12.)).text_color(if step.done { theme.secondary } else { theme.text }))
+                                        .child(step.text.clone()),
+                                );
+                            }
+                        }
+                        list = list.child(card);
+                    }
+                    let (ws, project, this) = (ws.clone(), project.clone(), this.clone());
+                    list.child(
+                        div()
+                            .id("tasks-show-in-memory")
+                            .text_color(theme.accent)
+                            .text_size(px(12.))
+                            .child("Show in Memory")
+                            .on_click(move |_, window, cx| {
+                                let Some(project) = project.clone() else { return };
+                                ws.update(cx, |ws, cx| ws.open_memory(&project, cx));
+                                let _ = this.update(cx, |root, cx| root.after_memory_opens(None, true, window, cx));
+                            }),
+                    )
+                })
+                .into_any_element(),
+        )
+    }
+
+    /// Once the Memory page is up: on Tasks or Memories, at a memory.
+    fn after_memory_opens(&mut self, memory: Option<String>, tasks: bool, window: &mut Window, cx: &mut Context<Self>) {
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(std::time::Duration::from_millis(50)).await;
+            let _ = this.update(cx, |root, cx| {
+                let Some(page) = root.memory_page(cx) else { return };
+                page.update(cx, |p, cx| {
+                    p.tab = if tasks { crate::ui::memory::Tab::Tasks } else { crate::ui::memory::Tab::Memories };
+                    if let Some(id) = &memory {
+                        p.select(id, cx);
+                    }
+                    cx.notify();
+                });
+            });
+        })
+        .detach();
+    }
+
+    /// What a Spotlight result asks of the window.
+    fn spotlight_action(&mut self, action: crate::ui::spotlight::Action, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::ui::spotlight::Action;
+        let ws = self.workspace.clone();
+        match action {
+            Action::Thread(id) => ws.update(cx, |ws, cx| ws.select(&id, cx)),
+            Action::ThreadAt(id, word) => {
+                ws.update(cx, |ws, cx| ws.select(&id, cx));
+                // Find, on the word that matched: it highlights it and scrolls there, once the
+                // transcript has its rows.
+                if let Some(word) = word {
+                    let find = self.find.clone();
+                    cx.spawn_in(window, async move |_, cx| {
+                        cx.background_executor().timer(std::time::Duration::from_millis(400)).await;
+                        let _ = find.update_in(cx, |f, window, cx| {
+                            f.show(window, cx);
+                            f.input.update(cx, |i, cx| i.set_value(word.clone(), window, cx));
+                            f.search(cx);
+                        });
+                    })
+                    .detach();
+                }
+            }
+            Action::Project(id) => ws.update(cx, |ws, cx| ws.open_project(&id, cx)),
+            Action::Memory { project, memory, task } => {
+                ws.update(cx, |ws, cx| ws.open_memory(&project, cx));
+                self.after_memory_opens(Some(memory), task, window, cx);
+            }
+            Action::NewThread(project) => self.sidebar.update(cx, |s, cx| s.new_thread(&project, cx)),
+            Action::OpenMemory(project) => {
+                ws.update(cx, |ws, cx| ws.open_memory(&project, cx));
+                self.after_memory_opens(None, false, window, cx);
+            }
+            Action::OpenTasks(project) => {
+                ws.update(cx, |ws, cx| ws.open_memory(&project, cx));
+                self.after_memory_opens(None, true, window, cx);
+            }
+            Action::Importer(project) => ws.update(cx, |ws, cx| ws.open_memory_agent("importer", &project, vec![], None, cx)),
+            Action::Reconciler(project) => ws.update(cx, |ws, cx| ws.open_memory_agent("reconciler", &project, vec![], None, cx)),
+            Action::AddProject => self.sidebar.update(cx, |s, cx| s.add_project(cx)),
+            Action::ResumeSession => self.resume.update(cx, |s, cx| s.show(window, cx)),
+            Action::Settings => crate::ui::settings::open(ws, window, cx),
+        }
+    }
+
+    /// No thread open: the first project to add, or a new thread to start.
+    fn empty_state(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        use gpui_kit::component::button::Button;
+        use gpui_kit::component::{Icon, IconName};
+        // Home is always there; a first run has nothing else, and no threads.
+        let ws = self.workspace.read(cx);
+        let home = ws.home_project();
+        let first_run = ws.threads.is_empty() && ws.projects.iter().all(|p| Some(&p.id) == home.as_ref());
+        let (icon, title, text): (Icon, &str, &str) = if first_run {
+            (Icon::new(IconName::FolderOpen), "Add Your First Project", "Pick a folder to work in. Claude runs there, using your own Claude Code login.")
+        } else {
+            (Icon::new(IconName::FileText), "No Thread Selected", "Choose a thread in the sidebar, or start a new one with ⌘N.")
+        };
+        div()
+            .flex_1()
+            .relative()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(10.))
+            .when(self.sidebar_hidden, |d| {
+                d.child(
+                    div().absolute().top(px(8.)).left(px(84.)).child(
+                        Button::new("show-sidebar-empty")
+                            .small()
+                            .ghost()
+                            .icon(Icon::new(IconName::PanelLeft))
+                            .tooltip("Show Sidebar (⌃⌘S)")
+                            .on_click(cx.listener(|this, _, window, cx| this.on_toggle_sidebar(window, cx))),
+                    ),
+                )
+            })
+            .child(icon.size(px(40.)).text_color(theme.secondary))
+            .child(div().text_size(px(18.)).font_weight(FontWeight::SEMIBOLD).child(title))
+            .child(div().max_w(px(380.)).text_color(theme.secondary).text_center().child(text))
+            .child(if first_run {
+                Button::new("empty-add-project")
+                    .primary()
+                    .large()
+                    .label("Add Project…")
+                    .on_click(cx.listener(|this, _, _, cx| this.sidebar.update(cx, |s, cx| s.add_project(cx))))
+                    .into_any_element()
+            } else {
+                Button::new("empty-new-thread").label("New Thread").on_click(|_, window, cx| window.dispatch_action(Box::new(NewThread), cx)).into_any_element()
+            })
+    }
+
     fn on_new_thread(&mut self, _: &NewThread, _: &mut Window, cx: &mut Context<Self>) {
         let ws = self.workspace.clone();
         let project = ws
@@ -294,7 +521,7 @@ impl RootView {
             .map(|t| t.read(cx).meta.project_id.clone())
             .or_else(|| ws.read(cx).projects.first().map(|p| p.id.clone()));
         if let Some(project) = project {
-            ws.update(cx, |ws, cx| ws.new_thread(&project, cx));
+            self.sidebar.update(cx, |s, cx| s.new_thread(&project, cx));
         }
     }
 }
@@ -317,6 +544,7 @@ impl Render for RootView {
         });
         let selected = if page.is_some() { None } else { self.workspace.read(cx).selected_thread() };
         let title = selected.as_ref().map(|t| t.read(cx).title.clone()).unwrap_or_else(|| "YourHarness".into());
+        let subtitle = selected.as_ref().map(|t| self.subtitle(t, cx)).unwrap_or_default();
         let transcript = self.transcript_view(cx);
         // The browser's page shows only over its panel; anything else hides it.
         let ws = self.workspace.read(cx);
@@ -365,7 +593,7 @@ impl Render for RootView {
             .on_action(cx.listener(|this, _: &TopOfThread, _, cx| this.jump(i64::MIN, cx)))
             .on_action(cx.listener(|this, _: &EndOfThread, _, cx| this.jump(i64::MAX, cx)))
             .on_action(cx.listener(|this, _: &AddProject, _, cx| this.sidebar.update(cx, |s, cx| s.add_project(cx))))
-            .on_action(cx.listener(|this, _: &ResumeSession, window, cx| this.spotlight.update(cx, |s, cx| s.show(window, cx))))
+            .on_action(cx.listener(|this, _: &ResumeSession, window, cx| this.resume.update(cx, |s, cx| s.show(window, cx))))
             .on_action(cx.listener(|this, _: &ExportState, _, cx| crate::ui::state_transfer::export(this.workspace.clone(), cx)))
             .on_action(cx.listener(|this, _: &ImportState, window, cx| crate::ui::state_transfer::import(this.workspace.clone(), window, cx)))
             .on_action(cx.listener(|_, _: &CheckForUpdates, _, cx| {
@@ -441,25 +669,17 @@ impl Render for RootView {
                                 ))
                                 .border_b_1()
                                 .border_color(theme.separator)
-                                .child(div().flex_1().min_w_0().font_weight(FontWeight::SEMIBOLD).overflow_hidden().whitespace_nowrap().text_ellipsis().child(title))
-                                .children(tasks.into_iter().take(2).map(|(title, state, done, steps)| {
-                                    // A task the agent tracks for this thread, from memory.
+                                .child(
                                     div()
-                                        .flex_none()
-                                        .max_w(px(280.))
+                                        .flex_1()
+                                        .min_w_0()
                                         .flex()
-                                        .items_center()
-                                        .gap(px(6.))
-                                        .px(px(8.))
-                                        .py(px(2.))
-                                        .rounded(px(10.))
-                                        .bg(theme.card)
-                                        .text_size(px(11.))
-                                        .text_color(theme.secondary)
-                                        .child(div().w(px(6.)).h(px(6.)).rounded_full().bg(if state == "blocked" { theme.warning } else { theme.accent }))
-                                        .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().child(title))
-                                        .when(steps > 0, |d| d.child(div().flex_none().child(format!("{done}/{steps}"))))
-                                }))
+                                        .items_baseline()
+                                        .gap(px(8.))
+                                        .child(div().flex_none().max_w(gpui_kit::relative(0.7)).font_weight(FontWeight::SEMIBOLD).overflow_hidden().whitespace_nowrap().text_ellipsis().child(title))
+                                        .child(div().min_w_0().text_size(px(12.)).text_color(theme.secondary).overflow_hidden().whitespace_nowrap().text_ellipsis().child(subtitle)),
+                                )
+                                .children(self.tasks_chip(tasks, &theme, cx))
                                 .children(crate::ui::thread_toolbar::checkouts(&self.workspace, &theme, cx))
                                 .child(crate::ui::thread_toolbar::buttons(&self.workspace, cx)),
                         )
@@ -481,17 +701,7 @@ impl Render for RootView {
                         .child(div().flex_none().w_full().child(self.jobs.clone()))
                         .child(div().flex_none().w_full().child(self.composer.clone()))
                     })
-                    .when(selected.is_none() && self.workspace.read(cx).page.is_none(), |d| {
-                        d.child(
-                            div()
-                                .flex_1()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .text_color(theme.secondary)
-                                .child("Pick a thread, or start one with + next to a project."),
-                        )
-                    }),
+                    .when(selected.is_none() && self.workspace.read(cx).page.is_none(), |d| d.child(self.empty_state(&theme, cx))),
             )
             .when(selected.is_some() && self.workspace.read(cx).shows_inspector, |d| {
                 // Cached: it redraws when its tab's data changes, not with the transcript.
@@ -519,6 +729,7 @@ impl Render for RootView {
                 )
             })
             .child(self.spotlight.clone())
+            .child(self.resume.clone())
             .child(self.mcp.clone())
     }
 }
