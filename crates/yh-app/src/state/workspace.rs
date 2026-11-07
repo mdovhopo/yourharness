@@ -2286,9 +2286,16 @@ impl Workspace {
 
     /// Commands the agent can run itself partway through a message: skills, by what a session
     /// reported; until one has, your own commands and skills.
+    /// The skills a session in the project last reported, as saved.
+    fn saved_skills(&self, project_id: &str) -> Option<Vec<String>> {
+        let list = self.library.setting("skills")?.get(project_id)?.as_array()?.clone();
+        Some(list.iter().filter_map(|s| s.as_str().map(str::to_string)).collect())
+    }
+
     fn chainable(&self, project_id: &str) -> std::collections::HashSet<String> {
         let commands = self.commands(project_id);
-        let skills = self.composer.skills.get(project_id);
+        let saved = self.composer.skills.get(project_id).cloned().or_else(|| self.saved_skills(project_id));
+        let skills = saved.as_ref();
         commands
             .iter()
             .filter(|c| match skills {
@@ -2403,6 +2410,15 @@ impl Workspace {
             }
             Event::Skills(skills) => {
                 let project = thread.read(cx).meta.project_id.clone();
+                if self.saved_skills(&project).as_ref() != Some(skills) {
+                    // Saved as the Swift app saves them (`skills`, by project).
+                    let mut all = match self.library.setting("skills") {
+                        Some(Value::Object(m)) => m,
+                        _ => serde_json::Map::new(),
+                    };
+                    all.insert(project.clone(), serde_json::json!(skills));
+                    self.library.set_setting("skills", &Value::Object(all));
+                }
                 self.composer.skills.insert(project, skills.clone());
             }
             // Remembered by model (`contextWindows`, as the Swift app keeps them).

@@ -368,6 +368,34 @@ fn main() {
             })
             .detach();
         }
+        // `YH_SEND_SEQ=<a>|<b>|…`: sent to the selected thread one after another (each once the
+        // last turn is over), as typed in the composer: for the app's own commands (`/btw`, `/model`…).
+        if let Some(seq) = env("YH_SEND_SEQ") {
+            let workspace = workspace.clone();
+            cx.spawn(async move |cx| {
+                for text in seq.split('|').map(str::trim).filter(|t| !t.is_empty()) {
+                    for _ in 0..200 {
+                        cx.background_executor().timer(Duration::from_millis(300)).await;
+                        let busy = cx.update(|cx| workspace.read(cx).selected_thread().is_some_and(|t| t.read(cx).running));
+                        if !busy {
+                            break;
+                        }
+                    }
+                    cx.background_executor().timer(Duration::from_millis(1200)).await;
+                    eprintln!("send-seq: {text}");
+                    let text = text.to_string();
+                    let _ = cx.update(|cx| {
+                        workspace.update(cx, |ws, cx| {
+                            if let Some(t) = ws.selected_thread() {
+                                ws.send(&t, &text, false, cx);
+                            }
+                        })
+                    });
+                }
+                eprintln!("send-seq: done");
+            })
+            .detach();
+        }
         // `YH_FIND=<words>`: Find opened with them typed, after `YH_DRAFT_DELAY`.
         if let Some(words) = env("YH_FIND") {
             let delay: f64 = env("YH_DRAFT_DELAY").and_then(|v| v.parse().ok()).unwrap_or(1.0);

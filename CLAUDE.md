@@ -59,6 +59,8 @@ themselves). Also
 selected thread's composer, as a drop does), `YH_NEW_THREAD=1` (a new thread in the first project at launch:
 its empty state), `YH_QUEUE=<text>` (sent `YH_QUEUE_DELAY` s after launch, 3, so it queues behind the
 `YH_SEND` turn; `YH_QUEUE_ACTION=now|edit|remove` then does what its buttons do, `YH_QUEUE_ACTION_DELAY` s later),
+`YH_SEND_SEQ=<a>|<b>|…` (sent to the selected thread one after another, each once the last turn is over: for
+`/btw`, `/model`, `/effort`, `/rename`, `/clear`, `/context`, `/usage`, or a second message naming a skill to chain),
 `YH_DRAFT=<text>` (typed in the composer:
 `/co` opens the command menu, `@no` the file menu; `YH_DRAFT_DELAY`), `YH_FIND=<words>` (Find
 opened), `YH_EXPAND_WORK=1` (folded work drawn open), `YH_ACTIONS_PROBE=1` (pin, rename, settle,

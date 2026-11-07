@@ -560,8 +560,9 @@ impl ThreadState {
     fn lifecycle(&mut self, id: &str, state: &str) -> bool {
         let found = self.items.iter().rev().take(40).flat_map(|i| i.entries.iter()).find(|e| e.borrow().data.id == id).cloned();
         let Some(e) = found else { return false };
+        // Only a queued message is taken back; the one a stop cut short ends `cancelled` too.
         if state == "cancelled" {
-            return self.withdrawn(&e);
+            return e.borrow().queued && self.withdrawn(&e);
         }
         let queued = state == "queued";
         let was_queued = e.borrow().queued;
@@ -610,6 +611,7 @@ impl ThreadState {
         {
             let mut b = e.borrow_mut();
             b.queued = false;
+            b.delivery = None;
             b.data.kind = Kind::Notice;
             b.data.text = if restore { "Taken back into the composer before Claude read it.".into() } else { "Withdrawn before Claude read it.".into() };
             b.data.attachments.clear();
@@ -1101,7 +1103,8 @@ impl ThreadState {
             }
             Event::Done { is_error, text } => {
                 self.end_turn();
-                if is_error && !text.is_empty() {
+                // Stopped for a message sent now, which carries that on itself.
+                if is_error && !text.is_empty() && self.composer.sending_now.is_empty() {
                     self.error_notice(&text);
                 }
                 true
