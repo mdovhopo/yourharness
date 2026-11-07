@@ -97,6 +97,8 @@ impl RootView {
         let updater = cx.new(crate::state::updater::Updater::new);
         let sidebar = cx.new(|cx| Sidebar::new(workspace.clone(), updater.clone(), window, cx));
         let composer = cx.new(|cx| Composer::new(workspace.clone(), window, cx));
+        let root = cx.entity().downgrade().into();
+        composer.update(cx, |c, _| c.on_height = Some(root));
         let find = cx.new(|cx| FindBar::new(workspace.clone(), window, cx));
         let spotlight = cx.new(|cx| Spotlight::new(workspace.clone(), window, cx));
         let resume = cx.new(|cx| crate::ui::resume_sheet::ResumeSheet::new(workspace.clone(), window, cx));
@@ -557,6 +559,19 @@ impl Focusable for RootView {
     }
 }
 
+impl RootView {
+    /// The composer, cached at the height it last measured (`Composer::measure`): this view
+    /// draws again on every frame of scrolling, and the composer needn't be laid out each time.
+    /// Not cached until it has measured once.
+    fn placed_composer(&self, cx: &App) -> gpui_kit::AnyElement {
+        let h = self.composer.read(cx).height.get();
+        if h <= 0. {
+            return self.composer.clone().into_any_element();
+        }
+        AnyView::from(self.composer.clone()).cached(StyleRefinement::default().w_full().h(px(h))).into_any_element()
+    }
+}
+
 impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::get(cx);
@@ -774,7 +789,7 @@ impl Render for RootView {
                                                     .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(folder)),
                                             ),
                                     )
-                                    .child(div().w_full().child(self.composer.clone())),
+                                    .child(div().w_full().child(self.placed_composer(cx))),
                             )
                         })
                         .when(start.is_none(), |d| d.child(match transcript {
@@ -789,10 +804,8 @@ impl Render for RootView {
                                 .into_any_element(),
                             None => div().flex_1().into_any_element(),
                         })
-                        // Not cached: a cached view needs a fixed size, and the composer grows
-                        // with its cards. Its render is a handful of elements.
                         .child(div().flex_none().w_full().child(self.jobs.clone()))
-                        .child(div().flex_none().w_full().child(self.composer.clone())))
+                        .child(div().flex_none().w_full().child(self.placed_composer(cx))))
                         // Files dropped anywhere on the thread go with the next message. The
                         // overlay shows only while files are dragged over it (a style GPUI works
                         // out at paint, so nothing re-renders and the cached transcript stays).

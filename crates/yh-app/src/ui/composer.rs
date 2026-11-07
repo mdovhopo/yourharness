@@ -30,6 +30,10 @@ pub const MODES: &[(&str, &str)] =
 
 pub struct Composer {
     workspace: Entity<Workspace>,
+    /// Its height when last laid out, for the cached view that places it (see `measure`).
+    pub height: Rc<std::cell::Cell<f32>>,
+    /// Told after a frame where the height changed: whoever places the composer.
+    pub on_height: Option<gpui_kit::AnyWeakEntity>,
     pub input: Entity<TextareaState>,
     current: Option<String>,
     card: Option<(String, Card)>,
@@ -203,6 +207,8 @@ impl Composer {
         ];
         Composer {
             workspace,
+            height: Rc::new(std::cell::Cell::new(0.)),
+            on_height: None,
             input,
             current: None,
             card: None,
@@ -860,7 +866,36 @@ impl Render for Composer {
                             .on_click(cx.listener(|this, _, window, cx| this.submit(false, window, cx)))
                     }),
             );
-        div().w_full().flex().justify_center().px(px(space::XL - 4.)).pb(px(space::L)).child(inner.child(composer))
+        div().w_full().relative().flex().justify_center().px(px(space::XL - 4.)).pb(px(space::L)).child(inner.child(composer)).child(self.measure())
+    }
+}
+
+impl Composer {
+    /// The composer is a cached view (the window redraws on every frame of scrolling, and laid
+    /// out each time it cost about a tenth of the main thread), and a cached view needs a fixed
+    /// height. Laid over it, this reads the height it took; when that changes it tells whoever
+    /// placed it, after this frame, to place it at the new height.
+    fn measure(&self) -> impl IntoElement {
+        let (cell, parent) = (self.height.clone(), self.on_height.clone());
+        gpui_kit::canvas(
+            move |bounds, _, cx| {
+                let h = f32::from(bounds.size.height);
+                if (cell.replace(h) - h).abs() > 0.5 {
+                    if let Some(parent) = parent.clone() {
+                        cx.defer(move |cx| {
+                            if let Some(e) = parent.upgrade() {
+                                cx.notify(e.entity_id());
+                            }
+                        });
+                    }
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
     }
 }
 
