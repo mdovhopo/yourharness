@@ -54,7 +54,16 @@ Launch options: `YH_DATA_DIR`, `YH_CLAUDE_HISTORY=1` (also list Claude Code's ow
 `YH_CLAUDE_CONFIG`, `YH_CLAUDE_LIMIT`), `YH_PROJECT=<folder>` (a project of its own, its mode
 `YH_MODE`: `ask` shows permission cards, `plan` plan cards), `YH_SELECT=<title or id>`, and
 `YH_SEND` / `YH_MODEL` / `YH_EFFORT` / `YH_ANSWER=allow|deny` (one real turn, prompts answered by
-themselves). Also
+themselves, every waiting one by its own id; `YH_ANSWER_DELAY=<s>` answers that much later, so the cards
+show and pile up: parallel sub-agents print `PERMISSIONS waiting: 2`). Also `YH_CLICK=<x,y>[;<x,y>…]` (clicks
+in window points through the window, a second apart, after `YH_DRAFT_DELAY` + 0.5 s: the composer's pickers,
+the plan card's Approve menu), `YH_DROP=<x,y>` with `YH_DROP_FILES=<a:b>` (files dragged in from Finder
+through GPUI's file-drop events after `YH_DRAFT_DELAY`, held `YH_DROP_HOLD` s (2) so a snapshot shows the
+overlay, then dropped), `YH_PREVIEW_MEDIA=1|draft` (the thread's last pictures, or what waits in the composer,
+in Quick Look, printing `PREVIEW PASS`; it shows on screen briefly), `YH_OPEN_BROWSER_WINDOW=1` (the open
+thread's browser in its own window after `YH_DRAFT_DELAY`, printing where the page went;
+`YH_BROWSER_WINDOW_SNAPSHOT=<png>` draws that window, `YH_BROWSER_WINDOW_CLOSE=<s>` then closes it, the pages
+going back to the sidebar; with `YH_BROWSER_OPEN=<url>`). Also
 `YH_SEND_FILES=<a.png:b.pdf:folder>` (with it: images inline, the rest by path; alone: attached to the
 selected thread's composer, as a drop does), `YH_NEW_THREAD=1` (a new thread in the first project at launch:
 its empty state), `YH_QUEUE=<text>` (sent `YH_QUEUE_DELAY` s after launch, 3, so it queues behind the

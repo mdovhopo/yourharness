@@ -7,7 +7,7 @@ Swift paths are under legacy/YourHarness/, Rust under crates/yh-app/src/. Tick i
 - [x] 1. Worktree removal asks first ("Remove and Discard" when work would be lost); error alert on failure. Views/WorkspaceView.swift:1019-1035 · ui/project.rs
 - [x] 2. Merging a stack asks first ("Squash and Merge"). Views/StackViews.swift:56 · ui/project.rs
 - [ ] 3. ⌘↩ / ⌘⌫ on question and plan cards: Answer (only once all answered) / approve in the recommended mode; Skip / Keep Planning. Views/AgentRequestCards.swift · ui/root.rs
-- [ ] 4. Several permission requests at once (parallel sub-agents), each answered. Views/ThreadView.swift:40 · state/thread.rs
+- [x] 4. Several permission requests at once (parallel sub-agents), each answered. Views/ThreadView.swift:40 · state/thread.rs (`permissions` is a list; the composer shows the oldest with "N more requests waiting", each answered by its request id; the Dock badge, sidebar marks, notifications (the newest request) and side chat follow. Checked with a real Haiku turn: two parallel Task sub-agents each asking for Bash, both cards queued, both answered.)
 - [ ] 5. Long plans scroll inside the card's cap; question card capped too. AgentRequestCards.swift:167,206-225 · ui/composer.rs
 
 ## B. Transcript
@@ -28,9 +28,9 @@ Swift paths are under legacy/YourHarness/, Rust under crates/yh-app/src/. Tick i
 - [x] Failed background-job notes in error colour (saved as `notice_style` error, as are `claude` exits and failed turns).
 
 ## C. Cards
-- [ ] 19. Permission card: "Allow Run command?", tool icon, key argument, description; narrow layout.
+- [x] 19. Permission card: "Allow Run command?", tool icon, key argument, description; narrow layout. (`composer::permission_card`, from `ui/steps.rs`'s presentation; a command shows whole up to four lines; the buttons wrap under the request when the card is narrow, as in the side chat, which uses the same card.)
 - [ ] 20. Question card: Answer disabled until all answered; option descriptions inline; Swift's skip message.
-- [ ] 21. Plan card: "Plan ready for review", recommended default (Approve · Auto) with others in a menu; Auto disabled when the model can't.
+- [x] 21. Plan card: "Plan ready for review", recommended default (Approve · Auto) with others in a menu; Auto disabled when the model can't. (Auto when the model's catalog entry has `supportsAutoMode`, else Accept Edits; feedback written before approving follows as your next message; Keep Planning sends the Swift app's words.)
 
 ## D. Sidebar
 - [x] 22. Collapsible projects (saved; activity dot/count when collapsed; skipped by keyboard).
@@ -57,8 +57,8 @@ Swift paths are under legacy/YourHarness/, Rust under crates/yh-app/src/. Tick i
 - [x] 37. Notifications: click opens the thread, project subtitle, real body, sound, cleared on open.
 - [x] 38. Spotlight: Recent Threads, Tasks, Memories, Projects, Actions; subtitles.
 - [x] 39. Resume Claude Code Session sheet (preview, project choice, prefill from clipboard, Show Thread).
-- [ ] 40. Drop files anywhere on the thread, with overlay (check after composer merge).
-- [ ] 41. Model picker details (check after composer merge).
+- [x] 40. Drop files anywhere on the thread, with overlay (check after composer merge). (A dashed "Drop files to attach" overlay that GPUI shows by its drag style, so nothing re-renders; checked through GPUI's own file-drop events, `YH_DROP`.)
+- [x] 41. Model picker details (check after composer merge). (Model: "Claude Code" header, each model's description, Pinned Versions submenu, footnote; Effort: Auto plus each level's description; Permissions: each mode's long name and what it does, Bypass in red, Auto "Not available with …" when the model can't. No plan chip: the rewrite doesn't read the account's plan.)
 
 ## G. Right sidebar
 - [x] 42. Sub-agent Stop button. (Its task ID now comes with `task_started`; checked that the probe gets it and calls `stop_task`, not yet on a sub-agent that kept running.)
@@ -81,4 +81,6 @@ Swift paths are under legacy/YourHarness/, Rust under crates/yh-app/src/. Tick i
 - [x] 54. Task rows: threads working on each.
 
 ## Browser
-- [ ] Pick element, pop-out window, idle close.
+- [x] Pick element, pop-out window, idle close. (Open in Window in the panel's ⋯ menu: the thread's pages move to a window of their own, the panel then says so with Show Window and Move Back Here; closing the window brings them back. Its own window counts as looked at for idle close.)
+- [x] Quick Look on what waits in the composer (click; Quick Look in its menu).
+- [x] The composer grows for a draft put there (a browser pick, `YH_DRAFT`, a queued message taken back), as typing does (auto-grow to 15 lines, then it scrolls).
