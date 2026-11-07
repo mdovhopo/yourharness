@@ -91,6 +91,11 @@ impl Sidebar {
         rows
     }
 
+    /// The threads as the sidebar lists them, top to bottom: for Previous and Next Thread.
+    pub fn thread_order(&self, cx: &App) -> Vec<String> {
+        self.rows(cx).iter().filter_map(|r| if let SidebarRow::Thread(t) = r { Some(t.read(cx).id().to_string()) } else { None }).collect()
+    }
+
     /// The thread's row, for scrolling it into view as a person would before clicking.
     pub fn row_index(&self, id: &str, cx: &App) -> Option<usize> {
         self.rows(cx).iter().position(|r| matches!(r, SidebarRow::Thread(t) if t.read(cx).id() == id))
@@ -123,26 +128,28 @@ impl Sidebar {
         cx.notify();
     }
 
-    fn confirm_delete(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(thread) = self.workspace.read(cx).thread(id) else { return };
-        let title = thread.read(cx).title.clone();
+    /// Removing a project can't be undone: it asks first.
+    fn confirm_remove_project(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let ws = self.workspace.read(cx);
+        let Some(project) = ws.project(id).cloned() else { return };
+        let count = ws.threads.iter().filter(|t| t.read(cx).meta.project_id == id).count();
         let ws = self.workspace.downgrade();
         let id = id.to_string();
         window.open_alert_dialog(cx, move |alert, _, _| {
             let (ws, id) = (ws.clone(), id.clone());
             alert
-                .title(format!("Delete “{title}”?"))
-                .description("Its history is removed from YourHarness. Claude Code's own session file stays.")
-                .ok_text("Delete")
+                .title(format!("Remove “{}”?", project.name))
+                .description(format!("Its {count} thread{} go with it. Its folder and Claude Code's own session files stay.", if count == 1 { "" } else { "s" }))
+                .ok_text("Remove")
                 .show_cancel(true)
                 .on_ok(move |_, _, cx| {
-                    let _ = ws.update(cx, |ws, cx| ws.delete(&id, cx));
+                    let _ = ws.update(cx, |ws, cx| ws.remove_project(&id, cx));
                     true
                 })
         });
     }
 
-    fn add_project(&mut self, cx: &mut Context<Self>) {
+    pub fn add_project(&mut self, cx: &mut Context<Self>) {
         let paths = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
             files: false,
             directories: true,
@@ -230,22 +237,33 @@ impl Sidebar {
             .context_menu({
                 let this = cx.entity().downgrade();
                 let ws = self.workspace.downgrade();
+                let session = thread.read(cx).session_id.clone();
                 move |menu, _, _| {
-                    let (a, b, c, d) = (this.clone(), ws.clone(), ws.clone(), this.clone());
-                    let (i1, i2, i3, i4) = (menu_id.clone(), menu_id.clone(), menu_id.clone(), menu_id.clone());
-                    menu.item(PopupMenuItem::new("Rename…").on_click(move |_, window, cx| {
-                        let _ = a.update(cx, |s, cx| s.start_rename(&i1, window, cx));
-                    }))
-                    .item(PopupMenuItem::new(if pinned { "Unpin" } else { "Pin" }).on_click(move |_, _, cx| {
-                        let _ = b.update(cx, |ws, cx| ws.set_pinned(&i2, !pinned, cx));
-                    }))
-                    .item(PopupMenuItem::new(if settled { "Bring Back" } else { "Settle" }).on_click(move |_, _, cx| {
-                        let _ = c.update(cx, |ws, cx| ws.set_settled(&i3, !settled, cx));
-                    }))
-                    .separator()
-                    .item(PopupMenuItem::new("Delete…").on_click(move |_, window, cx| {
-                        let _ = d.update(cx, |s, cx| s.confirm_delete(&i4, window, cx));
-                    }))
+                    let (a, b, c, d, e) = (this.clone(), ws.clone(), ws.clone(), ws.clone(), ws.clone());
+                    let (i1, i2, i3, i4, i5, i6) = (menu_id.clone(), menu_id.clone(), menu_id.clone(), menu_id.clone(), menu_id.clone(), menu_id.clone());
+                    let mut menu = menu
+                        .item(PopupMenuItem::new("Rename…").on_click(move |_, window, cx| {
+                            let _ = a.update(cx, |s, cx| s.start_rename(&i1, window, cx));
+                        }))
+                        .item(PopupMenuItem::new(if pinned { "Unpin" } else { "Pin" }).on_click(move |_, _, cx| {
+                            let _ = b.update(cx, |ws, cx| ws.toggle_pin(&i2, cx));
+                        }))
+                        .item(PopupMenuItem::new(if settled { "Bring Back" } else { "Settle" }).on_click(move |_, _, cx| {
+                            let _ = c.update(cx, |ws, cx| ws.toggle_settled(&i3, cx));
+                        }))
+                        .item(PopupMenuItem::new("Regenerate Title").on_click(move |_, _, cx| {
+                            let _ = e.update(cx, |ws, cx| ws.regenerate_title(&i5, cx));
+                        }))
+                        .separator();
+                    if let Some(s) = session.clone() {
+                        menu = menu.item(PopupMenuItem::new("Copy Session ID").on_click(move |_, _, cx| cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(s.clone()))));
+                    }
+                    menu.item(PopupMenuItem::new("Copy Thread ID").on_click(move |_, _, cx| cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(i6.clone()))))
+                        .separator()
+                        // No question: Undo (and ⌘Z) brings it back.
+                        .item(PopupMenuItem::new("Delete").on_click(move |_, _, cx| {
+                            let _ = d.update(cx, |ws, cx| ws.delete(&i4, cx));
+                        }))
                 }
             })
             .into_any_element()
@@ -398,6 +416,36 @@ impl Render for Sidebar {
                                 .hover(|s| s.text_color(theme.text))
                                 .child(if home { "Home".to_string() } else { project.name.clone() })
                                 .on_click(move |_, _, cx| ws.update(cx, |ws, cx| ws.open_project(&pid, cx)))
+                                .context_menu({
+                                    let (ws, pid, path, this) = (self.workspace.downgrade(), project.id.clone(), project.path.clone(), cx.entity().downgrade());
+                                    move |menu, _, _| {
+                                        let (a, b, c, d) = (ws.clone(), ws.clone(), ws.clone(), this.clone());
+                                        let (p1, p2, p3, p4, path) = (pid.clone(), pid.clone(), pid.clone(), pid.clone(), path.clone());
+                                        let mut menu = menu.item(PopupMenuItem::new("New Thread").on_click(move |_, _, cx| {
+                                            let _ = a.update(cx, |ws, cx| {
+                                                ws.new_thread(&p1, cx);
+                                            });
+                                        }));
+                                        if !home {
+                                            menu = menu.item(PopupMenuItem::new("Repos & Pull Requests").on_click(move |_, _, cx| {
+                                                let _ = b.update(cx, |ws, cx| ws.open_project(&p2, cx));
+                                            }));
+                                        }
+                                        menu = menu
+                                            .item(PopupMenuItem::new("Memory").on_click(move |_, _, cx| {
+                                                let _ = c.update(cx, |ws, cx| ws.open_memory(&p3, cx));
+                                            }))
+                                            .item(PopupMenuItem::new("Show in Finder").on_click(move |_, _, _| {
+                                                let _ = std::process::Command::new("/usr/bin/open").arg(&path).spawn();
+                                            }));
+                                        if !home {
+                                            menu = menu.separator().item(PopupMenuItem::new("Remove Project…").on_click(move |_, window, cx| {
+                                                let _ = d.update(cx, |s, cx| s.confirm_remove_project(&p4, window, cx));
+                                            }));
+                                        }
+                                        menu
+                                    }
+                                })
                         })
                         .child(
                             div()

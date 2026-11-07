@@ -11,13 +11,21 @@ use crate::ui::memory::MemoryPage;
 use crate::ui::spotlight::Spotlight;
 use crate::ui::sidebar::Sidebar;
 use crate::ui::transcript::TranscriptView;
+use gpui_kit::component::Sizable;
 use gpui_kit::{
     actions, div, prelude::*, px, AnyView, App, Context, Entity, FocusHandle, Focusable, FontWeight, StyleRefinement,
     Subscription, Window,
 };
 use yh_core::claude::Decision;
 
-actions!(harness, [Stop, Allow, Deny, Quit, NewThread, Find, FindNext, FindPrevious, OpenSettings, OpenSpotlight, ToggleInspector, OpenMemory, ToggleUsage]);
+actions!(
+    harness,
+    [
+        Stop, Allow, Deny, Quit, NewThread, Find, FindNext, FindPrevious, OpenSettings, OpenSpotlight, ToggleInspector, OpenMemory, ToggleUsage,
+        PreviousThread, NextThread, PreviousMessage, NextMessage, TopOfThread, EndOfThread, AddProject, ResumeSession, ExportState, ImportState,
+        CheckForUpdates, UndoThreadAction
+    ]
+);
 
 /// Transcripts kept made for going back and forth.
 const KEPT_TRANSCRIPTS: usize = 6;
@@ -183,6 +191,51 @@ impl RootView {
         }
     }
 
+    /// The thread above or below the open one in the sidebar.
+    fn adjacent_thread(&mut self, step: isize, cx: &mut Context<Self>) {
+        let order = self.sidebar.read(cx).thread_order(cx);
+        let current = self.workspace.read(cx).selected.clone();
+        let i = current.and_then(|c| order.iter().position(|t| *t == c));
+        let next = match i {
+            Some(i) => (i as isize + step).clamp(0, order.len() as isize - 1) as usize,
+            None => 0,
+        };
+        if let Some(id) = order.get(next).cloned() {
+            self.workspace.update(cx, |ws, cx| ws.select(&id, cx));
+        }
+    }
+
+    /// Jumps between your messages in the open thread: -1 the one above, 1 the one below,
+    /// i64::MIN the top, i64::MAX the end.
+    fn jump(&mut self, to: i64, cx: &mut Context<Self>) {
+        let Some(thread) = self.workspace.read(cx).selected_thread() else { return };
+        if to == i64::MIN && thread.read(cx).before > 0 {
+            // Earlier pages first: the top is the thread's start.
+            let ws = self.workspace.clone();
+            ws.update(cx, |ws, cx| ws.load_earlier(&thread, cx));
+        }
+        thread.update(cx, |t, cx| {
+            let count = t.items.len();
+            if count == 0 {
+                return;
+            }
+            let top = t.list.logical_scroll_top().item_ix;
+            let users: Vec<usize> = t.items.iter().enumerate().filter(|(_, i)| i.ty == crate::state::thread::ItemType::User).map(|(n, _)| n).collect();
+            let target = match to {
+                i64::MIN => 0,
+                i64::MAX => count - 1,
+                -1 => users.iter().rev().find(|&&n| n < top).copied().unwrap_or(0),
+                _ => users.iter().find(|&&n| n > top).copied().unwrap_or(count - 1),
+            };
+            if to == i64::MAX {
+                t.list.scroll_to_end();
+            } else {
+                t.list.scroll_to(gpui_kit::ListOffset { item_ix: target, offset_in_item: gpui_kit::px(0.) });
+            }
+            cx.notify();
+        });
+    }
+
     fn on_new_thread(&mut self, _: &NewThread, _: &mut Window, cx: &mut Context<Self>) {
         let ws = self.workspace.clone();
         let project = ws
@@ -237,6 +290,23 @@ impl Render for RootView {
                     let on = !ws.shows_inspector;
                     ws.set_shows_inspector(on, cx)
                 })
+            }))
+            .on_action(cx.listener(|this, _: &UndoThreadAction, _, cx| this.workspace.update(cx, |ws, cx| ws.undo(cx))))
+            .on_action(cx.listener(|this, _: &PreviousThread, _, cx| this.adjacent_thread(-1, cx)))
+            .on_action(cx.listener(|this, _: &NextThread, _, cx| this.adjacent_thread(1, cx)))
+            .on_action(cx.listener(|this, _: &PreviousMessage, _, cx| this.jump(-1, cx)))
+            .on_action(cx.listener(|this, _: &NextMessage, _, cx| this.jump(1, cx)))
+            .on_action(cx.listener(|this, _: &TopOfThread, _, cx| this.jump(i64::MIN, cx)))
+            .on_action(cx.listener(|this, _: &EndOfThread, _, cx| this.jump(i64::MAX, cx)))
+            .on_action(cx.listener(|this, _: &AddProject, _, cx| this.sidebar.update(cx, |s, cx| s.add_project(cx))))
+            .on_action(cx.listener(|this, _: &ResumeSession, window, cx| this.spotlight.update(cx, |s, cx| s.show(window, cx))))
+            .on_action(cx.listener(|this, _: &ExportState, _, cx| crate::ui::state_transfer::export(this.workspace.clone(), cx)))
+            .on_action(cx.listener(|this, _: &ImportState, window, cx| crate::ui::state_transfer::import(this.workspace.clone(), window, cx)))
+            .on_action(cx.listener(|_, _: &CheckForUpdates, _, cx| {
+                if let Some(links) = cx.try_global::<crate::ui::settings::SettingsLinks>() {
+                    let u = links.updater.clone();
+                    u.update(cx, |u, cx| u.check(cx));
+                }
             }))
             .on_action(cx.listener(|this, _: &ToggleUsage, _, cx| this.workspace.update(cx, |ws, cx| ws.toggle_usage(cx))))
             .on_action(cx.listener(|this, _: &OpenMemory, _, cx| {
@@ -331,6 +401,27 @@ impl Render for RootView {
             .when(selected.is_some() && self.workspace.read(cx).shows_inspector, |d| {
                 // Cached: it redraws when its tab's data changes, not with the transcript.
                 d.child(AnyView::from(self.inspector.clone()).cached(StyleRefinement::default().h_full().w(px(crate::ui::inspector::WIDTH)).flex_none()))
+            })
+            .when_some(self.workspace.read(cx).undo_notice().map(str::to_string), |d, message| {
+                // What the last thread action did, with a way back.
+                let ws = self.workspace.clone();
+                d.child(
+                    div().absolute().bottom(px(16.)).left(px(16.)).child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(10.))
+                            .px(px(12.))
+                            .py(px(8.))
+                            .rounded(px(10.))
+                            .bg(theme.canvas)
+                            .border_1()
+                            .border_color(theme.separator)
+                            .shadow_lg()
+                            .child(div().max_w(px(260.)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(message))
+                            .child(gpui_kit::component::button::Button::new("undo").small().label("Undo ⌘Z").on_click(move |_, _, cx| ws.update(cx, |ws, cx| ws.undo(cx)))),
+                    ),
+                )
             })
             .child(self.spotlight.clone())
             .child(self.mcp.clone())

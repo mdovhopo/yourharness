@@ -17,7 +17,7 @@ use gpui_kit::{
 use state::workspace::Workspace;
 use std::sync::Arc;
 use std::time::Duration;
-use ui::root::{Allow, Deny, Find, FindNext, FindPrevious, NewThread, OpenSettings, OpenSpotlight, Quit, RootView, Stop};
+use ui::root::*;
 
 fn env(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
@@ -66,18 +66,73 @@ fn main() {
             KeyBinding::new("cmd-g", FindNext, None),
             KeyBinding::new("cmd-shift-g", FindPrevious, None),
             KeyBinding::new("cmd-q", Quit, None),
+            KeyBinding::new("alt-cmd-up", ui::root::PreviousThread, None),
+            KeyBinding::new("alt-cmd-down", ui::root::NextThread, None),
+            KeyBinding::new("cmd-[", ui::root::PreviousMessage, None),
+            KeyBinding::new("cmd-]", ui::root::NextMessage, None),
+            KeyBinding::new("shift-cmd-[", ui::root::TopOfThread, None),
+            KeyBinding::new("shift-cmd-]", ui::root::EndOfThread, None),
+            KeyBinding::new("cmd-o", ui::root::AddProject, None),
+            KeyBinding::new("shift-cmd-o", ui::root::ResumeSession, None),
         ]);
         cx.on_action(|_: &Quit, cx| cx.quit());
+
         cx.set_menus(vec![
             Menu {
                 name: "YourHarness".into(),
-                items: vec![MenuItem::action("Settings…", OpenSettings), MenuItem::separator(), MenuItem::action("Quit", Quit)],
+                items: vec![MenuItem::action("Check for Updates…", CheckForUpdates), MenuItem::separator(), MenuItem::action("Settings…", OpenSettings), MenuItem::separator(), MenuItem::action("Quit YourHarness", Quit)],
                 disabled: false,
             },
-            Menu { name: "File".into(), items: vec![MenuItem::action("New Thread", NewThread)], disabled: false },
+            Menu {
+                name: "File".into(),
+                items: vec![
+                    MenuItem::action("New Thread", NewThread),
+                    MenuItem::action("Add Project…", AddProject),
+                    MenuItem::action("Resume Claude Code Session…", ResumeSession),
+                    MenuItem::separator(),
+                    MenuItem::action("Export State…", ExportState),
+                    MenuItem::action("Import State…", ImportState),
+                ],
+                disabled: false,
+            },
+            Menu {
+                name: "Edit".into(),
+                items: vec![
+                    MenuItem::os_action("Undo", gpui_kit::component::input::Undo, gpui_kit::OsAction::Undo),
+                    MenuItem::os_action("Redo", gpui_kit::component::input::Redo, gpui_kit::OsAction::Redo),
+                    MenuItem::separator(),
+                    MenuItem::os_action("Cut", gpui_kit::component::input::Cut, gpui_kit::OsAction::Cut),
+                    MenuItem::os_action("Copy", gpui_kit::component::input::Copy, gpui_kit::OsAction::Copy),
+                    MenuItem::os_action("Paste", gpui_kit::component::input::Paste, gpui_kit::OsAction::Paste),
+                    MenuItem::os_action("Select All", gpui_kit::component::input::SelectAll, gpui_kit::OsAction::SelectAll),
+                    MenuItem::separator(),
+                    MenuItem::action("Search Everything", OpenSpotlight),
+                    MenuItem::action("Find in Thread", Find),
+                    MenuItem::action("Find Next", FindNext),
+                    MenuItem::action("Find Previous", FindPrevious),
+                ],
+                disabled: false,
+            },
+            Menu {
+                name: "View".into(),
+                items: vec![MenuItem::action("Memory", OpenMemory), MenuItem::action("Usage", ToggleUsage), MenuItem::separator(), MenuItem::action("Right Sidebar", ToggleInspector)],
+                disabled: false,
+            },
             Menu {
                 name: "Thread".into(),
-                items: vec![MenuItem::action("Stop", Stop), MenuItem::action("Allow", Allow), MenuItem::action("Deny", Deny)],
+                items: vec![
+                    MenuItem::action("Previous Thread", PreviousThread),
+                    MenuItem::action("Next Thread", NextThread),
+                    MenuItem::separator(),
+                    MenuItem::action("Previous Message", PreviousMessage),
+                    MenuItem::action("Next Message", NextMessage),
+                    MenuItem::action("Top of Thread", TopOfThread),
+                    MenuItem::action("End of Thread", EndOfThread),
+                    MenuItem::separator(),
+                    MenuItem::action("Stop", Stop),
+                    MenuItem::action("Allow", Allow),
+                    MenuItem::action("Deny", Deny),
+                ],
                 disabled: false,
             },
         ]);
@@ -497,7 +552,12 @@ fn main() {
                     ws.rename(&ids[0], "Renamed by probe", cx);
                     ws.set_settled(&ids[1], true, cx);
                     ws.delete(&ids[2], cx);
-                    eprintln!("ACTIONS pinned+renamed {}, settled {}, deleted {}", ids[0], ids[1], ids[2]);
+                    eprintln!("ACTIONS pinned+renamed {}, settled {}, deleted {}; notice: {:?}", ids[0], ids[1], ids[2], ws.undo_notice());
+                    // `YH_ACTIONS_UNDO=1`: then Undo, which brings the deleted thread back.
+                    if env("YH_ACTIONS_UNDO").as_deref() == Some("1") {
+                        ws.undo(cx);
+                        eprintln!("ACTIONS undone: {} is {}", ids[2], if ws.thread(&ids[2]).is_some() { "back" } else { "still gone" });
+                    }
                 }
             });
         }

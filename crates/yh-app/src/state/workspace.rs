@@ -95,6 +95,13 @@ pub const MEMORY_AGENT: &str = "memory:";
 /// What a side chat's agent is told.
 const SIDE_CHAT_PROMPT: &str = "This is a side conversation. You are a copy of the conversation above, opened so the user can ask something on the side without interrupting or adding to the main thread; nothing said here reaches it. Answer the question directly and briefly. You have Read, Glob, Grep, Bash, WebFetch and WebSearch: use them when the answer needs a fresh look rather than what the conversation already says. The app asks the user to approve commands that could change something. You have no tools to edit files: if the answer needs changes, say what the main thread should do.";
 
+/// A thread action that Undo takes back.
+pub enum Undo {
+    Delete { entity: Entity<ThreadState>, record: serde_json::Map<String, Value>, index: usize, was_selected: bool },
+    Unpin(String),
+    Settle(String),
+}
+
 pub struct Workspace {
     pub library: Arc<Library>,
     pub data_dir: PathBuf,
@@ -118,6 +125,12 @@ pub struct Workspace {
     /// Threads whose title is being rewritten (`update_title`), and how many messages the user
     /// had sent when it was last asked for.
     titles_rewriting: std::collections::HashSet<String>,
+    /// The last thread action that can be undone, and whether its notice still shows.
+    undo: Option<(String, Undo)>,
+    undo_shown: bool,
+    undo_serial: u64,
+    /// Deleted threads whose rows go when the app quits (kept until then for Undo).
+    pending_purge: Vec<String>,
     /// Folders and files an importer may read, by its id.
     memory_agent_sources: HashMap<String, Vec<String>>,
     /// Each thread's side chat (`/btw`), made when first opened; never saved.
@@ -172,6 +185,10 @@ impl Workspace {
             page: None,
             side_chats: HashMap::new(),
             memory_agent_sources: HashMap::new(),
+            undo: None,
+            undo_shown: false,
+            undo_serial: 0,
+            pending_purge: vec![],
             shows_inspector: false,
             panel: Panel::SideChat,
             memory_revision: 0,
@@ -455,17 +472,149 @@ impl Workspace {
         });
     }
 
+    /// Deletes a thread from the sidebar, with Undo for a few seconds (and ⌘Z): its record goes
+    /// now, its rows when the app quits, so Undo brings it back whole. Without the store (a
+    /// thread of no project), at once.
     pub fn delete(&mut self, id: &str, cx: &mut Context<Self>) {
         self.end_runtime(id, cx);
         crate::browser::Browsers::close_thread(id);
-        self.threads.retain(|t| t.read(cx).id() != id);
+        let index = self.threads.iter().position(|t| t.read(cx).id() == id);
+        let entity = index.map(|i| self.threads.remove(i));
         self.by_id.remove(id);
-        self.library.remove_thread(id);
-        if self.selected.as_deref() == Some(id) {
+        let record = self.library.take_thread(id);
+        let was_selected = self.selected.as_deref() == Some(id);
+        if was_selected {
             self.selected = None;
+        }
+        match (entity, record) {
+            (Some(entity), Some(record)) => {
+                let title = entity.read(cx).title.clone();
+                self.pending_purge.push(id.to_string());
+                self.offer_undo(format!("Deleted “{title}”"), Undo::Delete { entity, record, index: index.unwrap_or(0), was_selected }, cx);
+            }
+            _ => self.library.purge(id),
         }
         cx.emit(WorkspaceEvent::Removed(id.to_string()));
         cx.notify();
+    }
+
+    /// Removes a project and its threads (not Home); its folder is left alone.
+    pub fn remove_project(&mut self, project: &str, cx: &mut Context<Self>) {
+        if self.home_project().as_deref() == Some(project) {
+            return;
+        }
+        let ids: Vec<String> = self.threads.iter().filter(|t| t.read(cx).meta.project_id == project).map(|t| t.read(cx).id().to_string()).collect();
+        for id in ids {
+            self.delete(&id, cx);
+        }
+        // No Undo for those: the project is going too.
+        self.undo = None;
+        self.projects.retain(|p| p.id != project);
+        self.library.remove_project(project);
+        if matches!(&self.page, Some(Page::Project(p)) | Some(Page::Memory(p)) if p == project) {
+            self.page = None;
+        }
+        cx.notify();
+    }
+
+    fn offer_undo(&mut self, message: String, action: Undo, cx: &mut Context<Self>) {
+        self.undo_serial += 1;
+        let serial = self.undo_serial;
+        self.undo = Some((message, action));
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(5)).await;
+            let _ = this.update(cx, |ws, cx| {
+                if ws.undo_serial == serial && ws.undo.is_some() {
+                    // The notice goes; ⌘Z still undoes until something else is done.
+                    ws.undo_shown = false;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        self.undo_shown = true;
+        cx.notify();
+    }
+
+    /// The Undo notice's text while it shows.
+    pub fn undo_notice(&self) -> Option<&str> {
+        self.undo.as_ref().filter(|_| self.undo_shown).map(|(m, _)| m.as_str())
+    }
+
+    /// Undoes the last delete, unpin or settle.
+    pub fn undo(&mut self, cx: &mut Context<Self>) {
+        let Some((_, action)) = self.undo.take() else { return };
+        self.undo_shown = false;
+        match action {
+            Undo::Delete { entity, record, index, was_selected } => {
+                let id = entity.read(cx).id().to_string();
+                self.pending_purge.retain(|p| *p != id);
+                self.library.restore_thread(record);
+                self.threads.insert(index.min(self.threads.len()), entity.clone());
+                self.by_id.insert(id.clone(), entity);
+                if was_selected {
+                    self.select(&id, cx);
+                }
+            }
+            Undo::Unpin(id) => self.set_pinned(&id, true, cx),
+            Undo::Settle(id) => self.set_settled(&id, false, cx),
+        }
+        cx.notify();
+    }
+
+    /// The thread's title written again from its conversation (the sidebar's Regenerate Title).
+    pub fn regenerate_title(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(db) = self.library.db.clone() else { return };
+        let id = id.to_string();
+        // A title asked for by hand replaces a chosen one.
+        self.update_meta(&id, cx, |m, r| {
+            m.title_chosen = false;
+            r.remove("titleChosen");
+        });
+        self.title_asked_at.remove(&id);
+        cx.spawn(async move |this, cx| {
+            let i = id.clone();
+            let messages: Vec<(bool, String)> = cx
+                .background_executor()
+                .spawn(async move {
+                    let total = db.transcript_count(&i);
+                    db.read_rows(&i, 0, total)
+                        .into_iter()
+                        .filter_map(yh_core::library::EntryData::from_row)
+                        .filter_map(|e| match e.kind {
+                            yh_core::library::Kind::User => Some((true, e.text)),
+                            yh_core::library::Kind::Assistant => Some((false, e.text)),
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .await;
+            let _ = this.update(cx, |ws, cx| {
+                let sent = messages.iter().filter(|m| m.0).count();
+                ws.update_title_for_agent(&id, messages, sent, None, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Unpins with Undo, or pins (from the sidebar).
+    pub fn toggle_pin(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(t) = self.thread(id) else { return };
+        let (pinned, title) = (t.read(cx).meta.pinned, t.read(cx).title.clone());
+        self.set_pinned(id, !pinned, cx);
+        if pinned {
+            self.offer_undo(format!("Unpinned “{title}”"), Undo::Unpin(id.to_string()), cx);
+        }
+    }
+
+    /// Settles with Undo, or brings back (from the sidebar).
+    pub fn toggle_settled(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(t) = self.thread(id) else { return };
+        let (settled, title) = (t.read(cx).meta.settled_at.is_some(), t.read(cx).title.clone());
+        self.set_settled(id, !settled, cx);
+        if !settled {
+            self.offer_undo(format!("Settled “{title}”"), Undo::Settle(id.to_string()), cx);
+        }
     }
 
     /// The composer's text, kept with the thread until sent.
@@ -1206,6 +1355,9 @@ impl Workspace {
 
     /// Quitting: everything saved, every `claude` ended.
     pub fn prepare_for_quit(&mut self, cx: &mut Context<Self>) {
+        for id in std::mem::take(&mut self.pending_purge) {
+            self.library.purge(&id);
+        }
         for t in self.threads.clone() {
             self.save_rows(&t, cx);
         }

@@ -342,6 +342,35 @@ impl Library {
         self.save();
     }
 
+    /// Takes a thread's record out (its rows stay, for Undo); `purge` deletes them later.
+    pub fn take_thread(&self, id: &str) -> Option<Map<String, Value>> {
+        let mut records = self.records.lock().unwrap();
+        let i = records.threads.iter().position(|t| t.get("id").and_then(Value::as_str) == Some(id))?;
+        let record = records.threads.remove(i);
+        drop(records);
+        self.save();
+        Some(record)
+    }
+
+    /// Puts a thread's record back (Undo of a delete).
+    pub fn restore_thread(&self, record: Map<String, Value>) {
+        self.records.lock().unwrap().threads.push(record);
+        self.save();
+    }
+
+    /// Deletes a thread's rows for good.
+    pub fn purge(&self, id: &str) {
+        if let Some(db) = &self.db {
+            db.delete_transcript(id);
+        }
+    }
+
+    /// Takes a project out of the list (its threads are removed by the caller).
+    pub fn remove_project(&self, id: &str) {
+        self.records.lock().unwrap().projects.retain(|p| p.get("id").and_then(Value::as_str) != Some(id));
+        self.save();
+    }
+
     /// Changes a project's record (`permissionMode`…) and saves.
     pub fn update_project(&self, id: &str, change: impl FnOnce(&mut Map<String, Value>)) {
         let mut records = self.records.lock().unwrap();
