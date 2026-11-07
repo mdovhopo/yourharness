@@ -52,6 +52,9 @@ pub mod text {
     /// Line heights that go with them.
     pub const BODY_LINE: f32 = 19.;
     pub const CODE_LINE: f32 = 17.;
+    /// Compact monospaced output (tool results, diffs), and headings.
+    pub const MONO_LINE: f32 = 16.;
+    pub const TITLE_LINE: f32 = 22.;
 }
 
 /// Corner radii: small for chips and inline code, medium for buttons and rows, large for cards
