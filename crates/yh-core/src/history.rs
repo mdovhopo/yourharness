@@ -114,7 +114,15 @@ pub fn load_with_limit(path: &Path, limit: usize) -> Vec<EntryData> {
 
     let mut entries: Vec<EntryData> = vec![];
     let mut tools: HashMap<String, usize> = HashMap::new();
+    // The date of the record being read: given to the rows it makes.
+    let (mut dated, mut pending_date) = (0usize, None::<f64>);
     for record in kept {
+        if let Some(date) = pending_date.take() {
+            for e in &mut entries[dated..] {
+                e.date.get_or_insert(date);
+            }
+        }
+        dated = entries.len();
         let id = format!("h{}", entries.len());
         if record.boundary {
             entries.push(EntryData::new(id, Kind::Notice, "Conversation compacted"));
@@ -124,6 +132,7 @@ pub fn load_with_limit(path: &Path, limit: usize) -> Vec<EntryData> {
             continue;
         }
         let Ok(object) = serde_json::from_slice::<Value>(&data[record.range.clone()]) else { continue };
+        pending_date = object["timestamp"].as_str().and_then(crate::library::parse_iso);
         let message = &object["message"];
         if record.kind == "assistant" {
             let synthetic = message["model"] == "<synthetic>";
@@ -196,6 +205,11 @@ pub fn load_with_limit(path: &Path, limit: usize) -> Vec<EntryData> {
             entries.push(EntryData::new(id, Kind::Notice, command));
         } else if !text.is_empty() || has_image {
             entries.push(EntryData::new(id, Kind::User, if text.is_empty() { "[Image]".to_string() } else { text }));
+        }
+    }
+    if let Some(date) = pending_date {
+        for e in &mut entries[dated..] {
+            e.date.get_or_insert(date);
         }
     }
     entries

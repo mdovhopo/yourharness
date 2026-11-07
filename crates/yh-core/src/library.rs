@@ -52,6 +52,10 @@ pub struct EntryData {
     pub is_error: bool,
     /// Images sent with your message: names in the data folder's `attachments/`.
     pub attachments: Vec<String>,
+    /// When it was written (seconds since 1970), when known.
+    pub date: Option<f64>,
+    /// On a message of yours that started a turn: when that turn ended (seconds since 1970).
+    pub turn_ended_at: Option<f64>,
 }
 
 impl EntryData {
@@ -66,6 +70,8 @@ impl EntryData {
             result_len: 0,
             is_error: false,
             attachments: vec![],
+            date: None,
+            turn_ended_at: None,
         }
     }
 }
@@ -562,6 +568,8 @@ impl EntryData {
             .unwrap_or_else(|| row.tool_result.as_ref().map_or(0, |r| r.len()));
         entry.tool_input = row.tool_input.map(|s| head(&s, TOOL_TEXT_LIMIT));
         entry.tool_result = row.tool_result.map(|s| head(&s, TOOL_TEXT_LIMIT));
+        entry.date = row.date;
+        entry.turn_ended_at = row.turn_ended_at;
         entry.attachments = row.attachments.as_deref().and_then(|a| serde_json::from_str(a).ok()).unwrap_or_default();
         // A notice in the error style reads as one.
         entry.is_error = row.tool_is_error == Some(true) || row.notice_style.as_deref() == Some("error");

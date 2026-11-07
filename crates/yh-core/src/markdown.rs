@@ -10,6 +10,8 @@ pub enum Span {
     Italic,
     Code,
     Link,
+    /// A link inside a code span: a path named in code.
+    CodeLink,
     Strike,
     // Code highlighting.
     Keyword,
@@ -30,7 +32,8 @@ pub struct Styled {
 pub enum MdBlock {
     Paragraph(Styled),
     Heading(u8, Styled),
-    Code(Styled),
+    /// A fenced or indented block: its language (`rust`, `mermaid`, or empty) and its text.
+    Code { lang: String, code: Styled },
     /// Items with their nesting depth and number (none: a bullet).
     List(Vec<(usize, Option<u64>, Styled)>),
     Quote(Styled),
@@ -153,7 +156,7 @@ pub fn parse(source: &str) -> Markdown {
                     if text.ends_with('\n') {
                         text.pop();
                     }
-                    b.blocks.push(MdBlock::Code(highlight(&text, &lang)));
+                    b.blocks.push(MdBlock::Code { code: highlight(&text, &lang), lang: lang.trim().to_string() });
                 }
                 TagEnd::Item => b.flush_paragraph(),
                 TagEnd::List(_) => {
@@ -241,7 +244,7 @@ pub fn parse(source: &str) -> Markdown {
 
 fn styled_mut(block: &mut MdBlock) -> Vec<&mut Styled> {
     match block {
-        MdBlock::Paragraph(s) | MdBlock::Heading(_, s) | MdBlock::Code(s) | MdBlock::Quote(s) => vec![s],
+        MdBlock::Paragraph(s) | MdBlock::Heading(_, s) | MdBlock::Code { code: s, .. } | MdBlock::Quote(s) => vec![s],
         MdBlock::List(items) => items.iter_mut().map(|(_, _, s)| s).collect(),
         MdBlock::Table { header, rows } => header.iter_mut().chain(rows.iter_mut().flatten()).collect(),
         MdBlock::Rule => vec![],
@@ -260,6 +263,12 @@ fn normalize(spans: &mut Vec<(Range<usize>, Span)>) {
         out.push((range, span));
     }
     *spans = out;
+}
+
+/// A table as tab-separated values, a row to a line, for pasting into a spreadsheet.
+pub fn table_tsv(header: &[Styled], rows: &[Vec<Styled>]) -> String {
+    let line = |cells: &[Styled]| cells.iter().map(|c| c.text.replace(['\t', '\n'], " ")).collect::<Vec<_>>().join("\t");
+    std::iter::once(line(header)).chain(rows.iter().map(|r| line(r))).collect::<Vec<_>>().join("\n")
 }
 
 const KEYWORDS: &[&str] = &[
@@ -311,4 +320,23 @@ pub fn highlight(text: &str, _lang: &str) -> Styled {
     // Ranges must fall on character boundaries.
     spans.retain(|(r, _): &(Range<usize>, Span)| text.is_char_boundary(r.start) && text.is_char_boundary(r.end));
     Styled { text: text.to_string(), spans, links: vec![] }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn code_blocks_keep_their_language() {
+        let md = parse("```mermaid\nflowchart TD\n  A --> B\n```\n\n    indented");
+        assert!(matches!(&md.blocks[0], MdBlock::Code { lang, code } if lang == "mermaid" && code.text == "flowchart TD\n  A --> B"));
+        assert!(matches!(&md.blocks[1], MdBlock::Code { lang, .. } if lang.is_empty()));
+    }
+
+    #[test]
+    fn tables_copy_as_tab_separated() {
+        let md = parse("| a | b |\n|---|---|\n| 1 | **2** |\n| x | y z |");
+        let MdBlock::Table { header, rows } = &md.blocks[0] else { panic!() };
+        assert_eq!(table_tsv(header, rows), "a\tb\n1\t2\nx\ty z");
+    }
 }
