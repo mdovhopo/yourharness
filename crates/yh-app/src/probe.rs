@@ -74,7 +74,7 @@ fn tick(frames: Rc<RefCell<Frames>>, generation: u64, window: &Window) {
             if let Some(last) = f.last {
                 let ms = (now - last).as_secs_f64() * 1000.0;
                 // A long frame says when and in what phase, to line up with what was happening.
-                if ms > 250.0 {
+                if ms > 50.0 {
                     let phase = PHASE.with(|p| p.borrow().clone());
                     eprintln!("PERF stall {ms:.0} ms in {phase} at {:.1} s", STARTED.with(|s| s.elapsed().as_secs_f64()));
                 }
