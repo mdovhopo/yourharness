@@ -9,11 +9,11 @@ use crate::theme::{radius, space, text, Theme, MONO};
 use crate::ui::icons;
 use crate::ui::rows;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
+use gpui_kit::component::input::{DeleteToBeginningOfLine, Enter, Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Disableable, Icon, IconName, Sizable};
-use gpui_kit::{div, prelude::*, px, App, Context, Entity, FontWeight, SharedString, Subscription, Window};
+use gpui_kit::{div, prelude::*, px, App, Context, Entity, Focusable, FontWeight, SharedString, Subscription, Window};
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use yh_core::attachments::FileAttachment;
@@ -173,6 +173,41 @@ impl Composer {
         }
     }
 
+    /// ⌘↩ inside the composer (its field or a card's): the input propagates `Enter`, and this
+    /// takes it so the window's Allow binding never answers a second request too. With a draft
+    /// in the composer it sends now (the field's own `PressEnter`); otherwise it answers the
+    /// card: a question (once every one is answered), a plan in the recommended mode, a tool.
+    fn on_enter(&mut self, action: &Enter, window: &mut Window, cx: &mut Context<Self>) {
+        if !action.secondary || action.shift {
+            return cx.propagate();
+        }
+        let draft = self.input.focus_handle(cx).is_focused(window) && !self.input.read(cx).value().trim().is_empty();
+        if draft || self.card_shortcut(true, cx) {
+            return;
+        }
+        if let Some(thread) = self.thread(cx).filter(|t| t.read(cx).permission().is_some()) {
+            self.workspace.update(cx, |ws, cx| ws.respond(&thread, Decision::allow(), cx));
+        }
+    }
+
+    /// ⌘⌫ with a card waiting: Skip a question, Keep Planning, Deny a tool, unless a field with
+    /// something in it has the focus, which deletes to the start of the line as usual.
+    fn on_delete_line(&mut self, _: &DeleteToBeginningOfLine, window: &mut Window, cx: &mut Context<Self>) {
+        let typing = match self.card.as_ref().map(|(_, c)| c) {
+            Some(Card::Question(q)) => q.read(cx).typing(window, cx),
+            Some(Card::Plan(p)) => p.read(cx).typing(window, cx),
+            _ => false,
+        } || (self.input.focus_handle(cx).is_focused(window) && !self.input.read(cx).value().is_empty());
+        let Some(thread) = self.thread(cx).filter(|t| t.read(cx).permission().is_some()) else { return cx.propagate() };
+        if typing {
+            return cx.propagate();
+        }
+        cx.stop_propagation();
+        if !self.card_shortcut(false, cx) {
+            self.workspace.update(cx, |ws, cx| ws.respond(&thread, Decision::deny(), cx));
+        }
+    }
+
     pub fn new(workspace: Entity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         // Grows with what's in it, typed or put there (a pick from the browser, a queued message
         // taken back), up to the field's cap, then scrolls.
@@ -249,9 +284,8 @@ impl Composer {
     /// sends now.
     fn enter(&mut self, secondary: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(thread) = self.thread(cx) else { return };
-        let waiting = thread.read(cx).waiting_for_you();
-        if secondary && waiting && self.input.read(cx).value().trim().is_empty() {
-            self.workspace.update(cx, |ws, cx| ws.respond(&thread, Decision::allow(), cx));
+        // ⌘↩ with nothing typed and a card waiting was answered by `on_enter`.
+        if secondary && thread.read(cx).waiting_for_you() && self.input.read(cx).value().trim().is_empty() {
             return;
         }
         self.submit(secondary, window, cx);
@@ -431,7 +465,7 @@ impl Composer {
                 let ws = self.workspace.downgrade();
                 let card = match p.tool.as_str() {
                     "AskUserQuestion" => match QuestionCard::new(p, ws, window, cx) {
-                        Some(card) => Card::Question(cx.new(|_| card)),
+                        Some(card) => Card::Question(card),
                         None => Card::Tool,
                     },
                     "ExitPlanMode" => Card::Plan(cx.new(|cx| PlanCard::new(p, ws, window, cx))),
@@ -866,7 +900,17 @@ impl Render for Composer {
                             .on_click(cx.listener(|this, _, window, cx| this.submit(false, window, cx)))
                     }),
             );
-        div().w_full().relative().flex().justify_center().px(px(space::XL - 4.)).pb(px(space::L)).child(inner.child(composer)).child(self.measure())
+        div()
+            .w_full()
+            .relative()
+            .flex()
+            .justify_center()
+            .px(px(space::XL - 4.))
+            .pb(px(space::L))
+            .on_action(cx.listener(Self::on_enter))
+            .capture_action(cx.listener(Self::on_delete_line))
+            .child(inner.child(composer))
+            .child(self.measure())
     }
 }
 
@@ -1555,29 +1599,62 @@ pub struct QuestionCard {
     workspace: Option<gpui_kit::WeakEntity<Workspace>>,
     input: String,
     questions: Vec<Question>,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl QuestionCard {
-    fn new(p: &Permission, workspace: gpui_kit::WeakEntity<Workspace>, window: &mut Window, cx: &mut Context<Composer>) -> Option<QuestionCard> {
+    /// The card for `p`, or None when its input has no questions (it shows as a plain
+    /// permission then). Typing an answer redraws the card (Answer waits for every question),
+    /// and replaces a single choice, as in the Swift app.
+    fn new(p: &Permission, workspace: gpui_kit::WeakEntity<Workspace>, window: &mut Window, cx: &mut Context<Composer>) -> Option<Entity<QuestionCard>> {
         let input: Value = serde_json::from_str(&p.input).ok()?;
-        let questions: Vec<Question> = input["questions"]
+        let parsed: Vec<(String, Option<String>, bool, Vec<(String, Option<String>)>)> = input["questions"]
             .as_array()?
             .iter()
             .filter_map(|q| {
-                Some(Question {
-                    question: q["question"].as_str()?.to_string(),
-                    header: q["header"].as_str().map(str::to_string),
-                    multi: q["multiSelect"].as_bool().unwrap_or(false),
-                    options: q["options"]
+                Some((
+                    q["question"].as_str()?.to_string(),
+                    q["header"].as_str().map(str::to_string),
+                    q["multiSelect"].as_bool().unwrap_or(false),
+                    q["options"]
                         .as_array()
                         .map(|o| o.iter().filter_map(|o| Some((o["label"].as_str()?.to_string(), o["description"].as_str().map(str::to_string)))).collect())
                         .unwrap_or_default(),
-                    chosen: BTreeSet::new(),
-                    other: cx.new(|cx| InputState::new(window, cx).placeholder("Or write your own answer")),
-                })
+                ))
             })
             .collect();
-        (!questions.is_empty()).then(|| QuestionCard { workspace: Some(workspace), input: p.input.clone(), questions })
+        if parsed.is_empty() {
+            return None;
+        }
+        let raw = p.input.clone();
+        Some(cx.new(|cx| {
+            let mut subscriptions = vec![];
+            let questions = parsed
+                .into_iter()
+                .enumerate()
+                .map(|(qi, (question, header, multi, options))| {
+                    let placeholder = if options.is_empty() { "Your answer" } else { "Or write your own answer" };
+                    let other = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
+                    subscriptions.push(cx.subscribe(&other, move |this: &mut QuestionCard, other, event: &InputEvent, cx| {
+                        if let InputEvent::Change = event {
+                            let typed = !other.read(cx).value().trim().is_empty();
+                            let q = &mut this.questions[qi];
+                            if typed && !q.multi {
+                                q.chosen.clear();
+                            }
+                            cx.notify();
+                        }
+                    }));
+                    Question { question, header, multi, options, chosen: BTreeSet::new(), other }
+                })
+                .collect();
+            QuestionCard { workspace: Some(workspace), input: raw, questions, _subscriptions: subscriptions }
+        }))
+    }
+
+    /// A field of the card's has the focus and something in it: ⌘⌫ edits it then.
+    fn typing(&self, window: &Window, cx: &App) -> bool {
+        self.questions.iter().any(|q| q.other.focus_handle(cx).is_focused(window) && !q.other.read(cx).value().is_empty())
     }
 
     /// Every question has an answer: an option picked, or one written.
@@ -1623,7 +1700,9 @@ impl QuestionCard {
 impl Render for QuestionCard {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::get(cx);
-        let mut card = card_frame(&theme).child(card_title(icons::message_question(), if self.questions.len() == 1 { "Claude asks".to_string() } else { format!("Claude asks {} questions", self.questions.len()) }, &theme));
+        let title = card_title(icons::message_question(), if self.questions.len() == 1 { "Claude asks".to_string() } else { format!("Claude asks {} questions", self.questions.len()) }, &theme);
+        // The questions scroll past 420 pt, as in the Swift app; the title and buttons stay.
+        let mut questions = div().id("question-list").max_h(px(420.)).overflow_y_scroll().flex().flex_col().gap(px(space::S + 2.));
         for (qi, q) in self.questions.iter().enumerate() {
             // With descriptions, each option on its own line with what it means beside it.
             let described = q.options.iter().any(|o| o.1.is_some());
@@ -1636,13 +1715,16 @@ impl Render for QuestionCard {
                         .when(!on, |b| b.outline())
                         .when(on, |b| b.icon(Icon::new(IconName::Check).size(px(12.))))
                         .label(label.clone())
-                        .on_click(cx.listener(move |this, _, _, cx| {
+                        .on_click(cx.listener(move |this, _, window, cx| {
                             let q = &mut this.questions[qi];
                             if !q.chosen.remove(&oi) {
                                 if !q.multi {
                                     q.chosen.clear();
+                                    // A single choice replaces what was written.
+                                    let other = q.other.clone();
+                                    other.update(cx, |i, cx| i.set_value("", window, cx));
                                 }
-                                q.chosen.insert(oi);
+                                this.questions[qi].chosen.insert(oi);
                             }
                             cx.notify();
                         }));
@@ -1655,7 +1737,7 @@ impl Render for QuestionCard {
                         .when_some(description.clone().filter(|_| described), |d, t| d.child(div().min_w_0().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child(t))),
                 );
             }
-            card = card.child(
+            questions = questions.child(
                 div()
                     .flex()
                     .flex_col()
@@ -1670,7 +1752,7 @@ impl Render for QuestionCard {
             );
         }
         let ready = self.all_answered(cx);
-        div().id("question-card").max_h(px(460.)).overflow_y_scroll().child(card.child(
+        card_frame(&theme).child(title).child(questions).child(
             card_buttons()
                 .child(Button::new("skip").small().outline().label("Skip").tooltip("Skip (⌘⌫)").on_click(cx.listener(|this, _, _, cx| this.skip(cx))))
                 .child(
@@ -1682,7 +1764,7 @@ impl Render for QuestionCard {
                         .disabled(!ready)
                         .on_click(cx.listener(|this, _, _, cx| this.submit(cx))),
                 ),
-        ))
+        )
     }
 }
 
@@ -1730,6 +1812,11 @@ impl PlanCard {
                 }
             });
         }
+    }
+
+    /// The feedback field has the focus and something in it: ⌘⌫ edits it then.
+    fn typing(&self, window: &Window, cx: &App) -> bool {
+        self.feedback.focus_handle(cx).is_focused(window) && !self.feedback.read(cx).value().is_empty()
     }
 
     /// ⌘↩: approve in the recommended mode.
