@@ -435,10 +435,16 @@ impl Library {
     /// A setting as JSON (`defaults`, `claudeModels`, `homeProjectID`…).
     pub fn setting(&self, key: &str) -> Option<Value> {
         let records = self.records.lock().unwrap();
-        records.values.get(key).and_then(|v| serde_json::from_slice(v).ok())
+        let value = records.values.get(key).and_then(|v| serde_json::from_slice(v).ok())?;
+        Some(if DATE_MAPS.contains(&key) { date_map(value, |d| d.as_str().and_then(parse_iso).or_else(|| d.as_f64()).map(Value::from)) } else { value })
     }
 
     pub fn set_setting(&self, key: &str, value: &Value) {
+        let value = if DATE_MAPS.contains(&key) {
+            &date_map(value.clone(), |d| d.as_f64().map(|s| Value::from(iso(s as i64))).or_else(|| d.is_string().then(|| d.clone())))
+        } else {
+            value
+        };
         let bytes = serde_json::to_vec(value).unwrap_or_default();
         self.records.lock().unwrap().values.insert(key.to_string(), bytes);
         self.save();
@@ -545,6 +551,18 @@ fn expand_tilde(path: &str) -> String {
 
 pub fn now_ms() -> f64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64() * 1000.0).unwrap_or(0.0)
+}
+
+/// Settings that are `[String: Date]` in the Swift app (`claudeMemorySyncedAt`): ISO 8601
+/// strings in the database, as 0.0.16 reads them, and seconds since 1970 to the app.
+const DATE_MAPS: &[&str] = &["claudeMemorySyncedAt"];
+
+/// Each value of an object changed by `f`; one it can't change is left out.
+fn date_map(value: Value, f: impl Fn(&Value) -> Option<Value>) -> Value {
+    match value {
+        Value::Object(m) => Value::Object(m.into_iter().filter_map(|(k, v)| f(&v).map(|v| (k, v))).collect()),
+        other => other,
+    }
 }
 
 /// The user's data folder, or `YH_DATA_DIR` (development runs: never the real one).
@@ -659,6 +677,18 @@ mod tests {
         assert_eq!(parse_iso("2026-10-28T01:00:00Z"), Some(1_793_149_200.0));
         assert_eq!(parse_iso("2026-10-28T03:00:00+02:00"), Some(1_793_149_200.0));
         assert_eq!(parse_iso("2026-10-28T01:00:00.5Z"), Some(1_793_149_200.5));
+    }
+
+    #[test]
+    fn date_settings_are_iso_on_disk_and_seconds_to_the_app() {
+        let saved = date_map(serde_json::json!({"P1": 1_793_149_200.0, "P2": "2026-10-28T01:00:00Z"}), |d| {
+            d.as_f64().map(|s| Value::from(iso(s as i64))).or_else(|| d.is_string().then(|| d.clone()))
+        });
+        assert_eq!(saved, serde_json::json!({"P1": "2026-10-28T01:00:00Z", "P2": "2026-10-28T01:00:00Z"}));
+        let read = date_map(serde_json::json!({"P1": "2026-10-28T01:00:00Z", "P2": 5.0, "P3": true}), |d| {
+            d.as_str().and_then(parse_iso).or_else(|| d.as_f64()).map(Value::from)
+        });
+        assert_eq!(read, serde_json::json!({"P1": 1_793_149_200.0, "P2": 5.0}));
     }
 
     #[test]

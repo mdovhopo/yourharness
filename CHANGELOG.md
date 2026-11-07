@@ -13,6 +13,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 - Tool calls in the transcript read as what they did ("Read …/README.md", "Run command"), each a compact line that opens into a card; failed ones are red. A finished turn's work folds into one quiet line.
 
 ### Added
+- History from 0.0.6 and earlier, kept as `state.json` and `threads/`, moves into the database the first time, in the background, as 0.0.16 would have moved it; a damaged file is skipped and noted, never a crash. Going back to 0.0.16 afterwards reads everything this version wrote.
 - Select text anywhere in a reply, a tool's output or a thinking block, and copy part of it.
 - Code blocks have a header with the language and a Copy button; tables copy as tab-separated text; diagrams open large, and copy or save as PNG. Copy buttons say "Copied" for a moment after a click, and a diagram's actions are icons with tooltips.
 - Narrow windows work down to the smallest size: the sidebars give way before the thread does (the left one folds away when there's no room beside the right one), and Memory, Usage and the project page switch to icons and one column at a time by their own width. A memory's text box grows with what you write.

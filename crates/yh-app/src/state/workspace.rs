@@ -1771,7 +1771,7 @@ impl Workspace {
             return;
         }
         self.models = parsed;
-        self.library.set_setting("claudeModels", models);
+        self.library.set_setting("claudeModels", &ModelInfo::saved_list(models));
         cx.notify();
     }
 

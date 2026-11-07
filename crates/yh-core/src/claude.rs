@@ -181,6 +181,32 @@ impl ModelInfo {
             supports_auto_mode: v["supportsAutoMode"].as_bool().unwrap_or(false),
         })
     }
+
+    /// The CLI's model list as the Swift app saves it (`claudeModels`, `[ClaudeModel]`), so
+    /// 0.0.16 reads it after a downgrade: `supportedEffortLevels` is required there, and a
+    /// model without it (Haiku) cost the whole list.
+    pub fn saved_list(models: &Value) -> Value {
+        let list = models.as_array().map(Vec::as_slice).unwrap_or_default();
+        Value::Array(
+            list.iter()
+                .filter_map(|m| {
+                    let info = ModelInfo::from_json(m)?;
+                    let mut o = serde_json::Map::new();
+                    o.insert("value".into(), info.value.into());
+                    if let Some(r) = m["resolvedModel"].as_str() {
+                        o.insert("resolvedModel".into(), r.into());
+                    }
+                    o.insert("displayName".into(), info.display_name.into());
+                    if let Some(d) = info.description {
+                        o.insert("description".into(), d.into());
+                    }
+                    o.insert("supportedEffortLevels".into(), info.efforts.into());
+                    o.insert("supportsAutoMode".into(), info.supports_auto_mode.into());
+                    Some(Value::Object(o))
+                })
+                .collect(),
+        )
+    }
 }
 
 #[derive(Clone, Debug)]
