@@ -12,6 +12,7 @@ pub mod mcp;
 pub mod page_icons;
 pub mod page_kit;
 pub mod memory;
+pub mod menus;
 pub mod project;
 pub mod resume_sheet;
 pub mod root;

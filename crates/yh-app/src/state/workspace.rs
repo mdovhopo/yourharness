@@ -35,6 +35,12 @@ pub enum WorkspaceEvent {
     AttachImages(Vec<Vec<u8>>),
 }
 
+/// The sidebar's order within a project: pinned first, then by when it was made, newest first,
+/// so rows stay where you left them (sorted by last activity, every turn moved them).
+pub fn sidebar_order(a: &ThreadMeta, b: &ThreadMeta) -> std::cmp::Ordering {
+    b.pinned.cmp(&a.pinned).then(b.created_at.total_cmp(&a.created_at))
+}
+
 /// One thread's `claude`, between turns too.
 struct Runtime {
     process: ClaudeProcess,
@@ -104,7 +110,12 @@ const SIDE_CHAT_PROMPT: &str = "This is a side conversation. You are a copy of t
 pub enum Undo {
     Delete { entity: Entity<ThreadState>, record: serde_json::Map<String, Value>, index: usize, was_selected: bool },
     Unpin(String),
-    Settle(String),
+    /// Pinning: ⌘Z unpins (no notice, as the Swift app).
+    Pin(String),
+    /// Settling: back as it was, its pin and the selection too.
+    Settle { id: String, pinned: bool, was_selected: bool },
+    /// Bringing back from the shelf: ⌘Z settles it again (no notice).
+    Unsettle(String),
 }
 
 pub struct Workspace {
@@ -141,6 +152,9 @@ pub struct Workspace {
     /// The last thread action that can be undone, and whether its notice still shows.
     undo: Option<(String, Undo)>,
     undo_shown: bool,
+    /// When the last undoable thread action was done: ⌘Z in the composer undoes it rather than
+    /// the typing when it came after the last key typed (`undo_beats_typing`).
+    pub undo_at: Option<Instant>,
     undo_serial: u64,
     /// Deleted threads whose rows go when the app quits (kept until then for Undo).
     pending_purge: Vec<String>,
@@ -212,6 +226,7 @@ impl Workspace {
             keep_awake_timer: None,
             undo: None,
             undo_shown: false,
+            undo_at: None,
             undo_serial: 0,
             pending_purge: vec![],
             shows_inspector: false,
@@ -513,6 +528,16 @@ impl Workspace {
     // MARK: Threads and projects
 
     pub fn new_thread(&mut self, project_id: &str, cx: &mut Context<Self>) -> String {
+        // An untouched blank in the project is used again instead of piling up blanks.
+        let blank = self.threads.iter().find(|t| {
+            let t = t.read(cx);
+            t.meta.project_id == project_id && t.meta.settled_at.is_none() && t.session_id.is_none() && t.title == "New thread" && !t.running && t.items.is_empty() && t.total.unwrap_or(0) == 0
+        });
+        if let Some(blank) = blank {
+            let id = blank.read(cx).id().to_string();
+            self.select(&id, cx);
+            return id;
+        }
         self.new_count += 1;
         // Saved in harness.sqlite right away, as the Swift app does; `new:` only without one.
         let meta = if self.library.db.is_some() && !project_id.starts_with("dir:") {
@@ -537,6 +562,45 @@ impl Workspace {
         }
         cx.notify();
         id
+    }
+
+    /// The sidebar's live threads in its order, folded projects skipped: Home first, then the
+    /// projects as listed; in each, pinned first, then newest made first (`sidebar_order`).
+    pub fn visible_thread_ids(&self, cx: &App) -> Vec<String> {
+        let home = self.home_project();
+        let collapsed: std::collections::HashSet<String> = self
+            .library
+            .setting("collapsedProjectIDs")
+            .and_then(|v| v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()))
+            .unwrap_or_default();
+        let mut projects: Vec<&ProjectMeta> = self.projects.iter().filter(|p| !collapsed.contains(&p.id)).collect();
+        projects.sort_by_key(|p| Some(&p.id) != home.as_ref());
+        let mut out = vec![];
+        for p in projects {
+            let mut live: Vec<&ThreadMeta> = self.threads.iter().map(|t| &t.read(cx).meta).filter(|m| m.project_id == p.id && m.settled_at.is_none()).collect();
+            live.sort_by(|a, b| sidebar_order(a, b));
+            out.extend(live.into_iter().map(|m| m.id.clone()));
+        }
+        out
+    }
+
+    /// Before the open thread goes (settled, deleted), the one below it opens, or above at the
+    /// end, as the Swift app does, so the window doesn't go blank.
+    fn select_neighbour(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.selected.as_deref() != Some(id) || self.page.is_some() {
+            return;
+        }
+        let ids = self.visible_thread_ids(cx);
+        let next = match ids.iter().position(|t| t == id) {
+            Some(i) if i + 1 < ids.len() => Some(ids[i + 1].clone()),
+            Some(i) if i > 0 => Some(ids[i - 1].clone()),
+            Some(_) => None,
+            None => ids.first().cloned(),
+        };
+        match next {
+            Some(next) => self.select(&next, cx),
+            None => self.selected = None,
+        }
     }
 
     fn update_meta(&mut self, id: &str, cx: &mut Context<Self>, change: impl FnOnce(&mut ThreadMeta, &mut serde_json::Map<String, Value>)) {
@@ -586,12 +650,22 @@ impl Workspace {
     /// On its project's Settled shelf, its `claude` ended, history kept; or brought back.
     pub fn set_settled(&mut self, id: &str, on: bool, cx: &mut Context<Self>) {
         if on {
+            // Already on the shelf: nothing to do (and the selection stays).
+            if self.thread(id).is_some_and(|t| t.read(cx).meta.settled_at.is_some()) {
+                return;
+            }
+            self.select_neighbour(id, cx);
             self.end_runtime(id, cx);
+            // Its pages go with its `claude`.
+            crate::browser::Browsers::close_thread(id);
         }
         let now = iso_now();
         self.update_meta(id, cx, |m, r| {
             if on {
                 m.settled_at = Some(yh_core::library::now_ms());
+                // Settling drops the pin.
+                m.pinned = false;
+                r.insert("isPinned".into(), Value::Null);
                 r.insert("settledAt".into(), now.into());
             } else {
                 m.settled_at = None;
@@ -608,14 +682,18 @@ impl Workspace {
     pub fn delete(&mut self, id: &str, cx: &mut Context<Self>) {
         self.end_runtime(id, cx);
         crate::browser::Browsers::close_thread(id);
+        let was_selected = self.selected.as_deref() == Some(id);
+        if was_selected {
+            // To the neighbour first, while the thread is still listed.
+            self.select_neighbour(id, cx);
+            if self.selected.as_deref() == Some(id) {
+                self.selected = None;
+            }
+        }
         let index = self.threads.iter().position(|t| t.read(cx).id() == id);
         let entity = index.map(|i| self.threads.remove(i));
         self.by_id.remove(id);
         let record = self.library.take_thread(id);
-        let was_selected = self.selected.as_deref() == Some(id);
-        if was_selected {
-            self.selected = None;
-        }
         match (entity, record) {
             (Some(entity), Some(record)) => {
                 let title = entity.read(cx).title.clone();
@@ -647,10 +725,25 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Puts an action on Undo (⌘Z, Edit → Undo) without the notice.
+    fn register_undo(&mut self, action: Undo, cx: &mut Context<Self>) {
+        self.undo_serial += 1;
+        self.undo = Some((String::new(), action));
+        self.undo_at = Some(Instant::now());
+        self.undo_shown = false;
+        cx.notify();
+    }
+
+    /// Whether there's a thread action to undo (Edit → Undo is on for it).
+    pub fn can_undo(&self) -> bool {
+        self.undo.is_some()
+    }
+
     fn offer_undo(&mut self, message: String, action: Undo, cx: &mut Context<Self>) {
         self.undo_serial += 1;
         let serial = self.undo_serial;
         self.undo = Some((message, action));
+        self.undo_at = Some(Instant::now());
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(Duration::from_secs(5)).await;
             let _ = this.update(cx, |ws, cx| {
@@ -687,7 +780,23 @@ impl Workspace {
                 }
             }
             Undo::Unpin(id) => self.set_pinned(&id, true, cx),
-            Undo::Settle(id) => self.set_settled(&id, false, cx),
+            Undo::Pin(id) => self.set_pinned(&id, false, cx),
+            Undo::Settle { id, pinned, was_selected } => {
+                // Back as it was: not "brought back" (that holds off settling on its own).
+                self.update_meta(&id, cx, |m, r| {
+                    m.settled_at = None;
+                    m.pinned = pinned;
+                    r.insert("settledAt".into(), Value::Null);
+                    r.insert("isPinned".into(), if pinned { true.into() } else { Value::Null });
+                });
+                if was_selected {
+                    self.select(&id, cx);
+                }
+            }
+            Undo::Unsettle(id) => self.set_settled(&id, true, cx),
+        }
+        if std::env::var("YH_DATA_DIR").is_ok() {
+            eprintln!("UNDO done");
         }
         cx.notify();
     }
@@ -731,6 +840,8 @@ impl Workspace {
     pub fn note_working(&mut self, cx: &mut Context<Self>) {
         let working = self.threads.iter().any(|t| t.read(cx).running) || self.by_id.values().any(|t| t.read(cx).running);
         self.keep_awake.set_working(working);
+        // App Nap held off while Claude works (test runs hold it off for good, `hold_off_app_nap`).
+        crate::platform::set_working_activity(working);
         if std::env::var("YH_KEEP_AWAKE_LOG").is_ok() {
             eprintln!("Keep awake: {}", self.keep_awake.describe());
         }
@@ -906,16 +1017,21 @@ impl Workspace {
         self.set_pinned(id, !pinned, cx);
         if pinned {
             self.offer_undo(format!("Unpinned “{title}”"), Undo::Unpin(id.to_string()), cx);
+        } else {
+            self.register_undo(Undo::Pin(id.to_string()), cx);
         }
     }
 
     /// Settles with Undo, or brings back (from the sidebar).
     pub fn toggle_settled(&mut self, id: &str, cx: &mut Context<Self>) {
         let Some(t) = self.thread(id) else { return };
-        let (settled, title) = (t.read(cx).meta.settled_at.is_some(), t.read(cx).title.clone());
+        let (settled, title, pinned) = (t.read(cx).meta.settled_at.is_some(), t.read(cx).title.clone(), t.read(cx).meta.pinned);
+        let was_selected = self.selected.as_deref() == Some(id);
         self.set_settled(id, !settled, cx);
         if !settled {
-            self.offer_undo(format!("Settled “{title}”"), Undo::Settle(id.to_string()), cx);
+            self.offer_undo(format!("Settled “{title}”"), Undo::Settle { id: id.to_string(), pinned, was_selected }, cx);
+        } else {
+            self.register_undo(Undo::Unsettle(id.to_string()), cx);
         }
     }
 

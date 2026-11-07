@@ -120,6 +120,8 @@ pub struct ThreadMeta {
     pub title: String,
     /// Milliseconds since 1970: the later of last activity and when it was brought back.
     pub updated_at: f64,
+    /// When it was made (ms): the sidebar's order, so rows don't move as threads work.
+    pub created_at: f64,
     pub session_id: Option<String>,
     pub pinned: bool,
     /// When it was put on its project's Settled shelf (ms).
@@ -149,6 +151,7 @@ impl ThreadMeta {
             project_id,
             title,
             updated_at: now_ms(),
+            created_at: now_ms(),
             session_id: None,
             pinned: false,
             settled_at: None,
@@ -175,6 +178,7 @@ impl ThreadMeta {
             project_id,
             title: s("title").unwrap_or_else(|| "Thread".into()),
             updated_at: updated.max(ms("reactivatedAt").unwrap_or(0.0)),
+            created_at: ms("createdAt").unwrap_or(updated),
             session_id: session_id.or_else(|| s("sessionID")),
             pinned: o.get("isPinned").and_then(Value::as_bool).unwrap_or(false),
             settled_at: ms("settledAt"),
@@ -395,9 +399,19 @@ impl Library {
         }
     }
 
-    /// Takes a project out of the list (its threads are removed by the caller).
+    /// Takes a project out of the list (its threads are removed by the caller). Its ID is kept
+    /// by folder (`removedProjectIDs`, as the Swift app keeps it): adding the folder again gets
+    /// it back, and with it its memory.
     pub fn remove_project(&self, id: &str) {
-        self.records.lock().unwrap().projects.retain(|p| p.get("id").and_then(Value::as_str) != Some(id));
+        let mut records = self.records.lock().unwrap();
+        let path = records.projects.iter().find(|p| p.get("id").and_then(Value::as_str) == Some(id)).and_then(|p| p.get("path").and_then(Value::as_str).map(str::to_string));
+        records.projects.retain(|p| p.get("id").and_then(Value::as_str) != Some(id));
+        if let Some(path) = path {
+            let mut removed = records.values.get("removedProjectIDs").and_then(|v| serde_json::from_slice::<Map<String, Value>>(v).ok()).unwrap_or_default();
+            removed.insert(path, id.into());
+            records.values.insert("removedProjectIDs".into(), serde_json::to_vec(&removed).unwrap_or_default());
+        }
+        drop(records);
         self.save();
     }
 
@@ -417,7 +431,16 @@ impl Library {
             let id = p.get("id").and_then(Value::as_str).unwrap_or("").to_string();
             return ProjectMeta::from_record(id, p);
         }
-        let id = new_uuid();
+        // A folder you had before gets its old ID back, unless something else has it now.
+        let mut removed = records.values.get("removedProjectIDs").and_then(|v| serde_json::from_slice::<Map<String, Value>>(v).ok()).unwrap_or_default();
+        let old = removed.remove(path).and_then(|v| v.as_str().map(str::to_string));
+        let id = match old {
+            Some(old) if !records.projects.iter().any(|p| p.get("id").and_then(Value::as_str) == Some(old.as_str())) => {
+                records.values.insert("removedProjectIDs".into(), serde_json::to_vec(&removed).unwrap_or_default());
+                old
+            }
+            _ => new_uuid(),
+        };
         let mut object = Map::new();
         object.insert("id".into(), id.clone().into());
         object.insert("name".into(), last_component(path).into());
@@ -703,5 +726,31 @@ mod tests {
         assert_eq!(u.len(), 36);
         assert_eq!(&u[14..15], "4");
         assert_eq!(u, u.to_uppercase());
+    }
+
+    fn bare() -> Library {
+        Library { db: None, records: Mutex::new(Records::default()), claude_config: None, projects: vec![], threads: vec![], session_files: HashMap::new(), archives: Mutex::new(vec![]) }
+    }
+
+    #[test]
+    fn a_removed_project_gets_its_id_back() {
+        let lib = bare();
+        let first = lib.add_project("/tmp/yh-a");
+        lib.remove_project(&first.id);
+        let again = lib.add_project("/tmp/yh-a");
+        assert_eq!(again.id, first.id);
+        // Only once: removing and adding a different folder makes a new one.
+        let other = lib.add_project("/tmp/yh-b");
+        assert_ne!(other.id, first.id);
+    }
+
+    #[test]
+    fn threads_keep_when_they_were_made() {
+        let mut o = Map::new();
+        o.insert("createdAt".into(), "2026-10-28T01:00:00Z".into());
+        o.insert("updatedAt".into(), "2026-10-29T01:00:00Z".into());
+        let m = ThreadMeta::from_record("a".into(), "p".into(), None, None, &o);
+        assert_eq!(m.created_at, 1_793_149_200_000.0);
+        assert!(m.updated_at > m.created_at);
     }
 }

@@ -24,7 +24,8 @@ actions!(
     [
         Stop, Allow, Deny, Quit, NewThread, Find, FindNext, FindPrevious, OpenSettings, OpenSpotlight, ToggleInspector, OpenMemory, ToggleUsage,
         PreviousThread, NextThread, PreviousMessage, NextMessage, TopOfThread, EndOfThread, AddProject, ResumeSession, ExportState, ImportState,
-        CheckForUpdates, UndoThreadAction, ToggleSidebar
+        CheckForUpdates, UndoThreadAction, ToggleSidebar, About, HideApp, HideOthers, ShowAll, CloseWindow, ToggleFullScreen, Minimize, Zoom,
+        BringAllToFront, OpenHelp, CaptureTranscriptState, ShowDataFolder
     ]
 );
 
@@ -42,6 +43,9 @@ const MAIN_MIN: f32 = 360.;
 /// room, or when Show Sidebar closes the right sidebar to make some).
 const MAIN_FOLD: f32 = 300.;
 const INSPECTOR_MIN: f32 = 320.;
+/// The right sidebar's width as dragged (`inspectorWidth`), as the Swift app lets it be.
+const INSPECTOR_DRAG_MIN: f32 = 300.;
+const INSPECTOR_DRAG_MAX: f32 = 960.;
 
 /// The two sidebars' widths in a window this wide: (left, right), 0 when not shown.
 fn column_widths(window: f32, left: f32, right: f32) -> (f32, f32) {
@@ -65,6 +69,15 @@ pub struct RootView {
     /// Folded away for want of room at the last render (`column_widths`), though not hidden.
     sidebar_folded: bool,
     resizing_sidebar: bool,
+    /// The right sidebar's width, and whether its edge is being dragged.
+    inspector_width: f32,
+    resizing_inspector: bool,
+    /// The window's frame before it was widened for the right sidebar, and the frame it got:
+    /// closing the sidebar gives the width back unless the window was resized since.
+    widened: Option<([f64; 4], [f64; 4])>,
+    inspector_was_open: bool,
+    /// When a key was last typed: ⌘Z in a text field undoes a thread action done after it.
+    last_typed: std::rc::Rc<std::cell::Cell<Option<std::time::Instant>>>,
     save_frame: Option<gpui_kit::Task<()>>,
     pub workspace: Entity<Workspace>,
     pub sidebar: Entity<Sidebar>,
@@ -134,8 +147,9 @@ impl RootView {
                 WorkspaceEvent::AppendToComposer(text) => this.composer.update(cx, |c, cx| c.append_draft(text, window, cx)),
                 WorkspaceEvent::AttachImages(images) => this.composer.update(cx, |c, cx| c.add_images(images.clone(), cx)),
             }),
-            cx.observe(&workspace, |this, _, cx| {
+            cx.observe_in(&workspace, window, |this, _, window, cx| {
                 this.refresh_tasks(cx);
+                this.make_room_for_inspector(window, cx);
                 cx.notify();
             }),
             cx.subscribe_in(&spotlight, window, |this, _, event: &crate::ui::spotlight::SpotlightEvent, window, cx| this.spotlight_action(event.0.clone(), window, cx)),
@@ -159,8 +173,22 @@ impl RootView {
                 lib.setting("sidebarWidth").and_then(|v| v.as_f64()).map_or(SIDEBAR_DEFAULT, |w| (w as f32).clamp(SIDEBAR_MIN, SIDEBAR_MAX)),
             )
         };
+        let inspector_width = workspace.read(cx).library.setting("inspectorWidth").and_then(|v| v.as_f64()).map_or(crate::ui::inspector::WIDTH, |w| (w as f32).clamp(INSPECTOR_DRAG_MIN, INSPECTOR_DRAG_MAX));
+        let last_typed: std::rc::Rc<std::cell::Cell<Option<std::time::Instant>>> = Default::default();
+        {
+            // Keys typed (not shortcuts): what ⌘Z in the composer weighs a thread action against.
+            let last_typed = last_typed.clone();
+            cx.observe_keystrokes(move |_, e, _, _| {
+                let m = &e.keystroke.modifiers;
+                if !m.platform && !m.control {
+                    last_typed.set(Some(std::time::Instant::now()));
+                }
+            })
+            .detach();
+        }
         let working = cx.new(|cx| crate::ui::working::WorkingTimer::new(workspace.clone(), cx));
-        RootView { sidebar_hidden, sidebar_width, sidebar_folded: false, resizing_sidebar: false, save_frame: None, workspace, sidebar, composer, find, spotlight, resume, inspector, mcp, jobs, deck: vec![], memory: None, project: None, usage: None, tasks: vec![], tasks_for: None, focus: cx.focus_handle(), working, _subscriptions: subscriptions }
+        let inspector_was_open = workspace.read(cx).shows_inspector;
+        RootView { sidebar_hidden, sidebar_width, sidebar_folded: false, resizing_sidebar: false, inspector_width, resizing_inspector: false, widened: None, inspector_was_open, last_typed, save_frame: None, workspace, sidebar, composer, find, spotlight, resume, inspector, mcp, jobs, deck: vec![], memory: None, project: None, usage: None, tasks: vec![], tasks_for: None, focus: cx.focus_handle(), working, _subscriptions: subscriptions }
     }
 
     fn show(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -276,6 +304,101 @@ impl RootView {
             self.workspace.read(cx).library.set_setting("sidebarWidth", &serde_json::Value::from(self.sidebar_width as f64));
             cx.notify();
         }
+    }
+
+    fn end_inspector_resize(&mut self, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.resizing_inspector) {
+            self.workspace.read(cx).library.set_setting("inspectorWidth", &serde_json::Value::from(self.inspector_width as f64));
+            cx.notify();
+        }
+    }
+
+    /// The right sidebar opening on a window too narrow for it widens the window (as AppKit
+    /// does for the Swift app's inspector), within its screen; closing it gives the width back
+    /// unless the window was resized meanwhile.
+    fn make_room_for_inspector(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let ws = self.workspace.read(cx);
+        let open = ws.shows_inspector && ws.page.is_none() && ws.selected.is_some();
+        if open == self.inspector_was_open {
+            return;
+        }
+        self.inspector_was_open = open;
+        if window.is_fullscreen() || std::env::var("YH_PERF").is_ok() {
+            return;
+        }
+        if open {
+            let width = f32::from(window.viewport_size().width);
+            let left = if self.sidebar_hidden { 0. } else { self.sidebar_width };
+            let need = left + self.inspector_width + MAIN_MIN - width;
+            if need > 0. && self.widened.is_none() {
+                self.widened = crate::platform::widen(window, need as f64);
+                if self.widened.is_some() && std::env::var("YH_DATA_DIR").is_ok() {
+                    eprintln!("WINDOW widened by {need:.0} for the right sidebar");
+                }
+            }
+        } else if let Some((before, after)) = self.widened.take() {
+            let now = crate::platform::frame_of(window);
+            if now.is_some_and(|n| n.iter().zip(after.iter()).all(|(a, b)| (a - b).abs() < 1.)) {
+                crate::platform::set_frame(window, before);
+                if std::env::var("YH_DATA_DIR").is_ok() {
+                    eprintln!("WINDOW width given back");
+                }
+            }
+        }
+    }
+
+    /// Where ⌘N and ⇧⌘M go: the open page's project, else the open thread's, else Home.
+    pub fn current_project(&self, cx: &App) -> Option<String> {
+        let ws = self.workspace.read(cx);
+        match &ws.page {
+            Some(crate::state::workspace::Page::Project(p)) | Some(crate::state::workspace::Page::Memory(p)) => return Some(p.clone()),
+            _ => {}
+        }
+        ws.selected_thread().map(|t| t.read(cx).meta.project_id.clone()).or_else(|| ws.home_project()).or_else(|| ws.projects.first().map(|p| p.id.clone()))
+    }
+
+    /// Debug → Capture Transcript State: where the open transcript is, into `diagnostics/`.
+    fn capture_transcript_state(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let ws = self.workspace.read(cx);
+        let Some(t) = ws.selected_thread() else { return };
+        let t = t.read(cx);
+        let top = t.list.logical_scroll_top();
+        let b = window.bounds();
+        let state = serde_json::json!({
+            "thread": t.id(), "title": t.title, "rows": t.items.len(), "before": t.before, "total": t.total,
+            "scrollTop": {"item": top.item_ix, "offset": f32::from(top.offset_in_item)},
+            "window": [f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height)],
+            "fullScreen": window.is_fullscreen(), "active": window.is_window_active(),
+            "rightSidebar": ws.shows_inspector, "sidebarHidden": self.sidebar_hidden,
+        });
+        let dir = ws.data_dir.join("diagnostics");
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join(format!("transcript-{}.json", yh_core::library::iso_now().replace(':', "-")));
+        match std::fs::write(&file, serde_json::to_vec_pretty(&state).unwrap_or_default()) {
+            Ok(()) => {
+                eprintln!("CAPTURED {}", file.display());
+                if std::env::var("YH_DATA_DIR").is_err() {
+                    cx.reveal_path(&file);
+                }
+            }
+            Err(e) => eprintln!("capture failed: {e}"),
+        }
+    }
+
+    /// ⌘Z or Edit → Undo with a text field focused: the last thread action, when it came after
+    /// the last key typed; otherwise the field's own undo.
+    fn undo_in_field(&mut self, cx: &mut Context<Self>) -> bool {
+        let ws = self.workspace.read(cx);
+        let after_typing = match (ws.undo_at, self.last_typed.get()) {
+            (Some(done), Some(typed)) => done > typed,
+            (Some(_), None) => true,
+            _ => false,
+        };
+        if ws.can_undo() && after_typing {
+            self.workspace.update(cx, |ws, cx| ws.undo(cx));
+            return true;
+        }
+        false
     }
 
     fn on_toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -554,13 +677,7 @@ impl RootView {
     }
 
     fn on_new_thread(&mut self, _: &NewThread, _: &mut Window, cx: &mut Context<Self>) {
-        let ws = self.workspace.clone();
-        let project = ws
-            .read(cx)
-            .selected_thread()
-            .map(|t| t.read(cx).meta.project_id.clone())
-            .or_else(|| ws.read(cx).projects.first().map(|p| p.id.clone()));
-        if let Some(project) = project {
+        if let Some(project) = self.current_project(cx) {
             self.sidebar.update(cx, |s, cx| s.new_thread(&project, cx));
         }
     }
@@ -611,7 +728,7 @@ impl Render for RootView {
         let (left_w, right_w) = column_widths(
             f32::from(window.viewport_size().width),
             if self.sidebar_hidden { 0. } else { self.sidebar_width },
-            if inspector_open { crate::ui::inspector::WIDTH } else { 0. },
+            if inspector_open { self.inspector_width } else { 0. },
         );
         self.sidebar_folded = !self.sidebar_hidden && left_w == 0.;
         let sidebar_shown = left_w > 0.;
@@ -651,7 +768,19 @@ impl Render for RootView {
                 this.workspace.read(cx).library.set_setting("sidebarHidden", &serde_json::Value::Bool(this.sidebar_hidden));
                 cx.notify();
             }))
-            .on_mouse_move(cx.listener(|this, e: &gpui_kit::MouseMoveEvent, _, cx| {
+            .on_mouse_move(cx.listener(|this, e: &gpui_kit::MouseMoveEvent, window, cx| {
+                if this.resizing_inspector {
+                    if e.dragging() {
+                        let w = f32::from(window.viewport_size().width) - f32::from(e.position.x);
+                        let w = w.clamp(INSPECTOR_DRAG_MIN, INSPECTOR_DRAG_MAX).round();
+                        if w != this.inspector_width {
+                            this.inspector_width = w;
+                            cx.notify();
+                        }
+                    } else {
+                        this.end_inspector_resize(cx);
+                    }
+                }
                 if this.resizing_sidebar {
                     if e.dragging() {
                         this.sidebar_width = f32::from(e.position.x).clamp(SIDEBAR_MIN, SIDEBAR_MAX);
@@ -661,7 +790,10 @@ impl Render for RootView {
                     }
                 }
             }))
-            .on_mouse_up(gpui_kit::MouseButton::Left, cx.listener(|this, _, _, cx| this.end_sidebar_resize(cx)))
+            .on_mouse_up(gpui_kit::MouseButton::Left, cx.listener(|this, _, _, cx| {
+                this.end_sidebar_resize(cx);
+                this.end_inspector_resize(cx);
+            }))
             .on_action(cx.listener(|this, _: &UndoThreadAction, _, cx| this.workspace.update(cx, |ws, cx| ws.undo(cx))))
             .on_action(cx.listener(|this, _: &PreviousThread, _, cx| this.adjacent_thread(-1, cx)))
             .on_action(cx.listener(|this, _: &NextThread, _, cx| this.adjacent_thread(1, cx)))
@@ -681,14 +813,19 @@ impl Render for RootView {
             }))
             .on_action(cx.listener(|this, _: &ToggleUsage, _, cx| this.workspace.update(cx, |ws, cx| ws.toggle_usage(cx))))
             .on_action(cx.listener(|this, _: &OpenMemory, _, cx| {
-                let ws = this.workspace.clone();
-                let project = ws
-                    .read(cx)
-                    .selected_thread()
-                    .map(|t| t.read(cx).meta.project_id.clone())
-                    .or_else(|| ws.read(cx).projects.first().map(|p| p.id.clone()));
-                if let Some(project) = project {
-                    ws.update(cx, |ws, cx| ws.open_memory(&project, cx));
+                if let Some(project) = this.current_project(cx) {
+                    this.workspace.update(cx, |ws, cx| ws.open_memory(&project, cx));
+                }
+            }))
+            .on_action(cx.listener(|this, _: &CaptureTranscriptState, window, cx| this.capture_transcript_state(window, cx)))
+            .on_action(cx.listener(|this, _: &ShowDataFolder, _, cx| {
+                let dir = this.workspace.read(cx).data_dir.clone();
+                cx.reveal_path(&dir);
+            }))
+            // Edit → Undo and ⌘Z in a text field: the thread action first when it's newer.
+            .capture_action(cx.listener(|this, _: &gpui_kit::component::input::Undo, _, cx| {
+                if this.undo_in_field(cx) {
+                    cx.stop_propagation();
                 }
             }))
             .on_action(cx.listener(|this, _: &FindNext, _, cx| this.find.update(cx, |f, cx| f.step(true, cx))))
@@ -741,10 +878,11 @@ impl Render for RootView {
                                 .items_center()
                                 .gap(px(space::M))
                                 .px(px(space::XL - 4.))
-                                .when(!sidebar_shown, |d| d.pl(px(84.)).child(
-                                    crate::ui::thread_toolbar::icon_button("show-sidebar", gpui_kit::component::Icon::new(gpui_kit::component::IconName::PanelLeft), "Show Sidebar (⌃⌘S)", &theme)
+                                .when(!sidebar_shown, |d| d.pl(px(84.)))
+                                .child(
+                                    crate::ui::thread_toolbar::icon_button("show-sidebar", gpui_kit::component::Icon::new(gpui_kit::component::IconName::PanelLeft), if sidebar_shown { "Hide Sidebar (⌃⌘S)" } else { "Show Sidebar (⌃⌘S)" }, &theme)
                                         .on_click(cx.listener(|this, _, window, cx| this.on_toggle_sidebar(window, cx))),
-                                ))
+                                )
                                 .border_b_1()
                                 .border_color(theme.separator)
                                 .child(
@@ -830,7 +968,25 @@ impl Render for RootView {
             )
             .when(inspector_open, |d| {
                 // Cached: it redraws when its tab's data changes, not with the transcript.
-                d.child(AnyView::from(self.inspector.clone()).cached(StyleRefinement::default().h_full().w(px(right_w)).flex_none()))
+                d.child(AnyView::from(self.inspector.clone()).cached(StyleRefinement::default().h_full().w(px(right_w)).flex_none())).child(
+                    // Its edge: drag to resize (300–960 pt, saved), double-click for the default.
+                    div()
+                        .id("inspector-resize")
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .right(px(right_w - 3.))
+                        .w(px(6.))
+                        .cursor_col_resize()
+                        .on_mouse_down(gpui_kit::MouseButton::Left, cx.listener(|this, e: &gpui_kit::MouseDownEvent, _, cx| {
+                            this.resizing_inspector = true;
+                            if e.click_count == 2 {
+                                this.inspector_width = crate::ui::inspector::WIDTH;
+                                this.end_inspector_resize(cx);
+                            }
+                            cx.stop_propagation();
+                        })),
+                )
             })
             .when_some(self.workspace.read(cx).undo_notice().map(str::to_string), |d, message| {
                 // What the last thread action did, with a way back.

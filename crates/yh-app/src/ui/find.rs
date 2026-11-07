@@ -64,6 +64,11 @@ impl FindBar {
     }
 
     /// `back`: to the older match.
+    /// Find Next and Previous have somewhere to go (the menu's items are on).
+    pub fn has_hits(&self) -> bool {
+        self.open && !self.hits.is_empty()
+    }
+
     pub fn step(&mut self, back: bool, cx: &mut Context<Self>) {
         let Some(thread) = self.workspace.read(cx).selected_thread() else { return };
         let next = match (self.current, back) {

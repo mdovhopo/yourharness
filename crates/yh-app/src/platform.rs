@@ -652,3 +652,267 @@ pub fn quick_look_visible(close: bool) -> bool {
         visible == YES && item != nil
     }
 }
+
+// MARK: The app's life
+
+/// While Claude works, macOS doesn't put the app to sleep behind your other windows (App Nap):
+/// its permission requests and notifications would come late. The Mac itself may still sleep
+/// (Keep Awake is separate). The Swift app's `workingChanged`.
+pub fn set_working_activity(working: bool) {
+    thread_local! {
+        static TOKEN: std::cell::Cell<id> = const { std::cell::Cell::new(nil) };
+    }
+    TOKEN.with(|token| unsafe {
+        let info: id = msg_send![class!(NSProcessInfo), processInfo];
+        if working && token.get() == nil {
+            // NSActivityUserInitiatedAllowingIdleSystemSleep
+            let options: u64 = 0x00FF_FFFF & !(1u64 << 20);
+            let reason = NSString::alloc(nil).init_str("Claude is working");
+            let t: id = msg_send![info, beginActivityWithOptions: options reason: reason];
+            let _: id = msg_send![t, retain];
+            token.set(t);
+            if std::env::var("YH_DATA_DIR").is_ok() {
+                eprintln!("APP NAP held off: Claude is working");
+            }
+        } else if !working && token.get() != nil {
+            let t = token.replace(nil);
+            let _: () = msg_send![info, endActivity: t];
+            let _: () = msg_send![t, release];
+            if std::env::var("YH_DATA_DIR").is_ok() {
+                eprintln!("APP NAP allowed again");
+            }
+        }
+    });
+}
+
+static QUIT_ALLOWED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static TERMINATE_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+thread_local! {
+    /// Asks whether to quit (the jobs question): the app's `ui::jobs` guard.
+    static ASK_TO_QUIT: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Quitting was decided (asked, or nothing to ask): the next `terminate:` goes through.
+pub fn allow_quit() {
+    QUIT_ALLOWED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// A quit from outside the app (Dock → Quit, logging out, restarting the Mac) is waiting for
+/// the answer: true goes on with it, false stops it. False when none was waiting.
+pub fn answer_terminate(quit: bool) -> bool {
+    if !TERMINATE_PENDING.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        return false;
+    }
+    if quit {
+        allow_quit();
+    }
+    unsafe {
+        let app: id = msg_send![class!(NSApplication), sharedApplication];
+        let _: () = msg_send![app, replyToApplicationShouldTerminate: if quit { YES } else { NO }];
+    }
+    true
+}
+
+/// Every way of quitting asks first, as ⌘Q does: GPUI's delegate is taught
+/// `applicationShouldTerminate:`, which lets a quit the app decided go (`allow_quit`) and holds
+/// any other (`NSTerminateLater`) until `ask` has called `answer_terminate`.
+pub fn guard_terminate(ask: impl Fn() + 'static) {
+    use objc::runtime::{Class, Object, Sel};
+    ASK_TO_QUIT.with(|a| *a.borrow_mut() = Some(Box::new(ask)));
+    extern "C" fn should_terminate(_: &Object, _: Sel, _: id) -> u64 {
+        if QUIT_ALLOWED.load(std::sync::atomic::Ordering::SeqCst) {
+            return 1; // NSTerminateNow
+        }
+        if !ASK_TO_QUIT.with(|a| a.borrow().is_some()) {
+            return 1;
+        }
+        TERMINATE_PENDING.store(true, std::sync::atomic::Ordering::SeqCst);
+        // Asked once this callback has returned: the app may be borrowed right now.
+        run_on_main(Box::new(|| {
+            ASK_TO_QUIT.with(|a| {
+                if let Some(ask) = a.borrow().as_ref() {
+                    ask();
+                }
+            })
+        }));
+        2 // NSTerminateLater
+    }
+    static TAUGHT: std::sync::Once = std::sync::Once::new();
+    unsafe {
+        let app: id = msg_send![class!(NSApplication), sharedApplication];
+        let delegate: id = msg_send![app, delegate];
+        if delegate == nil {
+            return;
+        }
+        TAUGHT.call_once(|| {
+            let cls = objc::runtime::object_getClass(delegate as *const Object) as *mut Class;
+            let imp = std::mem::transmute::<extern "C" fn(&Object, Sel, id) -> u64, objc::runtime::Imp>(should_terminate);
+            let types = b"Q@:@\0";
+            if !objc::runtime::class_addMethod(cls, sel!(applicationShouldTerminate:), imp, types.as_ptr() as *const std::ffi::c_char) {
+                let m = objc::runtime::class_getInstanceMethod(cls, sel!(applicationShouldTerminate:));
+                objc::runtime::method_setImplementation(m as *mut _, imp);
+            }
+        });
+    }
+}
+
+#[link(name = "System", kind = "dylib")]
+unsafe extern "C" {
+    static _dispatch_main_q: c_void;
+    fn dispatch_async_f(queue: *const c_void, context: *mut c_void, work: extern "C" fn(*mut c_void));
+}
+
+/// Runs on the main thread at the next turn of its run loop, outside whatever is going on now.
+fn run_on_main(job: Box<dyn FnOnce()>) {
+    extern "C" fn run(ctx: *mut c_void) {
+        let job = unsafe { Box::from_raw(ctx as *mut Box<dyn FnOnce()>) };
+        job();
+    }
+    let ctx = Box::into_raw(Box::new(job)) as *mut c_void;
+    unsafe { dispatch_async_f(&raw const _dispatch_main_q, ctx, run) };
+}
+
+/// Simulates Dock → Quit (or logging out): `terminate:` sent to the app as AppKit does, outside
+/// any update (`YH_TERMINATE_AFTER`, for testing that it asks too).
+pub fn terminate_from_outside() {
+    run_on_main(Box::new(|| unsafe {
+        let app: id = msg_send![class!(NSApplication), sharedApplication];
+        let _: () = msg_send![app, terminate: nil];
+    }));
+}
+
+/// About YourHarness: the standard panel, its version and build from the bundle.
+pub fn show_about_panel() {
+    unsafe {
+        let app: id = msg_send![class!(NSApplication), sharedApplication];
+        let _: () = msg_send![app, orderFrontStandardAboutPanel: nil];
+        if std::env::var("YH_BACKGROUND").is_err() {
+            let _: () = msg_send![app, activateIgnoringOtherApps: YES];
+        }
+    }
+}
+
+/// Window → Bring All to Front.
+pub fn bring_all_to_front() {
+    unsafe {
+        let app: id = msg_send![class!(NSApplication), sharedApplication];
+        let _: () = msg_send![app, arrangeInFront: nil];
+    }
+}
+
+/// The window's frame and its screen's visible frame, in AppKit's points (bottom left), and
+/// whether it's full screen.
+fn frames(w: id) -> (NSRect, NSRect, bool) {
+    unsafe {
+        let frame: NSRect = msg_send![w, frame];
+        let (_, visible) = main_screen_frame(w);
+        let mask: u64 = msg_send![w, styleMask];
+        (frame, visible, mask & (1 << 14) != 0)
+    }
+}
+
+/// Sets an NSWindow's frame on a later turn of the run loop: the resize it causes calls into
+/// GPUI, which must not be in the middle of an update then.
+fn set_frame_later(w: id, f: NSRect) {
+    let w = w as usize;
+    run_on_main(Box::new(move || unsafe {
+        let _: () = msg_send![w as id, setFrame: f display: YES];
+    }));
+}
+
+/// A window taller or wider than its screen comes back fitted to it (`fitOnScreen` in the
+/// Swift app: 0.0.2, 0.0.3 and 0.0.7 could grow one past the bottom, and saved it so).
+/// Returns whether it will change.
+pub fn fit_on_screen(window: &Window) -> bool {
+    let w = ns_window(window);
+    if w == nil {
+        return false;
+    }
+    let (frame, visible, full) = frames(w);
+    if full || (frame.size.height <= visible.size.height + 1. && frame.size.width <= visible.size.width + 1.) {
+        return false;
+    }
+    let size = NSSize::new(frame.size.width.min(visible.size.width), frame.size.height.min(visible.size.height));
+    let x = frame.origin.x.max(visible.origin.x).min(visible.origin.x + visible.size.width - size.width);
+    let y = frame.origin.y.max(visible.origin.y).min(visible.origin.y + visible.size.height - size.height);
+    set_frame_later(w, NSRect::new(NSPoint::new(x, y), size));
+    true
+}
+
+/// Widens the window by `by` points, as far as its screen allows, keeping it on screen (the
+/// right sidebar opening on a window too narrow for it). Returns the frame it had and the one
+/// it gets, to give the width back later (`set_frame`) if it's still that; None when it can't.
+pub fn widen(window: &Window, by: f64) -> Option<([f64; 4], [f64; 4])> {
+    let w = ns_window(window);
+    if w == nil || by <= 0. {
+        return None;
+    }
+    let (frame, visible, full) = frames(w);
+    if full {
+        return None;
+    }
+    let width = (frame.size.width + by).min(visible.size.width);
+    if width <= frame.size.width + 0.5 {
+        return None;
+    }
+    let x = frame.origin.x.min(visible.origin.x + visible.size.width - width).max(visible.origin.x);
+    set_frame_later(w, NSRect::new(NSPoint::new(x, frame.origin.y), NSSize::new(width, frame.size.height)));
+    Some(([frame.origin.x, frame.origin.y, frame.size.width, frame.size.height], [x, frame.origin.y, width, frame.size.height]))
+}
+
+/// The window's frame now, in AppKit's points.
+pub fn frame_of(window: &Window) -> Option<[f64; 4]> {
+    let w = ns_window(window);
+    if w == nil {
+        return None;
+    }
+    let (f, _, _) = frames(w);
+    Some([f.origin.x, f.origin.y, f.size.width, f.size.height])
+}
+
+/// Puts the window back to a frame `widen` returned (not in full screen).
+pub fn set_frame(window: &Window, f: [f64; 4]) {
+    let w = ns_window(window);
+    if w == nil || frames(w).2 {
+        return;
+    }
+    set_frame_later(w, NSRect::new(NSPoint::new(f[0], f[1]), NSSize::new(f[2], f[3])));
+}
+
+/// The text over the next open panel (GPUI's `prompt_for_paths` has no message): put on the
+/// panel once it's up, which GPUI does on a later turn of the run loop.
+pub fn set_open_panel_message(message: &str) {
+    fn attempt(message: String, left: u32) {
+        run_on_main(Box::new(move || {
+            let done = unsafe {
+                let app: id = msg_send![class!(NSApplication), sharedApplication];
+                let windows: id = msg_send![app, windows];
+                let count: usize = msg_send![windows, count];
+                let mut done = false;
+                for i in 0..count {
+                    let w: id = msg_send![windows, objectAtIndex: i];
+                    let is_panel: bool = msg_send![w, isKindOfClass: class!(NSOpenPanel)];
+                    if is_panel {
+                        let text = NSString::alloc(nil).init_str(&message);
+                        let _: () = msg_send![w, setMessage: text];
+                        done = true;
+                    }
+                }
+                done
+            };
+            if !done && left > 0 {
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(30));
+                    attempt(message, left - 1);
+                });
+            }
+        }));
+    }
+    attempt(message.to_string(), 40);
+}
+
+/// System Settings → Notifications, for when they're turned off for the app.
+pub fn open_notification_settings() {
+    let _ = std::process::Command::new("open").arg("x-apple.systempreferences:com.apple.Notifications-Settings.extension").spawn();
+}

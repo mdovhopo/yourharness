@@ -278,45 +278,82 @@ impl Render for JobsStrip {
 }
 
 /// What Quit does: asks first while background jobs run, as the Swift app did (they stop
-/// with the app). Set up once the window is there; until then Quit just quits.
+/// with the app). Set up once the window is there; until then Quit just quits. Every way of
+/// quitting comes here: ⌘Q, closing the window, Dock → Quit and logging out (through
+/// `platform::guard_terminate`), and the updater's Restart (`ask_then`).
 #[derive(Clone)]
-pub struct QuitGuard(Rc<dyn Fn(&mut App)>);
+pub struct QuitGuard(Rc<dyn Fn(Box<dyn FnOnce(&mut App)>, &mut App)>);
 
 impl Global for QuitGuard {}
 
+/// Quits for good: what was decided goes through `applicationShouldTerminate:`.
+pub fn quit_now(cx: &mut App) {
+    if !crate::platform::answer_terminate(true) {
+        crate::platform::allow_quit();
+        cx.quit();
+    }
+}
+
 pub fn quit(cx: &mut App) {
+    ask_then(Box::new(quit_now), cx);
+}
+
+/// Asks the quit question when there's one, then does `then` if you said Quit (or there was
+/// nothing to ask). Cancel also stops a quit from outside that was waiting.
+pub fn ask_then(then: Box<dyn FnOnce(&mut App)>, cx: &mut App) {
     match cx.try_global::<QuitGuard>().cloned() {
-        Some(guard) => (guard.0)(cx),
-        None => cx.quit(),
+        Some(guard) => (guard.0)(then, cx),
+        None => then(cx),
     }
 }
 
 /// `YH_QUIT_ANSWER=quit|cancel` answers the question without showing it, printing it
-/// (`QUIT asked: …`); `YH_QUIT_AFTER=<seconds>` chooses Quit that long after launch.
+/// (`QUIT asked: …`); `YH_QUIT_AFTER=<seconds>` chooses Quit that long after launch, and
+/// `YH_TERMINATE_AFTER=<seconds>` quits as Dock → Quit does.
 pub fn guard_quit(workspace: Entity<Workspace>, window: AnyWindowHandle, cx: &mut App) {
-    cx.set_global(QuitGuard(Rc::new(move |cx| {
-        let Some((title, detail)) = workspace.read(cx).quit_question(cx) else { return cx.quit() };
+    cx.set_global(QuitGuard(Rc::new(move |then: Box<dyn FnOnce(&mut App)>, cx: &mut App| {
+        let Some((title, detail)) = workspace.read(cx).quit_question(cx) else { return then(cx) };
         if let Ok(answer) = std::env::var("YH_QUIT_ANSWER") {
             eprintln!("QUIT asked: {title} / {detail} -> {answer}");
             if answer == "quit" {
-                cx.quit();
+                then(cx);
+            } else {
+                crate::platform::answer_terminate(false);
             }
             return;
         }
         let Ok(answer) = window.update(cx, |_, window, cx| window.prompt(PromptLevel::Warning, &title, Some(&detail), &["Quit", "Cancel"], cx)) else {
-            return cx.quit();
+            return then(cx);
         };
         cx.spawn(async move |cx| {
-            if answer.await == Ok(0) {
-                let _ = cx.update(|cx| cx.quit());
-            }
+            let quit = answer.await == Ok(0);
+            let _ = cx.update(|cx| {
+                if quit {
+                    then(cx);
+                } else {
+                    crate::platform::answer_terminate(false);
+                }
+            });
         })
         .detach();
     })));
+    // Dock → Quit, logging out, restarting the Mac: the same question.
+    let async_cx = cx.to_async();
+    crate::platform::guard_terminate(move || {
+        let _ = async_cx.update(|cx| ask_then(Box::new(quit_now), cx));
+    });
     if let Some(seconds) = std::env::var("YH_QUIT_AFTER").ok().and_then(|s| s.parse::<f64>().ok()) {
         cx.spawn(async move |cx| {
             cx.background_executor().timer(Duration::from_secs_f64(seconds)).await;
             let _ = cx.update(quit);
+        })
+        .detach();
+    }
+    if let Some(seconds) = std::env::var("YH_TERMINATE_AFTER").ok().and_then(|s| s.parse::<f64>().ok()) {
+        cx.spawn(async move |cx| {
+            cx.background_executor().timer(Duration::from_secs_f64(seconds)).await;
+            eprintln!("QUIT from outside");
+            crate::platform::terminate_from_outside();
         })
         .detach();
     }

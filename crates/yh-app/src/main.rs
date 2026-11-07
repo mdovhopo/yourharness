@@ -12,13 +12,18 @@ mod keep_awake;
 mod browser;
 
 use gpui_kit::{
-    point, prelude::*, px, size, App, Bounds, Focusable, KeyBinding, Menu, MenuItem, TitlebarOptions,
+    point, prelude::*, px, size, App, Bounds, Focusable, KeyBinding, TitlebarOptions,
     WindowBounds, WindowOptions,
 };
 use state::workspace::Workspace;
 use std::sync::Arc;
 use std::time::Duration;
 use ui::root::*;
+
+/// The main window: closing it quits.
+struct MainWindow(gpui_kit::WindowId);
+
+impl gpui_kit::Global for MainWindow {}
 
 fn env(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
@@ -50,7 +55,15 @@ fn main() {
     let library = Arc::new(yh_core::library::Library::open());
     theme::set_chosen_appearance(library.setting("appearance").and_then(|v| v.as_str().map(str::to_string)));
 
-    gpui_kit::application().with_assets(gpui_kit::assets::Assets).run(move |cx: &mut App| {
+    let application = gpui_kit::application().with_assets(gpui_kit::assets::Assets);
+    // The Dock icon clicked with the app open: its window comes forward (out of the Dock too).
+    application.on_reopen(|cx| {
+        cx.activate(true);
+        if let Some(w) = cx.windows().into_iter().next() {
+            let _ = w.update(cx, |_, window, _| window.activate_window());
+        }
+    });
+    application.run(move |cx: &mut App| {
         gpui_kit::init(cx);
         cx.bind_keys([
             KeyBinding::new("cmd-.", Stop, None),
@@ -77,68 +90,48 @@ fn main() {
             KeyBinding::new("cmd-o", ui::root::AddProject, None),
             KeyBinding::new("shift-cmd-o", ui::root::ResumeSession, None),
         ]);
-        // Asks first while background jobs run (`ui::jobs::guard_quit`).
-        cx.on_action(|_: &Quit, cx| ui::jobs::quit(cx));
-
-        cx.set_menus(vec![
-            Menu {
-                name: "YourHarness".into(),
-                items: vec![MenuItem::action("Check for Updates…", CheckForUpdates), MenuItem::separator(), MenuItem::action("Settings…", OpenSettings), MenuItem::separator(), MenuItem::action("Quit YourHarness", Quit)],
-                disabled: false,
-            },
-            Menu {
-                name: "File".into(),
-                items: vec![
-                    MenuItem::action("New Thread", NewThread),
-                    MenuItem::action("Add Project…", AddProject),
-                    MenuItem::action("Resume Claude Code Session…", ResumeSession),
-                    MenuItem::separator(),
-                    MenuItem::action("Export State…", ExportState),
-                    MenuItem::action("Import State…", ImportState),
-                ],
-                disabled: false,
-            },
-            Menu {
-                name: "Edit".into(),
-                items: vec![
-                    MenuItem::os_action("Undo", gpui_kit::component::input::Undo, gpui_kit::OsAction::Undo),
-                    MenuItem::os_action("Redo", gpui_kit::component::input::Redo, gpui_kit::OsAction::Redo),
-                    MenuItem::separator(),
-                    MenuItem::os_action("Cut", gpui_kit::component::input::Cut, gpui_kit::OsAction::Cut),
-                    MenuItem::os_action("Copy", gpui_kit::component::input::Copy, gpui_kit::OsAction::Copy),
-                    MenuItem::os_action("Paste", gpui_kit::component::input::Paste, gpui_kit::OsAction::Paste),
-                    MenuItem::os_action("Select All", gpui_kit::component::input::SelectAll, gpui_kit::OsAction::SelectAll),
-                    MenuItem::separator(),
-                    MenuItem::action("Search Everything", OpenSpotlight),
-                    MenuItem::action("Find in Thread", Find),
-                    MenuItem::action("Find Next", FindNext),
-                    MenuItem::action("Find Previous", FindPrevious),
-                ],
-                disabled: false,
-            },
-            Menu {
-                name: "View".into(),
-                items: vec![MenuItem::action("Memory", OpenMemory), MenuItem::action("Usage", ToggleUsage), MenuItem::separator(), MenuItem::action("Sidebar", ui::root::ToggleSidebar), MenuItem::action("Right Sidebar", ToggleInspector)],
-                disabled: false,
-            },
-            Menu {
-                name: "Thread".into(),
-                items: vec![
-                    MenuItem::action("Previous Thread", PreviousThread),
-                    MenuItem::action("Next Thread", NextThread),
-                    MenuItem::separator(),
-                    MenuItem::action("Previous Message", PreviousMessage),
-                    MenuItem::action("Next Message", NextMessage),
-                    MenuItem::action("Top of Thread", TopOfThread),
-                    MenuItem::action("End of Thread", EndOfThread),
-                    MenuItem::separator(),
-                    MenuItem::action("Stop", Stop),
-                    MenuItem::action("Allow", Allow),
-                    MenuItem::action("Deny", Deny),
-                ],
-                disabled: false,
-            },
+        // The standard app and window keys (SwiftUI gave the Swift app these). ⌘Z outside a text
+        // field undoes the last thread action; in one, the root decides (`RootView`'s Undo).
+        cx.bind_keys([
+            KeyBinding::new("cmd-z", ui::root::UndoThreadAction, None),
+            KeyBinding::new("cmd-w", ui::root::CloseWindow, None),
+            KeyBinding::new("cmd-h", ui::root::HideApp, None),
+            KeyBinding::new("alt-cmd-h", ui::root::HideOthers, None),
+            KeyBinding::new("cmd-m", ui::root::Minimize, None),
+            KeyBinding::new("ctrl-cmd-f", ui::root::ToggleFullScreen, None),
         ]);
+        // Asks first while background jobs run (`ui::jobs::guard_quit`).
+        cx.on_action(|_: &Quit, cx| cx.defer(ui::jobs::quit));
+        cx.on_action(|_: &ui::root::About, _| platform::show_about_panel());
+        cx.on_action(|_: &ui::root::HideApp, cx| cx.hide());
+        cx.on_action(|_: &ui::root::HideOthers, cx| cx.hide_other_apps());
+        cx.on_action(|_: &ui::root::ShowAll, cx| cx.unhide_other_apps());
+        cx.on_action(|_: &ui::root::BringAllToFront, _| platform::bring_all_to_front());
+        cx.on_action(|_: &ui::root::OpenHelp, cx| cx.open_url(ui::menus::HELP_URL));
+        cx.on_action(|_: &ui::root::Minimize, cx| {
+            if let Some(w) = cx.active_window() {
+                let _ = w.update(cx, |_, window, _| window.minimize_window());
+            }
+        });
+        cx.on_action(|_: &ui::root::Zoom, cx| {
+            if let Some(w) = cx.active_window() {
+                let _ = w.update(cx, |_, window, _| window.zoom_window());
+            }
+        });
+        cx.on_action(|_: &ui::root::ToggleFullScreen, cx| {
+            if let Some(w) = cx.active_window() {
+                let _ = w.update(cx, |_, window, _| window.toggle_fullscreen());
+            }
+        });
+        // ⌘W: the main window's close quits (as its close button does); another window closes.
+        cx.on_action(|_: &ui::root::CloseWindow, cx| {
+            let Some(w) = cx.active_window() else { return };
+            if cx.try_global::<MainWindow>().is_some_and(|m| m.0 == w.window_id()) {
+                return cx.defer(ui::jobs::quit);
+            }
+            let _ = w.update(cx, |_, window, _| window.remove_window());
+        });
+        ui::menus::set(&ui::menus::MenuState::default(), cx);
 
         let background = env("YH_BACKGROUND").as_deref() == Some("1") || env("YH_PERF").is_some();
         // Where the window was last time, if that's still on a screen.
@@ -173,6 +166,21 @@ fn main() {
         })
         .expect("window");
         let workspace = root.read(cx).workspace.clone();
+        cx.set_global(MainWindow(window.window_id()));
+        // Closing the window quits, as in the Swift app (`applicationShouldTerminateAfterLastWindowClosed`),
+        // through the same question as ⌘Q while jobs run: the window stays until it's answered.
+        let _ = window.update(cx, |_, window, cx| {
+            window.on_window_should_close(cx, |_, cx| {
+                // Asked once this window's update is over (the question is a sheet on it).
+                cx.defer(ui::jobs::quit);
+                false
+            });
+            // A window saved bigger than its screen comes back fitted to it.
+            if !background && platform::fit_on_screen(window) {
+                eprintln!("WINDOW fitted on screen");
+            }
+        });
+        ui::menus::follow(workspace.clone(), root.read(cx).find.clone(), cx);
         // The agents' browser: pages laid over this window.
         {
             let (ws, inspector) = (workspace.clone(), root.read(cx).inspector.clone());

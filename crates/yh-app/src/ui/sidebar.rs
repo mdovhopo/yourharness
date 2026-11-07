@@ -243,10 +243,7 @@ impl Sidebar {
             }
             let threads = by_project.get(project.id.as_str()).cloned().unwrap_or_default();
             let (mut live, mut settled): (Vec<_>, Vec<_>) = threads.into_iter().partition(|t| t.read(cx).meta.settled_at.is_none());
-            live.sort_by(|a, b| {
-                let (a, b) = (&a.read(cx).meta, &b.read(cx).meta);
-                b.pinned.cmp(&a.pinned).then(b.updated_at.total_cmp(&a.updated_at))
-            });
+            live.sort_by(|a, b| crate::state::workspace::sidebar_order(&a.read(cx).meta, &b.read(cx).meta));
             settled.sort_by(|a, b| b.read(cx).meta.settled_at.unwrap_or(0.).total_cmp(&a.read(cx).meta.settled_at.unwrap_or(0.)));
             let all = self.expanded.contains(&project.id);
             let shown = if all { live.len() } else { live.len().min(SHOWN_PER_PROJECT) };
@@ -362,16 +359,22 @@ impl Sidebar {
             multiple: false,
             prompt: Some("Add Project".into()),
         });
-        let ws = self.workspace.downgrade();
-        cx.spawn(async move |_, cx| {
+        crate::platform::set_open_panel_message("Choose a project folder. Claude runs with this folder as its working directory.");
+        cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(paths))) = paths.await {
                 if let Some(path) = paths.first() {
                     let path = path.to_string_lossy().to_string();
-                    let _ = ws.update(cx, |ws, cx| ws.add_project(&path, cx));
+                    let _ = this.update(cx, |s, cx| s.add_project_at(&path, cx));
                 }
             }
         })
         .detach();
+    }
+
+    /// A folder added (or one already there): a new thread in it, as the Swift app does.
+    pub fn add_project_at(&mut self, path: &str, cx: &mut Context<Self>) {
+        let id = self.workspace.update(cx, |ws, cx| ws.add_project(path, cx));
+        self.new_thread(&id, cx);
     }
 
     /// Home's folder: where threads that aren't in a project start.
