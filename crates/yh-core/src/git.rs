@@ -59,7 +59,8 @@ impl Cli {
         let mut command = Command::new(&self.program);
         command.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
         command.current_dir(cwd.map(Path::to_path_buf).unwrap_or_else(std::env::temp_dir));
-        if let Some(p) = &self.path_env {
+        // The login shell's PATH once read: an app opened from the Dock has only launchd's.
+        if let Some(p) = self.path_env.clone().or_else(crate::shell_env::loaded_path) {
             command.env("PATH", p);
         }
         for (k, v) in &self.env {
@@ -119,7 +120,7 @@ pub fn which(program: &str, path_env: Option<&str>) -> Option<PathBuf> {
     if program.contains('/') {
         return Path::new(program).is_file().then(|| PathBuf::from(program));
     }
-    let path = path_env.map(str::to_string).or_else(|| std::env::var("PATH").ok())?;
+    let path = path_env.map(str::to_string).or_else(crate::shell_env::loaded_path).or_else(|| std::env::var("PATH").ok())?;
     path.split(':').filter(|d| !d.is_empty()).map(|d| Path::new(d).join(program)).find(|p| p.is_file())
 }
 

@@ -133,6 +133,7 @@ pub fn probe(executable: &Path, path_env: Option<&str>) -> Result<Value, String>
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    crate::shell_env::apply(&mut command);
     if let Some(path) = path_env {
         command.env("PATH", path);
     }

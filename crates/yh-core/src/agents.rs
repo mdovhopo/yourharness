@@ -51,9 +51,10 @@ impl Status {
     }
 }
 
-/// An executable on `YH_PATH` (as test runs pass it), else `PATH` and the usual places.
+/// An executable on `YH_PATH` (as test runs pass it), else the login shell's `PATH` once read,
+/// else ours, and the usual places.
 pub fn which(name: &str) -> Option<PathBuf> {
-    let path = std::env::var("YH_PATH").or_else(|_| std::env::var("PATH")).unwrap_or_default();
+    let path = std::env::var("YH_PATH").ok().or_else(crate::shell_env::loaded_path).or_else(|| std::env::var("PATH").ok()).unwrap_or_default();
     let home = std::env::var("HOME").unwrap_or_default();
     let extra = [format!("{home}/.local/bin"), format!("{home}/.claude/local"), "/opt/homebrew/bin".into(), "/usr/local/bin".into()];
     path.split(':').map(str::to_string).chain(extra).map(|d| Path::new(&d).join(name)).find(|p| p.is_file())

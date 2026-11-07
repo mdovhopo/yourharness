@@ -563,9 +563,7 @@ fn run_claude(folder: &str, args: &[&str], client_secret: Option<&str>) -> Resul
     let claude = yh_core::claude::find_claude().ok_or("Claude Code isn't installed.")?;
     let mut command = std::process::Command::new(claude);
     command.args(args).current_dir(folder);
-    if let Ok(p) = std::env::var("YH_PATH") {
-        command.env("PATH", p);
-    }
+    yh_core::shell_env::apply(&mut command);
     if let Some(secret) = client_secret {
         command.env("MCP_CLIENT_SECRET", secret);
     }

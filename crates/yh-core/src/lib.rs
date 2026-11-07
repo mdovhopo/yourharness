@@ -21,6 +21,7 @@ pub mod history;
 pub mod legacy_import;
 pub mod library;
 pub mod recovery;
+pub mod shell_env;
 pub mod titles;
 pub mod markdown;
 pub mod links;
