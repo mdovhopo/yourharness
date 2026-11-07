@@ -246,10 +246,38 @@ fn attachments_dir() -> &'static std::path::Path {
     DIR.get_or_init(|| yh_core::library::data_directory().join("attachments"))
 }
 
-/// A small Copy button: what it copies goes on the clipboard as plain text.
-fn copy_button(id: ElementId, text: String, label: &'static str, theme: &Theme) -> gpui_kit::Stateful<gpui_kit::Div> {
+/// The Copy button that says "Copied" now: its id's hash, and its row.
+type Copied = (u64, gpui_kit::WeakEntity<ThreadState>, i64);
+
+thread_local! {
+    /// The Copy button clicked last, while it says "Copied" (`COPIED_FOR`). Transient and per
+    /// row: only that row is spliced and drawn again, when it starts and when it ends.
+    static COPIED: std::cell::RefCell<Option<Copied>> = const { std::cell::RefCell::new(None) };
+}
+
+/// How long a Copy button says "Copied".
+const COPIED_FOR: std::time::Duration = std::time::Duration::from_millis(1500);
+
+pub fn copy_hash(name: &'static str, key: impl Hash) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (name, key).hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Whether this Copy button says "Copied" now (it stays shown then, hovered or not).
+pub fn just_copied(name: &'static str, key: impl Hash) -> bool {
+    let h = copy_hash(name, key);
+    COPIED.with(|c| c.borrow().as_ref().is_some_and(|(x, _, _)| *x == h))
+}
+
+/// A small Copy button in a row: what it copies goes on the clipboard as plain text, and it
+/// says "Copied" with a check for a moment. No animation; the row's height never changes.
+fn copy_button(name: &'static str, key: impl Hash, text: String, ctx: &RowContext, theme: &Theme) -> gpui_kit::Stateful<gpui_kit::Div> {
+    let h = copy_hash(name, key);
+    let copied = COPIED.with(|c| c.borrow().as_ref().is_some_and(|(x, _, _)| *x == h));
+    let (thread, pos) = (ctx.thread.clone(), ctx.pos);
     div()
-        .id(id)
+        .id(ElementId::NamedInteger(name.into(), h))
         .flex_none()
         .flex()
         .items_center()
@@ -259,12 +287,49 @@ fn copy_button(id: ElementId, text: String, label: &'static str, theme: &Theme) 
         .rounded(px(radius::SMALL))
         .font_family(crate::theme::UI)
         .text_size(px(ts::CAPTION))
-        .text_color(theme.secondary)
+        .text_color(if copied { theme.text } else { theme.secondary })
         .cursor_pointer()
         .hover(|s| s.bg(theme.hover).text_color(theme.text))
-        .child(icon(IconName::Copy, 12., theme.secondary))
-        .child(label)
-        .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(text.clone())))
+        .child(icon(if copied { IconName::Check } else { IconName::Copy }, 12., theme.secondary))
+        .child(if copied { "Copied" } else { "Copy" })
+        .on_click(move |_, _, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+            mark_copied(h, &thread, pos, cx);
+        })
+}
+
+/// Splices one row so it's drawn again (its height can't change: only a label does).
+fn redraw_row(thread: &gpui_kit::WeakEntity<ThreadState>, pos: i64, cx: &mut App) {
+    let _ = thread.update(cx, |t, cx| {
+        t.touch_pos(pos);
+        cx.notify();
+    });
+}
+
+/// Shows "Copied" on one button (`h`, a `copy_hash`) and takes it back `COPIED_FOR` later,
+/// unless another was clicked meanwhile. Only the rows involved are spliced, never the list.
+pub fn mark_copied(h: u64, thread: &Entity<ThreadState>, pos: i64, cx: &mut App) {
+    let weak = thread.downgrade();
+    // The one shown before goes back now.
+    if let Some((_, old, old_pos)) = COPIED.with(|c| c.replace(Some((h, weak.clone(), pos)))) {
+        redraw_row(&old, old_pos, cx);
+    }
+    redraw_row(&weak, pos, cx);
+    cx.spawn(async move |cx| {
+        cx.background_executor().timer(COPIED_FOR).await;
+        let still = COPIED.with(|c| {
+            let mut c = c.borrow_mut();
+            let still = c.as_ref().is_some_and(|(x, _, _)| *x == h);
+            if still {
+                *c = None;
+            }
+            still
+        });
+        if still {
+            let _ = cx.update(|cx| redraw_row(&weak, pos, cx));
+        }
+    })
+    .detach();
 }
 
 /// What right-clicking a picture, a video or a file offers: Open Large (Quick Look) for media,
@@ -455,7 +520,8 @@ fn user_row(item: &Item, ctx: &RowContext, theme: &Theme, window: &Window) -> An
                 .gap(px(space::XS))
                 .h(px(20.))
                 .when(!text.is_empty(), |d| {
-                    d.child(copy_button(id_of("copy-user", (pos, &text)), text.clone(), "Copy", theme).opacity(0.).group_hover("user-message", |s| s.opacity(1.)))
+                    let shown = just_copied("copy-user", (pos, &text));
+                    d.child(copy_button("copy-user", (pos, &text), text.clone(), ctx, theme).when(!shown, |b| b.opacity(0.).group_hover("user-message", |s| s.opacity(1.))))
                 })
                 .when_some(date, |d, date| {
                     let full = yh_core::clock::full_time(date);
@@ -501,7 +567,8 @@ fn text_row(e: &EntryRef, ctx: &RowContext, theme: &Theme, window: &Window) -> A
         .group("reply")
         .child(markdown_view_in(&md, theme, Some(ctx), Some(window)))
         .child(div().h(px(20.)).mt(px(space::XS)).ml(px(-6.)).flex().when(!live, |d| {
-            d.child(copy_button(id_of("copy-reply", (ctx.pos, &text)), text, "Copy", theme).opacity(0.).group_hover("reply", |s| s.opacity(1.)))
+            let shown = just_copied("copy-reply", (ctx.pos, &text));
+            d.child(copy_button("copy-reply", (ctx.pos, &text), text.clone(), ctx, theme).when(!shown, |b| b.opacity(0.).group_hover("reply", |s| s.opacity(1.))))
         }))
         .into_any_element()
 }
@@ -1051,7 +1118,7 @@ fn code_block(code: &Text, lang: &str, theme: &Theme, ctx: Option<&RowContext>, 
                     .text_size(px(ts::CAPTION))
                     .text_color(theme.secondary)
                     .child(div().flex_1().min_w_0().font_weight(FontWeight::MEDIUM).child(name))
-                    .when_some(ctx, |d, ctx| d.child(copy_button(id_of("copy-code", (ctx.pos, n, &code.text)), code.text.clone(), "Copy", theme))),
+                    .when_some(ctx, |d, ctx| d.child(copy_button("copy-code", (ctx.pos, n, &code.text), code.text.clone(), ctx, theme))),
             )
         })
         .child(
@@ -1157,10 +1224,9 @@ pub fn markdown_view_in(md: &markdown::Markdown, theme: &Theme, ctx: Option<&Row
                             .child(table)
                             .child(
                                 div().absolute().top(px(5.)).right(px(5.)).child(
-                                    copy_button(id_of("copy-table", (ctx.pos, n, &tsv)), tsv, "Copy", theme)
+                                    copy_button("copy-table", (ctx.pos, n, &tsv), tsv.clone(), ctx, theme)
                                         .bg(theme.card)
-                                        .opacity(0.)
-                                        .group_hover("table", |s| s.opacity(1.)),
+                                        .when(!just_copied("copy-table", (ctx.pos, n, &tsv)), |b| b.opacity(0.).group_hover("table", |s| s.opacity(1.))),
                                 ),
                             )
                             .into_any_element()

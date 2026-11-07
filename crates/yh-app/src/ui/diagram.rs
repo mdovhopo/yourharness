@@ -5,6 +5,7 @@
 
 use crate::theme::{Theme, MONO};
 use crate::ui::rows::RowContext;
+use gpui_kit::component::{Icon, IconName};
 use gpui_kit::{
     canvas, div, point, prelude::*, px, AnyElement, App, ClipboardItem, FontWeight, Hsla, PathBuilder, Pixels, Point,
     SharedString, Window,
@@ -33,6 +34,18 @@ thread_local! {
     static DIAGRAMS: std::cell::RefCell<(HashMap<u64, Option<Rc<Drawn>>>, VecDeque<u64>)> = Default::default();
     /// Diagrams shown as their source.
     static SOURCE_SHOWN: std::cell::RefCell<HashSet<u64>> = Default::default();
+}
+
+/// Lucide's code: Show Source (the default icon set lacks it).
+fn code_icon() -> Icon {
+    const SVG: &str = concat!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">"#, r#"<path d="m16 18 6-6-6-6"/><path d="m8 6-6 6 6 6"/>"#, "</svg>");
+    Icon::default().data(SVG.as_bytes())
+}
+
+/// Lucide's image: Copy Image.
+fn image_icon() -> Icon {
+    const SVG: &str = concat!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">"#, r#"<rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/>"#, "</svg>");
+    Icon::default().data(SVG.as_bytes())
 }
 
 fn key(source: &str) -> u64 {
@@ -105,20 +118,10 @@ pub fn diagram_block(source: &str, ctx: &RowContext, n: usize, theme: &Theme, wi
         });
     };
     let copied = source.to_string();
-    let button = |id: &'static str, label: &'static str| {
-        div()
-            .id((id, (k as usize) ^ n))
-            .h(px(20.))
-            .flex()
-            .items_center()
-            .px(px(6.))
-            .rounded(px(crate::theme::radius::SMALL))
-            .text_size(px(crate::theme::text::CAPTION))
-            .text_color(theme.secondary)
-            .cursor_pointer()
-            .hover(|s| s.bg(theme.hover).text_color(theme.text))
-            .child(label)
-    };
+    // Icon buttons with tooltips, as the thread's toolbar: five text labels crowded the header.
+    let button = |id: &'static str, icon: Icon, tip: &'static str| crate::ui::thread_toolbar::icon_button((id, (k as usize) ^ n), icon, tip, theme);
+    let just_copied = crate::ui::rows::just_copied("diagram-copy", (k, n));
+    let (copy_thread, copy_pos) = (ctx.thread.clone(), ctx.pos);
     let header = div()
         .flex()
         .items_center()
@@ -132,16 +135,25 @@ pub fn diagram_block(source: &str, ctx: &RowContext, n: usize, theme: &Theme, wi
         .child(
             div()
                 .flex()
-                .gap(px(4.))
-                .when(!showing_source, |d| d.opacity(0.).group_hover("diagram", |s| s.opacity(1.)))
-                .child(button("diagram-source", if showing_source { "Show Diagram" } else { "Show Source" }).on_click(toggle))
-                .child(button("diagram-copy", "Copy Source").on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()))))
+                .gap(px(2.))
+                .when(!showing_source && !just_copied, |d| d.opacity(0.).group_hover("diagram", |s| s.opacity(1.)))
+                .child(if showing_source {
+                    button("diagram-source", Icon::new(IconName::Network), "Show Diagram").on_click(toggle)
+                } else {
+                    button("diagram-source", code_icon(), "Show Source").on_click(toggle)
+                })
+                .child(
+                    button("diagram-copy", Icon::new(if just_copied { IconName::Check } else { IconName::Copy }), if just_copied { "Copied" } else { "Copy Source" }).on_click(move |_, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()));
+                        crate::ui::rows::mark_copied(crate::ui::rows::copy_hash("diagram-copy", (k, n)), &copy_thread, copy_pos, cx);
+                    }),
+                )
                 .when(!showing_source, |d| {
                     let (big, copy, save) = (drawn.clone(), drawn.clone(), drawn.clone());
                     let theme = *theme;
-                    d.child(button("diagram-copy-image", "Copy Image").on_click(move |_, _, cx| copy_image(copy.clone(), theme, cx)))
-                        .child(button("diagram-save", "Save as PNG…").on_click(move |_, _, cx| save_png(save.clone(), theme, None, cx)))
-                        .child(button("diagram-large", "Open Large").on_click(move |_, _, cx| open_large(big.clone(), cx)))
+                    d.child(button("diagram-copy-image", image_icon(), "Copy Image").on_click(move |_, _, cx| copy_image(copy.clone(), theme, cx)))
+                        .child(button("diagram-save", crate::ui::icons::download(), "Save as PNG…").on_click(move |_, _, cx| save_png(save.clone(), theme, None, cx)))
+                        .child(button("diagram-large", Icon::new(IconName::Maximize), "Open Large").on_click(move |_, _, cx| open_large(big.clone(), cx)))
                 }),
         );
     let body: AnyElement = if showing_source {

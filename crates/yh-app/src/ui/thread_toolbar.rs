@@ -292,6 +292,6 @@ pub fn buttons(workspace: &Entity<Workspace>, theme: &Theme, cx: &App) -> AnyEle
 }
 
 /// A toolbar action: a small ghost button with a 14 pt icon and a tooltip saying what it does.
-pub fn icon_button(id: &'static str, icon: Icon, tip: &'static str, theme: &Theme) -> Button {
+pub fn icon_button(id: impl Into<gpui_kit::ElementId>, icon: Icon, tip: impl Into<SharedString>, theme: &Theme) -> Button {
     Button::new(id).small().ghost().icon(icon.size(px(14.)).text_color(theme.secondary)).tooltip(tip)
 }
