@@ -3,11 +3,13 @@
 pub mod composer;
 pub mod diagram;
 pub mod find;
+pub mod icons;
 pub mod inspector;
 pub mod jobs;
 pub mod mcp;
 pub mod memory;
 pub mod project;
+pub mod resume_sheet;
 pub mod root;
 pub mod settings;
 pub mod rows;

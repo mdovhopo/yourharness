@@ -117,6 +117,11 @@ pub struct Workspace {
     pub models: Vec<ModelInfo>,
     /// Usage limits as Claude last reported them.
     pub limits: Option<Value>,
+    /// When they were (seconds), a refresh asked of Claude under way, and why the last failed
+    /// (`state/limits.rs`).
+    pub limits_updated_at: Option<f64>,
+    pub limits_refreshing: bool,
+    pub limits_error: Option<String>,
     /// Each project's slash commands and skills, as the CLI last listed them (`slashCommands`).
     commands: HashMap<String, Vec<SlashCommand>>,
     /// A folder's files for `@` mentions, kept 30 seconds.
@@ -187,6 +192,9 @@ impl Workspace {
             generation: 0,
             models,
             limits: None,
+            limits_updated_at: None,
+            limits_refreshing: false,
+            limits_error: None,
             commands: HashMap::new(),
             files: HashMap::new(),
             new_count: 0,
@@ -234,6 +242,8 @@ impl Workspace {
         .detach();
         workspace.ensure_home(cx);
         workspace.recover_cut_off_turns(cx);
+        workspace.load_saved_limits();
+        workspace.listen_for_notification_clicks(cx);
         workspace
     }
 
@@ -285,11 +295,19 @@ impl Workspace {
     /// Its threads keep their conversations; their next message starts there.
     pub fn set_home_folder(&mut self, path: &str, cx: &mut Context<Self>) {
         let Some(id) = self.home_project() else { return };
+        // Named for its folder, as the Swift app does; "Home" for your home folder.
+        let name = if Some(path) == std::env::var("HOME").ok().as_deref() {
+            "Home".to_string()
+        } else {
+            std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "Home".into())
+        };
         self.library.update_project(&id, |p| {
             p.insert("path".into(), path.into());
+            p.insert("name".into(), name.clone().into());
         });
         if let Some(p) = self.projects.iter_mut().find(|p| p.id == id) {
             p.path = path.to_string();
+            p.name = name;
         }
         let ids: Vec<String> = self.threads.iter().filter(|t| t.read(cx).meta.project_id == id).map(|t| t.read(cx).id().to_string()).collect();
         for thread in ids {
@@ -360,6 +378,8 @@ impl Workspace {
             old.update(cx, |t, _| t.unread = false);
         }
         self.selected = Some(id.to_string());
+        // Its notifications have done their job.
+        crate::platform::clear_notifications(id);
         // Opened again at the next launch, unless it's a thread that isn't kept.
         if self.library.thread_record(id).is_some() {
             self.library.set_setting("selectedThreadID", &Value::from(id));
@@ -752,6 +772,8 @@ impl Workspace {
                     let tools = yh_core::workspace::WorkspaceTools::find(std::env::var("YH_PATH").ok().as_deref());
                     copy.scan(&tools);
                     copy.refresh_status(&tools, Duration::ZERO);
+                    // Open PRs too, every two minutes at most: the sidebar's review badges.
+                    copy.refresh_pulls(&tools, Duration::from_secs(120));
                     copy
                 })
                 .await;
@@ -858,6 +880,27 @@ impl Workspace {
         if !settled {
             self.offer_undo(format!("Settled “{title}”"), Undo::Settle(id.to_string()), cx);
         }
+    }
+
+    /// Whether idle settling may move the thread to the shelf (`autoSettle`, on unless off).
+    pub fn auto_settles(&self, id: &str) -> bool {
+        self.library.thread_record(id).and_then(|r| r.get("autoSettle").and_then(|v| v.as_bool())) != Some(false)
+    }
+
+    pub fn set_auto_settle(&mut self, id: &str, on: bool, cx: &mut Context<Self>) {
+        self.library.update_thread(id, |r| {
+            if on {
+                r.remove("autoSettle");
+            } else {
+                r.insert("autoSettle".into(), Value::Bool(false));
+            }
+        });
+        cx.notify();
+    }
+
+    /// A title is being written for it (the first message's, or a rewrite).
+    pub fn is_generating_title(&self, id: &str) -> bool {
+        self.titles_rewriting.contains(id)
     }
 
     /// The composer's text, kept with the thread until sent.
@@ -1212,12 +1255,7 @@ impl Workspace {
                                 let project = thread.read(cx).meta.project_id.clone();
                                 ws.note_catalog(models, commands, &project, cx);
                             }
-                            Event::Limits(info) => {
-                                if ws.limits.as_ref() != Some(info) {
-                                    ws.limits = Some(info.clone());
-                                    cx.notify();
-                                }
-                            }
+                            Event::Limits(info) => ws.note_limits(info, cx),
                             Event::Assistant { blocks, .. } => {
                                 for block in blocks {
                                     if let yh_core::claude::Block::Tool { name, input, .. } = block {
@@ -1279,20 +1317,10 @@ impl Workspace {
         let waiting = self.threads.iter().filter(|t| t.read(cx).permission.is_some()).count();
         crate::platform::set_badge(waiting);
         let t = thread.read(cx);
-        if t.permission.is_some() && !self.looking_at(t.id()) && self.notifications_on() {
-            crate::platform::notify(&t.title, "Claude is waiting for you");
+        if t.permission.is_some() {
+            let body = Self::describe_request(t);
+            self.notify_about(crate::state::notify::Kind::NeedsYou, thread, body, cx);
         }
-    }
-
-    fn notifications_on(&self) -> bool {
-        self.library.setting("notifications").and_then(|v| v.as_bool()).unwrap_or(true)
-    }
-
-    /// The thread is open in the app you're using.
-    fn looking_at(&self, id: &str) -> bool {
-        // A side chat is looked at with its thread.
-        let id = id.strip_prefix(SIDE).unwrap_or(id);
-        self.selected.as_deref() == Some(id) && crate::platform::app_is_active()
     }
 
     /// The turn is over: saved, unread if you were elsewhere, its `claude` let go of later.
@@ -1303,8 +1331,9 @@ impl Workspace {
         let selected = self.selected.as_deref() == Some(id.strip_prefix(SIDE).unwrap_or(&id));
         // Waiting on jobs it started, Claude isn't done: it's back when they report.
         let waiting_on_jobs = thread.read(cx).jobs.waiting() > 0;
-        if !waiting_on_jobs && !self.looking_at(&id) && self.notifications_on() {
-            crate::platform::notify(&thread.read(cx).title, "Claude finished");
+        if !waiting_on_jobs {
+            let body = Self::last_reply(thread.read(cx));
+            self.notify_about(crate::state::notify::Kind::Finished, thread, body, cx);
         }
         let (title, session) = thread.update(cx, |t, _| {
             t.running = false;
@@ -1363,6 +1392,10 @@ impl Workspace {
         let Some(claude) = yh_core::claude::find_claude() else { return };
         let path = std::env::var("YH_PATH").ok();
         let weak = thread.downgrade();
+        // The sidebar dims the placeholder title meanwhile.
+        let generating = thread.read(cx).id().to_string();
+        self.titles_rewriting.insert(generating.clone());
+        cx.notify();
         cx.spawn(async move |this, cx| {
             let mut result = Err(String::new());
             for attempt in 0..2 {
@@ -1375,6 +1408,10 @@ impl Workspace {
                     break;
                 }
             }
+            let _ = this.update(cx, |ws, cx| {
+                ws.titles_rewriting.remove(&generating);
+                cx.notify();
+            });
             let Ok(title) = result else { return };
             let _ = this.update(cx, |ws, cx| {
                 let Some(thread) = weak.upgrade() else { return };
@@ -1648,40 +1685,6 @@ impl Workspace {
     }
 
     // MARK: Search and resuming
-
-    /// Threads whose title has `query`, then rows that do (the full-text index), off the main
-    /// thread: (thread, title, snippet; empty for a title match).
-    pub fn search(&self, query: String, cx: &mut Context<Self>) -> Task<Vec<(String, String, String)>> {
-        let q = query.trim().to_lowercase();
-        let titles: Vec<(String, String)> = self
-            .threads
-            .iter()
-            .map(|t| (t.read(cx).id().to_string(), t.read(cx).title.clone()))
-            .collect();
-        let db = self.library.db.clone();
-        cx.background_executor().spawn(async move {
-            if q.chars().count() < 2 {
-                return vec![];
-            }
-            let mut out: Vec<(String, String, String)> =
-                titles.iter().filter(|(_, title)| title.to_lowercase().contains(&q)).take(8).map(|(id, t)| (id.clone(), t.clone(), String::new())).collect();
-            let mut seen: std::collections::HashSet<String> = out.iter().map(|(id, ..)| id.clone()).collect();
-            if let Some(db) = db {
-                for hit in db.search(&q, 60) {
-                    if seen.insert(hit.thread.clone()) {
-                        if let Some((_, title)) = titles.iter().find(|(id, _)| *id == hit.thread) {
-                            let snippet = hit.snippet.split_whitespace().collect::<Vec<_>>().join(" ");
-                            out.push((hit.thread, title.clone(), snippet));
-                        }
-                    }
-                    if out.len() >= 30 {
-                        break;
-                    }
-                }
-            }
-            out
-        })
-    }
 
     /// A Claude Code session started elsewhere, as a thread that continues it (`--resume`) in
     /// its own folder, with its history. Read from `~/.claude/projects`, never written.

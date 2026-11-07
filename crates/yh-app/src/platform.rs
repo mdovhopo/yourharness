@@ -345,30 +345,213 @@ pub fn refresh_notification_status() {
     }
 }
 
+fn logs_notifications() -> bool {
+    std::env::var("YH_NOTIFICATIONS").as_deref() == Ok("log")
+}
+
+/// The notification center, outside a test run (which only prints) and inside an app bundle.
+fn notification_center() -> Option<id> {
+    if logs_notifications() {
+        return None;
+    }
+    unsafe {
+        let bundle: id = msg_send![class!(NSBundle), mainBundle];
+        let identifier: id = msg_send![bundle, bundleIdentifier];
+        if identifier == nil {
+            return None;
+        }
+        let center: id = msg_send![class!(UNUserNotificationCenter), currentNotificationCenter];
+        (center != nil).then_some(center)
+    }
+}
+
+fn ns_string(s: &str) -> id {
+    unsafe {
+        let s = NSString::alloc(nil).init_str(s);
+        msg_send![s, autorelease]
+    }
+}
+
 /// A notification from the app (`YH_NOTIFICATIONS=log` prints it instead, so a test run never
 /// asks for permission). The first one asks macOS for permission.
 pub fn notify(title: &str, body: &str) {
-    if std::env::var("YH_NOTIFICATIONS").as_deref() == Ok("log") {
+    post(title, "", body, None);
+}
+
+/// Threads' notifications, clicked: their thread IDs, for the workspace to open.
+fn clicks() -> &'static (flume::Sender<String>, flume::Receiver<String>) {
+    static CLICKS: std::sync::OnceLock<(flume::Sender<String>, flume::Receiver<String>)> = std::sync::OnceLock::new();
+    CLICKS.get_or_init(flume::unbounded)
+}
+
+/// The thread of the last notification posted (for `YH_NOTIFICATION_CLICK`).
+static LAST_NOTIFIED: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+/// Threads whose notifications were cleared since their last one: switching threads asks
+/// nothing of the notification center then (it's another process).
+static CLEARED: std::sync::Mutex<Option<std::collections::HashSet<String>>> = std::sync::Mutex::new(None);
+
+/// About a thread: `kind` (`finished`, `needsYou`) keeps one of each per thread on screen, a
+/// newer one replacing it; its project is the subtitle, with the default sound. Clicking it
+/// opens the thread (`notification_clicks`).
+pub fn notify_thread(kind: &str, thread: &str, title: &str, subtitle: &str, body: &str) {
+    *LAST_NOTIFIED.lock().unwrap() = Some(thread.to_string());
+    if let Some(set) = CLEARED.lock().unwrap().as_mut() {
+        set.remove(thread);
+    }
+    if logs_notifications() {
+        eprintln!("NOTIFY {kind}: {title} · {subtitle} · {body}");
+        return;
+    }
+    post(title, subtitle, body, Some((thread, &format!("{thread}.{kind}"))));
+}
+
+fn post(title: &str, subtitle: &str, body: &str, thread: Option<(&str, &str)>) {
+    if logs_notifications() {
         eprintln!("NOTIFY {title}: {body}");
         return;
     }
+    let Some(center) = notification_center() else { return };
+    install_notification_delegate();
     unsafe {
-        let center: id = msg_send![class!(UNUserNotificationCenter), currentNotificationCenter];
-        if center == nil {
-            return;
-        }
         static ASKED: std::sync::Once = std::sync::Once::new();
         ASKED.call_once(|| {
             let done = block::ConcreteBlock::new(|_granted: bool, _error: id| {}).copy();
             // Alert and sound.
             let _: () = msg_send![center, requestAuthorizationWithOptions: (1u64 << 1) | (1u64 << 2) completionHandler: &*done];
+            std::mem::forget(done);
         });
         let content: id = msg_send![class!(UNMutableNotificationContent), new];
-        let _: () = msg_send![content, setTitle: NSString::alloc(nil).init_str(title)];
-        let _: () = msg_send![content, setBody: NSString::alloc(nil).init_str(body)];
-        let identifier = NSString::alloc(nil).init_str(&yh_core::library::new_uuid());
+        let _: () = msg_send![content, setTitle: ns_string(title)];
+        if !subtitle.is_empty() {
+            let _: () = msg_send![content, setSubtitle: ns_string(subtitle)];
+        }
+        let _: () = msg_send![content, setBody: ns_string(body)];
+        let sound: id = msg_send![class!(UNNotificationSound), defaultSound];
+        let _: () = msg_send![content, setSound: sound];
+        let identifier = match thread {
+            Some((thread, identifier)) => {
+                let _: () = msg_send![content, setThreadIdentifier: ns_string(thread)];
+                let info: id = msg_send![class!(NSDictionary), dictionaryWithObject: ns_string(thread) forKey: ns_string("thread")];
+                let _: () = msg_send![content, setUserInfo: info];
+                ns_string(identifier)
+            }
+            None => ns_string(&yh_core::library::new_uuid()),
+        };
         let request: id = msg_send![class!(UNNotificationRequest), requestWithIdentifier: identifier content: content trigger: nil];
         let _: () = msg_send![center, addNotificationRequest: request withCompletionHandler: nil];
+        let _: () = msg_send![content, release];
+    }
+}
+
+/// You're looking at the thread now: its notifications have done their job.
+pub fn clear_notifications(thread: &str) {
+    {
+        let mut cleared = CLEARED.lock().unwrap();
+        if !cleared.get_or_insert_with(Default::default).insert(thread.to_string()) {
+            return;
+        }
+    }
+    let Some(center) = notification_center() else { return };
+    unsafe {
+        let a = ns_string(&format!("{thread}.finished"));
+        let b = ns_string(&format!("{thread}.needsYou"));
+        let list: id = msg_send![class!(NSMutableArray), array];
+        let _: () = msg_send![list, addObject: a];
+        let _: () = msg_send![list, addObject: b];
+        let _: () = msg_send![center, removeDeliveredNotificationsWithIdentifiers: list];
+    }
+}
+
+/// Clicked notifications' threads. Becomes the notification center's delegate, so a click
+/// reaches the app (`UNUserNotificationCenterDelegate`), and shows notifications while it's
+/// in front too: they're about other threads.
+pub fn notification_clicks() -> flume::Receiver<String> {
+    install_notification_delegate();
+    clicks().1.clone()
+}
+
+/// What a click on the last notification would do (`YH_NOTIFICATION_CLICK`): the test path,
+/// since a test run never posts a real one.
+pub fn click_last_notification() -> Option<String> {
+    let thread = LAST_NOTIFIED.lock().unwrap().clone()?;
+    let _ = clicks().0.send(thread.clone());
+    Some(thread)
+}
+
+fn install_notification_delegate() {
+    use objc::declare::ClassDecl;
+    use objc::runtime::{Object, Sel};
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    let Some(center) = notification_center() else { return };
+    extern "C" fn did_receive(_: &Object, _: Sel, _center: id, response: id, handler: id) {
+        unsafe {
+            let notification: id = msg_send![response, notification];
+            let request: id = msg_send![notification, request];
+            let content: id = msg_send![request, content];
+            let info: id = msg_send![content, userInfo];
+            let value: id = msg_send![info, objectForKey: ns_string("thread")];
+            if value != nil {
+                let utf8: *const std::ffi::c_char = msg_send![value, UTF8String];
+                if !utf8.is_null() {
+                    let thread = std::ffi::CStr::from_ptr(utf8).to_string_lossy().into_owned();
+                    let _ = clicks().0.send(thread);
+                }
+            }
+            if handler != nil {
+                let block = &*(handler as *const block::Block<(), ()>);
+                block.call(());
+            }
+        }
+    }
+    extern "C" fn will_present(_: &Object, _: Sel, _center: id, _notification: id, handler: id) {
+        unsafe {
+            if handler != nil {
+                // Sound, list and banner.
+                let block = &*(handler as *const block::Block<(u64,), ()>);
+                block.call(((1 << 1) | (1 << 3) | (1 << 4),));
+            }
+        }
+    }
+    INSTALLED.call_once(|| unsafe {
+        let Some(mut decl) = ClassDecl::new("YHNotificationDelegate", class!(NSObject)) else { return };
+        decl.add_method(
+            sel!(userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:),
+            did_receive as extern "C" fn(&Object, Sel, id, id, id),
+        );
+        decl.add_method(
+            sel!(userNotificationCenter:willPresentNotification:withCompletionHandler:),
+            will_present as extern "C" fn(&Object, Sel, id, id, id),
+        );
+        let cls = decl.register();
+        // The center holds its delegate weakly: this one lives as long as the app.
+        let delegate: id = msg_send![cls, new];
+        let _: () = msg_send![center, setDelegate: delegate];
+    });
+}
+
+/// In front, the window shown: what clicking a notification does. A test run in the
+/// background (`YH_BACKGROUND=1`) stays where it is, so it never takes your focus.
+pub fn bring_to_front() {
+    if std::env::var("YH_BACKGROUND").is_ok() {
+        return;
+    }
+    unsafe {
+        let app: id = msg_send![class!(NSApplication), sharedApplication];
+        let _: () = msg_send![app, activateIgnoringOtherApps: YES];
+        let windows: id = msg_send![app, windows];
+        let count: usize = msg_send![windows, count];
+        for i in 0..count {
+            let w: id = msg_send![windows, objectAtIndex: i];
+            let main: bool = msg_send![w, canBecomeMainWindow];
+            if main {
+                let mini: bool = msg_send![w, isMiniaturized];
+                if mini {
+                    let _: () = msg_send![w, deminiaturize: nil];
+                }
+                let _: () = msg_send![w, makeKeyAndOrderFront: nil];
+                break;
+            }
+        }
     }
 }
 
