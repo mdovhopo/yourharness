@@ -14,6 +14,8 @@ set -euo pipefail
 ROOT="${0:A:h:h}"
 export DEVELOPER_DIR=${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}
 export PATH="$HOME/.cargo/bin:$PATH"
+# The binary's minimum macOS (LC_BUILD_VERSION minos) matches LSMinimumSystemVersion below.
+export MACOSX_DEPLOYMENT_TARGET=26.0
 "$ROOT/scripts/vendor.sh"
 # A failed build stops here, so a binary left by an earlier build never gets bundled.
 LOG="$(mktemp)"
@@ -54,6 +56,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>LSMinimumSystemVersion</key><string>26.0</string>
     <key>LSArchitecturePriority</key><array><string>arm64</string></array>
     <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
+    <key>NSSupportsAutomaticTermination</key><false/>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSPrincipalClass</key><string>NSApplication</string>
 </dict>
