@@ -127,6 +127,10 @@ pub struct ThreadMeta {
     pub turn_in_progress: bool,
     /// Where its `claude` runs, when not the project's folder (a worktree).
     pub working_directory: Option<String>,
+    /// The folders its tool calls touched, and the ones they changed something in
+    /// (`footprint`, `writtenFootprint`): which checkouts it works in.
+    pub footprint: Vec<String>,
+    pub written_footprint: Vec<String>,
 }
 
 impl ThreadMeta {
@@ -145,6 +149,8 @@ impl ThreadMeta {
             title_chosen: false,
             turn_in_progress: false,
             working_directory: None,
+            footprint: vec![],
+            written_footprint: vec![],
         }
     }
 
@@ -167,8 +173,14 @@ impl ThreadMeta {
             title_chosen: o.get("titleChosen").and_then(Value::as_bool).unwrap_or(false),
             turn_in_progress: o.get("turnInProgress").and_then(Value::as_bool).unwrap_or(false),
             working_directory: s("workingDirectory"),
+            footprint: list(o, "footprint"),
+            written_footprint: list(o, "writtenFootprint"),
         }
     }
+}
+
+fn list(o: &Map<String, Value>, key: &str) -> Vec<String> {
+    o.get(key).and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default()
 }
 
 pub struct Page {

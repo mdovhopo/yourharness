@@ -682,6 +682,41 @@ impl Workspace {
         cx.notify();
     }
 
+    /// A tool call's folders join its thread's footprint (saved as the Swift app saves it).
+    fn note_footprint(&mut self, thread: &Entity<ThreadState>, tool: &str, input: &str, cx: &mut Context<Self>) {
+        let cwd = self.folder_of(thread.read(cx));
+        let touched = yh_core::footprint::folders(tool, input, &cwd);
+        let written = yh_core::footprint::written_folders(tool, input, &cwd);
+        let (mut footprint, mut written_footprint) = {
+            let m = &thread.read(cx).meta;
+            (m.footprint.clone(), m.written_footprint.clone())
+        };
+        let before = (footprint.len(), written_footprint.len());
+        for f in touched {
+            if !footprint.contains(&f) {
+                footprint.push(f);
+            }
+        }
+        for f in written {
+            if !written_footprint.contains(&f) {
+                written_footprint.push(f);
+            }
+        }
+        if before == (footprint.len(), written_footprint.len()) {
+            return;
+        }
+        let id = thread.read(cx).id().to_string();
+        self.library.update_thread(&id, |r| {
+            r.insert("footprint".into(), Value::from(footprint.clone()));
+            r.insert("writtenFootprint".into(), Value::from(written_footprint.clone()));
+        });
+        thread.update(cx, |t, cx| {
+            t.meta.footprint = footprint;
+            t.meta.written_footprint = written_footprint;
+            cx.notify();
+        });
+    }
+
     /// Your rules for generated titles (`titlePrompt`, the Swift app's key; `titleRules` before).
     pub fn title_prompt(&self) -> Option<String> {
         ["titlePrompt", "titleRules"].iter().find_map(|k| self.library.setting(k).and_then(|r| r.as_str().map(str::to_string))).filter(|r| !r.trim().is_empty())
@@ -1096,6 +1131,13 @@ impl Workspace {
                                 if ws.limits.as_ref() != Some(info) {
                                     ws.limits = Some(info.clone());
                                     cx.notify();
+                                }
+                            }
+                            Event::Assistant { blocks, .. } => {
+                                for block in blocks {
+                                    if let yh_core::claude::Block::Tool { name, input, .. } = block {
+                                        ws.note_footprint(&thread, name, input, cx);
+                                    }
                                 }
                             }
                             Event::Session { id: sid } => {
