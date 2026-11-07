@@ -135,6 +135,24 @@ fn migrate(c: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// How long after opening the index starts catching up when nothing's written (tests set 0).
+pub static INDEX_DELAY_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(3000);
+
+/// Idle: brings the full-text index up to date, a batch at a time, so a write that arrives
+/// waits for one batch at most.
+fn index_while_idle(w: &mut Writer, inbox: &flume::Receiver<Job>) {
+    while inbox.is_empty() {
+        match w.index_batch(500) {
+            Ok(true) => continue,
+            Ok(false) => break,
+            Err(e) => {
+                eprintln!("harness.sqlite: indexing failed: {e}");
+                break;
+            }
+        }
+    }
+}
+
 impl Database {
     /// Opens (or creates) `harness.sqlite` in `directory`. The old JSON files there
     /// (`state.json`, `threads/`) are moved in the first time: the state now, transcripts one
@@ -166,7 +184,19 @@ impl Database {
         std::thread::Builder::new()
             .name("harness.sqlite writer".into())
             .spawn(move || {
-                while let Ok(first) = inbox.recv() {
+                // Launch first: a few seconds in, with nothing written meanwhile, the index
+                // catches up on what's not in it yet (rows from before, an older app's), as the
+                // Swift app's `indexBatch` does at open; then after every write.
+                let start = std::time::Duration::from_millis(INDEX_DELAY_MS.load(std::sync::atomic::Ordering::Relaxed));
+                let mut first_job = match inbox.recv_timeout(start) {
+                    Ok(job) => Some(job),
+                    Err(flume::RecvTimeoutError::Timeout) => {
+                        index_while_idle(&mut w, &inbox);
+                        None
+                    }
+                    Err(flume::RecvTimeoutError::Disconnected) => return,
+                };
+                while let Some(first) = first_job.take().or_else(|| inbox.recv().ok()) {
                     // Everything that's arrived meanwhile goes in the same transaction.
                     let mut jobs = vec![first];
                     jobs.extend(inbox.drain());
@@ -186,18 +216,7 @@ impl Database {
                     for f in flushes {
                         let _ = f.send(());
                     }
-                    // Idle: bring the full-text index up to date, a batch at a time, so a write
-                    // that arrives waits for one batch at most.
-                    while inbox.is_empty() {
-                        match w.index_batch(500) {
-                            Ok(true) => continue,
-                            Ok(false) => break,
-                            Err(e) => {
-                                eprintln!("harness.sqlite: indexing failed: {e}");
-                                break;
-                            }
-                        }
-                    }
+                    index_while_idle(&mut w, &inbox);
                 }
             })
             .map_err(|e| e.to_string())?;
@@ -982,6 +1001,28 @@ mod tests {
 
     fn row(id: &str, kind: &str, text: &str) -> Row {
         Row { id: id.into(), kind: kind.into(), text: text.into(), ..Default::default() }
+    }
+
+    #[test]
+    fn the_index_catches_up_at_open_without_a_write() {
+        INDEX_DELAY_MS.store(0, std::sync::atomic::Ordering::Relaxed);
+        let dir = scratch("catch-up");
+        {
+            let db = Database::open(&dir).unwrap();
+            db.save_rows("T1", 1, vec![(0, row("u1", "user", "the zebracorn grazes"))]);
+            db.flush();
+        }
+        // As an older app left it: rows in, nothing indexed.
+        {
+            let c = Connection::open(dir.join("harness.sqlite")).unwrap();
+            c.execute_batch("DELETE FROM entries_fts; DELETE FROM index_state;").unwrap();
+        }
+        let db = Database::open(&dir).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while db.search("zebracorn", 5).is_empty() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert_eq!(db.search("zebracorn", 5).len(), 1);
     }
 
     #[test]
