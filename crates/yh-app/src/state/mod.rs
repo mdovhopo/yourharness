@@ -1,6 +1,7 @@
 //! What the app knows, with no drawing.
 
 pub mod harness_tools;
+pub mod jobs;
 pub mod pulls;
 pub mod thread;
 pub mod thread_tools;

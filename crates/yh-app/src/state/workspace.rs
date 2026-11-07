@@ -1161,6 +1161,7 @@ impl Workspace {
         let Some(rt) = self.runtimes.remove(id) else { return };
         rt.process.terminate();
         if let Some(thread) = self.thread(id) {
+            self.cut_off_jobs(&thread, "stopped when Claude was restarted", cx);
             if thread.read(cx).running {
                 thread.update(cx, |t, cx| {
                     t.apply(Event::Exit { code: 0, tail: String::new() }, cx);
@@ -1293,7 +1294,9 @@ impl Workspace {
         thread.update(cx, |t, _| t.running = false);
         self.note_working(cx);
         let selected = self.selected.as_deref() == Some(id.strip_prefix(SIDE).unwrap_or(&id));
-        if !self.looking_at(&id) && self.notifications_on() {
+        // Waiting on jobs it started, Claude isn't done: it's back when they report.
+        let waiting_on_jobs = thread.read(cx).jobs.waiting() > 0;
+        if !waiting_on_jobs && !self.looking_at(&id) && self.notifications_on() {
             crate::platform::notify(&thread.read(cx).title, "Claude finished");
         }
         let (title, session) = thread.update(cx, |t, _| {
@@ -1316,14 +1319,24 @@ impl Workspace {
         self.save_rows(thread, cx);
         let weak = thread.downgrade();
         if let Some(rt) = self.runtimes.get_mut(&id) {
-            rt.idle = Some(cx.spawn(async move |this, cx| {
+            rt.idle = Some(cx.spawn(async move |this, cx| loop {
                 cx.background_executor().timer(IDLE_LIMIT).await;
-                let _ = this.update(cx, |ws, cx| {
-                    let waiting = weak.upgrade().is_some_and(|t| t.read(cx).running || t.read(cx).permission.is_some());
-                    if !waiting {
-                        ws.end_runtime(&id, cx);
-                    }
-                });
+                let again = this
+                    .update(cx, |ws, cx| {
+                        // Jobs it left running end with its `claude`: kept while they run, looked at again later.
+                        if weak.upgrade().is_some_and(|t| !t.read(cx).jobs.running.is_empty()) {
+                            return true;
+                        }
+                        let waiting = weak.upgrade().is_some_and(|t| t.read(cx).running || t.read(cx).permission.is_some());
+                        if !waiting {
+                            ws.end_runtime(&id, cx);
+                        }
+                        false
+                    })
+                    .unwrap_or(false);
+                if !again {
+                    break;
+                }
             }));
         }
         cx.notify();
@@ -1611,6 +1624,9 @@ impl Workspace {
     pub fn prepare_for_quit(&mut self, cx: &mut Context<Self>) {
         for id in std::mem::take(&mut self.pending_purge) {
             self.library.purge(&id);
+        }
+        for t in self.threads.clone() {
+            self.cut_off_jobs(&t, "stopped when YourHarness quit", cx);
         }
         for t in self.threads.clone() {
             self.save_rows(&t, cx);
@@ -2043,6 +2059,45 @@ impl Workspace {
                 });
             })
             .detach();
+        }
+    }
+}
+
+// MARK: Background jobs
+
+impl Workspace {
+    /// Stops a job Claude left running, as the Swift app's Stop does (`stop_task`); its end
+    /// comes back as for any other.
+    pub fn stop_job(&mut self, thread: &Entity<ThreadState>, task_id: &str, cx: &mut Context<Self>) {
+        let id = thread.read(cx).id().to_string();
+        if let Some(rt) = self.runtimes.get_mut(&id) {
+            rt.process.stop_task(task_id);
+        }
+    }
+
+    /// Its `claude` is going: the jobs it ran go with it, and the thread says which.
+    fn cut_off_jobs(&mut self, thread: &Entity<ThreadState>, outcome: &str, cx: &mut Context<Self>) {
+        if thread.read(cx).jobs.running.is_empty() {
+            return;
+        }
+        thread.update(cx, |t, cx| {
+            for note in t.jobs.cut_off(outcome) {
+                t.notice(&note);
+            }
+            cx.notify();
+        });
+        self.save_rows(thread, cx);
+        cx.notify();
+    }
+
+    /// Background jobs running in every thread, for asking before quitting: (title, detail),
+    /// as the Swift app words it.
+    pub fn quit_question(&self, cx: &App) -> Option<(String, String)> {
+        let jobs: Vec<String> = self.threads.iter().flat_map(|t| t.read(cx).jobs.background().map(|j| j.description.clone()).collect::<Vec<_>>()).collect();
+        match jobs.len() {
+            0 => None,
+            1 => Some(("A background job is running".into(), format!("“{}” stops if you quit YourHarness.", jobs[0]))),
+            n => Some((format!("{n} background jobs are running"), "They stop if you quit YourHarness.".into())),
         }
     }
 }

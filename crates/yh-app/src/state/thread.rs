@@ -261,6 +261,8 @@ pub struct ThreadState {
     folds_dirty: bool,
     /// What replies link against (the thread's files and repo), once read.
     pub linker: Option<std::sync::Arc<yh_core::links::Linker>>,
+    /// What Claude left running (background commands, watches): never saved.
+    pub jobs: crate::state::jobs::Jobs,
 }
 
 impl ThreadState {
@@ -297,6 +299,7 @@ impl ThreadState {
             open_turns: Default::default(),
             folds_dirty: false,
             linker: None,
+            jobs: Default::default(),
         }
     }
 
@@ -496,6 +499,8 @@ impl ThreadState {
             b.delivery = delivery.map(str::to_string);
         }
         self.refresh_folds();
+        // Jobs started from here on are what Claude waits on.
+        self.jobs.turn = Some(id.to_string());
     }
 
     /// The CLI says where your message is.
@@ -695,7 +700,12 @@ impl ThreadState {
                 let e = self.append(data);
                 e.borrow_mut().live = true;
                 self.blocks.insert(key, e);
-                false
+                // Claude woken by a job's end: a turn with no message of yours.
+                let woke = !self.running && self.jobs.version > 0;
+                if woke {
+                    self.running = true;
+                }
+                woke
             }
             Event::Delta { message, index, parent, kind, text } => {
                 if parent.is_some() {
@@ -828,7 +838,9 @@ impl ThreadState {
                         e.borrow().data.tool_name.as_deref().is_some_and(|n| yh_core::plan::TOOLS.contains(&n))
                     })
                 });
+                let jobs_before = self.jobs.running.len();
                 for r in results {
+                    self.jobs.tool_result(&r.id, &r.text);
                     let Some((e, pos)) = self.tools.get(&r.id).cloned() else { continue };
                     if let Some(full) = r.full {
                         self.full_results.insert(r.id.clone(), full);
@@ -848,7 +860,7 @@ impl ThreadState {
                     self.refresh_plan();
                     return true;
                 }
-                false
+                self.jobs.running.len() != jobs_before
             }
             Event::SubagentStarted { tool_id, description } => {
                 if let Some((e, pos)) = self.tools.get(&tool_id).cloned() {
@@ -899,7 +911,33 @@ impl ThreadState {
                 }
                 true
             }
+            Event::JobStarted { task_id, tool_id, description, background } => {
+                let tool = tool_id.as_ref().and_then(|id| self.tools.get(id)).and_then(|(e, _)| e.borrow().data.tool_name.clone());
+                self.jobs.start(task_id, tool_id, tool.as_deref(), description, background);
+                true
+            }
+            Event::JobFinished { task_id, status, summary, output_file } => {
+                let code = summary.as_deref().and_then(yh_core::claude::job_exit_code);
+                if let Some(note) = self.jobs.finish(&task_id, &status, code, output_file) {
+                    self.notice(&note);
+                }
+                true
+            }
+            Event::JobOutput { task_id, text } => {
+                self.jobs.saw(&task_id, &text);
+                false
+            }
+            Event::JobsRunning(ids) => {
+                let notes = self.jobs.keep_only(&ids);
+                for note in &notes {
+                    self.notice(note);
+                }
+                !notes.is_empty()
+            }
             Event::Exit { code, tail } => {
+                for note in self.jobs.cut_off("stopped when Claude exited") {
+                    self.notice(&note);
+                }
                 self.end_turn();
                 if code != 0 {
                     self.notice(&format!("claude exited ({code}) {tail}"));
