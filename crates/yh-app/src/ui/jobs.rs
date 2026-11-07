@@ -21,8 +21,8 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Duration;
 
-/// Lines of a job's output shown when it's opened.
-const OUTPUT_LINES: usize = 40;
+/// Lines of a job's output shown when it's opened: its end, all in view without scrolling.
+const OUTPUT_LINES: usize = 12;
 
 pub struct JobsStrip {
     workspace: Entity<Workspace>,
