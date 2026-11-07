@@ -2,20 +2,26 @@
 //! Swift app's WorkspaceView), with Memory one tab over. Everything's discovered from git and
 //! the forges' CLIs (`yh_core::workspace`): read on a copy off the main thread, swapped in
 //! whole, again every minute while it shows. Open PRs come grouped into stacks, each a card
-//! drawn as a staircase (`StackGraph`); then each repo, with its worktrees and the threads
-//! working in them.
+//! drawn as a staircase (`StackGraph`) with what can be done with it (merge, submit, add a
+//! branch, sync, make it one of GitHub's); then each repo, with its worktrees, what state
+//! each is in and the threads working in them. Anything that loses work asks first.
 
 use crate::state::workspace::Workspace;
 use crate::theme::{Theme, MONO};
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::component::Sizable;
-use gpui_kit::{div, prelude::*, px, Context, Entity, FontWeight, Hsla, SharedString, Task, Window};
+use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem};
+use gpui_kit::component::switch::Switch;
+use gpui_kit::component::{Disableable, IconName, Sizable, WindowExt};
+use gpui_kit::{div, prelude::*, px, App, ClipboardItem, Context, Entity, FontWeight, Hsla, SharedString, Task, WeakEntity, Window};
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use yh_core::forge::PullRequest;
+use yh_core::git::{Forge, RepoStatus, Worktree};
 use yh_core::stacks::{Lanes, PullRequestStack, Segment, StackGraph};
-use yh_core::workspace::{LayoutKind, RemovalRisk, WorkspaceTools};
+use yh_core::workspace::{LayoutKind, RemovalRisk, WorkspaceRepo, WorkspaceTools};
 
 pub struct ProjectPage {
     workspace: Entity<Workspace>,
@@ -23,12 +29,23 @@ pub struct ProjectPage {
     core: Option<yh_core::workspace::Workspace>,
     tools: Arc<WorkspaceTools>,
     refreshing: bool,
+    /// Asked to read again while a read was going: done once it's in (true: rescan too).
+    again: Option<bool>,
     /// What a stack command or a worktree change is doing, or its error.
     activity: Option<String>,
-    /// Repos opened to show their worktrees.
-    open_repos: std::collections::HashSet<String>,
-    /// New Worktree: for which repo, and the branch typed.
-    new_worktree: Option<(String, Entity<InputState>)>,
+    /// Repos whose worktrees were folded or unfolded by hand (else open with three or fewer).
+    toggled_repos: HashSet<String>,
+    /// Whether `gh stack` is there; None until asked (once, off the main thread).
+    stacks_installed: Option<bool>,
+    installing: bool,
+    /// The threads working in each checkout (by its path), newest first: worked out when the
+    /// repos were read, not on every draw.
+    threads_here: HashMap<String, Vec<String>>,
+    show_others: bool,
+    show_uncloned: bool,
+    /// `YH_PROJECT_PROBE`: what to do once the repos have been read (see `run_probe`).
+    probe: Option<String>,
+    scroll: gpui_kit::ScrollHandle,
     _poll: Option<Task<()>>,
 }
 
@@ -40,11 +57,64 @@ fn purple() -> Hsla {
     gpui_kit::rgb(0xaf52de).into()
 }
 
+fn orange() -> Hsla {
+    gpui_kit::rgb(0xff9500).into()
+}
+
+fn copy(text: String, cx: &mut App) {
+    cx.write_to_clipboard(ClipboardItem::new_string(text));
+}
+
+fn open_in_terminal(path: &str) {
+    let _ = std::process::Command::new("/usr/bin/open").args(["-a", "Terminal", path]).spawn();
+}
+
+fn tilde(path: &str) -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    match path.strip_prefix(&home) {
+        Some(rest) if !home.is_empty() => format!("~{rest}"),
+        _ => path.to_string(),
+    }
+}
+
+fn logs() -> bool {
+    std::env::var("YH_DATA_DIR").is_ok()
+}
+
+/// A merge asked for: the open layers it takes, bottom first, and the layer it stops at
+/// (None: the whole stack).
+#[derive(Clone)]
+struct MergeRequest {
+    number: u64,
+    pulls: Vec<(u64, String)>,
+    base: String,
+    up_to: Option<u64>,
+    repo: PathBuf,
+}
+
 impl ProjectPage {
     pub fn new(workspace: Entity<Workspace>, project: String, _window: &mut Window, cx: &mut Context<Self>) -> Self {
         let tools = Arc::new(WorkspaceTools::find(std::env::var("YH_PATH").ok().as_deref()));
-        let mut page = ProjectPage { workspace, project, core: None, tools, refreshing: false, activity: None, open_repos: Default::default(), new_worktree: None, _poll: None };
+        let mut page = ProjectPage {
+            workspace,
+            project,
+            core: None,
+            tools,
+            refreshing: false,
+            again: None,
+            activity: None,
+            toggled_repos: Default::default(),
+            stacks_installed: None,
+            installing: false,
+            threads_here: Default::default(),
+            show_others: false,
+            show_uncloned: false,
+            probe: std::env::var("YH_PROJECT_PROBE").ok(),
+            scroll: gpui_kit::ScrollHandle::new(),
+            _poll: None,
+        };
         page.refresh(true, cx);
+        page.check_stacks(cx);
         page._poll = Some(cx.spawn(async move |this, cx| loop {
             cx.background_executor().timer(Duration::from_secs(60)).await;
             if this.update(cx, |p, cx| p.refresh(false, cx)).is_err() {
@@ -54,13 +124,30 @@ impl ProjectPage {
         page
     }
 
-    fn root(&self, cx: &gpui_kit::App) -> Option<std::path::PathBuf> {
-        self.workspace.read(cx).project(&self.project).map(|p| std::path::PathBuf::from(&p.path))
+    fn root(&self, cx: &App) -> Option<PathBuf> {
+        self.workspace.read(cx).project(&self.project).map(|p| PathBuf::from(&p.path))
+    }
+
+    /// Whether `gh stack` is installed: `gh extension list`, off the main thread.
+    fn check_stacks(&mut self, cx: &mut Context<Self>) {
+        let Some(stacks) = self.tools.stacks.clone() else {
+            self.stacks_installed = Some(false);
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let installed = cx.background_executor().spawn(async move { stacks.is_installed() }).await;
+            let _ = this.update(cx, |p, cx| {
+                p.stacks_installed = Some(installed);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Reads it all again on a copy, off the main thread; `rescan` looks for repos again too.
     pub fn refresh(&mut self, rescan: bool, cx: &mut Context<Self>) {
         if self.refreshing {
+            self.again = Some(self.again.unwrap_or(false) || rescan);
             return;
         }
         let Some(root) = self.root(cx) else { return };
@@ -77,7 +164,7 @@ impl ProjectPage {
                     copy
                 })
                 .await;
-            if std::env::var("YH_DATA_DIR").is_ok() {
+            if logs() {
                 eprintln!(
                     "PROJECT read {} repos, {} worktrees, {} PRs in {} ms",
                     done.cloned_repos().len(),
@@ -89,27 +176,53 @@ impl ProjectPage {
             let _ = this.update(cx, |p, cx| {
                 p.core = Some(done);
                 p.refreshing = false;
+                p.count_threads(cx);
+                if let Some(rescan) = p.again.take() {
+                    p.refresh(rescan, cx);
+                }
                 cx.notify();
             });
         })
         .detach();
     }
 
-    /// Runs a command (a `gh stack` one, or a worktree change) off the main thread, says
-    /// how it went, and reads everything again now and a few seconds later.
-    fn run(&mut self, what: String, job: impl FnOnce(Arc<WorkspaceTools>) -> Result<(), String> + Send + 'static, cx: &mut Context<Self>) {
+    /// Which threads of the project work in which checkout, from the folders they touched.
+    fn count_threads(&mut self, cx: &App) {
+        let Some(core) = &self.core else { return };
+        let ws = self.workspace.read(cx);
+        let metas: Vec<_> = ws.threads.iter().map(|t| t.read(cx)).filter(|t| t.meta.project_id == self.project).map(|t| (t.id().to_string(), &t.meta)).collect();
+        let folders: Vec<yh_core::workspace::ThreadFolders> = metas
+            .iter()
+            .map(|(id, m)| yh_core::workspace::ThreadFolders { id, footprint: &m.footprint, written: &m.written_footprint, working_directory: m.working_directory.as_deref(), last_active: m.updated_at })
+            .collect();
+        self.threads_here = core.threads_by_checkout(&folders, false);
+        if logs() {
+            let mut counts: Vec<String> = self.threads_here.iter().map(|(k, v)| format!("{}={}", tilde(k), v.len())).collect();
+            counts.sort();
+            eprintln!("PROJECT threads by checkout: {}", counts.join(", "));
+        }
+    }
+
+    /// Runs a command (a `gh stack` one, or a worktree change) off the main thread, says how it
+    /// went, and reads everything again now and a few seconds later. A failure with `alert`
+    /// set also puts up an alert with that title.
+    fn run(&mut self, what: String, alert: Option<&'static str>, job: impl FnOnce(Arc<WorkspaceTools>) -> Result<(), String> + Send + 'static, window: &mut Window, cx: &mut Context<Self>) {
         self.activity = Some(format!("{what}…"));
         cx.notify();
         let tools = self.tools.clone();
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             let result = cx.background_executor().spawn(async move { job(tools) }).await;
-            let _ = this.update(cx, |p, cx| {
+            let _ = this.update_in(cx, |p, window, cx| {
                 p.activity = Some(match &result {
                     Ok(()) => format!("{what}: done."),
                     Err(e) => format!("{what} failed: {e}"),
                 });
-                if std::env::var("YH_DATA_DIR").is_ok() {
+                if logs() {
                     eprintln!("PROJECT {}", p.activity.clone().unwrap_or_default());
+                }
+                if let (Err(e), Some(title)) = (&result, alert) {
+                    let e = e.clone();
+                    window.open_alert_dialog(cx, move |a, _, _| a.title(title).description(e.clone()).ok_text("OK"));
                 }
                 p.refresh(false, cx);
                 cx.notify();
@@ -123,40 +236,319 @@ impl ProjectPage {
         .detach();
     }
 
-    /// Merges a GitHub stack up to a PR (all of it with None), with `gh stack merge`.
-    pub fn merge_stack(&mut self, stack: Option<u64>, up_to: Option<u64>, repo: std::path::PathBuf, cx: &mut Context<Self>) {
-        let what = match up_to {
-            Some(n) => format!("Merging up to #{n}"),
-            None => "Merging the stack".to_string(),
+    // MARK: Stacks
+
+    /// Asks first: a merge on GitHub can't be undone.
+    fn request_merge(&mut self, request: MergeRequest, window: &mut Window, cx: &mut Context<Self>) {
+        let title = if request.pulls.len() == 1 {
+            format!("Squash and merge #{} into {}?", request.pulls[0].0, request.base)
+        } else {
+            format!("Squash and merge {} pull requests into {}?", request.pulls.len(), request.base)
         };
-        self.run(what, move |t| t.stacks.as_ref().ok_or("gh stack isn't installed.".to_string())?.merge(stack, up_to, &repo), cx);
+        let list: Vec<String> = request.pulls.iter().map(|(n, t)| format!("#{n} {t}")).collect();
+        let message = format!("{}\n\nGitHub merges them bottom up, each squashed into one commit. This can't be undone.", list.join("\n"));
+        if logs() {
+            eprintln!("PROJECT asks: {title} | {}", message.replace('\n', " / "));
+        }
+        let page = cx.entity().downgrade();
+        let r1 = request.clone();
+        window.open_alert_dialog(cx, move |a, _, _| {
+            let (page, request) = (page.clone(), r1.clone());
+            a.title(title.clone()).description(message.clone()).ok_text("Squash and Merge").show_cancel(true).on_ok(move |_, window, cx| {
+                let request = request.clone();
+                let _ = page.update(cx, |p, cx| p.merge_stack(request, window, cx));
+                true
+            })
+        });
+        if std::env::var("YH_PROJECT_PROBE_ANSWER").as_deref() == Ok("ok") {
+            // The probe says yes, as clicking Squash and Merge does (sandbox repos only).
+            window.close_dialog(cx);
+            self.merge_stack(request, window, cx);
+        }
     }
 
-    /// Opens the PRs of a stack made with `gh stack` that isn't on GitHub yet.
-    pub fn submit_stack(&mut self, checkout: std::path::PathBuf, cx: &mut Context<Self>) {
-        self.run("Submitting the stack".into(), move |t| t.stacks.as_ref().ok_or("gh stack isn't installed.".to_string())?.submit(&checkout), cx);
+    /// Merges a GitHub stack up to a PR (all of it with None), with `gh stack merge`.
+    fn merge_stack(&mut self, r: MergeRequest, window: &mut Window, cx: &mut Context<Self>) {
+        let what = match r.up_to {
+            Some(n) => format!("Merging up to #{n}"),
+            None => format!("Merging stack #{}", r.number),
+        };
+        self.run(what, None, move |t| t.stacks.as_ref().ok_or("gh isn't installed.".to_string())?.merge(Some(r.number), r.up_to, &r.repo), window, cx);
     }
 
-    fn sync_stack(&mut self, checkout: std::path::PathBuf, cx: &mut Context<Self>) {
-        self.run("Syncing the stack".into(), move |t| t.stacks.as_ref().ok_or("gh stack isn't installed.".to_string())?.sync(&checkout), cx);
+    fn submit_stack(&mut self, checkout: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.run("Submitting the stack".into(), None, move |t| t.stacks.as_ref().ok_or("gh isn't installed.".to_string())?.submit(&checkout), window, cx);
     }
 
-    /// A branch checked out in a folder of its own beside the repo (new when it doesn't exist).
-    pub fn add_worktree(&mut self, repo_id: String, branch: String, cx: &mut Context<Self>) {
+    fn sync_stack(&mut self, checkout: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.run("Syncing the stack".into(), None, move |t| t.stacks.as_ref().ok_or("gh isn't installed.".to_string())?.sync(&checkout), window, cx);
+    }
+
+    fn link_stack(&mut self, urls: Vec<String>, repo: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.run("Making it a GitHub stack".into(), None, move |t| t.stacks.as_ref().ok_or("gh isn't installed.".to_string())?.link(&urls, &repo), window, cx);
+    }
+
+    fn add_branch(&mut self, branch: String, checkout: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.run(format!("Adding {branch}"), None, move |t| t.stacks.as_ref().ok_or("gh isn't installed.".to_string())?.add(&branch, &checkout), window, cx);
+    }
+
+    fn install_stacks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.installing = true;
+        let _ = window;
+        let Some(stacks) = self.tools.stacks.clone() else { return };
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_executor().spawn(async move { stacks.install() }).await;
+            let _ = this.update(cx, |p, cx| {
+                p.installing = false;
+                p.stacks_installed = Some(result.is_ok());
+                if let Err(e) = result {
+                    p.activity = Some(format!("Installing gh stack failed: {e}"));
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Add Branch on Top…: a name, then `gh stack add` in the checkout on the top branch.
+    fn ask_branch_on_top(&mut self, checkout: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Branch"));
+        let page = cx.entity().downgrade();
+        let theme = Theme::get(cx);
+        window.open_dialog(cx, move |dialog, _, _| {
+            let (input, page, checkout) = (input.clone(), page.clone(), checkout.clone());
+            dialog.title("Add a Branch on Top").w(px(420.)).child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(12.))
+                    .child(div().text_color(theme.secondary).child("A new branch at the top branch's latest commit, checked out there. Commit to it, then Submit."))
+                    .child(Input::new(&input))
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap(px(8.))
+                            .child(Button::new("branch-cancel").label("Cancel").on_click(|_, window, cx| window.close_dialog(cx)))
+                            .child(Button::new("branch-add").primary().label("Add").on_click(move |_, window, cx| {
+                                let branch = input.read(cx).value().trim().to_string();
+                                window.close_dialog(cx);
+                                if !branch.is_empty() {
+                                    let checkout = checkout.clone();
+                                    let _ = page.update(cx, |p, cx| p.add_branch(branch, checkout, window, cx));
+                                }
+                            })),
+                    ),
+            )
+        });
+    }
+
+    // MARK: Worktrees
+
+    /// Safe: just remove it. Work in it: ask, saying what happens to it.
+    fn request_removal(&mut self, wt: Worktree, repo: WorkspaceRepo, window: &mut Window, cx: &mut Context<Self>) {
         let Some(core) = &self.core else { return };
-        let Some(repo) = core.repos().iter().find(|r| r.id() == repo_id).cloned() else { return };
-        let name: String = branch.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' }).collect();
-        let path = repo.path.with_file_name(format!("{}-{name}", repo.path.file_name().unwrap_or_default().to_string_lossy()));
-        self.new_worktree = None;
-        self.run(format!("Adding a worktree for {branch}"), move |t| {
-            let git = t.git.as_ref().ok_or("git isn't installed.".to_string())?;
-            let exists = git.branch_exists(&branch, &repo.path);
-            git.add_worktree(&repo.path, &path, if exists { None } else { Some(&branch) }, None, if exists { Some(&branch) } else { None })
-        }, cx);
+        let risk = core.removal_risk(&wt, &repo);
+        if risk == RemovalRisk::None {
+            self.remove_worktree(wt, repo, window, cx);
+            return;
+        }
+        let name = Path::new(&wt.path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let loses = matches!(risk, RemovalRisk::LosesWork(_));
+        let title = if loses { format!("Discard the work in “{name}”?") } else { format!("Remove the worktree “{name}”?") };
+        let mut parts = vec![];
+        if let RemovalRisk::KeepsWork(why) | RemovalRisk::LosesWork(why) = &risk {
+            parts.push(why.clone());
+        }
+        parts.push("Its folder is deleted.".to_string());
+        match self.threads_here.get(&wt.path).map_or(0, Vec::len) {
+            0 => {}
+            1 => parts.push("The thread that worked in it keeps its conversation.".into()),
+            n => parts.push(format!("The {n} threads that worked in it keep their conversations.")),
+        }
+        let message = parts.join(" ");
+        if logs() {
+            eprintln!("PROJECT asks: {title} | {message}");
+        }
+        let page = cx.entity().downgrade();
+        let (w1, r1) = (wt.clone(), repo.clone());
+        window.open_alert_dialog(cx, move |a, _, _| {
+            let (page, wt, repo) = (page.clone(), w1.clone(), r1.clone());
+            a.title(title.clone())
+                .description(message.clone())
+                .ok_text(if loses { "Remove and Discard" } else { "Remove" })
+                .ok_variant(ButtonVariant::Danger)
+                .show_cancel(true)
+                .on_ok(move |_, window, cx| {
+                    let (wt, repo) = (wt.clone(), repo.clone());
+                    let _ = page.update(cx, |p, cx| p.remove_worktree(wt, repo, window, cx));
+                    true
+                })
+        });
+        if std::env::var("YH_PROJECT_PROBE_ANSWER").as_deref() == Ok("ok") {
+            window.close_dialog(cx);
+            self.remove_worktree(wt, repo, window, cx);
+        }
     }
 
-    fn remove_worktree(&mut self, worktree: yh_core::git::Worktree, repo_path: std::path::PathBuf, force: bool, cx: &mut Context<Self>) {
-        self.run("Removing the worktree".into(), move |t| t.git.as_ref().ok_or("git isn't installed.".to_string())?.remove_worktree(&worktree, &repo_path, force), cx);
+    /// `git worktree remove` (forced with uncommitted changes, which git refuses otherwise), or
+    /// for a folder that's gone, `git worktree prune`. A failure puts up an alert.
+    fn remove_worktree(&mut self, wt: Worktree, repo: WorkspaceRepo, window: &mut Window, cx: &mut Context<Self>) {
+        let dirty = self.core.as_ref().and_then(|c| c.status.worktree_statuses.get(&wt.path)).is_some_and(|s| s.is_dirty());
+        if let Some(core) = &mut self.core {
+            // Gone from the list at once; a failure brings it back with the next read.
+            core.forget_worktree(&wt, &repo);
+        }
+        let repo_path = repo.path.clone();
+        self.run(
+            if wt.is_missing { "Forgetting the worktree".into() } else { "Removing the worktree".into() },
+            Some("Couldn't remove the worktree"),
+            move |t| {
+                let git = t.git.as_ref().ok_or("git isn't installed.".to_string())?;
+                if wt.is_missing { git.prune_worktrees(&repo_path) } else { git.remove_worktree(&wt, &repo_path, dirty) }
+            },
+            window,
+            cx,
+        );
+    }
+
+    fn prune(&mut self, repo: WorkspaceRepo, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(core) = &mut self.core {
+            core.forget_missing_worktrees(&repo);
+        }
+        let path = repo.path.clone();
+        self.run("Forgetting missing worktrees".into(), Some("Couldn't forget the worktrees"), move |t| t.git.as_ref().ok_or("git isn't installed.".to_string())?.prune_worktrees(&path), window, cx);
+    }
+
+    /// A thread of the project that works in `folder` from its first message.
+    fn new_thread_in(&mut self, folder: Option<String>, cx: &mut Context<Self>) {
+        let project = self.project.clone();
+        let project_path = self.root(cx).map(|p| p.to_string_lossy().into_owned());
+        self.workspace.update(cx, |ws, cx| {
+            let id = ws.new_thread(&project, cx);
+            if let Some(f) = folder.filter(|f| Some(f) != project_path.as_ref()) {
+                ws.set_working_directory(&id, Some(f), cx);
+            }
+        });
+    }
+
+    fn open_new_worktree(&mut self, repo: WorkspaceRepo, window: &mut Window, cx: &mut Context<Self>) {
+        let base = self.core.as_ref().and_then(|c| c.status.default_branches.get(repo.id()).cloned());
+        let data = self.workspace.read(cx).data_dir.clone();
+        let page = cx.entity().downgrade();
+        let form = cx.new(|cx| NewWorktreeForm::new(page, repo.clone(), base, data, self.tools.clone(), window, cx));
+        let f = form.clone();
+        window.open_dialog(cx, move |d, _, _| d.title(format!("New Worktree of {}", repo.name())).w(px(520.)).child(f.clone()));
+        if std::env::var("YH_PROJECT_PROBE_ANSWER").as_deref() == Ok("ok") {
+            // The probe clicks Create (with `YH_NEW_WORKTREE_BRANCH` typed).
+            form.update(cx, |f, cx| f.create(window, cx));
+        }
+    }
+
+    fn open_new_stack(&mut self, repo: WorkspaceRepo, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(core) = &self.core else { return };
+        let page = cx.entity().downgrade();
+        let core = core.clone();
+        let installed = self.stacks_installed;
+        let form = cx.new(|cx| NewStackForm::new(page, repo.clone(), core, self.tools.clone(), installed, window, cx));
+        let f = form.clone();
+        window.open_dialog(cx, move |d, _, _| d.title(format!("New Stack in {}", repo.name())).w(px(620.)).child(f.clone()));
+        // `YH_NEW_STACK_BRANCHES=<a:b>` picks them, bottom first, Submit off; with
+        // `YH_PROJECT_PROBE_ANSWER=ok` the probe clicks Create Stack.
+        if let Ok(branches) = std::env::var("YH_NEW_STACK_BRANCHES") {
+            form.update(cx, |f, cx| {
+                f.chosen = branches.split(':').map(str::to_string).collect();
+                f.submit = false;
+                if std::env::var("YH_PROJECT_PROBE_ANSWER").as_deref() == Ok("ok") {
+                    f.create(window, cx);
+                }
+            });
+        }
+    }
+
+    /// `YH_PROJECT_PROBE`, once the repos have been read: `remove:<worktree folder name>` asks to
+    /// remove it as its button does, `merge` (or `merge:<up to #>`) the first numbered stack,
+    /// `new-worktree` and `new-stack` open their sheets for the first repo, `add-branch` the
+    /// first stack's Add Branch on Top, `expand` unfolds every repo's worktrees, `repos` scrolls down to the repos; several with commas.
+    /// `YH_PROJECT_PROBE_ANSWER=ok` then says yes.
+    fn run_probe(&mut self, probe: String, window: &mut Window, cx: &mut Context<Self>) {
+        if probe.contains(',') {
+            for p in probe.split(',') {
+                self.run_probe(p.to_string(), window, cx);
+            }
+            return;
+        }
+        let Some(core) = self.core.clone() else { return };
+        let first_repo = core.cloned_repos().first().map(|r| (*r).clone());
+        eprintln!("PROJECT probe {probe}");
+        let (verb, arg) = probe.split_once(':').map_or((probe.as_str(), None), |(a, b)| (a, Some(b)));
+        match verb {
+            "remove" => {
+                let target = core.cloned_repos().into_iter().find_map(|r| {
+                    core.worktrees_of(r).iter().find(|w| !w.is_main && Path::new(&w.path).file_name().is_some_and(|n| Some(n.to_string_lossy().as_ref()) == arg)).map(|w| (w.clone(), r.clone()))
+                });
+                match target {
+                    Some((wt, repo)) => self.request_removal(wt, repo, window, cx),
+                    None => eprintln!("PROJECT probe: no worktree named {arg:?}"),
+                }
+            }
+            "merge" => {
+                let sections = core.pull_request_sections();
+                let stack = sections.needs_review.iter().chain(&sections.mine).chain(&sections.others).find(|s| s.number().is_some()).cloned();
+                match stack.and_then(|s| self.merge_request(&s, arg.and_then(|a| a.parse().ok()))) {
+                    Some(r) => self.request_merge(r, window, cx),
+                    None => eprintln!("PROJECT probe: no stack to merge"),
+                }
+            }
+            "new-worktree" => {
+                if let Some(r) = first_repo {
+                    self.open_new_worktree(r, window, cx);
+                }
+            }
+            "new-stack" => {
+                if let Some(r) = first_repo {
+                    self.open_new_stack(r, window, cx);
+                }
+            }
+            // Every repo's worktrees shown.
+            "expand" => {
+                for r in core.cloned_repos() {
+                    if core.worktrees_of(r).iter().filter(|w| !w.is_main).count() > 3 {
+                        self.toggled_repos.insert(r.id().to_string());
+                    }
+                }
+                cx.notify();
+            }
+            // Scrolled to the repos, for a snapshot of them.
+            "repos" => {
+                self.scroll.scroll_to_bottom();
+                cx.notify();
+            }
+            "add-branch" => self.ask_branch_on_top(core.root.clone(), window, cx),
+            _ => eprintln!("PROJECT probe: unknown {probe}"),
+        }
+    }
+
+    /// The merge a stack's button asks for: its open layers up to the first draft, up to
+    /// `up_to` when given.
+    fn merge_request(&self, stack: &PullRequestStack, up_to: Option<u64>) -> Option<MergeRequest> {
+        let core = self.core.as_ref()?;
+        let number = stack.number()?;
+        let open: Vec<&PullRequest> = stack.all().into_iter().filter(|p| p.is_open()).collect();
+        let mergeable: Vec<&PullRequest> = open.iter().take_while(|p| !p.draft).copied().collect();
+        if mergeable.is_empty() {
+            return None;
+        }
+        let end = up_to.and_then(|n| mergeable.iter().position(|p| p.number() == n)).unwrap_or(mergeable.len() - 1);
+        let pulls: Vec<&PullRequest> = mergeable[..=end].to_vec();
+        let whole = pulls.len() == open.len();
+        Some(MergeRequest {
+            number,
+            pulls: pulls.iter().map(|p| (p.number(), p.title.clone())).collect(),
+            base: pulls[0].base.clone(),
+            up_to: if whole { None } else { Some(pulls[pulls.len() - 1].number()) },
+            repo: core.repo_for(&stack.pull_request)?.path.clone(),
+        })
     }
 }
 
@@ -166,35 +558,121 @@ fn chip(label: &str, color: Hsla) -> gpui_kit::Div {
     div().flex_none().px(px(6.)).rounded(px(8.)).text_size(px(10.)).font_weight(FontWeight::MEDIUM).text_color(color).bg(color.opacity(0.14)).child(label.to_string())
 }
 
+/// A coloured dot and words: a worktree's or repo's state.
+fn state_badge(text: impl Into<SharedString>, color: Hsla, theme: &Theme) -> gpui_kit::Div {
+    div().flex_none().flex().items_center().gap(px(5.)).text_size(px(11.)).font_weight(FontWeight::MEDIUM).text_color(theme.secondary).child(div().w(px(6.)).h(px(6.)).rounded_full().bg(color)).child(text.into())
+}
+
 fn age(updated: Option<&str>) -> String {
     let Some(t) = updated.and_then(yh_core::library::parse_iso) else { return String::new() };
     // parse_iso gives seconds; ago takes milliseconds.
     crate::state::thread_tools::ago(t * 1000.)
 }
 
+fn section_title(title: &str, count: usize, theme: &Theme) -> gpui_kit::Div {
+    div()
+        .flex()
+        .items_baseline()
+        .gap(px(8.))
+        .child(div().text_size(px(17.)).font_weight(FontWeight::SEMIBOLD).child(title.to_string()))
+        .when(count > 0, |d| d.child(div().text_color(theme.secondary.opacity(0.7)).child(count.to_string())))
+}
+
+fn group_label(title: &str, count: usize, theme: &Theme) -> gpui_kit::Div {
+    div().flex().items_center().gap(px(6.)).text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.secondary).child(title.to_string()).child(div().text_color(theme.secondary.opacity(0.6)).child(count.to_string()))
+}
+
+/// Ahead and behind its upstream, or that it has none.
+fn sync_label(s: &RepoStatus, theme: &Theme) -> Option<gpui_kit::AnyElement> {
+    if s.branch.is_some() && s.upstream.is_none() {
+        return Some(div().id("local-only").text_size(px(11.)).text_color(theme.secondary.opacity(0.7)).child("Local only").tooltip_text("This branch isn't pushed").into_any_element());
+    }
+    if s.ahead == 0 && s.behind == 0 {
+        return None;
+    }
+    let mut d = div().flex().gap(px(6.)).text_size(px(11.)).font_weight(FontWeight::MEDIUM).text_color(theme.secondary);
+    if s.ahead > 0 {
+        d = d.child(format!("↑{}", s.ahead));
+    }
+    if s.behind > 0 {
+        d = d.child(format!("↓{}", s.behind));
+    }
+    let tip = [(s.ahead, "to push"), (s.behind, "to pull (as of the last fetch)")]
+        .iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, w)| format!("{n} commit{} {w}", if *n == 1 { "" } else { "s" }))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(div().id("sync").child(d).tooltip_text(tip).into_any_element())
+}
+
+/// Conflicts in red, other changes in orange.
+fn changes_label(s: &RepoStatus, theme: &Theme) -> Option<gpui_kit::AnyElement> {
+    if s.conflicted > 0 {
+        return Some(state_badge(format!("{} conflicted", s.conflicted), theme.error, theme).into_any_element());
+    }
+    if !s.is_dirty() {
+        return None;
+    }
+    let detail = [(s.staged, "staged"), (s.modified, "modified"), (s.untracked, "untracked")].iter().filter(|(n, _)| *n > 0).map(|(n, w)| format!("{n} {w}")).collect::<Vec<_>>().join(", ");
+    Some(div().id("changes").child(state_badge(format!("{} changed", s.changed_files()), orange(), theme)).tooltip_text(detail).into_any_element())
+}
+
+trait TooltipText {
+    fn tooltip_text(self, text: impl Into<SharedString>) -> Self;
+}
+
+impl TooltipText for gpui_kit::Stateful<gpui_kit::Div> {
+    fn tooltip_text(self, text: impl Into<SharedString>) -> Self {
+        let text: SharedString = text.into();
+        self.tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(text.clone()).build(window, cx))
+    }
+}
+
 impl ProjectPage {
     fn header(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let ws = self.workspace.read(cx);
         let name = ws.project(&self.project).map(|p| p.name.clone()).unwrap_or_default();
+        let path = ws.project(&self.project).map(|p| p.path.clone()).unwrap_or_default();
         let subtitle = match self.core.as_ref().and_then(|c| c.layout.as_ref().map(|l| (c, l))) {
             None => "Looking for repositories…".to_string(),
             Some((_, l)) if l.kind == LayoutKind::Plain => "Folder".to_string(),
-            Some((c, l)) if l.kind == LayoutKind::Repo => {
-                let branch = c.status.statuses.get("").and_then(|s| s.branch.clone()).map(|b| format!(" · {b}")).unwrap_or_default();
-                let wt = c.all_worktrees().iter().filter(|w| !w.is_main).count();
-                format!("Git repository{branch}{}", if wt > 0 { format!(" · {wt} worktrees") } else { String::new() })
-            }
-            Some((c, _)) => {
-                let (cloned, uncloned) = (c.cloned_repos().len(), c.uncloned_repos().len());
-                let mut parts = vec!["Workspace".to_string(), if cloned == 1 { "1 repo".into() } else { format!("{cloned} repos") }];
-                if uncloned > 0 {
-                    parts.push(format!("{uncloned} not cloned"));
+            Some((c, l)) => {
+                let mut parts = if l.kind == LayoutKind::Repo {
+                    vec![format!("Git repository{}", c.status.statuses.get("").and_then(|s| s.branch.clone()).map(|b| format!(" · {b}")).unwrap_or_default())]
+                } else {
+                    let (cloned, uncloned) = (c.cloned_repos().len(), c.uncloned_repos().len());
+                    let mut p = vec!["Workspace".to_string(), if cloned == 1 { "1 repo".into() } else { format!("{cloned} repos") }];
+                    if uncloned > 0 {
+                        p.push(format!("{uncloned} not cloned"));
+                    }
+                    p
+                };
+                // "3 worktrees", and what needs a look: not on a branch, done with, missing.
+                let all: Vec<(&WorkspaceRepo, &Worktree)> = c.cloned_repos().into_iter().flat_map(|r| c.worktrees_of(r).iter().filter(|w| !w.is_main).map(move |w| (r, w))).collect();
+                if !all.is_empty() {
+                    parts.push(if all.len() == 1 { "1 worktree".into() } else { format!("{} worktrees", all.len()) });
+                    let detached = all.iter().filter(|(_, w)| w.is_detached() && !w.is_missing).count();
+                    let finished = all.iter().filter(|(r, w)| c.is_finished(w, r)).count();
+                    let missing = all.iter().filter(|(_, w)| w.is_missing).count();
+                    for (n, what) in [(detached, "not on a branch"), (finished, "done with"), (missing, "missing")] {
+                        if n > 0 {
+                            parts.push(format!("{n} {what}"));
+                        }
+                    }
                 }
                 parts.join(" · ")
             }
         };
+        let updated = self.core.as_ref().and_then(|c| c.pulls_updated_at.or(c.status_updated_at)).map(|t| {
+            let secs = t.elapsed().as_secs();
+            if secs < 60 { "Updated just now".to_string() } else { format!("Updated {} min ago", secs / 60) }
+        });
         let (ws1, project) = (self.workspace.clone(), self.project.clone());
+        let (p1, p2) = (path.clone(), path.clone());
+        let workspace_kind = self.core.as_ref().and_then(|c| c.layout.as_ref()).is_some_and(|l| l.is_workspace());
         div()
+            .id("project-header")
             .flex()
             .items_center()
             .gap(px(12.))
@@ -202,9 +680,40 @@ impl ProjectPage {
             .py(px(16.))
             .border_b_1()
             .border_color(theme.separator)
+            .context_menu(move |menu, _, _| {
+                let p = p1.clone();
+                menu.item(PopupMenuItem::new("Show in Finder").icon(IconName::Folder).on_click(move |_, _, cx| cx.reveal_path(Path::new(&p))))
+            })
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(40.))
+                    .h(px(40.))
+                    .rounded(px(10.))
+                    .bg(theme.card)
+                    .border_1()
+                    .border_color(theme.separator)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(theme.secondary)
+                    .child(gpui_kit::component::Icon::new(if workspace_kind { IconName::LayoutDashboard } else { IconName::Folder }).size(px(20.))),
+            )
             .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.)).child(div().text_size(px(20.)).font_weight(FontWeight::SEMIBOLD).child(name)).child(div().text_color(theme.secondary).child(subtitle)))
             .when_some(self.activity.clone(), |d, a| d.child(div().max_w(px(360.)).text_size(px(12.)).text_color(theme.secondary).line_clamp(2).child(a)))
-            .child(Button::new("project-refresh").small().ghost().label(if self.refreshing { "Refreshing…" } else { "Refresh" }).on_click(cx.listener(|p, _, _, cx| p.refresh(true, cx))))
+            .when_some(updated, |d, u| d.child(div().flex_none().text_size(px(11.)).text_color(theme.secondary.opacity(0.7)).child(u)))
+            .child(
+                Button::new("project-refresh")
+                    .small()
+                    .ghost()
+                    .icon(IconName::RefreshCw)
+                    .loading(self.refreshing)
+                    .disabled(self.refreshing)
+                    .tooltip("Refresh repos and pull requests")
+                    .on_click(cx.listener(|p, _, _, cx| p.refresh(true, cx))),
+            )
+            .child(Button::new("project-finder").small().ghost().icon(IconName::FolderOpen).tooltip("Show in Finder").on_click(move |_, _, cx| cx.reveal_path(Path::new(&p2))))
+            .child(Button::new("project-new-thread").small().label("New Thread").icon(IconName::Plus).on_click(cx.listener(|p, _, _, cx| p.new_thread_in(None, cx))))
             .child(div().flex().gap(px(2.)).child(Button::new("tab-overview").small().primary().label("Overview")).child(Button::new("tab-memory").small().ghost().label("Memory").on_click(move |_, _, cx| {
                 ws1.update(cx, |ws, cx| ws.open_memory(&project, cx))
             })))
@@ -276,6 +785,7 @@ impl ProjectPage {
             Some("BLOCKED") => Some("Blocked"),
             _ => None,
         };
+        let (u1, u2, head) = (url.clone(), url.clone(), pr.head.clone());
         div()
             .id(SharedString::from(format!("pr-{}", pr.link.id())))
             .flex()
@@ -284,6 +794,12 @@ impl ProjectPage {
             .px(px(10.))
             .hover(|d| d.bg(theme.selected))
             .on_click(move |_, _, cx| cx.open_url(&url))
+            .context_menu(move |menu, _, _| {
+                let (u1, u2, head) = (u1.clone(), u2.clone(), head.clone());
+                menu.item(PopupMenuItem::new("Open in Browser").icon(IconName::ExternalLink).on_click(move |_, _, cx| cx.open_url(&u1)))
+                    .item(PopupMenuItem::new("Copy Link").icon(IconName::Copy).on_click(move |_, _, cx| copy(u2.clone(), cx)))
+                    .item(PopupMenuItem::new("Copy Branch Name").on_click(move |_, _, cx| copy(head.clone(), cx)))
+            })
             .when_some(graph_el, |d, g| d.child(g))
             .when(graph.is_none(), |d| d.child(div().flex_none().w(px(22.)).flex().items_center().child(div().w(px(9.)).h(px(9.)).rounded_full().bg(dot))))
             .child(
@@ -314,17 +830,271 @@ impl ProjectPage {
             .into_any_element()
     }
 
+    /// Above a stack's PRs: which it is, how far along, and what can be done with it.
+    fn stack_header(&self, stack: &PullRequestStack, theme: &Theme, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let Some(core) = &self.core else { return div().into_any_element() };
+        let top = &stack.pull_request;
+        let all = stack.all();
+        let open: Vec<&PullRequest> = all.iter().filter(|p| p.is_open()).copied().collect();
+        let number = stack.number();
+        let clone = core.repo_for(top).cloned();
+        let github = top.remote().forge == Some(Forge::GitHub);
+        let title = match number {
+            None => format!("Stack of {}", all.len()),
+            Some(n) => {
+                let size = top.stack.as_ref().map_or(0, |s| s.size as usize).max(all.len());
+                let merged = all.iter().filter(|p| p.state == "merged").count();
+                if merged > 0 {
+                    format!("Stack #{n} · {merged} of {size} merged")
+                } else if open.len() < size {
+                    format!("Stack #{n} · {} of {size} open", open.len())
+                } else {
+                    format!("Stack #{n} · {size} PRs")
+                }
+            }
+        };
+        let sid = stack.id();
+        let mut actions = div().flex().items_center().gap(px(6.));
+        let not_installed = self.stacks_installed == Some(false);
+        if (number.is_some() || (github && !open.is_empty())) && not_installed {
+            actions = actions.child(self.install_button(cx));
+        } else if let Some(n) = number {
+            // Branches gh stack has locally with no PR yet: Submit opens them.
+            let local = core.local_stack(n, &top.remote()).cloned();
+            if let (Some(local), Some(repo)) = (&local, &clone) {
+                let pending = local.layers.iter().filter(|l| l.pull_request_number.is_none()).count();
+                if pending > 0 {
+                    let branches: Vec<String> = local.layers.iter().map(|l| l.branch.clone()).collect();
+                    let checkout = core.checkout_on_any_of(repo, &branches);
+                    let tip = if checkout.is_none() {
+                        "Check out one of the stack's branches to submit it".to_string()
+                    } else if pending == 1 {
+                        "Push the stack and open a PR for its new branch".to_string()
+                    } else {
+                        format!("Push the stack and open PRs for its {pending} new branches")
+                    };
+                    actions = actions.child(Button::new(SharedString::from(format!("submit-{sid}"))).xsmall().label("Submit").disabled(checkout.is_none()).tooltip(tip).on_click(cx.listener(move |p, _, window, cx| {
+                        if let Some(c) = checkout.clone() {
+                            p.submit_stack(c, window, cx);
+                        }
+                    })));
+                }
+            }
+            actions = actions.child(self.merge_control(stack, &open, clone.as_ref(), cx));
+            // More: Add Branch on Top (in the checkout on the top branch), Sync with GitHub.
+            let branches: Vec<String> = local.as_ref().map(|l| l.layers.iter().map(|l| l.branch.clone()).collect()).unwrap_or_else(|| all.iter().map(|p| p.head.clone()).collect());
+            let top_checkout = clone.as_ref().and_then(|r| branches.last().and_then(|b| core.checkout_on_any_of(r, std::slice::from_ref(b))));
+            let any_checkout = clone.as_ref().and_then(|r| core.checkout_on_any_of(r, &all.iter().map(|p| p.head.clone()).collect::<Vec<_>>()));
+            let page = cx.entity().downgrade();
+            actions = actions.child(Button::new(SharedString::from(format!("more-{sid}"))).xsmall().ghost().icon(IconName::Ellipsis).tooltip("More for this stack").dropdown_menu(move |menu, _, _| {
+                let (p1, p2) = (page.clone(), page.clone());
+                let (t, a) = (top_checkout.clone(), any_checkout.clone());
+                let (t2, a2) = (t.clone(), a.clone());
+                let menu = menu
+                    .item(PopupMenuItem::new("Add Branch on Top…").disabled(t.is_none()).on_click(move |_, window, cx| {
+                        if let Some(c) = t2.clone() {
+                            let _ = p1.update(cx, |p, cx| p.ask_branch_on_top(c, window, cx));
+                        }
+                    }))
+                    .item(PopupMenuItem::new("Sync with GitHub").icon(IconName::RefreshCw).disabled(a.is_none()).on_click(move |_, window, cx| {
+                        if let Some(c) = a2.clone() {
+                            let _ = p2.update(cx, |p, cx| p.sync_stack(c, window, cx));
+                        }
+                    }));
+                if t.is_none() || a.is_none() {
+                    menu.separator().label("Check out one of the stack's branches (its top one, to add) to use these")
+                } else {
+                    menu
+                }
+            }));
+        } else if github && !open.is_empty() {
+            // A stack only its branches know about: one click makes it one of GitHub's.
+            let tip = if !stack.is_line() {
+                "GitHub stacks are one line of PRs; this one forks".to_string()
+            } else if clone.is_none() {
+                format!("This runs gh stack in a clone of {}; there isn't one in this project", top.remote().name())
+            } else {
+                "Make these PRs one of GitHub's stacked pull requests, bottom up, so they merge as a stack. Branches and PRs stay as they are.".to_string()
+            };
+            let urls: Vec<String> = all.iter().map(|p| p.link.url.clone()).collect();
+            let repo = clone.as_ref().map(|r| r.path.clone());
+            actions = actions.child(Button::new(SharedString::from(format!("link-{sid}"))).xsmall().label("Make GitHub Stack").disabled(!stack.is_line() || repo.is_none()).tooltip(tip).on_click(cx.listener(move |p, _, window, cx| {
+                if let Some(r) = repo.clone() {
+                    p.link_stack(urls.clone(), r, window, cx);
+                }
+            })));
+        }
+        div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .px(px(12.))
+            .pt(px(8.))
+            .pb(px(2.))
+            .child(div().flex_1().min_w_0().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.secondary).truncate().child(title))
+            .child(actions)
+            .into_any_element()
+    }
+
+    fn install_button(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        Button::new("install-gh-stack")
+            .xsmall()
+            .label("Install gh stack")
+            .loading(self.installing)
+            .disabled(self.installing || self.tools.stacks.is_none())
+            .tooltip(format!("Stacks are merged and submitted with GitHub's gh stack extension: {}", yh_core::github::STACK_INSTALL_COMMAND))
+            .on_click(cx.listener(|p, _, window, cx| p.install_stacks(window, cx)))
+            .into_any_element()
+    }
+
+    /// Merge, Merge #N, or Merge Stack with Merge Up to #N in its menu; disabled with why.
+    fn merge_control(&self, stack: &PullRequestStack, open: &[&PullRequest], clone: Option<&WorkspaceRepo>, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let sid = stack.id();
+        if open.is_empty() {
+            return div().into_any_element();
+        }
+        let mergeable: Vec<&PullRequest> = open.iter().take_while(|p| !p.draft).copied().collect();
+        let disabled = |tip: String| Button::new(SharedString::from(format!("merge-{sid}"))).xsmall().label("Merge").disabled(true).tooltip(tip).into_any_element();
+        if clone.is_none() {
+            return disabled(format!("Merging runs gh stack in a clone of {}; there isn't one in this project", stack.pull_request.remote().name()));
+        }
+        if mergeable.is_empty() {
+            return disabled("The bottom PR is a draft: GitHub won't merge it".into());
+        }
+        let whole = self.merge_request(stack, None);
+        if mergeable.len() == 1 {
+            let label = if open.len() == 1 { "Merge".to_string() } else { format!("Merge #{}", mergeable[0].number()) };
+            return Button::new(SharedString::from(format!("merge-{sid}")))
+                .xsmall()
+                .primary()
+                .label(label)
+                .tooltip("Squash and merge on GitHub")
+                .on_click(cx.listener(move |p, _, window, cx| {
+                    if let Some(r) = whole.clone() {
+                        p.request_merge(r, window, cx);
+                    }
+                }))
+                .into_any_element();
+        }
+        let label = if mergeable.len() == open.len() { "Merge Stack".to_string() } else { format!("Merge {}", mergeable.len()) };
+        let tip = if mergeable.len() == open.len() { "Squash and merge the whole stack on GitHub, bottom up" } else { "Squash and merge the layers below the first draft" };
+        let partial: Vec<(u64, Option<MergeRequest>)> = mergeable[..mergeable.len() - 1].iter().map(|p| (p.number(), self.merge_request(stack, Some(p.number())))).collect();
+        let page = cx.entity().downgrade();
+        div()
+            .flex()
+            .child(Button::new(SharedString::from(format!("merge-{sid}"))).xsmall().primary().label(label).tooltip(tip).on_click(cx.listener(move |p, _, window, cx| {
+                if let Some(r) = whole.clone() {
+                    p.request_merge(r, window, cx);
+                }
+            })))
+            .child(Button::new(SharedString::from(format!("merge-menu-{sid}"))).xsmall().ghost().icon(IconName::ChevronDown).tooltip("Merge part of the stack").dropdown_menu(move |mut menu: PopupMenu, _, _| {
+                for (n, r) in &partial {
+                    let (page, r) = (page.clone(), r.clone());
+                    menu = menu.item(PopupMenuItem::new(format!("Merge Up to #{n}")).on_click(move |_, window, cx| {
+                        if let Some(r) = r.clone() {
+                            let _ = page.update(cx, |p, cx| p.request_merge(r, window, cx));
+                        }
+                    }));
+                }
+                menu
+            }))
+            .into_any_element()
+    }
+
     /// One card a stack (a lone PR is a stack of one), drawn as a staircase.
     fn stack_card(&self, stack: &PullRequestStack, theme: &Theme, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let graph = StackGraph::layout(stack, Lanes::Depth);
         let is_stack = stack.is_stacked() || stack.number().is_some();
         let mut card = div().flex().flex_col().py(px(3.)).rounded(px(10.)).bg(theme.card).border_1().border_color(theme.separator);
         if is_stack {
-            let top = &stack.pull_request;
-            let open: Vec<u64> = stack.all().iter().filter(|p| p.is_open()).map(|p| p.link.number).collect();
-            let repo_path = self.core.as_ref().and_then(|c| c.repo_for(top).map(|r| r.path.clone()));
-            let number = stack.number();
-            card = card.child(
+            card = card.child(self.stack_header(stack, theme, cx));
+        }
+        for row in &graph.rows {
+            card = card.child(self.pull_row(&row.pull_request, is_stack.then_some((row, graph.lane_count)), theme));
+        }
+        // GitHub stack branches gh stack has locally, no PR yet: on top of the PRs.
+        if let (Some(core), Some(n)) = (&self.core, stack.number()) {
+            if let Some(local) = core.local_stack(n, &stack.pull_request.remote()) {
+                let below = graph.rows.len();
+                for (i, l) in local.layers.iter().enumerate().filter(|(_, l)| l.pull_request_number.is_none()) {
+                    card = card.child(unsubmitted_row(&l.branch, (i + 1).max(below + 1), theme));
+                }
+            }
+        }
+        card.into_any_element()
+    }
+
+    fn pulls_section(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let Some(core) = &self.core else { return div().into_any_element() };
+        if !core.has_forge_remotes() && core.pulls.errors.is_empty() {
+            return div().into_any_element();
+        }
+        let sections = core.pull_request_sections();
+        let mut column = div().flex().flex_col().gap(px(8.)).child(section_title("Pull Requests", core.pull_requests().len(), theme));
+        // Repos the signed-in account can't see, so their PRs are missing from the list.
+        let unreachable = core.pulls.unreachable.len();
+        let forge_remotes: HashSet<_> = core.remotes.values().filter(|r| r.forge.is_some()).collect();
+        if unreachable > 0 {
+            let total = forge_remotes.len();
+            let forges: HashSet<_> = core.pulls.unreachable.iter().filter_map(|r| r.forge).collect();
+            let who = if forges.len() == 1 { forges.iter().next().and_then(|f| core.pulls.accounts.get(f)).map(|a| format!("@{a}")) } else { None }.unwrap_or_else(|| "your account".into());
+            let repos = if unreachable == total {
+                if unreachable == 1 { "This repo isn't".to_string() } else { "These repos aren't".to_string() }
+            } else {
+                format!("{unreachable} of {total} repos aren't")
+            };
+            column = column.child(div().text_size(px(12.)).text_color(theme.secondary).child(format!("{repos} visible to {who}, so their pull requests can't be shown.")));
+        }
+        for (forge, e) in &core.pulls.errors {
+            let install = e.starts_with("Install").then(|| forge.install_url().to_string());
+            column = column.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .p(px(12.))
+                    .rounded(px(10.))
+                    .bg(orange().opacity(0.08))
+                    .border_1()
+                    .border_color(orange().opacity(0.3))
+                    .child(gpui_kit::component::Icon::new(IconName::TriangleAlert).text_color(orange()))
+                    .child(div().flex_1().text_size(px(12.)).text_color(theme.secondary).child(e.clone()))
+                    .when_some(install, |d, url| d.child(Button::new(SharedString::from(format!("get-{}", forge.cli_name()))).xsmall().ghost().label(format!("Get {}", forge.cli_name())).on_click(move |_, _, cx| cx.open_url(&url)))),
+            );
+        }
+        let empty = sections.needs_review.is_empty() && sections.mine.is_empty() && sections.others.is_empty();
+        if empty && core.pulls_updated_at.is_some() && core.pulls.errors.is_empty() && unreachable < forge_remotes.len().max(1) {
+            column = column.child(div().text_color(theme.secondary).child("No open pull requests."));
+        } else if empty && self.refreshing {
+            column = column.child(div().text_color(theme.secondary).child("Loading pull requests…"));
+        }
+        // Stacks made with gh stack, not on GitHub yet.
+        let unsubmitted: Vec<_> = core.unsubmitted_stacks().into_iter().filter(|(_, s)| s.number.is_none()).collect();
+        if !unsubmitted.is_empty() {
+            column = column.child(div().pt(px(6.)).child(group_label("Not Submitted", unsubmitted.len(), theme)));
+        }
+        for (repo, local) in unsubmitted {
+            let branches: Vec<String> = local.layers.iter().map(|l| l.branch.clone()).collect();
+            let checkout = core.checkout_on_any_of(repo, &branches);
+            let sid = format!("local:{}:{}", repo.id(), local.id());
+            let action = if self.stacks_installed == Some(false) {
+                self.install_button(cx)
+            } else {
+                let tip = if checkout.is_none() { "Check out one of the stack's branches to submit it".to_string() } else { format!("Push its branches and open a PR for each, into {}", local.trunk) };
+                Button::new(SharedString::from(format!("submit-{sid}")))
+                    .xsmall()
+                    .primary()
+                    .label("Submit")
+                    .disabled(checkout.is_none())
+                    .tooltip(tip)
+                    .on_click(cx.listener(move |p, _, window, cx| {
+                        if let Some(c) = checkout.clone() {
+                            p.submit_stack(c, window, cx);
+                        }
+                    }))
+                    .into_any_element()
+            };
+            let mut card = div().flex().flex_col().pb(px(3.)).rounded(px(10.)).bg(theme.card).border_1().border_color(theme.separator).child(
                 div()
                     .flex()
                     .items_center()
@@ -332,211 +1102,496 @@ impl ProjectPage {
                     .px(px(12.))
                     .pt(px(8.))
                     .pb(px(2.))
-                    .text_size(px(11.))
-                    .text_color(theme.secondary)
-                    .child(div().flex_1().child(format!("Stack{} · {} PRs into {}", number.map(|n| format!(" {n}")).unwrap_or_default(), stack.all().len(), top.base)))
-                    // GitHub's own stacks (gh stack) merge from the bottom up to a layer.
-                    .when(number.is_some() && !open.is_empty() && repo_path.is_some(), |d| {
-                        let repo = repo_path.clone().unwrap_or_default();
-                        d.child(Button::new(SharedString::from(format!("merge-stack-{}", stack.id()))).xsmall().ghost().label("Merge Stack").on_click(cx.listener(move |p, _, _, cx| p.merge_stack(number, None, repo.clone(), cx))))
-                    }),
+                    .child(div().flex_1().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.secondary).child(format!("{} · stack of {}, not submitted", repo.name(), local.layers.len())))
+                    .child(action),
             );
+            for (i, l) in local.layers.iter().enumerate() {
+                card = card.child(unsubmitted_row(&l.branch, i + 1, theme));
+            }
+            column = column.child(card);
         }
-        for row in &graph.rows {
-            card = card.child(self.pull_row(&row.pull_request, is_stack.then_some((row, graph.lane_count)), theme));
-        }
-        card.into_any_element()
-    }
-
-    fn pulls_section(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
-        let Some(core) = &self.core else { return div().into_any_element() };
-        let sections = core.pull_request_sections();
-        let mut column = div().flex().flex_col().gap(px(8.));
-        let errors: Vec<String> = core.pulls.errors.values().cloned().collect();
-        for e in errors {
-            column = column.child(div().text_size(px(12.)).text_color(theme.warning).child(e));
-        }
-        for (title, stacks) in [("Needs your review", &sections.needs_review), ("Yours", &sections.mine), ("Others", &sections.others)] {
+        for (title, stacks) in [("Needs Your Review", &sections.needs_review), ("Yours", &sections.mine)] {
             if stacks.is_empty() {
                 continue;
             }
-            column = column.child(div().pt(px(8.)).text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.secondary).child(format!("{} · {}", title.to_uppercase(), stacks.iter().map(|s| s.all().len()).sum::<usize>())));
+            column = column.child(div().pt(px(6.)).child(group_label(title, stacks.iter().map(|s| s.all().len()).sum(), theme)));
             for s in stacks.iter() {
                 column = column.child(self.stack_card(s, theme, cx));
             }
         }
-        // Stacks made with gh stack, not on GitHub yet.
-        for (repo, local) in core.unsubmitted_stacks() {
-            let branches: Vec<String> = local.layers.iter().map(|l| l.branch.clone()).collect();
-            let checkout = core.checkout_on_any_of(repo, &branches).unwrap_or(repo.path.clone());
-            let (c1, c2) = (checkout.clone(), checkout);
+        if !sections.others.is_empty() {
+            // Busy repos have plenty of PRs that aren't yours: out of the way unless there's nothing else.
+            let expanded = self.show_others || (sections.needs_review.is_empty() && sections.mine.is_empty());
             column = column.child(
                 div()
-                    .p(px(12.))
-                    .rounded(px(10.))
-                    .border_1()
-                    .border_color(theme.separator)
+                    .id("others-toggle")
+                    .pt(px(6.))
                     .flex()
                     .items_center()
-                    .gap(px(8.))
-                    .child(div().flex_1().flex().flex_col().child(div().font_weight(FontWeight::MEDIUM).child(format!("A stack in {}, not on GitHub yet", repo.name()))).child(div().text_size(px(11.)).font_family(MONO).text_color(theme.secondary).child(format!("{} ← {}", local.trunk, branches.join(" ← ")))))
-                    .child(Button::new(SharedString::from(format!("sync-{}", local.id()))).xsmall().ghost().label("Sync").on_click(cx.listener(move |p, _, _, cx| p.sync_stack(c1.clone(), cx))))
-                    .child(Button::new(SharedString::from(format!("submit-{}", local.id()))).xsmall().primary().label("Submit").on_click(cx.listener(move |p, _, _, cx| p.submit_stack(c2.clone(), cx)))),
+                    .gap(px(4.))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|p, _, _, cx| {
+                        p.show_others = !p.show_others;
+                        cx.notify();
+                    }))
+                    .child(gpui_kit::component::Icon::new(if expanded { IconName::ChevronDown } else { IconName::ChevronRight }).size(px(12.)).text_color(theme.secondary))
+                    .child(group_label("Everyone Else", sections.others.iter().map(|s| s.all().len()).sum(), theme)),
             );
+            if expanded {
+                for s in sections.others.iter() {
+                    column = column.child(self.stack_card(s, theme, cx));
+                }
+            }
         }
-        if sections.needs_review.is_empty() && sections.mine.is_empty() && sections.others.is_empty() && core.has_forge_remotes() && core.pulls_updated_at.is_some() {
-            column = column.child(div().text_color(theme.secondary).child("No open pull requests."));
+        column.child(div().h(px(16.))).into_any_element()
+    }
+
+    /// The threads working in a checkout, as one pill: the title of a single active one, else
+    /// how many are active and settled. Click for the list, and open one from it.
+    fn thread_chips(&self, key: &str, checkout: &str, theme: &Theme, cx: &App) -> Option<gpui_kit::AnyElement> {
+        let ids = self.threads_here.get(checkout)?;
+        let ws = self.workspace.read(cx);
+        let mut active = vec![];
+        let mut settled = vec![];
+        for id in ids {
+            let Some(t) = ws.thread(id) else { continue };
+            let t = t.read(cx);
+            let row = (id.clone(), t.title.clone(), t.running);
+            if t.meta.settled_at.is_some() { settled.push(row) } else { active.push(row) }
         }
-        column.into_any_element()
+        if active.is_empty() && settled.is_empty() {
+            return None;
+        }
+        let only_settled = active.is_empty();
+        let label = if active.len() == 1 && settled.is_empty() {
+            active[0].1.chars().take(28).collect::<String>()
+        } else {
+            [(active.len(), "active"), (settled.len(), "settled")].iter().filter(|(n, _)| *n > 0).map(|(n, w)| format!("{n} {w}")).collect::<Vec<_>>().join(" · ")
+        };
+        let working = active.iter().any(|(_, _, r)| *r);
+        let tip = [(active.len(), "active thread"), (settled.len(), "settled")]
+            .iter()
+            .filter(|(n, _)| *n > 0)
+            .map(|(n, w)| if *w == "settled" { format!("{n} settled") } else { format!("{n} {w}{}", if *n == 1 { "" } else { "s" }) })
+            .collect::<Vec<_>>()
+            .join(", ")
+            + " work here. Click to see them.";
+        let ws = self.workspace.downgrade();
+        let accent = theme.accent;
+        Some(
+            Button::new(SharedString::from(format!("threads-{key}")))
+                .xsmall()
+                .ghost()
+                .label(label)
+                .when(working, |b| b.child(div().w(px(6.)).h(px(6.)).rounded_full().bg(accent)))
+                .when(only_settled, |b| b.opacity(0.6))
+                .tooltip(tip)
+                .dropdown_menu(move |mut menu, _, _| {
+                    for (title, rows) in [("Active", &active), ("Settled", &settled)] {
+                        if rows.is_empty() {
+                            continue;
+                        }
+                        menu = menu.label(title);
+                        for (id, name, running) in rows.iter() {
+                            let (ws, id) = (ws.clone(), id.clone());
+                            let text = if *running { format!("{name} (working)") } else { name.clone() };
+                            menu = menu.item(PopupMenuItem::new(text).on_click(move |_, _, cx| {
+                                let _ = ws.update(cx, |ws, cx| ws.select(&id, cx));
+                            }));
+                        }
+                    }
+                    menu
+                })
+                .into_any_element(),
+        )
     }
 
     fn repos_section(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let Some(core) = &self.core else { return div().into_any_element() };
-        let mut column = div().flex().flex_col().gap(px(6.)).child(div().pt(px(16.)).text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.secondary).child("REPOSITORIES"));
-        // The threads working in each folder, from where they run.
-        let threads: Vec<(String, String, String)> = self
-            .workspace
-            .read(cx)
-            .threads
-            .iter()
-            .filter_map(|t| {
-                let t = t.read(cx);
-                (t.meta.project_id == self.project && t.meta.settled_at.is_none()).then(|| (t.id().to_string(), t.title.clone(), self.workspace.read(cx).folder_of(t)))
-            })
-            .collect();
-        let mut repos: Vec<&yh_core::workspace::WorkspaceRepo> = core.repos().iter().collect();
-        repos.sort_by_key(|r| (!r.is_root(), r.name()));
+        let mut repos: Vec<&WorkspaceRepo> = core.cloned_repos();
+        // Most used first (by threads working in them), then by name; a shell's own repo on top.
+        let shell = core.layout.as_ref().is_some_and(|l| l.kind == LayoutKind::Shell);
+        let usage = |r: &WorkspaceRepo| self.threads_here.get(&r.real_path()).map_or(0, Vec::len) + core.worktrees_of(r).iter().map(|w| self.threads_here.get(&w.path).map_or(0, Vec::len)).sum::<usize>();
+        repos.sort_by_key(|r| (!(shell && r.is_root()), std::cmp::Reverse(usage(r)), r.name().to_lowercase()));
+        let mut column = div().flex().flex_col().gap(px(6.)).child(section_title("Repositories", repos.len(), theme));
+        let page = cx.entity().downgrade();
         for repo in repos {
-            let id = repo.id().to_string();
-            let status = core.status.statuses.get(&id);
-            let worktrees: Vec<_> = core.worktrees_of(repo).iter().filter(|w| !w.is_main).cloned().collect();
-            let open = self.open_repos.contains(&id) || worktrees.len() <= 3;
-            let prs = core.pull_requests_for(repo).len();
-            let mut detail = vec![];
-            if let Some(s) = status {
-                detail.push(s.branch.clone().unwrap_or_else(|| "no branch".into()));
-                if s.is_dirty() {
-                    detail.push(format!("{} changed", s.staged + s.modified + s.untracked));
-                }
-                if s.ahead > 0 {
-                    detail.push(format!("{} to push", s.ahead));
-                }
-                if s.behind > 0 {
-                    detail.push(format!("{} behind", s.behind));
-                }
-            }
-            if !repo.is_cloned {
-                detail.push("not cloned".into());
-            }
-            if prs > 0 {
-                detail.push(format!("{prs} open PR{}", if prs == 1 { "" } else { "s" }));
-            }
-            let here: Vec<&(String, String, String)> = threads.iter().filter(|(_, _, f)| *f == repo.real_path() || *f == repo.path.to_string_lossy()).collect();
-            let (toggle_id, add_id) = (id.clone(), id.clone());
-            let mut card = div().flex().flex_col().rounded(px(10.)).bg(theme.card).border_1().border_color(theme.separator).child(
+            column = column.child(self.repo_card(repo, &page, theme, cx));
+        }
+        let uncloned = core.uncloned_repos();
+        if !uncloned.is_empty() {
+            let open = self.show_uncloned;
+            column = column.child(
                 div()
-                    .id(SharedString::from(format!("repo-{id}")))
+                    .id("uncloned-toggle")
+                    .pt(px(14.))
                     .flex()
                     .items_center()
-                    .gap(px(8.))
-                    .px(px(12.))
-                    .py(px(8.))
-                    .child(div().flex_1().min_w_0().flex().flex_col().child(div().font_weight(FontWeight::MEDIUM).child(repo.name())).child(div().text_size(px(11.)).text_color(theme.secondary).child(detail.join(" · "))))
-                    .when(!here.is_empty(), |d| d.child(chip(&if here.len() == 1 { here[0].1.chars().take(28).collect::<String>() } else { format!("{} threads", here.len()) }, theme.accent)))
-                    .when(worktrees.len() > 3, |d| {
-                        d.child(Button::new(SharedString::from(format!("fold-{id}"))).xsmall().ghost().label(if open { "Hide worktrees".to_string() } else { format!("{} worktrees", worktrees.len()) }).on_click(cx.listener(move |p, _, _, cx| {
-                            if !p.open_repos.remove(&toggle_id) {
-                                p.open_repos.insert(toggle_id.clone());
-                            }
-                            cx.notify();
-                        })))
-                    })
-                    .when(repo.is_cloned, |d| {
-                        d.child(Button::new(SharedString::from(format!("add-wt-{id}"))).xsmall().ghost().label("New Worktree…").on_click(cx.listener(move |p, _, window, cx| {
-                            let input = cx.new(|cx| InputState::new(window, cx).placeholder("Branch: an existing one, or a new name"));
-                            p.new_worktree = Some((add_id.clone(), input));
-                            cx.notify();
-                        })))
-                    }),
+                    .gap(px(4.))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|p, _, _, cx| {
+                        p.show_uncloned = !p.show_uncloned;
+                        cx.notify();
+                    }))
+                    .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Referenced by this workspace (for example in its compose file) but not on disk yet").build(window, cx))
+                    .child(gpui_kit::component::Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).size(px(12.)).text_color(theme.secondary))
+                    .child(group_label("Not Cloned", uncloned.len(), theme)),
             );
-            if let Some((for_repo, input)) = &self.new_worktree {
-                if *for_repo == id {
-                    let (rid, inp) = (id.clone(), input.clone());
-                    card = card.child(
+            if open {
+                let mut grid = div().flex().flex_wrap().gap(px(6.)).pl(px(18.));
+                for r in uncloned {
+                    grid = grid.child(div().w(px(190.)).text_size(px(12.)).text_color(theme.secondary).truncate().child(r.name()));
+                }
+                column = column.child(grid);
+            }
+        }
+        column.into_any_element()
+    }
+
+    fn repo_card(&self, repo: &WorkspaceRepo, page: &WeakEntity<Self>, theme: &Theme, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let Some(core) = &self.core else { return div().into_any_element() };
+        let id = repo.id().to_string();
+        let status = core.status.statuses.get(&id);
+        let remote = core.remotes.get(&id).cloned();
+        let worktrees: Vec<Worktree> = core.worktrees_of(repo).iter().filter(|w| !w.is_main).cloned().collect();
+        let open = (worktrees.len() <= 3) != self.toggled_repos.contains(&id);
+        let prs = core.pull_requests_for(repo).len();
+        let unreachable = remote.as_ref().is_some_and(|r| core.pulls.unreachable.contains(r));
+        let forge_name = remote.as_ref().map(|r| r.forge.map_or(r.host.clone(), |f| f.display_name().to_string()));
+        let web = remote.as_ref().map(|r| r.web_url());
+        let needs_look = worktrees.iter().any(|w| w.is_missing || w.is_detached() || core.status.worktree_statuses.get(&w.path).is_some_and(|s| s.is_dirty()));
+        let folded_summary = {
+            let mut parts = vec![if worktrees.len() == 1 { "1 worktree".to_string() } else { format!("{} worktrees", worktrees.len()) }];
+            let changed = worktrees.iter().filter(|w| !w.is_missing && core.status.worktree_statuses.get(&w.path).is_some_and(|s| s.is_dirty())).count();
+            let detached = worktrees.iter().filter(|w| w.is_detached() && !w.is_missing).count();
+            let finished = worktrees.iter().filter(|w| core.is_finished(w, repo)).count();
+            let missing = worktrees.iter().filter(|w| w.is_missing).count();
+            for (n, what) in [(changed, "with changes"), (detached, "not on a branch"), (finished, "done with"), (missing, "missing")] {
+                if n > 0 {
+                    parts.push(format!("{n} {what}"));
+                }
+            }
+            parts.join(" · ") + ". Click to show them."
+        };
+        let branch_text = match status {
+            None => "—".to_string(),
+            Some(s) => match (&s.branch, &s.head_oid) {
+                (Some(b), _) => b.clone(),
+                (None, Some(oid)) => format!("Detached at {}", &oid[..oid.len().min(7)]),
+                (None, None) => "No commits yet".into(),
+            },
+        };
+        let (toggle1, toggle2) = (fold_listener(id.clone(), cx), fold_listener(id.clone(), cx));
+        let menu = {
+            let (page, repo) = (page.clone(), repo.clone());
+            let (web, forge_name, branch) = (web.clone(), forge_name.clone(), status.and_then(|s| s.branch.clone()));
+            let github = remote.as_ref().and_then(|r| r.forge) == Some(Forge::GitHub);
+            let has_missing = worktrees.iter().any(|w| w.is_missing);
+            move |menu: PopupMenu, _: &mut Window, _: &mut Context<PopupMenu>| {
+                let path = repo.path.to_string_lossy().into_owned();
+                let (p1, p2, p3) = (path.clone(), path.clone(), path.clone());
+                let mut menu = menu.item(PopupMenuItem::new("Show in Finder").icon(IconName::Folder).on_click(move |_, _, cx| cx.reveal_path(Path::new(&p1))));
+                if let (Some(w), Some(f)) = (web.clone(), forge_name.clone()) {
+                    menu = menu.item(PopupMenuItem::new(format!("Open on {f}")).icon(IconName::ExternalLink).on_click(move |_, _, cx| cx.open_url(&w)));
+                }
+                menu = menu
+                    .item(PopupMenuItem::new("Open in Terminal").icon(IconName::SquareTerminal).on_click(move |_, _, _| open_in_terminal(&p2)))
+                    .item(PopupMenuItem::new("Copy Path").icon(IconName::Copy).on_click(move |_, _, cx| copy(p3.clone(), cx)));
+                if let Some(b) = branch.clone() {
+                    menu = menu.item(PopupMenuItem::new("Copy Branch Name").on_click(move |_, _, cx| copy(b.clone(), cx)));
+                }
+                let (pg1, pg2, pg3, pg4) = (page.clone(), page.clone(), page.clone(), page.clone());
+                let (r1, r2, r3) = (repo.clone(), repo.clone(), repo.clone());
+                menu = menu.separator().item(PopupMenuItem::new("New Worktree…").icon(IconName::Plus).on_click(move |_, window, cx| {
+                    let _ = pg1.update(cx, |p, cx| p.open_new_worktree(r1.clone(), window, cx));
+                }));
+                if github {
+                    menu = menu.item(PopupMenuItem::new("New Stack from Branches…").on_click(move |_, window, cx| {
+                        let _ = pg2.update(cx, |p, cx| p.open_new_stack(r2.clone(), window, cx));
+                    }));
+                }
+                let here = path.clone();
+                menu = menu.item(PopupMenuItem::new("New Thread Here").on_click(move |_, _, cx| {
+                    let _ = pg3.update(cx, |p, cx| p.new_thread_in(Some(here.clone()), cx));
+                }));
+                if has_missing {
+                    menu = menu.item(PopupMenuItem::new("Forget Missing Worktrees").icon(IconName::Delete).on_click(move |_, window, cx| {
+                        let _ = pg4.update(cx, |p, cx| p.prune(r3.clone(), window, cx));
+                    }));
+                }
+                menu
+            }
+        };
+        let threads = self.thread_chips(&id, &repo.real_path(), theme, cx);
+        let refreshing = self.refreshing;
+        let header = div()
+            .id(SharedString::from(format!("repo-{id}")))
+            .group("repo-row")
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .px(px(12.))
+            .py(px(8.))
+            .context_menu(menu)
+            .child(
+                div().flex_none().w(px(14.)).when(!worktrees.is_empty(), |d| {
+                    d.child(
+                        div()
+                            .id(SharedString::from(format!("fold-{id}")))
+                            .cursor_pointer()
+                            .on_click(toggle1)
+                            .tooltip({
+                                let t: SharedString = if open { "Hide its worktrees".into() } else { format!("Show its {} worktree{}", worktrees.len(), if worktrees.len() == 1 { "" } else { "s" }).into() };
+                                move |window, cx| gpui_kit::component::tooltip::Tooltip::new(t.clone()).build(window, cx)
+                            })
+                            .child(gpui_kit::component::Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).size(px(12.)).text_color(theme.secondary)),
+                    )
+                }),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .child(
                         div()
                             .flex()
                             .items_center()
                             .gap(px(6.))
-                            .px(px(12.))
-                            .pb(px(8.))
-                            .child(div().flex_1().child(Input::new(input).small()))
-                            .child(Button::new("wt-cancel").xsmall().ghost().label("Cancel").on_click(cx.listener(|p, _, _, cx| {
-                                p.new_worktree = None;
-                                cx.notify();
-                            })))
-                            .child(Button::new("wt-add").xsmall().primary().label("Add").on_click(cx.listener(move |p, _, _, cx| {
-                                let branch = inp.read(cx).value().trim().to_string();
-                                if !branch.is_empty() {
-                                    p.add_worktree(rid.clone(), branch, cx);
-                                }
-                            }))),
-                    );
-                }
+                            .child(div().min_w_0().truncate().font_weight(FontWeight::MEDIUM).child(repo.name()))
+                            .when(unreachable, |d| {
+                                let tip: SharedString = format!("{} couldn't find this repo with your account", forge_name.clone().unwrap_or_else(|| "The host".into())).into();
+                                d.child(div().id("unreachable").text_size(px(10.)).text_color(theme.secondary.opacity(0.7)).child("not found").tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)))
+                            })
+                            .when(!open && !worktrees.is_empty(), |d| {
+                                let tip: SharedString = folded_summary.clone().into();
+                                d.child(
+                                    div()
+                                        .id(SharedString::from(format!("wt-count-{id}")))
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(3.))
+                                        .px(px(6.))
+                                        .rounded(px(8.))
+                                        .bg(theme.selected)
+                                        .text_size(px(11.))
+                                        .text_color(theme.secondary)
+                                        .cursor_pointer()
+                                        .on_click(toggle2)
+                                        .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
+                                        .child(format!("{} worktree{}", worktrees.len(), if worktrees.len() == 1 { "" } else { "s" }))
+                                        .when(needs_look, |d| d.child(div().w(px(5.)).h(px(5.)).rounded_full().bg(orange()))),
+                                )
+                            }),
+                    )
+                    .child(div().text_size(px(11.)).font_family(MONO).text_color(theme.secondary).truncate().child(branch_text)),
+            )
+            .when_some(threads, |d, t| d.child(t))
+            .when_some(status.and_then(|s| sync_label(s, theme)), |d, l| d.child(l))
+            .when_some(status.and_then(|s| changes_label(s, theme)), |d, l| d.child(l))
+            .when(status.is_none() && refreshing, |d| d.child(div().text_size(px(11.)).text_color(theme.secondary).child("…")))
+            .when(prs > 0, |d| d.child(chip(&format!("{prs} PR{}", if prs == 1 { "" } else { "s" }), theme.secondary)))
+            .when_some(web.zip(forge_name), |d, (w, f)| {
+                d.child(div().invisible().group_hover("repo-row", |s| s.visible()).child(Button::new(SharedString::from(format!("web-{id}"))).xsmall().ghost().icon(IconName::ExternalLink).tooltip(format!("Open on {f}")).on_click(move |_, _, cx| cx.open_url(&w))))
+            });
+        let mut card = div().flex().flex_col().rounded(px(10.)).bg(theme.card).border_1().border_color(theme.separator).child(header);
+        if open {
+            for wt in &worktrees {
+                card = card.child(self.worktree_row(wt, repo, page, theme, cx));
             }
-            if open {
-                for wt in &worktrees {
-                    let st = core.status.worktree_statuses.get(&wt.path);
-                    let pr = core.pull_request_for(wt, repo);
-                    let risk = core.removal_risk(wt, repo);
-                    let here: Vec<&(String, String, String)> = threads.iter().filter(|(_, _, f)| *f == wt.path || f.starts_with(&format!("{}/", wt.path))).collect();
-                    let home = std::env::var("HOME").unwrap_or_default();
-                    let shown_path = wt.path.strip_prefix(&home).map(|p| format!("~{p}")).unwrap_or(wt.path.clone());
-                    let mut bits = vec![wt.branch.clone().unwrap_or_else(|| "no branch".into())];
-                    if wt.is_missing {
-                        bits.push("folder missing".into());
-                    }
-                    if let Some(s) = st.filter(|s| s.is_dirty()) {
-                        bits.push(format!("{} changed", s.staged + s.modified + s.untracked));
-                    }
-                    let (w1, r1) = (wt.clone(), repo.path.clone());
-                    let force = risk != RemovalRisk::None;
-                    let (label, tip) = match &risk {
-                        RemovalRisk::None => ("Remove", "Nothing in it that isn't elsewhere.".to_string()),
-                        RemovalRisk::KeepsWork(why) => ("Remove…", why.clone()),
-                        RemovalRisk::LosesWork(why) => ("Remove (loses work)", why.clone()),
-                    };
-                    card = card.child(
+        }
+        card.into_any_element()
+    }
+
+    /// A linked worktree under its repo: where it is, its branch (or that it's on none), what's
+    /// in it, its PR, the threads working in it, and Remove (asking first when work's at stake).
+    fn worktree_row(&self, wt: &Worktree, repo: &WorkspaceRepo, page: &WeakEntity<Self>, theme: &Theme, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let Some(core) = &self.core else { return div().into_any_element() };
+        let st = core.status.worktree_statuses.get(&wt.path);
+        let pr = core.pull_request_for(wt, repo).cloned();
+        let risk = core.removal_risk(wt, repo);
+        let finished = core.is_finished(wt, repo);
+        let no_work = core.has_no_work(wt, repo);
+        let base = core.status.default_branches.get(repo.id()).cloned().unwrap_or_else(|| "main".into());
+        let base = base.strip_prefix("origin/").unwrap_or(&base).to_string();
+        let name = Path::new(&wt.path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        // Inside the project: relative; elsewhere: with ~ for your home folder.
+        let location = {
+            let folder = Path::new(&wt.path).parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+            let root = core.root.to_string_lossy().into_owned();
+            if folder == root {
+                String::new()
+            } else if let Some(rest) = folder.strip_prefix(&format!("{root}/")) {
+                format!("{rest}/")
+            } else {
+                format!("{}/", tilde(&folder))
+            }
+        };
+        let branch: gpui_kit::AnyElement = match &wt.branch {
+            Some(b) => div().text_size(px(11.)).font_family(MONO).text_color(theme.secondary).truncate().child(b.clone()).into_any_element(),
+            None => {
+                let oid = wt.head_oid.as_deref().map(|o| format!(" · {}", &o[..o.len().min(7)])).unwrap_or_default();
+                div()
+                    .id(SharedString::from(format!("detached-{}", wt.path)))
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .text_size(px(11.))
+                    .font_family(MONO)
+                    .text_color(orange())
+                    .child(gpui_kit::component::Icon::new(IconName::TriangleAlert).size(px(10.)))
+                    .child(format!("Not on a branch{oid}"))
+                    .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("HEAD is detached: new commits here aren't on any branch, and are easy to lose. Check out or create a branch in it.").build(window, cx))
+                    .into_any_element()
+            }
+        };
+        let state: Option<gpui_kit::AnyElement> = if wt.is_missing {
+            Some(div().id("missing").child(state_badge("Folder missing", orange(), theme)).tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Its folder was moved or deleted. Forget Missing Worktrees (on the repo) cleans it up.").build(window, cx)).into_any_element())
+        } else if let Some(s) = st {
+            if finished {
+                let text = if s.upstream_gone { "Remote branch deleted".to_string() } else { format!("Merged into {base}") };
+                Some(div().id("landed").child(state_badge(text, green(), theme)).tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Its work has landed. If nothing in it is still needed, it can be removed.").build(window, cx)).into_any_element())
+            } else if no_work && !s.is_dirty() {
+                let tip: SharedString = format!("Its branch points at a commit of {base}: nothing has been committed on it").into();
+                Some(div().id("no-commits").text_size(px(11.)).font_weight(FontWeight::MEDIUM).text_color(theme.secondary.opacity(0.7)).child("No commits yet").tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)).into_any_element())
+            } else {
+                sync_label(s, theme)
+            }
+        } else {
+            None
+        };
+        let changes = st.filter(|_| !wt.is_missing).and_then(|s| changes_label(s, theme));
+        let threads = self.thread_chips(&wt.path, &wt.path, theme, cx);
+        let remove_tip = if wt.is_locked {
+            format!("Locked{}. Unlock it with git worktree unlock to remove it.", wt.lock_reason.as_ref().map(|r| format!(": {r}")).unwrap_or_default())
+        } else if wt.is_missing {
+            "Forget this worktree: its folder is already gone".to_string()
+        } else {
+            match &risk {
+                RemovalRisk::None => "Remove this worktree: nothing in it would be lost".to_string(),
+                RemovalRisk::KeepsWork(_) => "Remove this worktree (asks first: its branch has work in progress)".to_string(),
+                RemovalRisk::LosesWork(_) => "Remove this worktree (asks first: something in it would be lost)".to_string(),
+            }
+        };
+        let safe = risk == RemovalRisk::None;
+        let (w1, r1, w2, r2) = (wt.clone(), repo.clone(), wt.clone(), repo.clone());
+        let group = SharedString::from(format!("wt-{}", wt.path));
+        let menu = {
+            let (page, wt) = (page.clone(), wt.clone());
+            let pr = pr.as_ref().map(|p| (p.number(), p.link.url.clone()));
+            let label = if safe { "Remove Worktree" } else { "Remove Worktree…" };
+            move |menu: PopupMenu, _: &mut Window, _: &mut Context<PopupMenu>| {
+                let (p1, p2, p3) = (wt.path.clone(), wt.path.clone(), wt.path.clone());
+                let mut menu = menu
+                    .item(PopupMenuItem::new("Show in Finder").icon(IconName::Folder).disabled(wt.is_missing).on_click(move |_, _, cx| cx.reveal_path(Path::new(&p1))))
+                    .item(PopupMenuItem::new("Open in Terminal").icon(IconName::SquareTerminal).disabled(wt.is_missing).on_click(move |_, _, _| open_in_terminal(&p2)))
+                    .item(PopupMenuItem::new("Copy Path").icon(IconName::Copy).on_click(move |_, _, cx| copy(p3.clone(), cx)));
+                if let Some(b) = wt.branch.clone() {
+                    menu = menu.item(PopupMenuItem::new("Copy Branch Name").on_click(move |_, _, cx| copy(b.clone(), cx)));
+                }
+                if let Some((n, url)) = pr.clone() {
+                    menu = menu.item(PopupMenuItem::new(format!("Open #{n}")).icon(IconName::ExternalLink).on_click(move |_, _, cx| cx.open_url(&url)));
+                }
+                menu = menu.separator();
+                if !wt.is_missing {
+                    let (pg, here) = (page.clone(), wt.path.clone());
+                    menu = menu.item(PopupMenuItem::new("New Thread Here").on_click(move |_, _, cx| {
+                        let _ = pg.update(cx, |p, cx| p.new_thread_in(Some(here.clone()), cx));
+                    }));
+                }
+                let (pg, w, r) = (page.clone(), w2.clone(), r2.clone());
+                menu.item(PopupMenuItem::new(label).icon(IconName::Delete).disabled(wt.is_locked).on_click(move |_, window, cx| {
+                    let _ = pg.update(cx, |p, cx| p.request_removal(w.clone(), r.clone(), window, cx));
+                }))
+            }
+        };
+        div()
+            .id(SharedString::from(format!("wt-row-{}", wt.path)))
+            .group(group.clone())
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .pl(px(34.))
+            .pr(px(12.))
+            .py(px(6.))
+            .border_t_1()
+            .border_color(theme.separator)
+            .context_menu(menu)
+            .child(gpui_kit::component::Icon::new(if wt.is_missing { IconName::CircleAlert } else { IconName::FolderClosed }).size(px(14.)).text_color(if wt.is_missing { orange() } else { theme.secondary.opacity(0.7) }))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .child(
                         div()
                             .flex()
                             .items_center()
-                            .gap(px(8.))
-                            .pl(px(28.))
-                            .pr(px(12.))
-                            .py(px(6.))
-                            .border_t_1()
-                            .border_color(theme.separator)
-                            .child(div().flex_1().min_w_0().flex().flex_col().child(div().text_size(px(12.)).font_family(MONO).overflow_hidden().whitespace_nowrap().text_ellipsis().child(shown_path)).child(div().text_size(px(11.)).text_color(theme.secondary).child(bits.join(" · "))))
-                            .when_some(pr.map(|p| format!("#{}", p.link.number)), |d, n| d.child(chip(&n, green())))
-                            .when(!here.is_empty(), |d| d.child(chip(&format!("{} thread{}", here.len(), if here.len() == 1 { "" } else { "s" }), theme.accent)))
-                            .child(
-                                Button::new(SharedString::from(format!("rm-wt-{}", wt.path)))
-                                    .xsmall()
-                                    .ghost()
-                                    .label(label)
-                                    .tooltip(tip)
-                                    .on_click(cx.listener(move |p, _, _, cx| p.remove_worktree(w1.clone(), r1.clone(), force, cx))),
-                            ),
-                    );
-                }
-            }
-            column = column.child(card);
-        }
-        column.into_any_element()
+                            .gap(px(6.))
+                            .child(div().flex_none().font_weight(FontWeight::MEDIUM).child(name))
+                            .when(!location.is_empty(), |d| d.child(div().min_w_0().truncate().text_size(px(11.)).text_color(theme.secondary.opacity(0.7)).child(location)))
+                            .when(wt.is_locked, |d| d.child(div().text_size(px(10.)).text_color(theme.secondary.opacity(0.7)).child("locked"))),
+                    )
+                    .child(branch),
+            )
+            .when_some(threads, |d, t| d.child(t))
+            .when_some(state, |d, s| d.child(s))
+            .when_some(changes, |d, c| d.child(c))
+            .when_some(pr, |d, p| {
+                let url = p.link.url.clone();
+                d.child(Button::new(SharedString::from(format!("wt-pr-{}", wt.path))).xsmall().ghost().label(format!("#{}", p.number())).tooltip(p.title.clone()).on_click(move |_, _, cx| cx.open_url(&url)))
+            })
+            .child(
+                // Always there when it's safe to remove; on hover otherwise.
+                div().when(!safe, |d| d.invisible().group_hover(group, |s| s.visible())).child(
+                    Button::new(SharedString::from(format!("rm-wt-{}", wt.path)))
+                        .xsmall()
+                        .ghost()
+                        .icon(IconName::Delete)
+                        .disabled(wt.is_locked)
+                        .tooltip(remove_tip)
+                        .on_click(cx.listener(move |p, _, window, cx| p.request_removal(w1.clone(), r1.clone(), window, cx))),
+                ),
+            )
+            .into_any_element()
     }
 }
 
+/// Folds or unfolds a repo's worktrees.
+fn fold_listener(id: String, cx: &mut Context<ProjectPage>) -> impl Fn(&gpui_kit::ClickEvent, &mut Window, &mut App) + 'static {
+    cx.listener(move |p: &mut ProjectPage, _: &gpui_kit::ClickEvent, _: &mut Window, cx: &mut Context<ProjectPage>| {
+        if !p.toggled_repos.remove(&id) {
+            p.toggled_repos.insert(id.clone());
+        }
+        cx.notify();
+    })
+}
+
+/// A branch of a stack that has no pull request yet.
+fn unsubmitted_row(branch: &str, layer: usize, theme: &Theme) -> gpui_kit::AnyElement {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .px(px(12.))
+        .py(px(7.))
+        .child(div().w(px(16.)).h(px(16.)).rounded_full().border_1().border_dashed().border_color(theme.secondary).flex().items_center().justify_center().text_size(px(9.)).font_weight(FontWeight::BOLD).text_color(theme.secondary).child(layer.to_string()))
+        .child(div().flex_1().min_w_0().truncate().text_size(px(11.)).font_family(MONO).child(branch.to_string()))
+        .child(chip("Not submitted", theme.secondary))
+        .into_any_element()
+}
+
 impl Render for ProjectPage {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.core.as_ref().is_some_and(|c| c.status_updated_at.is_some()) && !self.refreshing {
+            if let Some(probe) = self.probe.take() {
+                cx.defer_in(window, move |p, window, cx| p.run_probe(probe, window, cx));
+            }
+        }
         let theme = Theme::get(cx);
         let plain = self.core.as_ref().and_then(|c| c.layout.as_ref()).is_some_and(|l| l.kind == LayoutKind::Plain);
         let body = if plain {
@@ -549,6 +1604,348 @@ impl Render for ProjectPage {
             .flex()
             .flex_col()
             .child(self.header(&theme, cx))
-            .child(div().id("project-body").flex_1().min_h_0().overflow_y_scroll().child(div().max_w(px(880.)).w_full().mx_auto().px(px(32.)).py(px(20.)).child(body)))
+            .child(div().id("project-body").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.scroll).child(div().max_w(px(880.)).w_full().mx_auto().px(px(32.)).py(px(20.)).child(body)))
+    }
+}
+
+// MARK: New Worktree
+
+/// New Worktree…: a branch (new, or one that exists) checked out in a folder of its own, from a
+/// base, and a thread started in it if you like.
+struct NewWorktreeForm {
+    page: WeakEntity<ProjectPage>,
+    repo: WorkspaceRepo,
+    branch: Entity<InputState>,
+    base: Entity<InputState>,
+    default_base: Option<String>,
+    data_dir: PathBuf,
+    /// Chosen with Change…; else under the data folder's `worktrees/<repo>/<branch>`.
+    location: Option<PathBuf>,
+    start_thread: bool,
+    working: bool,
+    error: Option<String>,
+    tools: Arc<WorkspaceTools>,
+    _sub: gpui_kit::Subscription,
+}
+
+impl NewWorktreeForm {
+    fn new(page: WeakEntity<ProjectPage>, repo: WorkspaceRepo, default_base: Option<String>, data_dir: PathBuf, tools: Arc<WorkspaceTools>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let branch = cx.new(|cx| InputState::new(window, cx).placeholder("feature/login"));
+        let base = cx.new(|cx| InputState::new(window, cx).placeholder(default_base.clone().unwrap_or_else(|| "HEAD".into())));
+        if let Ok(b) = std::env::var("YH_NEW_WORKTREE_BRANCH") {
+            branch.update(cx, |i, cx| i.set_value(b, window, cx));
+        }
+        let sub = cx.subscribe(&branch, |_, _, _: &gpui_kit::component::input::InputEvent, cx| cx.notify());
+        NewWorktreeForm { page, repo, branch, base, default_base, data_dir, location: None, start_thread: true, working: false, error: None, tools, _sub: sub }
+    }
+
+    fn slug(&self, cx: &App) -> String {
+        let b = self.branch.read(cx).value().trim().to_string();
+        if b.is_empty() { "branch".into() } else { b.replace(['/', ' '], "-") }
+    }
+
+    fn target(&self, cx: &App) -> PathBuf {
+        match &self.location {
+            Some(folder) => folder.join(self.slug(cx)),
+            None => self.data_dir.join("worktrees").join(self.repo.path.file_name().unwrap_or_default()).join(self.slug(cx)),
+        }
+    }
+
+    fn choose_folder(&mut self, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(gpui_kit::PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some("Put It Here".into()) });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(mut p))) = paths.await {
+                if let Some(folder) = p.pop() {
+                    let _ = this.update(cx, |f, cx| {
+                        f.location = Some(folder);
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn create(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let branch = self.branch.read(cx).value().trim().to_string();
+        if branch.is_empty() || self.working {
+            return;
+        }
+        let typed = self.base.read(cx).value().trim().to_string();
+        let base = if typed.is_empty() { self.default_base.clone() } else { Some(typed) };
+        let folder = self.target(cx);
+        let (repo, tools) = (self.repo.path.clone(), self.tools.clone());
+        self.working = true;
+        self.error = None;
+        cx.notify();
+        let f2 = folder.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let git = tools.git.as_ref().ok_or("git isn't installed.".to_string())?;
+                    if let Some(parent) = f2.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    let exists = git.branch_exists(&branch, &repo);
+                    git.add_worktree(&repo, &f2, (!exists).then_some(branch.as_str()), if exists { None } else { base.as_deref() }, exists.then_some(branch.as_str()))
+                })
+                .await;
+            let _ = this.update_in(cx, |f, window, cx| {
+                f.working = false;
+                eprintln!("PROJECT new worktree at {}: {:?}", folder.display(), result);
+                match result {
+                    Err(e) => f.error = Some(e),
+                    Ok(()) => {
+                        window.close_dialog(cx);
+                        let (start, path) = (f.start_thread, folder.to_string_lossy().into_owned());
+                        let _ = f.page.update(cx, |p, cx| {
+                            p.refresh(false, cx);
+                            if start {
+                                p.new_thread_in(Some(path), cx);
+                            }
+                        });
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+}
+
+impl Render for NewWorktreeForm {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::get(cx);
+        let empty = self.branch.read(cx).value().trim().is_empty();
+        let field = |label: &str, el: gpui_kit::AnyElement| div().flex().items_center().gap(px(12.)).child(div().w(px(110.)).flex_none().text_color(theme.secondary).child(label.to_string())).child(div().flex_1().min_w_0().child(el));
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .child(div().text_color(theme.secondary).child("Another checkout of the repo, on its own branch, so work there doesn't touch this one. A thread can work in as many as it needs."))
+            .child(field("Branch", Input::new(&self.branch).into_any_element()))
+            .child(field("Starting from", Input::new(&self.base).into_any_element()))
+            .child(div().pl(px(122.)).text_size(px(11.)).text_color(theme.secondary).child("Used for a new branch. An existing branch is checked out as it is."))
+            .child(field(
+                "Folder",
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(div().flex_1().min_w_0().truncate().text_size(px(12.)).font_family(MONO).child(tilde(&self.target(cx).to_string_lossy())))
+                    .child(Button::new("wt-folder").xsmall().label("Change…").on_click(cx.listener(|f, _, _, cx| f.choose_folder(cx))))
+                    .into_any_element(),
+            ))
+            .child(field(
+                "",
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(Switch::new("wt-start-thread").checked(self.start_thread).on_change(cx.listener(|f, on: &bool, _, cx| {
+                        f.start_thread = *on;
+                        cx.notify();
+                    })))
+                    .child("Start a thread in it")
+                    .into_any_element(),
+            ))
+            .when_some(self.error.clone(), |d, e| d.child(div().text_color(theme.error).child(e)))
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap(px(8.))
+                    .child(Button::new("wt-cancel").label("Cancel").on_click(|_, window, cx| window.close_dialog(cx)))
+                    .child(Button::new("wt-create").primary().label("Create").loading(self.working).disabled(empty || self.working).on_click(cx.listener(|f, _, window, cx| f.create(window, cx)))),
+            )
+    }
+}
+
+// MARK: New Stack
+
+/// New Stack from Branches…: existing branches of a repo made a GitHub stack, bottom first,
+/// with `gh stack init`, and submitted if you like.
+struct NewStackForm {
+    page: WeakEntity<ProjectPage>,
+    repo: WorkspaceRepo,
+    core: yh_core::workspace::Workspace,
+    tools: Arc<WorkspaceTools>,
+    installed: Option<bool>,
+    branches: Option<Vec<String>>,
+    /// Bottom first.
+    chosen: Vec<String>,
+    base: Entity<InputState>,
+    submit: bool,
+    working: bool,
+    error: Option<String>,
+}
+
+impl NewStackForm {
+    fn new(page: WeakEntity<ProjectPage>, repo: WorkspaceRepo, core: yh_core::workspace::Workspace, tools: Arc<WorkspaceTools>, installed: Option<bool>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let default = core.status.default_branches.get(repo.id()).cloned().unwrap_or_else(|| "main".into());
+        let base = cx.new(|cx| InputState::new(window, cx).placeholder(default));
+        let (path, t) = (repo.path.clone(), tools.clone());
+        cx.spawn(async move |this, cx| {
+            let list = cx.background_executor().spawn(async move { t.git.as_ref().map(|g| g.local_branches(&path)).unwrap_or_default() }).await;
+            let _ = this.update(cx, |f, cx| {
+                f.branches = Some(list);
+                cx.notify();
+            });
+        })
+        .detach();
+        NewStackForm { page, repo, core, tools, installed, branches: None, chosen: vec![], base, submit: true, working: false, error: None }
+    }
+
+    fn trunk(&self, cx: &App) -> String {
+        let typed = self.base.read(cx).value().trim().to_string();
+        if typed.is_empty() { self.core.status.default_branches.get(self.repo.id()).cloned().unwrap_or_else(|| "main".into()) } else { typed }
+    }
+
+    /// Where `gh stack` runs: a checkout already on one of the branches, else the repo's own.
+    fn checkout(&self) -> PathBuf {
+        self.core.checkout_on_any_of(&self.repo, &self.chosen).unwrap_or_else(|| self.repo.path.clone())
+    }
+
+    fn checkout_is_dirty(&self) -> bool {
+        let c = self.checkout();
+        if c == self.repo.path {
+            self.core.status.statuses.get(self.repo.id()).is_some_and(|s| s.is_dirty())
+        } else {
+            self.core.status.worktree_statuses.get(&c.to_string_lossy().into_owned()).is_some_and(|s| s.is_dirty())
+        }
+    }
+
+    fn create(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.chosen.is_empty() || self.working {
+            return;
+        }
+        let typed = self.base.read(cx).value().trim().to_string();
+        let (branches, checkout, submit, tools) = (self.chosen.clone(), self.checkout(), self.submit, self.tools.clone());
+        self.working = true;
+        self.error = None;
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let stacks = tools.stacks.as_ref().ok_or("gh isn't installed.".to_string())?;
+                    stacks.create(&branches, (!typed.is_empty()).then_some(typed.as_str()), &checkout)?;
+                    if submit {
+                        stacks.submit(&checkout).map_err(|e| format!("The stack was made, but submitting it failed: {e}"))?;
+                    }
+                    Ok::<(), String>(())
+                })
+                .await;
+            let _ = this.update_in(cx, |f, window, cx| {
+                f.working = false;
+                eprintln!("PROJECT new stack: {result:?}");
+                match result {
+                    Err(e) => f.error = Some(e),
+                    Ok(()) => {
+                        window.close_dialog(cx);
+                        let _ = f.page.update(cx, |p, cx| p.refresh(false, cx));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+}
+
+impl Render for NewStackForm {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::get(cx);
+        let trunk = self.trunk(cx);
+        let list_box = || div().id("list").flex_1().h(px(220.)).overflow_y_scroll().rounded(px(8.)).border_1().border_color(theme.separator).bg(theme.card).p(px(4.)).flex().flex_col();
+        let mut available = list_box();
+        match &self.branches {
+            None => available = available.child(div().p(px(8.)).text_color(theme.secondary).child("Reading branches…")),
+            Some(all) => {
+                for b in all.iter().filter(|b| !self.chosen.contains(b) && **b != trunk) {
+                    let b2 = b.clone();
+                    available = available.child(
+                        div()
+                            .id(SharedString::from(format!("add-{b}")))
+                            .px(px(8.))
+                            .py(px(3.))
+                            .rounded(px(5.))
+                            .hover(|d| d.bg(theme.selected))
+                            .cursor_pointer()
+                            .text_size(px(12.))
+                            .font_family(MONO)
+                            .truncate()
+                            .child(format!("+ {b}"))
+                            .on_click(cx.listener(move |f, _, _, cx| {
+                                f.chosen.push(b2.clone());
+                                cx.notify();
+                            })),
+                    );
+                }
+            }
+        }
+        let mut chosen = list_box();
+        if self.chosen.is_empty() {
+            chosen = chosen.child(div().p(px(8.)).text_center().text_color(theme.secondary.opacity(0.7)).child("Click branches to add them, bottom first"));
+        }
+        // Shown top first.
+        for (i, b) in self.chosen.iter().enumerate().rev() {
+            let n = self.chosen.len();
+            chosen = chosen.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .px(px(6.))
+                    .py(px(2.))
+                    .child(div().w(px(16.)).text_size(px(11.)).text_color(theme.secondary).child((i + 1).to_string()))
+                    .child(div().flex_1().min_w_0().truncate().text_size(px(12.)).font_family(MONO).child(b.clone()))
+                    .child(Button::new(SharedString::from(format!("up-{i}"))).xsmall().ghost().icon(IconName::ChevronUp).disabled(i + 1 == n).tooltip("Higher in the stack").on_click(cx.listener(move |f, _, _, cx| {
+                        f.chosen.swap(i, i + 1);
+                        cx.notify();
+                    })))
+                    .child(Button::new(SharedString::from(format!("down-{i}"))).xsmall().ghost().icon(IconName::ChevronDown).disabled(i == 0).tooltip("Lower in the stack").on_click(cx.listener(move |f, _, _, cx| {
+                        f.chosen.swap(i, i - 1);
+                        cx.notify();
+                    })))
+                    .child(Button::new(SharedString::from(format!("rm-{i}"))).xsmall().ghost().icon(IconName::Minus).tooltip("Remove").on_click(cx.listener(move |f, _, _, cx| {
+                        f.chosen.remove(i);
+                        cx.notify();
+                    }))),
+            );
+        }
+        let dirty = !self.chosen.is_empty() && self.checkout_is_dirty();
+        let not_installed = self.installed == Some(false);
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .child(div().text_color(theme.secondary).child(format!("Existing branches, each a pull request on the one below it. Pick them bottom first: the first goes into {trunk}.")))
+            .child(div().flex().gap(px(12.)).child(available).child(chosen))
+            .child(div().flex().items_center().gap(px(12.)).child(div().w(px(60.)).text_color(theme.secondary).child("Into")).child(div().flex_1().child(Input::new(&self.base))))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(Switch::new("stack-submit").checked(self.submit).on_change(cx.listener(|f, on: &bool, _, cx| {
+                        f.submit = *on;
+                        cx.notify();
+                    })))
+                    .child("Submit to GitHub now (push and open the PRs)"),
+            )
+            .when(!self.chosen.is_empty(), |d| d.child(div().text_size(px(11.)).text_color(theme.secondary).child(format!("Runs in {}, which ends up on {}", tilde(&self.checkout().to_string_lossy()), self.chosen.last().cloned().unwrap_or_default()))))
+            .when(dirty, |d| d.child(div().text_color(orange()).child("That checkout has uncommitted changes. Commit or stash them first.")))
+            .when(not_installed, |d| d.child(div().text_color(orange()).child(format!("gh stack isn't installed: {}", yh_core::github::STACK_INSTALL_COMMAND))))
+            .when_some(self.error.clone(), |d, e| d.child(div().text_color(theme.error).child(e)))
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap(px(8.))
+                    .child(Button::new("stack-cancel").label("Cancel").on_click(|_, window, cx| window.close_dialog(cx)))
+                    .child(Button::new("stack-create").primary().label("Create Stack").loading(self.working).disabled(self.chosen.is_empty() || self.working || dirty || not_installed).on_click(cx.listener(|f, _, window, cx| f.create(window, cx)))),
+            )
     }
 }
