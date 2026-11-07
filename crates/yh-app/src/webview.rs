@@ -714,7 +714,36 @@ impl WebView {
     }
 
     /// A click at a point in CSS pixels, as real mouse events: `left` or `right`, `count` times.
+    /// WebKit makes the page the window's first responder when it's clicked, which would pull
+    /// the keyboard out of the composer you're typing in: the agent's input mustn't. Off again
+    /// once the page has handled the events, so your own clicks focus it as usual.
+    fn without_taking_focus(&self, body: impl FnOnce()) {
+        unsafe {
+            let window: id = msg_send![self.view, window];
+            let first: id = if window == nil { nil } else { msg_send![window, firstResponder] };
+            let selector = sel!(_setShouldSuppressFirstResponderChanges:);
+            let can: bool = msg_send![self.view, respondsToSelector: selector];
+            if first == self.view || !can {
+                body();
+                return;
+            }
+            let _: () = msg_send![self.view, _setShouldSuppressFirstResponderChanges: YES];
+            body();
+            let view = self.view as usize;
+            let done = ConcreteBlock::new(move |_result: id, _error: id| {
+                let view = view as id;
+                let _: () = msg_send![view, _setShouldSuppressFirstResponderChanges: NO];
+            })
+            .copy();
+            let _: () = msg_send![self.view, evaluateJavaScript: ns_string("0") completionHandler: &*done];
+        }
+    }
+
     pub fn click(&self, x: f64, y: f64, right: bool, count: isize, modifiers: usize) {
+        self.without_taking_focus(|| self.click_now(x, y, right, count, modifiers));
+    }
+
+    fn click_now(&self, x: f64, y: f64, right: bool, count: isize, modifiers: usize) {
         let at = self.window_point(x, y);
         self.hover_at(at, modifiers);
         unsafe {
@@ -757,8 +786,10 @@ impl WebView {
     pub fn mouse_down(&self, x: f64, y: f64) {
         let at = self.window_point(x, y);
         self.hover_at(at, 0);
-        synthetic_mouse::holding(1, || unsafe {
-            let _: () = msg_send![self.view, mouseDown: self.mouse_event(1, at, 1, 0)];
+        self.without_taking_focus(|| {
+            synthetic_mouse::holding(1, || unsafe {
+                let _: () = msg_send![self.view, mouseDown: self.mouse_event(1, at, 1, 0)];
+            })
         });
     }
 
