@@ -725,6 +725,8 @@ impl Workspace {
             t.meta.written_footprint = written_footprint;
             cx.notify();
         });
+        // The header's checkouts follow it.
+        cx.notify();
     }
 
     /// Reads a project's repos, worktrees and their status again, aside (no pull requests).
@@ -751,6 +753,9 @@ impl Workspace {
                     copy
                 })
                 .await;
+            if std::env::var("YH_DATA_DIR").is_ok() {
+                eprintln!("SCAN {} repos, worktrees {:?}", done.cloned_repos().len(), done.all_worktrees().iter().map(|w| w.path.clone()).collect::<Vec<_>>());
+            }
             let _ = this.update(cx, |ws, cx| {
                 ws.scanning.remove(&project);
                 ws.scans.insert(project, done);

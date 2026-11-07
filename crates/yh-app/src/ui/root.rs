@@ -458,7 +458,9 @@ impl Render for RootView {
                                         .child(div().w(px(6.)).h(px(6.)).rounded_full().bg(if state == "blocked" { theme.warning } else { theme.accent }))
                                         .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().child(title))
                                         .when(steps > 0, |d| d.child(div().flex_none().child(format!("{done}/{steps}"))))
-                                })),
+                                }))
+                                .children(crate::ui::thread_toolbar::checkouts(&self.workspace, &theme, cx))
+                                .child(crate::ui::thread_toolbar::buttons(&self.workspace, cx)),
                         )
                         .child(self.find.clone())
                         .child(match transcript {

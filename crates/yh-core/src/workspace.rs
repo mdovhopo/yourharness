@@ -12,7 +12,8 @@
 //! functions (`read_remotes`, `read_status`, `read_pulls`) taking what they need and
 //! returning what they found, for a caller that keeps its own state.
 
-use crate::footprint::{self, real_path};
+pub use crate::footprint::real_path;
+use crate::footprint;
 use crate::forge::PullRequest;
 use crate::git::{Cli, Forge, Git, GitRemote, RepoStatus, Worktree};
 use crate::github::{ForgeSnapshot, GitHubClient, GitHubStacks, LocalStack};
@@ -463,9 +464,11 @@ pub struct Workspace {
 }
 
 impl Workspace {
+    /// `root` is resolved first: git names worktrees by their real paths, so a project reached
+    /// through a symlink would match none of them.
     pub fn new(root: &Path) -> Workspace {
         Workspace {
-            root: root.to_path_buf(),
+            root: std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf()),
             layout: None,
             remotes: HashMap::new(),
             status: StatusSnapshot::default(),
