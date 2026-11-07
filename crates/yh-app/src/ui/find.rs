@@ -3,9 +3,10 @@
 //! is read and the next ↩ looks there too.
 
 use crate::state::workspace::Workspace;
-use crate::theme::Theme;
+use crate::theme::{space, text, Theme};
+use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::Sizable;
+use gpui_kit::component::{Disableable, Icon, IconName, Sizable};
 use gpui_kit::{div, prelude::*, px, Context, Entity, Subscription, Window};
 
 pub struct FindBar {
@@ -98,21 +99,47 @@ impl Render for FindBar {
             None if self.input.read(cx).value().trim().chars().count() >= 2 => "No matches".into(),
             None => String::new(),
         };
+        let has_hits = !self.hits.is_empty();
         div()
             .flex()
             .items_center()
-            .gap(px(8.))
-            .px(px(20.))
-            .py(px(6.))
+            .gap(px(2.))
+            .h(px(40.))
+            .px(px(space::XL - 4.))
             .border_b_1()
             .border_color(theme.separator)
-            .bg(theme.card)
             .on_key_down(cx.listener(|this, e: &gpui_kit::KeyDownEvent, _, cx| {
                 if e.keystroke.key == "escape" {
                     this.close(cx);
                 }
             }))
-            .child(div().w(px(320.)).child(Input::new(&self.input).small()))
-            .child(div().text_size(px(12.)).text_color(theme.secondary).child(label))
+            .child(div().w(px(300.)).mr(px(space::S)).child(Input::new(&self.input).small().prefix(Icon::new(IconName::Search).size(px(13.)).text_color(theme.tertiary))))
+            .child(
+                Button::new("find-previous")
+                    .small()
+                    .ghost()
+                    .icon(Icon::new(IconName::ChevronUp).size(px(14.)).text_color(theme.secondary))
+                    .tooltip("Previous Match (↩)")
+                    .disabled(!has_hits)
+                    .on_click(cx.listener(|this, _, _, cx| this.step(true, cx))),
+            )
+            .child(
+                Button::new("find-next")
+                    .small()
+                    .ghost()
+                    .icon(Icon::new(IconName::ChevronDown).size(px(14.)).text_color(theme.secondary))
+                    .tooltip("Next Match (⇧↩)")
+                    .disabled(!has_hits)
+                    .on_click(cx.listener(|this, _, _, cx| this.step(false, cx))),
+            )
+            .child(div().flex_1().pl(px(space::S)).text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child(label))
+            .child(
+                Button::new("find-close")
+                    .small()
+                    .ghost()
+                    .icon(crate::ui::icons::x().size(px(14.)).text_color(theme.secondary))
+                    .tooltip("Close (⎋)")
+                    .on_click(cx.listener(|this, _, _, cx| this.close(cx))),
+            )
     }
 }

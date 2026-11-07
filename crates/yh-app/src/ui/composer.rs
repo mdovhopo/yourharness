@@ -5,13 +5,14 @@
 
 use crate::state::thread::{Permission, ThreadState};
 use crate::state::workspace::Workspace;
-use crate::theme::{Theme, MONO};
+use crate::theme::{radius, space, text, Theme, MONO};
+use crate::ui::icons;
 use crate::ui::rows;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{Disableable, Sizable};
+use gpui_kit::component::{Disableable, Icon, IconName, Sizable};
 use gpui_kit::{div, prelude::*, px, App, Context, Entity, FontWeight, SharedString, Subscription, Window};
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -44,6 +45,8 @@ pub struct Composer {
     _mentions: Option<gpui_kit::Task<()>>,
     /// An MCP server's question, as a card.
     elicit: Option<(String, Entity<ElicitCard>)>,
+    /// Nothing typed (Send greyed out), kept so typing redraws the composer only when it flips.
+    empty: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -118,19 +121,16 @@ impl Render for ElicitCard {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::get(cx);
         let mut card = card_frame(&theme)
-            .child(div().flex().gap(px(4.)).child(div().font_weight(FontWeight::BOLD).child(self.asked.server.clone())).child("asks"))
-            .child(div().whitespace_normal().child(self.asked.message.clone()));
+            .child(card_title(icons::plug(), format!("{} asks", self.asked.server), &theme))
+            .child(div().text_size(px(text::BODY)).whitespace_normal().child(self.asked.message.clone()));
         for (_, label, input) in &self.fields {
-            card = card.child(div().flex().flex_col().gap(px(2.)).child(div().text_size(px(11.)).text_color(theme.secondary).child(label.clone())).child(Input::new(input).small()));
+            card = card.child(div().flex().flex_col().gap(px(space::XS)).child(div().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child(label.clone())).child(Input::new(input).small()));
         }
         let url = self.asked.url.clone();
         card.child(
-            div()
-                .flex()
-                .justify_end()
-                .gap(px(6.))
+            card_buttons()
                 .when_some(url, |d, url| {
-                    d.child(Button::new("elicit-open").small().label("Open Page").on_click(move |_, _, cx| {
+                    d.child(Button::new("elicit-open").small().ghost().icon(Icon::new(IconName::ExternalLink).size(px(13.))).label("Open Page").on_click(move |_, _, cx| {
                         if std::env::var("YH_MCP_BROWSER").as_deref() == Ok("log") {
                             eprintln!("MCP page: {url}");
                         } else {
@@ -138,7 +138,7 @@ impl Render for ElicitCard {
                         }
                     }))
                 })
-                .child(Button::new("elicit-decline").small().label("Decline").on_click(cx.listener(|this, _, _, cx| this.answer("decline", cx))))
+                .child(Button::new("elicit-decline").small().outline().label("Decline").on_click(cx.listener(|this, _, _, cx| this.answer("decline", cx))))
                 .child(Button::new("elicit-accept").small().primary().label(if self.asked.mode == "url" { "Done" } else { "Send" }).on_click(cx.listener(|this, _, _, cx| this.answer("accept", cx)))),
         )
     }
@@ -184,7 +184,15 @@ impl Composer {
                     this.save_draft(cx);
                     this.suggest = None;
                 }
-                InputEvent::Change => this.update_suggestions(window, cx),
+                InputEvent::Change => {
+                    this.update_suggestions(window, cx);
+                    // Send greys out with nothing to send: a redraw only when that flips.
+                    let empty = this.input.read(cx).value().trim().is_empty();
+                    if empty != this.empty {
+                        this.empty = empty;
+                        cx.notify();
+                    }
+                }
                 _ => {}
             }),
             cx.observe_in(&workspace, window, |this, _, window, cx| {
@@ -204,6 +212,7 @@ impl Composer {
             withdrawing: HashSet::new(),
             _mentions: None,
             elicit: None,
+            empty: true,
             _subscriptions: subscriptions,
         }
     }
@@ -429,7 +438,7 @@ impl Composer {
 
     /// Model, effort and permissions, as the Swift app's chips: each menu says what its choices
     /// mean, with a footnote on when they apply.
-    fn pickers(&self, thread: &Entity<ThreadState>, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+    fn pickers(&self, thread: &Entity<ThreadState>, compact: bool, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let ws = self.workspace.read(cx);
         let t = thread.read(cx);
         let id = t.id().to_string();
@@ -456,7 +465,7 @@ impl Composer {
         let (secondary, error) = (theme.secondary, theme.error);
         let model_menu = {
             let (w, id, models, current) = (w.clone(), id.clone(), models.clone(), current_model.clone());
-            Button::new("model").ghost().xsmall().label(model_name.clone()).tooltip("Model").dropdown_caret(true).dropdown_menu(move |mut menu, window, cx| {
+            Button::new("model").ghost().small().flex_none().icon(icons::sparkles().size(px(13.)).text_color(secondary)).child(picker_label(model_name.clone(), secondary)).tooltip("Model").dropdown_caret(true).dropdown_menu(move |mut menu, window, cx| {
                 menu = menu.min_w(px(260.)).label("Claude Code");
                 let pick = |value: Option<String>| {
                     let (w, id) = (w.clone(), id.clone());
@@ -494,7 +503,7 @@ impl Composer {
             let (w, id, current) = (w.clone(), id.clone(), effort.clone());
             let efforts = efforts.clone();
             let label = effort.as_deref().map(effort_label).unwrap_or("Auto").to_string();
-            Button::new("effort").ghost().xsmall().label(label).tooltip("Reasoning effort").dropdown_caret(true).dropdown_menu(move |mut menu, _, _| {
+            Button::new("effort").ghost().small().flex_none().icon(icons::gauge().size(px(13.)).text_color(secondary)).when(!compact, |b| b.child(picker_label(label, secondary))).tooltip("Reasoning effort").dropdown_caret(!compact).dropdown_menu(move |mut menu, _, _| {
                 menu = menu.min_w(px(240.)).label("Reasoning Effort");
                 {
                     let (w, id) = (w.clone(), id.clone());
@@ -516,7 +525,8 @@ impl Composer {
             let (w, project, current) = (w.clone(), project.clone(), mode.clone());
             let help = if mode == "auto" && !auto_ok { format!("{model_name} doesn't support Auto, so Claude asks before changes") } else { format!("Permissions for {project_name}") };
             let model_name = model_name.clone();
-            Button::new("mode").ghost().xsmall().label(mode_label).tooltip(help).dropdown_caret(true).dropdown_menu(move |mut menu, _, _| {
+            let mode_icon = if mode == "bypass" { icons::shield().text_color(error) } else if mode == "auto" { icons::shield_check().text_color(secondary) } else { icons::shield().text_color(secondary) };
+            Button::new("mode").ghost().small().flex_none().icon(mode_icon.size(px(13.))).when(!compact, |b| b.child(picker_label(mode_label.to_string(), secondary))).tooltip(help).dropdown_caret(!compact).dropdown_menu(move |mut menu, _, _| {
                 menu = menu.min_w(px(280.)).label(format!("Permissions · {project_name}"));
                 for (value, _) in MODES {
                     let (w, project) = (w.clone(), project.clone());
@@ -534,12 +544,17 @@ impl Composer {
             .flex()
             .items_center()
             .gap(px(2.))
-            .text_size(px(12.))
+            .text_size(px(text::FOOTNOTE))
             .text_color(theme.secondary)
             .child(model_menu)
             .children(effort_menu)
             .child(mode_menu)
     }
+}
+
+/// A picker's label: footnote size, secondary, so the row stays quiet next to Send.
+fn picker_label(label: String, color: gpui_kit::Hsla) -> gpui_kit::Div {
+    div().text_size(px(text::FOOTNOTE)).text_color(color).child(label)
 }
 
 /// A model as the picker lists it.
@@ -611,18 +626,35 @@ enum Attached {
     File(FileAttachment),
 }
 
+/// A card above the composer: something waiting for you, so an orange hairline (the colour for
+/// "needs you"), on the composer's own card colour and radius.
 fn card_frame(theme: &Theme) -> gpui_kit::Div {
     div()
         .border_1()
-        .border_color(theme.warning)
-        .rounded(px(12.))
+        .border_color(theme.warning.opacity(0.55))
+        .rounded(px(radius::LARGE))
         .bg(theme.card)
-        .px(px(12.))
-        .py(px(10.))
-        .mb(px(8.))
+        .px(px(space::M + 2.))
+        .py(px(space::M))
+        .mb(px(space::S))
         .flex()
         .flex_col()
-        .gap(px(8.))
+        .gap(px(space::S + 2.))
+}
+
+/// A card's title row: its icon, then what it asks, in the headline style.
+fn card_title(icon: Icon, title: impl IntoElement, theme: &Theme) -> gpui_kit::Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(space::S))
+        .child(icon.size(px(16.)).text_color(theme.warning))
+        .child(div().min_w_0().text_size(px(text::HEADLINE)).font_weight(FontWeight::SEMIBOLD).child(title))
+}
+
+/// A card's buttons, right-aligned.
+fn card_buttons() -> gpui_kit::Div {
+    div().flex().flex_wrap().justify_end().items_center().gap(px(space::S))
 }
 
 /// A tool waiting for your permission, as the Swift app's `PermissionCard`: the tool's icon,
@@ -647,7 +679,7 @@ pub fn permission_card(p: &Permission, thread: &Entity<ThreadState>, workspace: 
         .flex()
         .items_start()
         .gap(px(10.))
-        .child(div().flex_none().w(px(24.)).pt(px(1.)).flex().justify_center().child(rows::icon(shown.icon, 18., theme.warning)))
+        .child(div().flex_none().w(px(28.)).h(px(28.)).rounded(px(radius::MEDIUM)).bg(theme.warning.opacity(0.14)).flex().items_center().justify_center().child(rows::icon(shown.icon, 15., theme.warning)))
         .child(
             div()
                 .flex_1()
@@ -655,11 +687,11 @@ pub fn permission_card(p: &Permission, thread: &Entity<ThreadState>, workspace: 
                 .flex()
                 .flex_col()
                 .gap(px(4.))
-                .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child(format!("Allow {}?", shown.verb)))
-                .when(!detail.is_empty(), |d| d.child(div().font_family(MONO).text_size(px(12.)).line_clamp(4).whitespace_normal().child(detail)))
-                .when_some(description, |d, text| d.child(div().text_size(px(12.)).text_color(theme.secondary).whitespace_normal().child(text)))
+                .child(div().pt(px(1.)).text_size(px(text::HEADLINE)).font_weight(FontWeight::SEMIBOLD).child(format!("Allow {}?", shown.verb)))
+                .when(!detail.is_empty(), |d| d.child(div().font_family(MONO).text_size(px(text::CODE)).line_height(px(text::CODE_LINE)).line_clamp(4).whitespace_normal().child(detail)))
+                .when_some(description, |d, t| d.child(div().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).whitespace_normal().child(t)))
                 .when(more > 0, |d| {
-                    d.child(div().text_size(px(11.)).text_color(theme.secondary).child(if more == 1 { "1 more request waiting".to_string() } else { format!("{more} more requests waiting") }))
+                    d.child(div().text_size(px(text::CAPTION)).text_color(theme.secondary).child(if more == 1 { "1 more request waiting".to_string() } else { format!("{more} more requests waiting") }))
                 }),
         );
     let buttons = div()
@@ -667,18 +699,18 @@ pub fn permission_card(p: &Permission, thread: &Entity<ThreadState>, workspace: 
         .ml_auto()
         .flex()
         .items_center()
-        .gap(px(8.))
-        .child(Button::new(SharedString::from(format!("deny-{}", p.id))).label("Deny").tooltip("Deny (⌘⌫)").on_click(move |_, _, cx| {
+        .gap(px(space::S))
+        .child(Button::new(SharedString::from(format!("deny-{}", p.id))).small().outline().label("Deny").tooltip("Deny (⌘⌫)").on_click(move |_, _, cx| {
             let _ = deny.update(cx, |ws, cx| ws.respond_to(&t2, &id2, Decision::deny(), cx));
         }))
-        .child(Button::new(SharedString::from(format!("allow-{}", p.id))).primary().label("Allow").tooltip("Allow (⌘↩)").on_click(move |_, _, cx| {
+        .child(Button::new(SharedString::from(format!("allow-{}", p.id))).small().primary().label("Allow").tooltip("Allow (⌘↩)").on_click(move |_, _, cx| {
             let _ = allow.update(cx, |ws, cx| ws.respond_to(&t1, &id1, Decision::allow(), cx));
         }));
-    card_frame(theme).child(div().flex().flex_wrap().items_start().gap(px(12.)).child(summary).child(buttons))
+    card_frame(theme).child(div().flex().flex_wrap().items_center().gap(px(space::M)).child(summary).child(buttons))
 }
 
 impl Render for Composer {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::get(cx);
         let Some(thread) = self.thread(cx) else { return div() };
         let (running, permission, waiting) = {
@@ -707,22 +739,20 @@ impl Render for Composer {
             let cancelled = ask.cancelled.clone();
             inner = inner.child(
                 card_frame(&theme)
-                    .child(div().flex().gap(px(4.)).child("Claude needs you to sign in to").child(div().font_weight(FontWeight::BOLD).child(ask.server.clone())))
-                    .when_some(ask.reason.clone(), |d, r| d.child(div().text_color(theme.secondary).child(r)))
+                    .child(card_title(icons::key_round(), format!("Sign in to {}", ask.server), &theme))
+                    .child(div().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).whitespace_normal().child(ask.reason.clone().unwrap_or_else(|| "Claude needs you to sign in to this MCP server to go on. It opens in your browser.".into())))
                     .child(if asking {
-                        div()
-                            .flex()
-                            .justify_end()
-                            .gap(px(6.))
-                            .child(Button::new("sign-in-no").small().label("Not Now").on_click(move |_, _, cx| answer(&t1, false, cx)))
-                            .child(Button::new("sign-in-yes").small().primary().label("Sign In").on_click(move |_, _, cx| answer(&t2, true, cx)))
+                        card_buttons()
+                            .child(Button::new("sign-in-no").small().outline().label("Not Now").on_click(move |_, _, cx| answer(&t1, false, cx)))
+                            .child(Button::new("sign-in-yes").small().primary().icon(icons::log_in().size(px(13.))).label("Sign In…").on_click(move |_, _, cx| answer(&t2, true, cx)))
                     } else {
                         div()
                             .flex()
                             .items_center()
-                            .gap(px(6.))
-                            .child(div().flex_1().text_color(theme.secondary).child("Waiting for you to finish in your browser…"))
-                            .child(Button::new("sign-in-cancel").small().label("Cancel").on_click(move |_, _, cx| {
+                            .gap(px(space::S))
+                            .child(Icon::new(IconName::Globe).size(px(14.)).text_color(theme.secondary))
+                            .child(div().flex_1().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child("Waiting for you to finish in your browser…"))
+                            .child(Button::new("sign-in-cancel").small().outline().label("Cancel").on_click(move |_, _, cx| {
                                 cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
                                 t3.update(cx, |_, cx| cx.notify());
                             }))
@@ -754,42 +784,51 @@ impl Render for Composer {
             (context, crate::state::workspace::mcp_needing_you(&t.composer.mcp_servers))
         };
         let stop_thread = thread.clone();
+        // A narrow composer (a small window, the right sidebar open) shows effort and mode as
+        // icons alone, their tooltips saying what they are, so Send never gets pushed out.
+        let compact = {
+            let inspector = if self.workspace.read(cx).shows_inspector { crate::ui::inspector::WIDTH } else { 0. };
+            f32::from(window.viewport_size().width) - inspector - 260. - 40. < 540.
+        };
+        let has_text = !self.input.read(cx).value().trim().is_empty() || attached.is_some();
+        self.empty = self.input.read(cx).value().trim().is_empty();
         let composer = div()
             .capture_key_down(cx.listener(Self::on_key))
-            .children(attached)
+            .children(attached.map(|a| a.px(px(space::XS)).pt(px(space::XS))))
             .relative()
             .border_1()
             .border_color(theme.separator)
-            .rounded(px(14.))
+            .rounded(px(radius::LARGE))
             .bg(theme.card)
-            .px(px(12.))
-            .pt(px(10.))
-            .pb(px(8.))
+            .px(px(space::S))
+            .pt(px(space::S))
+            .pb(px(space::S))
             .flex()
             .flex_col()
-            .gap(px(6.))
-            .child(Textarea::new(&self.input).appearance(false).max_h(px(320.)))
+            .gap(px(space::XS))
+            .child(div().px(px(space::XS)).child(Textarea::new(&self.input).appearance(false).max_h(px(320.))))
             .when(crate::probe::enabled(), |d| d.child(crate::probe::tracker("composer".into())))
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(8.))
+                    .gap(px(2.))
                     .child(
                         Button::new("attach")
                             .ghost()
-                            .xsmall()
-                            .label("+")
+                            .small()
+                            .icon(icons::paperclip().size(px(14.)).text_color(theme.secondary))
                             .tooltip("Attach Files… (files, folders or images; or paste and drop them)")
                             .on_click(cx.listener(|this, _, _, cx| this.attach(cx))),
                     )
-                    .child(self.pickers(&thread, &theme, cx))
-                    .children((!mcp_chip.is_empty()).then(|| mcp_attention_chip(&mcp_chip, self.workspace.downgrade(), &theme)))
-                    .child(div().flex_1())
+                    // The pickers give way first when the window is narrow: Send always shows.
+                    .child(div().flex_1().min_w_0().overflow_hidden().flex().items_center().gap(px(2.)).child(self.pickers(&thread, compact, &theme, cx)).children(
+                        (!mcp_chip.is_empty()).then(|| mcp_attention_chip(&mcp_chip, self.workspace.downgrade(), &theme)),
+                    ))
                     .children(context.map(|(tokens, window)| context_ring(tokens, window, &theme)))
                     .when(running, |d| {
                         let w = w.clone();
-                        d.child(Button::new("stop").small().label("Stop ⌘.").on_click(cx.listener(move |this, _, _, cx| {
+                        d.child(Button::new("stop").small().ghost().icon(icons::circle_stop().size(px(16.)).text_color(theme.text)).tooltip("Stop (⌘.)").on_click(cx.listener(move |this, _, _, cx| {
                             // Anything queued goes back into the composer first, so stopping never sends it.
                             let queued = stop_thread.read(cx).queued_messages();
                             for (id, ..) in queued {
@@ -800,15 +839,28 @@ impl Render for Composer {
                             let _ = w.update(cx, |ws, cx| ws.interrupt(&stop_thread, cx));
                         })))
                     })
-                    .child(
+                    .child(if running {
+                        // While Claude works, ↩ steers: the message joins the turn after the current step.
                         Button::new("send")
                             .small()
                             .primary()
-                            .label(if running { "Steer ↩" } else { "Send" })
-                            .on_click(cx.listener(|this, _, window, cx| this.submit(false, window, cx))),
-                    ),
+                            .disabled(!has_text)
+                            .icon(icons::corner_down_right().size(px(13.)))
+                            .label("Steer")
+                            .tooltip("Steer (↩): Claude reads it after its current step. ⌘↩ stops and sends now.")
+                            .on_click(cx.listener(|this, _, window, cx| this.submit(false, window, cx)))
+                    } else {
+                        Button::new("send")
+                            .small()
+                            .primary()
+                            .disabled(!has_text)
+                            .rounded(px(12.))
+                            .icon(icons::arrow_up().size(px(15.)))
+                            .tooltip("Send (↩)")
+                            .on_click(cx.listener(|this, _, window, cx| this.submit(false, window, cx)))
+                    }),
             );
-        div().w_full().flex().justify_center().px(px(20.)).pb(px(16.)).child(inner.child(composer))
+        div().w_full().flex().justify_center().px(px(space::XL - 4.)).pb(px(space::L)).child(inner.child(composer))
     }
 }
 
@@ -817,48 +869,62 @@ impl Composer {
     fn plan_strip(&self, plan: &yh_core::plan::Plan, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         use yh_core::plan::Status;
         let current = plan.current().map(|i| i.active_form.clone().unwrap_or_else(|| i.subject.clone()));
-        let head = format!(
-            "{} Plan {}/{}{}",
-            if self.plan_open { "⌄" } else { "›" },
-            plan.completed(),
-            plan.items.len(),
-            current.map(|c| format!(" · {c}")).unwrap_or_else(|| if plan.is_finished() { " · done".into() } else { String::new() })
-        );
+        let status = current.unwrap_or_else(|| if plan.is_finished() { "Done".into() } else { String::new() });
+        let open = self.plan_open;
         let mut strip = div()
             .flex()
             .flex_col()
             .gap(px(2.))
-            .mb(px(6.))
-            .px(px(12.))
-            .py(px(6.))
-            .rounded(px(10.))
+            .mb(px(space::S))
+            .px(px(space::M))
+            .py(px(space::XS + 2.))
+            .rounded(px(radius::LARGE))
+            .border_1()
+            .border_color(theme.separator)
             .bg(theme.card)
-            .text_size(px(12.))
+            .text_size(px(text::FOOTNOTE))
             .child(
                 div()
                     .id("plan-head")
-                    .text_color(theme.secondary)
-                    .child(head)
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S))
+                    .cursor_pointer()
+                    .child(icons::list_todo().size(px(14.)).text_color(if plan.is_finished() { theme.success } else { theme.accent }))
+                    .child(div().flex_none().font_weight(FontWeight::MEDIUM).child("Plan"))
+                    .child(div().flex_none().text_color(theme.secondary).child(format!("{}/{}", plan.completed(), plan.items.len())))
+                    .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(theme.secondary).child(status))
+                    .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).size(px(13.)).text_color(theme.tertiary))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.plan_open = !this.plan_open;
                         cx.notify();
                     })),
             );
-        if self.plan_open {
+        if open {
+            let mut list = div().flex().flex_col().gap(px(3.)).pt(px(space::XS)).pb(px(2.));
             for item in &plan.items {
-                let (mark, color) = match item.status {
-                    Status::Completed => ("✓", theme.secondary),
-                    Status::InProgress => ("◐", theme.accent),
-                    Status::Pending => ("○", theme.secondary),
+                let mark = match item.status {
+                    Status::Completed => Icon::new(IconName::CircleCheck).text_color(theme.success),
+                    Status::InProgress => Icon::new(IconName::LoaderCircle).text_color(theme.accent),
+                    Status::Pending => icons::circle_dashed().text_color(theme.tertiary),
                 };
-                strip = strip.child(
+                list = list.child(
                     div()
                         .flex()
-                        .gap(px(6.))
-                        .child(div().w(px(14.)).text_color(color).child(mark))
-                        .child(div().when(item.status == Status::Completed, |d| d.text_color(theme.secondary)).child(item.subject.clone())),
+                        .items_center()
+                        .gap(px(space::S))
+                        .pl(px(1.))
+                        .child(mark.size(px(13.)))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .when(item.status == Status::Completed, |d| d.text_color(theme.secondary).line_through())
+                                .when(item.status == Status::InProgress, |d| d.font_weight(FontWeight::MEDIUM))
+                                .child(item.subject.clone()),
+                        ),
                 );
             }
+            strip = strip.child(list);
         }
         strip
     }
@@ -872,7 +938,7 @@ impl Composer {
         if queued.is_empty() {
             return None;
         }
-        let mut list = div().flex().flex_col().gap(px(6.)).mb(px(8.));
+        let mut list = div().flex().flex_col().gap(px(space::XS + 2.)).mb(px(space::S));
         for (i, (id, text, attachments)) in queued.into_iter().enumerate() {
             let (sending, taking) = {
                 let c = &thread.read(cx).composer;
@@ -893,15 +959,16 @@ impl Composer {
             let mut row = div()
                 .flex()
                 .items_start()
-                .gap(px(8.))
-                .px(px(10.))
-                .py(px(7.))
-                .rounded(px(10.))
+                .gap(px(space::S + 2.))
+                .pl(px(space::M))
+                .pr(px(space::XS + 2.))
+                .py(px(space::S))
+                .rounded(px(radius::LARGE))
                 .border_1()
                 .border_color(theme.separator)
                 .bg(theme.card)
-                .text_size(px(12.))
-                .child(div().w(px(14.)).flex_none().text_color(theme.secondary).child(if sending { "↯" } else { "◷" }))
+                .text_size(px(text::FOOTNOTE))
+                .child(div().pt(px(1.)).flex_none().child(if sending { icons::zap() } else { icons::clock() }.size(px(14.)).text_color(if sending { theme.warning } else { theme.secondary })))
                 .child(
                     div()
                         .flex_1()
@@ -910,7 +977,7 @@ impl Composer {
                         .flex_col()
                         .gap(px(2.))
                         .child(div().max_h(px(34.)).overflow_hidden().child(label))
-                        .child(div().text_size(px(11.)).text_color(theme.secondary).child(status)),
+                        .child(div().text_size(px(text::CAPTION)).text_color(theme.secondary).child(status)),
                 );
             if !sending && !taking {
                 let w = self.workspace.downgrade();
@@ -922,17 +989,17 @@ impl Composer {
                         .flex()
                         .flex_none()
                         .gap(px(2.))
-                        .child(Button::new(SharedString::from(format!("queued-now-{i}"))).ghost().xsmall().label("Send Now").tooltip("Interrupt Claude and send this now").on_click(
+                        .child(Button::new(SharedString::from(format!("queued-now-{i}"))).ghost().small().icon(icons::zap().size(px(13.)).text_color(theme.secondary)).label("Send Now").tooltip("Interrupt Claude and send this now").on_click(
                             move |_, _, cx| {
                                 let _ = w.update(cx, |ws, cx| ws.send_now(&t1, &i1, cx));
                             },
                         ))
-                        .child(Button::new(SharedString::from(format!("queued-edit-{i}"))).ghost().xsmall().label("Edit").tooltip("Take it back into the composer").on_click(
+                        .child(Button::new(SharedString::from(format!("queued-edit-{i}"))).ghost().small().icon(Icon::new(IconName::Undo2).size(px(13.)).text_color(theme.secondary)).tooltip("Edit: take it back into the composer").on_click(
                             move |_, _, cx| {
                                 let _ = w2.update(cx, |ws, cx| ws.withdraw(&t2, &i2, true, cx));
                             },
                         ))
-                        .child(Button::new(SharedString::from(format!("queued-remove-{i}"))).ghost().xsmall().label("Remove").tooltip("Don't send it").on_click(cx.listener(
+                        .child(Button::new(SharedString::from(format!("queued-remove-{i}"))).ghost().small().icon(icons::x().size(px(13.)).text_color(theme.secondary)).tooltip("Remove: don't send it").on_click(cx.listener(
                             move |this, _, _, cx| {
                                 this.withdrawing.insert(i3.clone());
                                 this.workspace.update(cx, |ws, cx| ws.withdraw(&t3, &i3, false, cx));
@@ -951,7 +1018,7 @@ impl Composer {
         let key = thread.read(cx).id().to_string();
         let list = self.attached.get(&key).filter(|l| !l.is_empty())?;
         let dir = self.workspace.read(cx).data_dir.join("attachments");
-        let mut strip = div().flex().flex_wrap().gap(px(6.));
+        let mut strip = div().flex().flex_wrap().gap(px(space::S));
         // A click opens Quick Look on what's waiting, at the one clicked; the arrow keys go
         // through the rest, as in Finder.
         let all: Vec<String> = list
@@ -968,7 +1035,12 @@ impl Composer {
                 Attached::File(f) => f.path.clone(),
             };
             let body = match a {
-                Attached::Image(_) => div().child(gpui_kit::img(path.clone()).h(px(56.)).max_w(px(120.)).rounded(px(6.))),
+                Attached::Image(_) => div()
+                    .rounded(px(radius::MEDIUM))
+                    .border_1()
+                    .border_color(theme.separator)
+                    .overflow_hidden()
+                    .child(gpui_kit::img(path.clone()).h(px(56.)).max_w(px(120.)).rounded(px(radius::MEDIUM - 1.))),
                 Attached::File(f) => file_chip(f, theme),
             };
             let (reveal, look, look_menu) = (path.clone(), all.clone(), all.clone());
@@ -996,16 +1068,16 @@ impl Composer {
                         .absolute()
                         .top(px(-4.))
                         .right(px(-4.))
-                        .w(px(16.))
-                        .h(px(16.))
+                        .w(px(18.))
+                        .h(px(18.))
                         .rounded_full()
-                        .bg(theme.secondary)
-                        .text_color(gpui_kit::white())
-                        .text_size(px(11.))
+                        .bg(theme.text)
+                        .border_2()
+                        .border_color(theme.card)
                         .flex()
                         .items_center()
                         .justify_center()
-                        .child("×")
+                        .child(icons::x().size(px(9.)).text_color(theme.card))
                         .on_click(cx.listener({
                             let key = key.clone();
                             move |this, _, _, cx| {
@@ -1064,20 +1136,20 @@ pub fn file_chip(file: &FileAttachment, theme: &Theme) -> gpui_kit::Div {
         .gap(px(8.))
         .h(px(56.))
         .max_w(px(240.))
-        .pl(px(8.))
-        .pr(px(12.))
-        .rounded(px(8.))
+        .pl(px(space::S + 2.))
+        .pr(px(space::M))
+        .rounded(px(radius::MEDIUM))
         .border_1()
         .border_color(theme.separator)
-        .bg(theme.code)
+        .bg(theme.canvas)
         .child(
             div()
                 .flex_none()
-                .w(px(28.))
-                .h(px(28.))
-                .rounded(px(6.))
-                .bg(color)
-                .text_color(gpui_kit::white())
+                .w(px(30.))
+                .h(px(30.))
+                .rounded(px(radius::SMALL + 1.))
+                .bg(color.opacity(0.14))
+                .text_color(color)
                 .text_size(px(9.))
                 .font_weight(FontWeight::BOLD)
                 .flex()
@@ -1090,8 +1162,8 @@ pub fn file_chip(file: &FileAttachment, theme: &Theme) -> gpui_kit::Div {
                 .min_w_0()
                 .flex()
                 .flex_col()
-                .child(div().text_size(px(12.)).font_weight(FontWeight::MEDIUM).overflow_hidden().whitespace_nowrap().text_ellipsis().child(file.name()))
-                .child(div().text_size(px(11.)).text_color(theme.secondary).overflow_hidden().whitespace_nowrap().text_ellipsis().child(detail)),
+                .child(div().text_size(px(text::FOOTNOTE)).font_weight(FontWeight::MEDIUM).overflow_hidden().whitespace_nowrap().text_ellipsis().child(file.name()))
+                .child(div().text_size(px(text::CAPTION)).text_color(theme.secondary).overflow_hidden().whitespace_nowrap().text_ellipsis().child(detail)),
         )
 }
 
@@ -1138,16 +1210,21 @@ fn mcp_attention_chip(needing: &[(String, bool)], workspace: gpui_kit::WeakEntit
     div()
         .id("mcp-attention")
         .flex_none()
-        .px(px(9.))
-        .py(px(3.))
+        .flex()
+        .items_center()
+        .gap(px(space::XS + 1.))
+        .ml(px(space::XS))
+        .h(px(22.))
+        .px(px(space::S))
         .rounded_full()
         .bg(theme.warning.opacity(0.14))
         .hover(|d| d.bg(theme.warning.opacity(0.22)))
         .text_color(theme.warning)
-        .text_size(px(12.))
+        .text_size(px(text::FOOTNOTE))
         .font_weight(FontWeight::MEDIUM)
         .cursor_pointer()
-        .child(label)
+        .child(icons::plug().size(px(12.)).text_color(theme.warning))
+        .child(div().whitespace_nowrap().child(label))
         .tooltip(move |window, cx| Tooltip::new(help.clone()).build(window, cx))
         .on_click(move |_, _, cx| {
             let _ = workspace.update(cx, |ws, cx| ws.open_mcp(cx));
@@ -1395,23 +1472,28 @@ impl Composer {
         let mut list = div()
             .flex()
             .flex_col()
-            .mb(px(6.))
-            .py(px(4.))
-            .rounded(px(10.))
+            .mb(px(space::S))
+            .p(px(space::XS))
+            .rounded(px(radius::LARGE))
             .border_1()
             .border_color(theme.separator)
             .bg(theme.card);
         for (i, item) in s.items.iter().enumerate() {
+            let on = i == s.index;
             list = list.child(
                 div()
                     .id(("suggestion", i))
                     .flex()
-                    .gap(px(10.))
-                    .px(px(10.))
-                    .py(px(3.))
-                    .when(i == s.index, |d| d.bg(theme.selected))
-                    .child(div().flex_none().font_weight(FontWeight::MEDIUM).child(item.label.clone()))
-                    .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_color(theme.secondary).child(item.detail.clone()))
+                    .items_center()
+                    .gap(px(space::S + 2.))
+                    .h(px(28.))
+                    .px(px(space::S))
+                    .rounded(px(radius::MEDIUM))
+                    .cursor_pointer()
+                    .when(on, |d| d.bg(theme.accent_soft))
+                    .when(!on, |d| d.hover(|d| d.bg(theme.hover)))
+                    .child(div().flex_none().font_weight(FontWeight::MEDIUM).when(on, |d| d.text_color(theme.accent)).child(item.label.clone()))
+                    .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child(item.detail.clone()))
                     .on_mouse_down(gpui_kit::MouseButton::Left, cx.listener(move |this, _, window, cx| this.accept(i, true, window, cx))),
             );
         }
@@ -1506,16 +1588,18 @@ impl QuestionCard {
 impl Render for QuestionCard {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::get(cx);
-        let mut card = card_frame(&theme);
+        let mut card = card_frame(&theme).child(card_title(icons::message_question(), if self.questions.len() == 1 { "Claude asks".to_string() } else { format!("Claude asks {} questions", self.questions.len()) }, &theme));
         for (qi, q) in self.questions.iter().enumerate() {
             // With descriptions, each option on its own line with what it means beside it.
             let described = q.options.iter().any(|o| o.1.is_some());
-            let mut options = if described { div().flex().flex_col().gap(px(4.)) } else { div().flex().flex_wrap().gap(px(6.)) };
+            let mut options = if described { div().flex().flex_col().gap(px(space::XS + 2.)) } else { div().flex().flex_wrap().gap(px(space::XS + 2.)) };
             for (oi, (label, description)) in q.options.iter().enumerate() {
                 let on = q.chosen.contains(&oi);
                 let button = Button::new(SharedString::from(format!("q{qi}-{oi}")))
                         .small()
                         .when(on, |b| b.primary())
+                        .when(!on, |b| b.outline())
+                        .when(on, |b| b.icon(Icon::new(IconName::Check).size(px(12.))))
                         .label(label.clone())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let q = &mut this.questions[qi];
@@ -1533,33 +1617,33 @@ impl Render for QuestionCard {
                         .items_center()
                         .gap(px(8.))
                         .child(div().flex_none().child(button))
-                        .when_some(description.clone().filter(|_| described), |d, text| d.child(div().min_w_0().text_size(px(12.)).text_color(theme.secondary).child(text))),
+                        .when_some(description.clone().filter(|_| described), |d, t| d.child(div().min_w_0().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child(t))),
                 );
             }
             card = card.child(
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(6.))
-                    .when_some(q.header.clone(), |d, h| d.child(div().text_size(px(11.)).text_color(theme.secondary).child(h)))
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child(q.question.clone()))
+                    .gap(px(space::S))
+                    .when(qi > 0, |d| d.pt(px(space::S)).border_t_1().border_color(theme.separator))
+                    .when_some(q.header.clone(), |d, h| {
+                        d.child(div().flex().child(div().px(px(space::XS + 2.)).rounded(px(radius::SMALL)).bg(theme.selected).text_size(px(text::CAPTION)).font_weight(FontWeight::MEDIUM).text_color(theme.secondary).child(h)))
+                    })
+                    .child(div().text_size(px(text::BODY)).font_weight(FontWeight::MEDIUM).whitespace_normal().child(q.question.clone()))
                     .child(options)
                     .child(Input::new(&q.other).small()),
             );
         }
         let ready = self.all_answered(cx);
         div().id("question-card").max_h(px(460.)).overflow_y_scroll().child(card.child(
-            div()
-                .flex()
-                .justify_end()
-                .gap(px(8.))
-                .child(Button::new("skip").small().label("Skip").tooltip("⌘⌫").on_click(cx.listener(|this, _, _, cx| this.skip(cx))))
+            card_buttons()
+                .child(Button::new("skip").small().outline().label("Skip").tooltip("Skip (⌘⌫)").on_click(cx.listener(|this, _, _, cx| this.skip(cx))))
                 .child(
                     Button::new("answer")
                         .small()
                         .primary()
                         .label("Answer")
-                        .tooltip(if ready { "⌘↩" } else { "Answer every question first" })
+                        .tooltip(if ready { "Answer (⌘↩)" } else { "Answer every question first" })
                         .disabled(!ready)
                         .on_click(cx.listener(|this, _, _, cx| this.submit(cx))),
                 ),
@@ -1664,23 +1748,24 @@ impl Render for PlanCard {
                 menu
             });
         card_frame(&theme)
+            .child(card_title(Icon::new(IconName::Map), "Plan ready for review", &theme))
             .child(
                 div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .child(rows::icon(gpui_kit::component::IconName::Map, 16., theme.accent))
-                    .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child("Plan ready for review")),
+                    .id("plan-body")
+                    .max_h(px(320.))
+                    .overflow_y_scroll()
+                    .px(px(space::M))
+                    .py(px(space::S))
+                    .rounded(px(radius::MEDIUM))
+                    .bg(theme.canvas)
+                    .border_1()
+                    .border_color(theme.separator)
+                    .child(rows::markdown_view(&self.plan, &theme)),
             )
-            .child(div().id("plan-body").max_h(px(320.)).overflow_y_scroll().child(rows::markdown_view(&self.plan, &theme)))
             .child(Input::new(&self.feedback).small())
             .child(
-                div()
-                    .flex()
-                    .justify_end()
-                    .items_center()
-                    .gap(px(8.))
-                    .child(Button::new("keep-planning").small().label("Keep Planning").tooltip("Send your feedback and keep planning (⌘⌫)").on_click(cx.listener(|this, _, _, cx| this.keep_planning(cx))))
+                card_buttons()
+                    .child(Button::new("keep-planning").small().outline().label("Keep Planning").tooltip("Send your feedback and keep planning (⌘⌫)").on_click(cx.listener(|this, _, _, cx| this.keep_planning(cx))))
                     .child(approve),
             )
     }

@@ -3,10 +3,10 @@
 //! the window puts them back.
 
 use crate::state::workspace::Workspace;
-use crate::theme::{Theme, MONO, UI};
-use gpui_kit::component::button::{Button, ButtonVariants};
+use crate::theme::{radius, space, text, Theme, UI};
+use crate::ui::inspector::{strip_tab, tab_close, tool_button};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::{Disableable, Sizable};
+use gpui_kit::component::{Disableable, Icon, IconName, Sizable};
 use gpui_kit::{div, prelude::*, px, AnyWindowHandle, App, Context, Entity, FontWeight, SharedString, Subscription, WeakEntity, Window};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -139,56 +139,33 @@ impl Render for BrowserWindow {
             let shown = url.clone();
             self.address.update(cx, |a, cx| a.set_value(shown, window, cx));
         }
-        let mut strip = div().id("pop-tabs").flex_1().min_w_0().flex().items_center().gap(px(4.)).overflow_x_scroll();
+        let mut strip = div().id("pop-tabs").flex_1().min_w_0().flex().items_center().gap(px(2.)).overflow_x_scroll();
         for (id, title, on, loading) in tabs.iter().cloned() {
             let (t, t2) = (thread.clone(), thread.clone());
+            let icon = if loading { Icon::new(IconName::LoaderCircle) } else { Icon::new(IconName::Globe) };
             strip = strip.child(
-                div()
-                    .id(SharedString::from(format!("pop-tab-{id}")))
-                    .flex_none()
-                    .max_w(px(200.))
-                    .flex()
-                    .items_center()
-                    .gap(px(4.))
-                    .pl(px(8.))
-                    .pr(px(4.))
-                    .py(px(2.))
-                    .rounded(px(10.))
-                    .text_size(px(11.))
-                    .bg(if on { theme.accent.opacity(0.16) } else { theme.selected })
-                    .text_color(if on { theme.text } else { theme.secondary })
-                    .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(if loading { format!("◌ {title}") } else { title }))
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("pop-tab-close-{id}")))
-                            .flex_none()
-                            .px(px(3.))
-                            .rounded(px(6.))
-                            .text_color(theme.secondary)
-                            .hover(|s| s.bg(theme.separator))
-                            .child("×")
-                            .on_click(cx.listener(move |_, _, _, cx| {
-                                crate::browser::Browsers::close_tab_now(&t2, id);
-                                cx.stop_propagation();
-                                cx.notify();
-                            })),
-                    )
+                strip_tab(SharedString::from(format!("pop-tab-{id}")), Some(icon), title, on, false, 220., &theme)
+                    .child(tab_close(SharedString::from(format!("pop-tab-close-{id}")), &theme).on_click(cx.listener(move |_, _, _, cx| {
+                        crate::browser::Browsers::close_tab_now(&t2, id);
+                        cx.stop_propagation();
+                        cx.notify();
+                    })))
                     .on_click(cx.listener(move |_, _, _, cx| {
                         crate::browser::Browsers::select_tab(&t, id);
                         cx.notify();
                     })),
             );
         }
-        let nav = |id: &'static str, label: &'static str, tip: &'static str, enabled: bool, act: fn(&crate::webview::WebView)| {
+        let nav = |id: &'static str, icon: Icon, tip: &'static str, enabled: bool, act: fn(&crate::webview::WebView)| {
             let thread = thread.clone();
-            Button::new(id).xsmall().ghost().label(label).tooltip(tip).disabled(!enabled).on_click(cx.listener(move |_, _, _, cx| {
+            tool_button(id, icon, tip, &theme).disabled(!enabled).on_click(cx.listener(move |_, _, _, cx| {
                 crate::browser::Browsers::with_tab(&thread, |t| act(&t.web));
                 cx.notify();
             }))
         };
         let new_tab = {
             let (thread, project) = (thread.clone(), self.project.clone());
-            Button::new("pop-new-tab").xsmall().ghost().label("+").tooltip("New Tab").on_click(cx.listener(move |this, _, window, cx| {
+            tool_button("pop-new-tab", Icon::new(IconName::Plus), "New Tab", &theme).on_click(cx.listener(move |this, _, window, cx| {
                 crate::browser::Browsers::open_for_user(&thread, Some(&project), None);
                 this.address.update(cx, |a, cx| {
                     a.set_value("", window, cx);
@@ -199,7 +176,7 @@ impl Render for BrowserWindow {
         };
         let back_to_sidebar = {
             let (thread, ws) = (thread.clone(), self.workspace.clone());
-            Button::new("pop-back").xsmall().ghost().label("Move to Sidebar").tooltip("Show this browser in the right sidebar again").on_click(move |_, _, cx| {
+            tool_button("pop-back", Icon::new(IconName::PanelRight), "Move to Sidebar: show this browser in the right sidebar again", &theme).on_click(move |_, _, cx| {
                 close(&thread, cx);
                 ws.update(cx, |ws, cx| ws.show_panel(crate::state::workspace::Panel::Browser, cx));
             })
@@ -210,21 +187,21 @@ impl Render for BrowserWindow {
             .flex()
             .flex_col()
             .font_family(UI)
-            .text_size(px(13.))
+            .text_size(px(text::BODY))
             .text_color(theme.text)
             .bg(theme.canvas)
-            .child(div().flex().items_center().gap(px(4.)).px(px(8.)).pt(px(6.)).child(strip).child(new_tab))
+            .child(div().flex().items_center().gap(px(space::XS)).px(px(space::S)).pt(px(space::XS + 2.)).child(strip).child(new_tab))
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap(px(2.))
-                    .px(px(6.))
-                    .py(px(6.))
-                    .child(nav("pop-back-nav", "‹", "Back", can_back, |w| w.go_back()))
-                    .child(nav("pop-forward", "›", "Forward", can_forward, |w| w.go_forward()))
-                    .child(nav("pop-reload", "↻", "Reload", !tabs.is_empty(), |w| w.reload()))
-                    .child(div().flex_1().min_w_0().child(Input::new(&self.address).xsmall().font_family(MONO)))
+                    .px(px(space::S))
+                    .py(px(space::XS + 2.))
+                    .child(nav("pop-back-nav", Icon::new(IconName::ArrowLeft), "Back", can_back, |w| w.go_back()))
+                    .child(nav("pop-forward", Icon::new(IconName::ArrowRight), "Forward", can_forward, |w| w.go_forward()))
+                    .child(nav("pop-reload", Icon::new(IconName::RotateCw), "Reload", !tabs.is_empty(), |w| w.reload()))
+                    .child(div().flex_1().min_w_0().px(px(space::XS)).child(Input::new(&self.address).small().text_size(px(text::FOOTNOTE)).prefix(Icon::new(IconName::Search).size(px(13.)).text_color(theme.tertiary))))
                     .child(back_to_sidebar),
             )
             .child(
@@ -239,11 +216,13 @@ impl Render for BrowserWindow {
                             div()
                                 .size_full()
                                 .flex()
+                                .flex_col()
                                 .items_center()
                                 .justify_center()
-                                .text_color(theme.secondary)
-                                .font_weight(FontWeight::MEDIUM)
-                                .child("No pages open. Type an address, or wait for Claude to open one."),
+                                .gap(px(space::S))
+                                .child(div().mb(px(2.)).w(px(36.)).h(px(36.)).rounded(px(radius::LARGE - 2.)).bg(theme.selected).flex().items_center().justify_center().child(Icon::new(IconName::Globe).size(px(16.)).text_color(theme.secondary)))
+                                .child(div().text_size(px(text::HEADLINE)).font_weight(FontWeight::SEMIBOLD).child("No Pages Open"))
+                                .child(div().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child("Type an address, or wait for Claude to open one.")),
                         )
                     })
                     .child(

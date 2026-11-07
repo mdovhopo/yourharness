@@ -5,11 +5,12 @@
 use crate::state::thread::{SubStep, ThreadState};
 use crate::state::workspace::{Panel, Workspace};
 use crate::ui::transcript::TranscriptView;
-use crate::theme::{Theme, MONO};
+use crate::theme::{radius, space, text, Theme, MONO};
+use crate::ui::icons;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
-use gpui_kit::component::{Disableable, IconName, Selectable, Sizable};
+use gpui_kit::component::{Disableable, Icon, IconName, Selectable, Sizable};
 use gpui_kit::{
     div, prelude::*, px, uniform_list, App, Context, Entity, FontWeight, ScrollHandle, ScrollStrategy, SharedString, Subscription,
     UniformListScrollHandle, WeakEntity, Window,
@@ -702,36 +703,73 @@ impl Inspector {
 // MARK: Drawing
 
 impl Inspector {
+    /// The tabs: a segmented control of icons, each named in its tooltip and in the panel's
+    /// header under it.
     fn tabs(&self, panel: Panel, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut row = div().flex().items_center().gap(px(2.)).px(px(10.)).h(px(44.)).flex_none().border_b_1().border_color(theme.separator);
+        // The chosen segment stands up from the track, as in Settings.
+        let raised = if theme.canvas.l < 0.5 { theme.bubble } else { theme.canvas };
+        let mut track = div().flex_1().flex().items_center().gap(px(2.)).p(px(2.)).rounded(px(radius::MEDIUM + 1.)).bg(theme.selected);
         for p in Panel::ALL {
             let ws = self.workspace.clone();
-            let b = Button::new(SharedString::from(format!("panel-{}", p.label()))).small().label(p.label());
-            row = row.child((if p == panel { b.primary() } else { b.ghost() }).on_click(cx.listener(move |this, _, _, cx| {
-                ws.update(cx, |ws, cx| ws.show_panel(p, cx));
-                this.ensure_tree(cx);
-                this.ensure_side(cx);
-                this.ensure_pulls(cx);
-                cx.notify();
-            })));
+            let on = p == panel;
+            let (icon, tip): (Icon, &'static str) = match p {
+                Panel::PullRequests => (crate::ui::icons::pull_request(), "Pull Requests"),
+                Panel::SideChat => (crate::ui::icons::message_square(), "Side Chat"),
+                Panel::Subagents => (crate::ui::icons::bot(), "Sub-agents"),
+                Panel::Files => (crate::ui::icons::files(), "Files"),
+                Panel::Browser => (Icon::new(IconName::Globe), "Browser"),
+            };
+            track = track.child(
+                div()
+                    .id(SharedString::from(format!("panel-{}", p.label())))
+                    .flex_1()
+                    .h(px(24.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(radius::MEDIUM - 1.))
+                    .when(on, |d| d.bg(raised).border_1().border_color(theme.separator))
+                    .when(!on, |d| d.hover(|s| s.bg(theme.hover)))
+                    .child(icon.size(px(15.)).text_color(if on { theme.accent } else { theme.secondary }))
+                    .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip).build(window, cx))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        ws.update(cx, |ws, cx| ws.show_panel(p, cx));
+                        this.ensure_tree(cx);
+                        this.ensure_side(cx);
+                        this.ensure_pulls(cx);
+                        cx.notify();
+                    })),
+            );
         }
-        row
+        div().flex().items_center().px(px(space::M)).h(px(44.)).flex_none().border_b_1().border_color(theme.separator).child(track)
     }
 
     fn subagents(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let Some(thread) = self.thread.clone() else { return empty("No thread open.", theme) };
         let runs = thread.read(cx).subagents();
         if runs.is_empty() {
-            return empty("No sub-agents. When Claude hands work to a sub-agent, you can follow it here step by step.", theme);
+            return div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(panel_header("Sub-agents", None, theme))
+                .child(div().flex_1().min_h_0().child(empty_panel(icons::bot(), "No Sub-agents", "When Claude hands work to a sub-agent, you can follow it here, step by step.", theme)))
+                .into_any_element();
         }
+        let working = runs.iter().filter(|(_, e)| run_label(&e.borrow()).1 == "running").count();
+        let subtitle = match (runs.len(), working) {
+            (1, _) => "1 run".to_string(),
+            (n, 0) => format!("{n} runs"),
+            (n, w) => format!("{n} runs · {w} working"),
+        };
         let picked = thread.read(cx).inspected_subagent.clone();
         let selected = picked
             .and_then(|id| runs.iter().find(|(r, _)| *r == id).cloned())
             .or_else(|| runs.iter().rev().find(|(_, e)| e.borrow().sub.as_ref().is_some_and(|s| s.status == "running")).cloned())
             .unwrap_or_else(|| runs[runs.len() - 1].clone());
-        let mut column = div().size_full().flex().flex_col();
+        let mut column = div().size_full().flex().flex_col().child(panel_header("Sub-agents", Some(subtitle), theme));
         if runs.len() > 1 {
-            let mut list = div().id("subagent-runs").max_h(px(168.)).overflow_y_scroll().p(px(8.)).flex().flex_col().gap(px(2.)).border_b_1().border_color(theme.separator);
+            let mut list = div().id("subagent-runs").max_h(px(176.)).overflow_y_scroll().px(px(space::S)).pb(px(space::S)).flex().flex_col().gap(px(1.)).border_b_1().border_color(theme.separator);
             for (id, e) in runs.iter().rev() {
                 let b = e.borrow();
                 let (description, status) = run_label(&b);
@@ -742,13 +780,14 @@ impl Inspector {
                         .id(SharedString::from(format!("run-{id}")))
                         .flex()
                         .items_center()
-                        .gap(px(8.))
-                        .px(px(8.))
-                        .py(px(4.))
-                        .rounded(px(6.))
-                        .when(on, |d| d.bg(theme.accent.opacity(0.15)))
-                        .when(!on, |d| d.hover(|s| s.bg(theme.selected)))
-                        .child(status_dot(&status, theme))
+                        .gap(px(space::S))
+                        .h(px(28.))
+                        .px(px(space::S))
+                        .rounded(px(radius::MEDIUM))
+                        .cursor_pointer()
+                        .when(on, |d| d.bg(theme.selected).font_weight(FontWeight::MEDIUM))
+                        .when(!on, |d| d.hover(|s| s.bg(theme.hover)))
+                        .child(status_icon(&status, theme))
                         .child(div().flex_1().overflow_hidden().whitespace_nowrap().text_ellipsis().child(description))
                         .on_click(move |_, _, cx| {
                             t.update(cx, |t, cx| {
@@ -804,9 +843,15 @@ impl Inspector {
         }
         let stop = task_id.map(|task| {
             let (ws, t) = (self.workspace.clone(), thread.clone());
-            Button::new("subagent-stop").small().label("Stop").tooltip("Stop this sub-agent. The thread carries on.").on_click(move |_, _, cx| {
-                ws.update(cx, |ws, cx| ws.stop_job(&t, &task, cx));
-            })
+            Button::new("subagent-stop")
+                .small()
+                .outline()
+                .icon(icons::circle_stop().size(px(13.)))
+                .label("Stop")
+                .tooltip("Stop this sub-agent. The thread carries on.")
+                .on_click(move |_, _, cx| {
+                    ws.update(cx, |ws, cx| ws.stop_job(&t, &task, cx));
+                })
         });
         let mut detail = div()
             .id("subagent-detail")
@@ -814,34 +859,66 @@ impl Inspector {
             .min_h_0()
             .overflow_y_scroll()
             .track_scroll(&self.sub_scroll)
-            .p(px(16.))
+            .px(px(space::L))
+            .pt(px(space::M))
+            .pb(px(space::L))
             .flex()
             .flex_col()
-            .gap(px(10.))
-            .child(div().flex().items_start().gap(px(8.)).child(div().flex_1().min_w_0().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(description)).when_some(stop, |d, b| d.child(b)))
+            .gap(px(space::M))
             .child(
                 div()
                     .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .text_color(theme.secondary)
-                    .child(status_dot(&status, theme))
-                    .child(format!("{} · {tools} tool{}", status_text(&status), if tools == 1 { "" } else { "s" }))
-                    .when_some(agent_type, |d, t| d.child(div().child(format!("· {t}")))),
+                    .items_start()
+                    .gap(px(space::S))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(space::XS))
+                            .child(div().text_size(px(text::TITLE)).line_height(px(20.)).font_weight(FontWeight::SEMIBOLD).whitespace_normal().child(description))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(space::XS + 2.))
+                                    .text_size(px(text::FOOTNOTE))
+                                    .text_color(theme.secondary)
+                                    .child(status_icon(&status, theme))
+                                    .child(format!("{} · {tools} tool{}", status_text(&status), if tools == 1 { "" } else { "s" }))
+                                    .when_some(agent_type, |d, t| d.child(div().child(format!("· {t}")))),
+                            ),
+                    )
+                    .when_some(stop, |d, b| d.child(b)),
             );
         if !prompt.is_empty() {
             let open = self.prompt_open;
             detail = detail.child(
                 div()
                     .id("subagent-prompt")
-                    .p(px(10.))
-                    .rounded(px(8.))
+                    .px(px(space::M))
+                    .py(px(space::S + 2.))
+                    .rounded(px(radius::MEDIUM))
                     .bg(theme.card)
+                    .border_1()
+                    .border_color(theme.separator)
+                    .cursor_pointer()
                     .flex()
                     .flex_col()
-                    .gap(px(4.))
-                    .child(div().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.secondary).child(if open { "TASK ▾" } else { "TASK ▸" }))
-                    .child(div().text_size(px(12.)).text_color(theme.secondary).when(!open, |d| d.line_clamp(3)).child(prompt))
+                    .gap(px(space::XS))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(space::XS))
+                            .text_size(px(text::CAPTION))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.secondary)
+                            .child("Task")
+                            .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).size(px(12.)).text_color(theme.tertiary)),
+                    )
+                    .child(div().text_size(px(text::FOOTNOTE)).line_height(px(17.)).text_color(theme.secondary).whitespace_normal().when(!open, |d| d.line_clamp(3)).child(prompt))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.prompt_open = !this.prompt_open;
                         cx.notify();
@@ -850,30 +927,34 @@ impl Inspector {
         }
         for step in shown {
             detail = detail.child(match &step.tool {
-                None => div().text_size(px(13.)).whitespace_normal().child(step.text.clone()),
+                None => div().text_size(px(text::BODY)).line_height(px(text::BODY_LINE)).whitespace_normal().child(step.text.clone()),
                 Some(name) => {
                     let gist = gist(name, &step.text);
                     div()
                         .flex()
                         .flex_col()
-                        .gap(px(2.))
+                        .gap(px(space::XS))
                         .child(
                             div()
                                 .flex()
-                                .gap(px(6.))
-                                .text_size(px(12.))
-                                .child(div().font_weight(FontWeight::SEMIBOLD).child(name.clone()))
-                                .child(div().flex_1().overflow_hidden().whitespace_nowrap().text_ellipsis().font_family(MONO).text_color(theme.secondary).child(gist)),
+                                .items_center()
+                                .gap(px(space::XS + 2.))
+                                .text_size(px(text::FOOTNOTE))
+                                .child(div().flex_none().child(Icon::new(if step.is_error { IconName::CircleX } else { IconName::ChevronRight }).size(px(12.)).text_color(if step.is_error { theme.error } else { theme.tertiary })))
+                                .child(div().flex_none().font_weight(FontWeight::MEDIUM).child(name.clone()))
+                                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_family(MONO).text_size(px(text::CAPTION)).text_color(theme.secondary).child(gist)),
                         )
                         .when_some(step.result.as_ref().map(|r| first_lines(r, 3)), |d, r| {
                             d.child(
                                 div()
-                                    .px(px(8.))
-                                    .py(px(4.))
-                                    .rounded(px(5.))
+                                    .ml(px(18.))
+                                    .px(px(space::S))
+                                    .py(px(space::XS + 1.))
+                                    .rounded(px(radius::SMALL))
                                     .bg(theme.code)
                                     .font_family(MONO)
-                                    .text_size(px(11.))
+                                    .text_size(px(text::CAPTION))
+                                    .line_height(px(15.))
                                     .text_color(if step.is_error { theme.error } else { theme.secondary })
                                     .child(r),
                             )
@@ -882,20 +963,29 @@ impl Inspector {
             });
         }
         if status == "running" {
-            detail = detail.child(div().text_color(theme.secondary).child("Working…"));
+            detail = detail.child(div().flex().items_center().gap(px(space::XS + 2.)).text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child(Icon::new(IconName::LoaderCircle).size(px(13.)).text_color(theme.accent)).child("Working…"));
         } else if let Some(report) = report.filter(|r| !r.trim().is_empty()) {
             detail = detail.child(
                 div()
-                    .p(px(12.))
-                    .rounded(px(8.))
+                    .p(px(space::M))
+                    .rounded(px(radius::LARGE))
                     .border_1()
-                    .border_color(theme.accent.opacity(0.4))
-                    .bg(theme.accent.opacity(0.06))
+                    .border_color(theme.separator)
+                    .bg(theme.card)
                     .flex()
                     .flex_col()
-                    .gap(px(6.))
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child("Report"))
-                    .child(div().whitespace_normal().child(report)),
+                    .gap(px(space::S))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(space::XS + 2.))
+                            .text_size(px(text::HEADLINE))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(Icon::new(IconName::FileText).size(px(14.)).text_color(theme.secondary))
+                            .child("Report"),
+                    )
+                    .child(div().text_size(px(text::BODY)).line_height(px(text::BODY_LINE)).whitespace_normal().child(report)),
             );
         }
         column.child(detail).into_any_element()
@@ -912,29 +1002,17 @@ impl Inspector {
         let hides_tree = state.is_some_and(|s| s.hides_tree && !s.files.is_empty());
         let has_files = state.is_some_and(|s| !s.files.is_empty());
         let wraps = self.wraps;
-        let top = div()
-            .flex()
-            .items_center()
-            .gap(px(4.))
-            .p(px(8.))
+        let folder_name = folder.trim_end_matches('/').rsplit('/').next().unwrap_or("").to_string();
+        let header = panel_header("Files", Some(folder_name), theme)
             .child(
-                Button::new("files-tree-toggle")
-                    .small()
-                    .ghost()
-                    .icon(if hides_tree { IconName::PanelLeftOpen } else { IconName::PanelLeftClose })
+                tool_button("files-tree-toggle", if hides_tree { Icon::new(IconName::PanelLeftOpen) } else { Icon::new(IconName::PanelLeftClose) }, if hides_tree { "Show the folder" } else { "Hide the folder" }, theme)
                     .disabled(!has_files)
-                    .tooltip(if hides_tree { "Show the folder" } else { "Hide the folder" })
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_tree(cx))),
             )
-            .child(div().flex_1().min_w_0().child(Input::new(&self.goto).small().cleanable(true)))
             .child(
-                Button::new("files-wrap")
-                    .small()
-                    .ghost()
-                    .label("Wrap")
+                tool_button("files-wrap", icons::text_wrap(), if wraps { "Don't wrap lines" } else { "Wrap lines" }, theme)
                     .selected(wraps)
                     .disabled(current.is_none())
-                    .tooltip(if wraps { "Don't wrap lines" } else { "Wrap lines" })
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.wraps = !this.wraps;
                         this.ensure_wrapped();
@@ -943,16 +1021,21 @@ impl Inspector {
             )
             .child({
                 let (folder, path) = (folder.clone(), current.clone());
-                Button::new("files-more").small().ghost().icon(IconName::Ellipsis).disabled(current.is_none()).tooltip("More").dropdown_menu(move |menu, _, _| match &path {
+                tool_button("files-more", Icon::new(IconName::Ellipsis), "More", theme).disabled(current.is_none()).dropdown_menu(move |menu, _, _| match &path {
                     Some(p) => file_menu(menu, &folder, p),
                     None => menu,
                 })
             });
-        let mut column = div().size_full().flex().flex_col().child(top);
+        let top = div()
+            .flex_none()
+            .px(px(space::M))
+            .pb(px(space::S))
+            .child(Input::new(&self.goto).small().prefix(Icon::new(IconName::Search).size(px(13.)).text_color(theme.tertiary)).cleanable(true));
+        let mut column = div().size_full().flex().flex_col().child(header).child(top);
         if query {
-            let mut list = div().id("goto-results").flex_1().min_h_0().overflow_y_scroll().px(px(8.)).flex().flex_col();
+            let mut list = div().id("goto-results").flex_1().min_h_0().overflow_y_scroll().px(px(space::S)).flex().flex_col().gap(px(1.));
             if self.goto_results.is_empty() {
-                list = list.child(div().p(px(8.)).text_color(theme.secondary).child("No files match."));
+                list = list.child(div().px(px(space::S)).py(px(space::S)).text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child("No files match."));
             }
             for path in &self.goto_results {
                 let p = path.clone();
@@ -961,13 +1044,16 @@ impl Inspector {
                     div()
                         .id(SharedString::from(format!("goto-{path}")))
                         .flex()
-                        .gap(px(6.))
-                        .px(px(8.))
-                        .py(px(3.))
-                        .rounded(px(5.))
-                        .hover(|s| s.bg(theme.selected))
-                        .child(div().flex_none().child(name))
-                        .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(11.)).text_color(theme.secondary).child(dir))
+                        .items_center()
+                        .gap(px(space::S))
+                        .h(px(26.))
+                        .px(px(space::S))
+                        .rounded(px(radius::MEDIUM))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme.hover))
+                        .child(div().flex_none().child(file_icon(&name).size(px(13.)).text_color(theme.tertiary)))
+                        .child(div().flex_none().text_size(px(text::FOOTNOTE)).child(name))
+                        .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(text::CAPTION)).text_color(theme.tertiary).child(dir))
                         .on_click(cx.listener(move |this, _, _, cx| this.open_file(&p, None, cx))),
                 );
             }
@@ -979,6 +1065,7 @@ impl Inspector {
             column = column.child(div().h(px(60.)).flex_none().child(empty("Reading the folder…", theme)));
         } else if !hides_tree {
             let rows = state.rows.clone();
+            let open_dirs: Rc<HashSet<String>> = Rc::new(state.open_dirs.clone());
             let this = cx.entity().downgrade();
             let theme2 = *theme;
             let open_path = current.clone();
@@ -988,19 +1075,29 @@ impl Inspector {
                         let (path, name, depth, dir) = rows[i].clone();
                         let this: WeakEntity<Inspector> = this.clone();
                         let on = open_path.as_deref() == Some(path.as_str());
+                        let expanded = dir && open_dirs.contains(&path);
+                        let icon = if dir {
+                            Icon::new(if expanded { IconName::FolderOpen } else { IconName::FolderClosed }).text_color(theme2.accent.opacity(0.85))
+                        } else {
+                            file_icon(&name).text_color(theme2.tertiary)
+                        };
                         div()
                             .id(i)
-                            .h(px(22.))
+                            .h(px(24.))
+                            .mx(px(space::S - 2.))
                             .flex()
                             .items_center()
-                            .gap(px(4.))
-                            .pl(px(10. + depth as f32 * 14.))
-                            .pr(px(8.))
-                            .text_size(px(12.))
-                            .when(on, |d| d.bg(theme2.accent.opacity(0.14)))
-                            .hover(|s| s.bg(theme2.selected))
-                            .child(div().w(px(10.)).text_color(theme2.secondary).child(if dir { "›" } else { "" }))
-                            .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().when(dir, |d| d.font_weight(FontWeight::MEDIUM)).child(name))
+                            .gap(px(space::XS + 1.))
+                            .pl(px(4. + depth as f32 * 14.))
+                            .pr(px(space::S))
+                            .rounded(px(radius::MEDIUM))
+                            .text_size(px(text::FOOTNOTE))
+                            .cursor_pointer()
+                            .when(on, |d| d.bg(theme2.selected).font_weight(FontWeight::MEDIUM))
+                            .when(!on, |d| d.hover(|s| s.bg(theme2.hover)))
+                            .child(div().flex_none().w(px(12.)).when(dir, |d| d.child(Icon::new(if expanded { IconName::ChevronDown } else { IconName::ChevronRight }).size(px(11.)).text_color(theme2.tertiary))))
+                            .child(div().flex_none().child(icon.size(px(14.))))
+                            .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(name))
                             .on_click(move |e, _, cx| {
                                 // One click opens a preview; a double click keeps it.
                                 let keep = e.click_count() >= 2;
@@ -1010,12 +1107,12 @@ impl Inspector {
                     .collect()
             })
             .track_scroll(&self.tree_scroll);
-            column = column.child(div().when(has_files, |d| d.h(px(220.)).flex_none()).when(!has_files, |d| d.flex_1()).min_h_0().child(tree.size_full()));
+            column = column.child(div().when(has_files, |d| d.h(px(220.)).flex_none()).when(!has_files, |d| d.flex_1()).min_h_0().pb(px(space::XS)).child(tree.size_full()));
         }
         if !has_files {
             return column.into_any_element();
         }
-        let mut tabs = div().id("file-tabs").flex().gap(px(4.)).px(px(8.)).py(px(6.)).border_t_1().border_b_1().border_color(theme.separator).overflow_x_scroll();
+        let mut tabs = div().id("file-tabs").flex_none().flex().items_center().gap(px(2.)).px(px(space::S)).py(px(space::XS + 1.)).border_t_1().border_b_1().border_color(theme.separator).overflow_x_scroll();
         let count = state.files.len();
         for (i, f) in state.files.iter().enumerate() {
             let on = i == state.current;
@@ -1023,21 +1120,8 @@ impl Inspector {
             let (this, folder, path) = (cx.entity().downgrade(), folder.clone(), f.path.clone());
             let preview = f.preview;
             tabs = tabs.child(
-                div()
-                    .id(SharedString::from(format!("file-tab-{i}")))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap(px(4.))
-                    .px(px(8.))
-                    .py(px(2.))
-                    .rounded(px(10.))
-                    .text_size(px(11.))
-                    .bg(if on { theme.accent.opacity(0.16) } else { theme.selected })
-                    .text_color(if on { theme.text } else { theme.secondary })
-                    .when(preview, |d| d.italic())
-                    .child(name)
-                    .child(div().id(SharedString::from(format!("close-{i}"))).px(px(2.)).text_color(theme.secondary).child("×").on_click(cx.listener(move |this, _, _, cx| {
+                strip_tab(SharedString::from(format!("file-tab-{i}")), Some(file_icon(&name)), name, on, preview, 200., theme)
+                    .child(tab_close(SharedString::from(format!("close-{i}")), theme).on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
                         this.close_file(i, cx)
                     })))
@@ -1074,19 +1158,33 @@ impl Inspector {
         let (dir, name) = file.path.rsplit_once('/').map_or((String::new(), file.path.clone()), |(d, n)| (format!("{d}/"), n.to_string()));
         column = column.child(
             div()
+                .flex_none()
                 .flex()
                 .items_center()
-                .px(px(10.))
-                .py(px(4.))
-                .text_size(px(11.))
+                .h(px(28.))
+                .px(px(space::M))
+                .text_size(px(text::CAPTION))
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .child(div().min_w_0().text_ellipsis().overflow_hidden().text_color(theme.secondary).child(dir))
-                .child(div().flex_none().child(name))
+                .child(div().flex_none().font_weight(FontWeight::MEDIUM).child(name))
                 .child(div().flex_1())
-                .when_some(file.lines().map(|l| l.len()), |d, n| d.child(div().flex_none().text_color(theme.secondary).child(if n == 1 { "1 line".to_string() } else { format!("{n} lines") }))),
+                .when_some(file.lines().map(|l| l.len()), |d, n| d.child(div().flex_none().pl(px(space::S)).text_color(theme.tertiary).child(if n == 1 { "1 line".to_string() } else { format!("{n} lines") }))),
         );
-        let notice = |text: String| div().px(px(10.)).py(px(4.)).text_size(px(11.)).text_color(theme.secondary).border_b_1().border_color(theme.separator).child(text);
+        let notice = |line: String| {
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(space::XS + 2.))
+                .px(px(space::M))
+                .py(px(space::XS))
+                .text_size(px(text::CAPTION))
+                .text_color(theme.secondary)
+                .bg(theme.warning.opacity(0.08))
+                .child(Icon::new(IconName::Info).size(px(12.)).text_color(theme.warning))
+                .child(line)
+        };
         if file.cut_lines {
             column = column.child(notice(format!("Lines over {} characters are cut", "5,000")));
         }
@@ -1094,7 +1192,7 @@ impl Inspector {
             column = column.child(notice(n));
         }
         let full = if file.path.starts_with('/') { file.path.clone() } else { format!("{}/{}", folder.trim_end_matches('/'), file.path) };
-        let unavailable = |title: &str, detail: Option<String>, open: bool| {
+        let unavailable = |icon: Icon, title: &str, detail: Option<String>, open: bool| {
             let full = full.clone();
             div()
                 .flex_1()
@@ -1102,18 +1200,17 @@ impl Inspector {
                 .flex_col()
                 .items_center()
                 .justify_center()
-                .gap(px(6.))
-                .p(px(20.))
-                .child(div().font_weight(FontWeight::SEMIBOLD).child(title.to_string()))
-                .when_some(detail, |d, t| d.child(div().text_size(px(12.)).text_center().text_color(theme.secondary).child(t)))
-                .when(open, |d| d.child(Button::new("open-default").small().label("Open in Default App").on_click(move |_, _, _| open_default(&full))))
+                .gap(px(space::M))
+                .pb(px(space::XL))
+                .child(empty_state(icon, title, detail.as_deref().unwrap_or(""), theme))
+                .when(open, |d| d.child(Button::new("open-default").small().outline().icon(Icon::new(IconName::ExternalLink).size(px(13.))).label("Open in Default App").on_click(move |_, _, _| open_default(&full))))
                 .into_any_element()
         };
         let body = match &file.content {
-            FileContent::Missing => unavailable("File Not Found", Some("It may have been moved or deleted.".into()), false),
-            FileContent::Unreadable(why) => unavailable("Can't Read This File", Some(why.clone()), false),
-            FileContent::Folder => unavailable("Folder", None, true),
-            FileContent::Binary(size) => unavailable("Binary File", Some(size_text(*size)), true),
+            FileContent::Missing => unavailable(Icon::new(IconName::File), "File Not Found", Some("It may have been moved or deleted.".into()), false),
+            FileContent::Unreadable(why) => unavailable(Icon::new(IconName::TriangleAlert), "Can't Read This File", Some(why.clone()), false),
+            FileContent::Folder => unavailable(Icon::new(IconName::Folder), "Folder", None, true),
+            FileContent::Binary(size) => unavailable(Icon::new(IconName::File), "Binary File", Some(size_text(*size)), true),
             FileContent::Image(path) => div()
                 .id("file-image")
                 .flex_1()
@@ -1127,19 +1224,19 @@ impl Inspector {
                 let picked = file.lines_picked;
                 let digits = lines.len().to_string().len();
                 let theme3 = *theme;
-                let gutter = digits as f32 * 7.5 + 14.;
+                let gutter = digits as f32 * 7.5 + 20.;
                 let row = move |i: usize, wrap: bool| {
                     let on = picked.is_some_and(|(a, b)| i + 1 >= a && i + 1 <= b.max(a));
                     div()
-                        .when(!wrap, |d| d.h(px(17.)))
+                        .when(!wrap, |d| d.h(px(text::CODE_LINE)).min_w_full())
                         .when(wrap, |d| d.w_full())
                         .flex()
                         .font_family(MONO)
-                        .text_size(px(11.5))
-                        .line_height(px(17.))
+                        .text_size(px(text::CODE))
+                        .line_height(px(text::CODE_LINE))
                         .when(!wrap, |d| d.whitespace_nowrap())
-                        .when(on, |d| d.bg(theme3.warning.opacity(0.18)))
-                        .child(div().flex_none().w(px(gutter)).pr(px(8.)).text_right().text_color(theme3.secondary.opacity(0.7)).child(format!("{}", i + 1)))
+                        .when(on, |d| d.bg(theme3.warning.opacity(0.16)))
+                        .child(div().flex_none().w(px(gutter)).pr(px(space::S + 2.)).text_right().text_color(if on { theme3.secondary } else { theme3.tertiary }).child(format!("{}", i + 1)))
                         .child(div().when(!wrap, |d| d.flex_none()).when(wrap, |d| d.flex_1().min_w_0().overflow_hidden().whitespace_normal()).child(code_line(&lines[i], &theme3)))
                 };
                 if let Some(state) = file.wrapped.clone().filter(|_| wraps) {
@@ -1222,7 +1319,8 @@ impl Inspector {
     /// agent can find it again.
     fn pick_button(&self, thread: &str, cx: &mut Context<Self>) -> Button {
         let thread = thread.to_string();
-        Button::new("browser-pick").xsmall().ghost().label("⌖").tooltip("Pick an element for your message (Esc cancels)").on_click(cx.listener(move |this, _, _, cx| this.pick(&thread, cx)))
+        let theme = Theme::get(cx);
+        tool_button("browser-pick", icons::mouse_pointer_click(), "Pick an element for your message (Esc cancels)", &theme).on_click(cx.listener(move |this, _, _, cx| this.pick(&thread, cx)))
     }
 
     pub fn pick(&mut self, thread: &str, cx: &mut Context<Self>) {
@@ -1261,20 +1359,19 @@ impl Inspector {
             let (t1, t2) = (thread.clone(), thread.clone());
             return div()
                 .size_full()
+                .pb(px(space::XL * 2.))
                 .flex()
                 .flex_col()
                 .items_center()
                 .justify_center()
-                .gap(px(10.))
-                .px(px(20.))
-                .child(div().font_weight(FontWeight::SEMIBOLD).child("Open in Its Own Window"))
-                .child(div().text_size(px(12.)).text_color(theme.secondary).text_center().child("This thread's browser is in a window of its own. Claude keeps using it there."))
+                .gap(px(space::L))
+                .child(empty_state(icons::app_window(), "Open in Its Own Window", "This thread's browser is in a window of its own. Claude keeps using it there.", theme))
                 .child(
                     div()
                         .flex()
-                        .gap(px(6.))
+                        .gap(px(space::S))
                         .child(Button::new("browser-show-window").small().outline().label("Show Window").on_click(move |_, _, cx| crate::ui::browser_window::activate(&t1, cx)))
-                        .child(Button::new("browser-bring-back").small().label("Move Back Here").on_click(cx.listener(move |_, _, _, cx| {
+                        .child(Button::new("browser-bring-back").small().primary().label("Move Back Here").on_click(cx.listener(move |_, _, _, cx| {
                             crate::ui::browser_window::close(&t2, cx);
                             cx.notify();
                         }))),
@@ -1294,7 +1391,7 @@ impl Inspector {
             crate::browser::Browsers::show(None);
             return self.cookie_panel(import, theme, cx);
         }
-        let import_button = Button::new("import-sign-ins").xsmall().ghost().label("Import Sign-ins…").on_click(cx.listener(|this, _, _, cx| {
+        let import_button = Button::new("import-sign-ins").small().ghost().icon(icons::cookie().size(px(13.)).text_color(theme.secondary)).label("Import Sign-ins…").on_click(cx.listener(|this, _, _, cx| {
             this.cookie_import = Some(CookieImport::Sources(yh_core::cookies::sources()));
             cx.notify();
         }));
@@ -1306,27 +1403,50 @@ impl Inspector {
             }
             let servers = self.dev_servers.clone().unwrap_or_default();
             let restorable = crate::browser::Browsers::with(|b| b.sessions.get(&thread).map(|s| s.restorable.len()).unwrap_or(0));
-            let mut list = div().flex().flex_col().gap(px(4.)).w_full().px(px(16.));
+            let mut list = div().flex().flex_col().gap(px(2.)).w_full().px(px(space::M));
             if !servers.is_empty() {
-                list = list.child(div().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.secondary).child("Running on this Mac"));
+                list = list.child(div().px(px(space::XS)).pb(px(space::XS)).text_size(px(text::FOOTNOTE)).font_weight(FontWeight::SEMIBOLD).text_color(theme.secondary).child("Running on This Mac"));
             }
             for server in servers {
                 let url = server.url();
                 list = list.child(
-                    Button::new(SharedString::from(format!("dev-{}", server.port))).small().outline().w_full().label(format!("localhost:{} · {}", server.port, server.command)).on_click(cx.listener(move |this, _, _, cx| this.go_to(&url, cx))),
+                    div()
+                        .id(SharedString::from(format!("dev-{}", server.port)))
+                        .flex()
+                        .items_center()
+                        .gap(px(space::S))
+                        .h(px(30.))
+                        .px(px(space::S))
+                        .rounded(px(radius::MEDIUM))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme.hover))
+                        .child(Icon::new(IconName::SquareTerminal).size(px(14.)).text_color(theme.secondary))
+                        .child(div().flex_none().font_family(MONO).text_size(px(text::CODE)).child(format!("localhost:{}", server.port)))
+                        .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(text::FOOTNOTE)).text_color(theme.tertiary).child(server.command.clone()))
+                        .on_click(cx.listener(move |this, _, _, cx| this.go_to(&url, cx))),
                 );
             }
             return div()
                 .size_full()
                 .flex()
                 .flex_col()
-                .gap(px(10.))
-                .child(div().px(px(8.)).pt(px(8.)).child(Input::new(&self.address).small()))
-                .child(div().flex_1().child(empty("No pages open. Type an address, or wait for Claude to open one: it shows here, and you can watch what it does.", theme)))
+                .gap(px(space::S))
+                .child(
+                    div()
+                        .px(px(space::M))
+                        .pt(px(space::M))
+                        .child(Input::new(&self.address).small().prefix(Icon::new(IconName::Search).size(px(13.)).text_color(theme.tertiary))),
+                )
+                .child(div().flex_1().min_h_0().flex().items_center().justify_center().child(empty_state(
+                    Icon::new(IconName::Globe),
+                    "No Pages Open",
+                    "Type an address, or wait for Claude to open one: it shows here, and you can watch what it does.",
+                    theme,
+                )))
                 .when(restorable > 0, |d| {
                     let (thread, project) = (thread.clone(), project.clone());
                     d.child(div().flex().justify_center().child(
-                        Button::new("browser-reopen").small().outline().label(if restorable == 1 { "Reopen the Page Closed While Idle".to_string() } else { format!("Reopen {restorable} Pages Closed While Idle") }).on_click(cx.listener(move |_, _, _, cx| {
+                        Button::new("browser-reopen").small().outline().icon(icons::rotate_ccw().size(px(13.))).label(if restorable == 1 { "Reopen the Page Closed While Idle".to_string() } else { format!("Reopen {restorable} Pages Closed While Idle") }).on_click(cx.listener(move |_, _, _, cx| {
                             crate::browser::Browsers::reopen(&thread, Some(&project));
                             cx.notify();
                         })),
@@ -1337,9 +1457,9 @@ impl Inspector {
                     div()
                         .flex()
                         .justify_center()
-                        .gap(px(6.))
-                        .pb(px(16.))
-                        .child(Button::new("dev-refresh").xsmall().ghost().label("Look for Dev Servers").on_click(cx.listener(|this, _, _, cx| this.find_dev_servers(cx))))
+                        .gap(px(space::XS))
+                        .pb(px(space::L))
+                        .child(Button::new("dev-refresh").small().ghost().icon(Icon::new(IconName::RefreshCw).size(px(13.)).text_color(theme.secondary)).label("Look for Dev Servers").on_click(cx.listener(|this, _, _, cx| this.find_dev_servers(cx))))
                         .child(import_button),
                 )
                 .into_any_element();
@@ -1350,41 +1470,17 @@ impl Inspector {
             let shown = url.clone();
             self.address.update(cx, |a, cx| a.set_value(shown, window, cx));
         }
-        let mut strip = div().id("browser-tabs").flex().items_center().gap(px(4.)).px(px(8.)).py(px(6.)).overflow_x_scroll();
+        let mut strip = div().id("browser-tabs").flex().items_center().gap(px(2.)).px(px(space::S)).py(px(space::XS + 1.)).overflow_x_scroll();
         for (id, title, on, loading) in tabs {
             let (t, t2) = (thread.clone(), thread.clone());
+            let icon = if loading { Icon::new(IconName::LoaderCircle) } else { Icon::new(IconName::Globe) };
             strip = strip.child(
-                div()
-                    .id(SharedString::from(format!("browser-tab-{id}")))
-                    .group("tab")
-                    .flex_none()
-                    .max_w(px(170.))
-                    .flex()
-                    .items_center()
-                    .gap(px(4.))
-                    .pl(px(8.))
-                    .pr(px(4.))
-                    .py(px(2.))
-                    .rounded(px(10.))
-                    .text_size(px(11.))
-                    .bg(if on { theme.accent.opacity(0.16) } else { theme.selected })
-                    .text_color(if on { theme.text } else { theme.secondary })
-                    .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(if loading { format!("◌ {title}") } else { title }))
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("browser-tab-close-{id}")))
-                            .flex_none()
-                            .px(px(3.))
-                            .rounded(px(6.))
-                            .text_color(theme.secondary)
-                            .hover(|s| s.bg(theme.separator))
-                            .child("×")
-                            .on_click(cx.listener(move |_, _, _, cx| {
-                                crate::browser::Browsers::close_tab_now(&t2, id);
-                                cx.stop_propagation();
-                                cx.notify();
-                            })),
-                    )
+                strip_tab(SharedString::from(format!("browser-tab-{id}")), Some(icon), title, on, false, 170., theme)
+                    .child(tab_close(SharedString::from(format!("browser-tab-close-{id}")), theme).on_click(cx.listener(move |_, _, _, cx| {
+                        crate::browser::Browsers::close_tab_now(&t2, id);
+                        cx.stop_propagation();
+                        cx.notify();
+                    })))
                     .on_click(cx.listener(move |_, _, _, cx| {
                         crate::browser::Browsers::select_tab(&t, id);
                         cx.notify();
@@ -1393,7 +1489,7 @@ impl Inspector {
         }
         let new_tab = {
             let (thread, project) = (thread.clone(), project.clone());
-            Button::new("browser-new-tab").xsmall().ghost().label("+").tooltip("New Tab").on_click(cx.listener(move |this, _, window, cx| {
+            tool_button("browser-new-tab", Icon::new(IconName::Plus), "New Tab", theme).on_click(cx.listener(move |this, _, window, cx| {
                 crate::browser::Browsers::open_for_user(&thread, Some(&project), None);
                 this.address.update(cx, |a, cx| {
                     a.set_value("", window, cx);
@@ -1402,9 +1498,9 @@ impl Inspector {
                 cx.notify();
             }))
         };
-        let nav = |id: &'static str, label: &'static str, tip: &'static str, enabled: bool, act: fn(&crate::webview::WebView)| {
+        let nav = |id: &'static str, icon: Icon, tip: &'static str, enabled: bool, act: fn(&crate::webview::WebView)| {
             let thread = thread.clone();
-            Button::new(id).xsmall().ghost().label(label).tooltip(tip).disabled(!enabled).on_click(cx.listener(move |_, _, _, cx| {
+            tool_button(id, icon, tip, theme).disabled(!enabled).on_click(cx.listener(move |_, _, _, cx| {
                 crate::browser::Browsers::with_tab(&thread, |t| act(&t.web));
                 cx.notify();
             }))
@@ -1413,33 +1509,33 @@ impl Inspector {
             let (thread, project, url) = (thread.clone(), project.clone(), url.clone());
             let page = cx.entity().downgrade();
             let ws = self.workspace.clone();
-            Button::new("browser-more").xsmall().ghost().label("⋯").dropdown_menu(move |menu, _, _| {
+            tool_button("browser-more", Icon::new(IconName::Ellipsis), "More", theme).dropdown_menu(move |menu, _, _| {
                 let (u1, u2) = (url.clone(), url.clone());
                 let (p1, p2, p3, p4, p5) = (page.clone(), page.clone(), page.clone(), page.clone(), page.clone());
                 let (project, thread) = (project.clone(), thread.clone());
                 let (ws, pop_thread, pop_project) = (ws.clone(), thread.clone(), project.clone());
-                menu.item(PopupMenuItem::new("Open in Window").on_click(move |_, _, cx| {
+                menu.item(PopupMenuItem::new("Open in Window").icon(icons::app_window()).on_click(move |_, _, cx| {
                     crate::ui::browser_window::open(ws.clone(), pop_thread.clone(), pop_project.clone(), cx);
                     let _ = p5.update(cx, |_, cx| cx.notify());
                 }))
                 .separator()
-                .item(PopupMenuItem::new("Open in Default Browser").on_click(move |_, _, cx| cx.open_url(&u1)))
-                    .item(PopupMenuItem::new("Copy Address").on_click(move |_, _, cx| cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(u2.clone()))))
+                .item(PopupMenuItem::new("Open in Default Browser").icon(IconName::ExternalLink).on_click(move |_, _, cx| cx.open_url(&u1)))
+                    .item(PopupMenuItem::new("Copy Address").icon(IconName::Copy).on_click(move |_, _, cx| cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(u2.clone()))))
                     .separator()
-                    .item(PopupMenuItem::new("Console").on_click(move |_, _, cx| {
+                    .item(PopupMenuItem::new("Console").icon(IconName::SquareTerminal).on_click(move |_, _, cx| {
                         let _ = p1.update(cx, |this, cx| {
                             this.browser_pane = if this.browser_pane == Some(BrowserPane::Console) { None } else { Some(BrowserPane::Console) };
                             cx.notify();
                         });
                     }))
-                    .item(PopupMenuItem::new("Network").on_click(move |_, _, cx| {
+                    .item(PopupMenuItem::new("Network").icon(IconName::Network).on_click(move |_, _, cx| {
                         let _ = p2.update(cx, |this, cx| {
                             this.browser_pane = if this.browser_pane == Some(BrowserPane::Network) { None } else { Some(BrowserPane::Network) };
                             cx.notify();
                         });
                     }))
                     .separator()
-                    .item(PopupMenuItem::new("Import Sign-ins…").on_click(move |_, _, cx| {
+                    .item(PopupMenuItem::new("Import Sign-ins…").icon(icons::cookie()).on_click(move |_, _, cx| {
                         let _ = p3.update(cx, |this, cx| {
                             this.cookie_import = Some(CookieImport::Sources(yh_core::cookies::sources()));
                             cx.notify();
@@ -1480,13 +1576,15 @@ impl Inspector {
                     div()
                         .flex()
                         .items_center()
-                        .justify_between()
-                        .px(px(8.))
-                        .py(px(3.))
-                        .text_size(px(11.))
+                        .gap(px(space::XS + 2.))
+                        .h(px(30.))
+                        .pl(px(space::M))
+                        .pr(px(space::XS + 2.))
+                        .text_size(px(text::FOOTNOTE))
                         .font_weight(FontWeight::SEMIBOLD)
-                        .child(if which == BrowserPane::Console { "Console" } else { "Network" })
-                        .child(Button::new("pane-close").xsmall().ghost().label("×").on_click(cx.listener(|this, _, _, cx| {
+                        .child(Icon::new(if which == BrowserPane::Console { IconName::SquareTerminal } else { IconName::Network }).size(px(13.)).text_color(theme.secondary))
+                        .child(div().flex_1().child(if which == BrowserPane::Console { "Console" } else { "Network" }))
+                        .child(tool_button("pane-close", icons::x(), "Close", theme).on_click(cx.listener(|this, _, _, cx| {
                             this.browser_pane = None;
                             cx.notify();
                         }))),
@@ -1497,10 +1595,12 @@ impl Inspector {
                         .flex_1()
                         .min_h_0()
                         .overflow_y_scroll()
-                        .px(px(8.))
+                        .px(px(space::M))
+                        .pb(px(space::XS))
                         .font_family(MONO)
-                        .text_size(px(10.5))
-                        .when(lines.is_empty(), |d| d.text_color(theme.secondary).child("Nothing yet."))
+                        .text_size(px(text::CAPTION))
+                        .line_height(px(16.))
+                        .when(lines.is_empty(), |d| d.font_family(crate::theme::UI).text_color(theme.tertiary).child("Nothing yet."))
                         .children(lines.into_iter().map(|(line, bad)| div().py(px(1.)).whitespace_nowrap().overflow_hidden().text_ellipsis().text_color(if bad { theme.error } else { theme.secondary }).child(line))),
                 )
         });
@@ -1509,18 +1609,18 @@ impl Inspector {
             .size_full()
             .flex()
             .flex_col()
-            .child(div().flex().items_center().child(div().flex_1().min_w_0().child(strip)).child(div().pr(px(6.)).child(new_tab)))
+            .child(div().flex().items_center().child(div().flex_1().min_w_0().child(strip)).child(div().pr(px(space::S)).child(new_tab)))
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap(px(2.))
-                    .px(px(6.))
-                    .pb(px(6.))
-                    .child(nav("browser-back", "‹", "Back", can_back, |w| w.go_back()))
-                    .child(nav("browser-forward", "›", "Forward", can_forward, |w| w.go_forward()))
-                    .child(nav("browser-reload", "↻", "Reload", true, |w| w.reload()))
-                    .child(div().flex_1().min_w_0().child(Input::new(&self.address).xsmall().font_family(MONO)))
+                    .px(px(space::S))
+                    .pb(px(space::S))
+                    .child(nav("browser-back", Icon::new(IconName::ArrowLeft), "Back", can_back, |w| w.go_back()))
+                    .child(nav("browser-forward", Icon::new(IconName::ArrowRight), "Forward", can_forward, |w| w.go_forward()))
+                    .child(nav("browser-reload", Icon::new(IconName::RotateCw), "Reload", true, |w| w.reload()))
+                    .child(div().flex_1().min_w_0().px(px(2.)).child(Input::new(&self.address).small().text_size(px(text::FOOTNOTE))))
                     .child(self.pick_button(&thread, cx))
                     .child(menu),
             )
@@ -1543,52 +1643,112 @@ impl Inspector {
 
     /// The sign-ins panel: Safari and each Chromium profile; then the source's sites.
     fn cookie_panel(&self, import: &CookieImport, theme: &Theme, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
-        let mut column = div().id("cookie-import").size_full().overflow_y_scroll().p(px(14.)).flex().flex_col().gap(px(8.)).child(
-            div()
-                .flex()
-                .items_center()
-                .child(div().flex_1().font_weight(FontWeight::SEMIBOLD).child("Import Sign-ins"))
-                .child(Button::new("cookie-close").xsmall().ghost().label("Done").on_click(cx.listener(|this, _, _, cx| {
-                    this.cookie_import = None;
-                    cx.notify();
-                }))),
-        );
+        let header = panel_header("Import Sign-ins", None, theme).child(Button::new("cookie-close").small().ghost().label("Done").on_click(cx.listener(|this, _, _, cx| {
+            this.cookie_import = None;
+            cx.notify();
+        })));
+        let mut column = div().id("cookie-import").flex_1().min_h_0().overflow_y_scroll().px(px(space::M)).pb(px(space::L)).flex().flex_col().gap(px(space::S));
+        let note = |line: String| div().px(px(space::XS)).text_size(px(text::FOOTNOTE)).line_height(px(17.)).text_color(theme.secondary).whitespace_normal().child(line);
         match import {
             CookieImport::Sources(sources) => {
-                column = column.child(div().text_size(px(12.)).text_color(theme.secondary).whitespace_normal().child(
-                    "Copy the cookies of sites you're signed in to from another browser into this project's browser, so Claude can use them signed in. Nothing is read until you pick a browser, and macOS asks first.",
+                column = column.child(note(
+                    "Copy the cookies of sites you're signed in to from another browser into this project's browser, so Claude can use them signed in. Nothing is read until you pick a browser, and macOS asks first.".into(),
                 ));
+                let mut group = div().mt(px(space::XS)).flex().flex_col().rounded(px(radius::LARGE)).border_1().border_color(theme.separator).bg(theme.card).overflow_hidden();
                 for (i, source) in sources.iter().enumerate() {
                     let source = source.clone();
-                    column = column.child(
-                        Button::new(SharedString::from(format!("cookie-source-{i}"))).small().label(source.label()).on_click(cx.listener(move |this, _, _, cx| {
-                            this.read_cookies(source.clone(), cx)
-                        })),
+                    group = group.child(
+                        div()
+                            .id(SharedString::from(format!("cookie-source-{i}")))
+                            .flex()
+                            .items_center()
+                            .gap(px(space::S + 2.))
+                            .h(px(36.))
+                            .px(px(space::M))
+                            .cursor_pointer()
+                            .when(i > 0, |d| d.border_t_1().border_color(theme.separator))
+                            .hover(|s| s.bg(theme.hover))
+                            .child(Icon::new(IconName::Globe).size(px(15.)).text_color(theme.secondary))
+                            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(source.label()))
+                            .child(Icon::new(IconName::ChevronRight).size(px(13.)).text_color(theme.tertiary))
+                            .on_click(cx.listener(move |this, _, _, cx| this.read_cookies(source.clone(), cx))),
                     );
                 }
+                column = column.child(group);
             }
-            CookieImport::Reading(label) => column = column.child(div().text_color(theme.secondary).child(format!("Reading {label}…"))),
-            CookieImport::Done(text) => column = column.child(div().whitespace_normal().child(text.clone())),
+            CookieImport::Reading(label) => {
+                column = column.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(space::S))
+                        .px(px(space::XS))
+                        .text_size(px(text::FOOTNOTE))
+                        .text_color(theme.secondary)
+                        .child(Icon::new(IconName::LoaderCircle).size(px(13.)).text_color(theme.accent))
+                        .child(format!("Reading {label}…")),
+                )
+            }
+            CookieImport::Done(line) => {
+                column = column.child(
+                    div()
+                        .flex()
+                        .items_start()
+                        .gap(px(space::S + 2.))
+                        .p(px(space::M))
+                        .rounded(px(radius::LARGE))
+                        .bg(theme.card)
+                        .border_1()
+                        .border_color(theme.separator)
+                        .child(div().pt(px(1.)).child(icons::cookie().size(px(15.)).text_color(theme.secondary)))
+                        .child(div().flex_1().min_w_0().text_size(px(text::FOOTNOTE)).line_height(px(17.)).whitespace_normal().child(line.clone())),
+                )
+            }
             CookieImport::Sites { source, sites, picked, .. } => {
-                column = column.child(div().text_size(px(12.)).text_color(theme.secondary).child(format!("{source}: pick the sites to bring over.")));
                 let count = picked.len();
-                column = column.child(Button::new("cookie-import-go").small().primary().label(format!("Import {count} Site{}", if count == 1 { "" } else { "s" })).on_click(cx.listener(|this, _, _, cx| this.store_cookies(cx))));
+                column = column.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(space::S))
+                        .child(div().flex_1().min_w_0().child(note(format!("{source}: pick the sites to bring over."))))
+                        .child(
+                            Button::new("cookie-import-go")
+                                .small()
+                                .primary()
+                                .label(format!("Import {count} Site{}", if count == 1 { "" } else { "s" }))
+                                .on_click(cx.listener(|this, _, _, cx| this.store_cookies(cx))),
+                        ),
+                );
+                let mut list = div().flex().flex_col().gap(px(1.));
                 for (site, n) in sites.iter().take(400) {
                     let on = picked.contains(site);
                     let key = site.clone();
-                    column = column.child(
+                    list = list.child(
                         div()
                             .id(SharedString::from(format!("site-{site}")))
                             .flex()
                             .items_center()
-                            .gap(px(8.))
-                            .px(px(6.))
-                            .py(px(3.))
-                            .rounded(px(5.))
-                            .hover(|d| d.bg(theme.selected))
-                            .child(div().w(px(14.)).text_color(if on { theme.accent } else { theme.secondary }).child(if on { "☑" } else { "☐" }))
-                            .child(div().flex_1().overflow_hidden().whitespace_nowrap().text_ellipsis().child(site.clone()))
-                            .child(div().text_size(px(11.)).text_color(theme.secondary).child(n.to_string()))
+                            .gap(px(space::S + 2.))
+                            .h(px(28.))
+                            .px(px(space::S))
+                            .rounded(px(radius::MEDIUM))
+                            .cursor_pointer()
+                            .hover(|d| d.bg(theme.hover))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .w(px(14.))
+                                    .h(px(14.))
+                                    .rounded(px(4.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .when(on, |d| d.bg(theme.accent).child(Icon::new(IconName::Check).size(px(10.)).text_color(gpui_kit::white())))
+                                    .when(!on, |d| d.border_1().border_color(theme.tertiary)),
+                            )
+                            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(site.clone()))
+                            .child(div().flex_none().text_size(px(text::CAPTION)).text_color(theme.tertiary).child(n.to_string()))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if let Some(CookieImport::Sites { picked, .. }) = &mut this.cookie_import {
                                     if !picked.remove(&key) {
@@ -1599,9 +1759,10 @@ impl Inspector {
                             })),
                     );
                 }
+                column = column.child(list);
             }
         }
-        column.into_any_element()
+        div().size_full().flex().flex_col().child(header).child(column).into_any_element()
     }
 
     fn read_cookies(&mut self, source: yh_core::cookies::Source, cx: &mut Context<Self>) {
@@ -1650,11 +1811,15 @@ impl Inspector {
         }
         let running = thread.read(cx).running;
         let ws = self.workspace.clone();
-        let b = Button::new(if compact { "split-stack-compact" } else { "split-stack" }).xsmall().ghost();
-        let b = if compact { b.icon(IconName::GalleryVerticalEnd) } else { b.label("Split into a Stack") };
+        let theme = Theme::get(cx);
+        let tip = "Ask Claude to split this thread's work into a stack of small pull requests, with gh stack";
+        let b = if compact {
+            tool_button("split-stack-compact", icons::layers(), tip, &theme)
+        } else {
+            Button::new("split-stack").small().outline().icon(icons::layers().size(px(13.))).label("Split into a Stack").tooltip(tip)
+        };
         Some(
             b.disabled(running)
-                .tooltip("Ask Claude to split this thread's work into a stack of small pull requests, with gh stack")
                 .on_click(move |_, _, cx| {
                     let t = thread.clone();
                     ws.update(cx, |ws, cx| ws.send(&t, SPLIT_INTO_STACK, false, cx));
@@ -1666,17 +1831,32 @@ impl Inspector {
     fn pull_requests(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let Some(thread) = &self.thread else { return empty("No thread open.", theme) };
         let id = thread.read(cx).id().to_string();
-        let Some((pulls, at)) = self.pulls.get(&id) else { return empty("Looking for this thread's pull requests…", theme) };
+        let column = div().size_full().flex().flex_col();
+        let Some((pulls, at)) = self.pulls.get(&id) else {
+            return column.child(panel_header("Pull Requests", None, theme)).child(div().flex_1().min_h_0().child(empty("Looking for this thread's pull requests…", theme))).into_any_element();
+        };
+        let refresh = tool_button("pulls-refresh", Icon::new(IconName::RefreshCw), "Refresh", theme).loading(self.pulls_loading).on_click(cx.listener(|this, _, _, cx| this.refresh_pulls(cx)));
         if pulls.is_empty() {
-            return div()
-                .size_full()
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap(px(10.))
-                .child(div().px(px(24.)).text_center().text_color(theme.secondary).child("No pull requests. When Claude opens, merges or comments on one in this thread, or one's linked here, it shows here and stays current."))
-                .when_some(self.split_button(false, cx), |d, b| d.child(b))
+            return column
+                .child(panel_header("Pull Requests", None, theme).child(refresh))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .pb(px(space::XL * 2.))
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .justify_center()
+                        .gap(px(space::L))
+                        .child(empty_state(
+                            icons::pull_request(),
+                            "No Pull Requests",
+                            "When Claude opens, merges or comments on one in this thread, or one's linked here, it shows here and stays current.",
+                            theme,
+                        ))
+                        .when_some(self.split_button(false, cx), |d, b| d.child(b)),
+                )
                 .into_any_element();
         }
         let state = |p: &crate::state::pulls::ThreadPull| p.pull.as_ref().map(|p| p.state.clone()).ok();
@@ -1687,34 +1867,26 @@ impl Inspector {
         done.sort_by_key(|p| std::cmp::Reverse(when(p)));
         let mentioned: Vec<&crate::state::pulls::ThreadPull> = pulls.iter().filter(|p| !p.worked).collect();
         let open_count = open.iter().filter(|p| state(p).is_some()).count();
-        let mut column = div().id("pulls").size_full().overflow_y_scroll().p(px(12.)).flex().flex_col().gap(px(8.)).child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .text_size(px(11.))
-                .text_color(theme.secondary)
-                .child(div().flex_1().child(format!("{open_count} open · updated {}", if at.elapsed().as_secs() < 5 { "just now".to_string() } else { format!("{} s ago", at.elapsed().as_secs()) })))
-                .when_some(self.split_button(true, cx), |d, b| d.child(b))
-                .child(Button::new("pulls-refresh").xsmall().ghost().icon(IconName::RefreshCw).loading(self.pulls_loading).tooltip("Refresh").on_click(cx.listener(|this, _, _, cx| this.refresh_pulls(cx)))),
-        );
+        let subtitle = format!("{open_count} open · updated {}", if at.elapsed().as_secs() < 5 { "just now".to_string() } else { format!("{} s ago", at.elapsed().as_secs()) });
+        let header = panel_header("Pull Requests", Some(subtitle), theme).when_some(self.split_button(true, cx), |d, b| d.child(b)).child(refresh);
+        let mut list = div().id("pulls").flex_1().min_h_0().overflow_y_scroll().px(px(space::M)).pb(px(space::M)).flex().flex_col().gap(px(space::S));
         for p in open {
-            column = column.child(pull_card(p, theme));
+            list = list.child(pull_card(p, theme));
         }
-        let header = |t: &str| div().pt(px(8.)).text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.secondary).child(t.to_string());
+        let section = |t: &str| div().pt(px(space::S)).px(px(space::XS)).text_size(px(text::FOOTNOTE)).font_weight(FontWeight::SEMIBOLD).text_color(theme.secondary).child(t.to_string());
         if !done.is_empty() {
-            column = column.child(header("MERGED AND CLOSED"));
+            list = list.child(section("Merged and Closed"));
             for p in done {
-                column = column.child(pull_card(p, theme));
+                list = list.child(pull_card(p, theme));
             }
         }
         if !mentioned.is_empty() {
-            column = column.child(header("MENTIONED"));
+            list = list.child(section("Mentioned"));
             for p in mentioned {
-                column = column.child(pull_card(p, theme));
+                list = list.child(pull_card(p, theme));
             }
         }
-        column.into_any_element()
+        column.child(header).child(list).into_any_element()
     }
 
     fn side_chat(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
@@ -1725,41 +1897,51 @@ impl Inspector {
         };
         let ws = self.workspace.clone();
         let parent = self.thread.as_ref().map(|t| t.read(cx).id().to_string()).unwrap_or_default();
-        let mut column = div().size_full().flex().flex_col();
+        let (stop_ws, stop_chat, clear_ws) = (ws.clone(), chat.clone(), ws.clone());
+        let header = panel_header("Side Chat", Some("A copy of this thread answers".into()), theme).when(!running && !empty_chat, |d| {
+            d.child(tool_button("side-clear", icons::rotate_ccw(), "Clear: start the side chat over", theme).on_click(cx.listener(move |this, _, _, cx| {
+                clear_ws.update(cx, |ws, cx| ws.clear_side_chat(&parent, cx));
+                this.side = None;
+                this.ensure_side(cx);
+                cx.notify();
+            })))
+        });
+        let mut column = div().size_full().flex().flex_col().child(header);
         if empty_chat {
-            column = column.child(empty(
-                "Ask something on the side. A copy of this thread's conversation answers: it can read files and run commands you approve, can't edit anything, and nothing said here reaches the thread.",
+            column = column.child(div().flex_1().min_h_0().child(empty_panel(
+                icons::message_square(),
+                "Ask on the Side",
+                "A copy of this thread's conversation answers: it can read files and run commands you approve, can't edit anything, and nothing said here reaches the thread.",
                 theme,
-            ));
+            )));
         } else {
             column = column.child(div().flex_1().min_h_0().child(gpui_kit::AnyView::from(view.clone()).cached(gpui_kit::StyleRefinement::default().size_full())));
         }
         if let Some(p) = permission {
             let more = chat.read(cx).permissions.len().saturating_sub(1);
-            column = column.child(div().px(px(10.)).pt(px(8.)).child(crate::ui::composer::permission_card(&p, chat, ws.downgrade(), more, theme)));
+            column = column.child(div().px(px(space::M)).pt(px(space::S)).child(crate::ui::composer::permission_card(&p, chat, ws.downgrade(), more, theme)));
         }
-        let (stop_ws, stop_chat, clear_ws) = (ws.clone(), chat.clone(), ws.clone());
         column
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .p(px(10.))
-                    .border_t_1()
-                    .border_color(theme.separator)
-                    .child(div().flex_1().child(Input::new(&self.question).small()))
-                    .when(running, |d| {
-                        d.child(Button::new("side-stop").small().label("Stop").on_click(move |_, _, cx| stop_ws.update(cx, |ws, cx| ws.interrupt(&stop_chat, cx))))
-                    })
-                    .when(!running && !empty_chat, |d| {
-                        d.child(Button::new("side-clear").small().ghost().label("Clear").tooltip("Start the side chat over").on_click(cx.listener(move |this, _, _, cx| {
-                            clear_ws.update(cx, |ws, cx| ws.clear_side_chat(&parent, cx));
-                            this.side = None;
-                            this.ensure_side(cx);
-                            cx.notify();
-                        })))
-                    }),
+                div().flex_none().px(px(space::M)).pb(px(space::M)).pt(px(space::XS)).child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(space::XS))
+                        .pl(px(space::XS))
+                        .pr(px(space::XS))
+                        .py(px(space::XS))
+                        .rounded(px(radius::LARGE))
+                        .border_1()
+                        .border_color(theme.separator)
+                        .bg(theme.card)
+                        .child(div().flex_1().min_w_0().child(Input::new(&self.question).appearance(false).small()))
+                        .when(running, |d| {
+                            d.child(
+                                tool_button("side-stop", icons::circle_stop(), "Stop", theme).on_click(move |_, _, cx| stop_ws.update(cx, |ws, cx| ws.interrupt(&stop_chat, cx))),
+                            )
+                        }),
+                ),
             )
             .into_any_element()
     }
@@ -1768,17 +1950,20 @@ impl Inspector {
 /// A PR in the narrow sidebar: what it is, where it's going, what stands in its way.
 fn pull_card(p: &crate::state::pulls::ThreadPull, theme: &Theme) -> impl IntoElement {
     let url = p.link.url.clone();
-    let green: gpui_kit::Hsla = gpui_kit::rgb(0x34c759).into();
     let purple: gpui_kit::Hsla = gpui_kit::rgb(0xaf52de).into();
     let card = div()
         .id(SharedString::from(format!("pull-{}", p.link.id())))
-        .p(px(10.))
-        .rounded(px(8.))
+        .px(px(space::M))
+        .py(px(space::S + 2.))
+        .rounded(px(radius::LARGE))
+        .border_1()
+        .border_color(theme.separator)
         .bg(theme.card)
+        .cursor_pointer()
         .hover(|s| s.bg(theme.selected))
         .flex()
         .flex_col()
-        .gap(px(4.))
+        .gap(px(space::XS + 1.))
         .on_click(move |_, _, cx| cx.open_url(&url));
     // Open in Browser, Copy Link, Copy Branch Name.
     let (u1, u2) = (p.link.url.clone(), p.link.url.clone());
@@ -1793,14 +1978,15 @@ fn pull_card(p: &crate::state::pulls::ThreadPull, theme: &Theme) -> impl IntoEle
             None => menu,
         }
     });
+    let fact = |icon: Icon, label: &str, color: gpui_kit::Hsla| div().flex().items_center().gap(px(3.)).text_color(color).child(icon.size(px(11.)).text_color(color)).child(label.to_string());
     match &p.pull {
         Ok(pr) => {
-            let (dot, chip): (gpui_kit::Hsla, Option<&str>) = match pr.state.as_str() {
-                "merged" => (purple, Some("Merged")),
-                "closed" => (theme.error, Some("Closed")),
-                _ if pr.draft => (theme.secondary, Some("Draft")),
-                _ if pr.auto_merge => (purple, Some("Auto-merge")),
-                _ => (green, None),
+            let (icon, tint, chip): (Icon, gpui_kit::Hsla, Option<&str>) = match pr.state.as_str() {
+                "merged" => (icons::merged(), purple, Some("Merged")),
+                "closed" => (icons::pull_request_closed(), theme.error, Some("Closed")),
+                _ if pr.draft => (icons::pull_request_draft(), theme.secondary, Some("Draft")),
+                _ if pr.auto_merge => (icons::pull_request(), purple, Some("Auto-merge")),
+                _ => (icons::pull_request(), theme.success, None),
             };
             let blocker = match pr.merge_status.as_deref().filter(|_| pr.state == "open") {
                 Some("DIRTY") => Some("Conflicts"),
@@ -1809,51 +1995,75 @@ fn pull_card(p: &crate::state::pulls::ThreadPull, theme: &Theme) -> impl IntoEle
                 _ => None,
             };
             let review = match pr.review.as_str() {
-                "approved" => Some(("Approved", green)),
-                "changesRequested" => Some(("Changes requested", theme.error)),
-                "required" => Some(("Review required", theme.secondary)),
+                "approved" => Some((Icon::new(IconName::Check), "Approved", theme.success)),
+                "changesRequested" => Some((Icon::new(IconName::CircleAlert), "Changes requested", theme.error)),
+                "required" => Some((Icon::new(IconName::Eye), "Review required", theme.secondary)),
                 _ => None,
             };
             let checks = match pr.checks.as_str() {
-                "passing" => Some(("Checks pass", green)),
-                "failing" => Some(("Checks fail", theme.error)),
-                "pending" => Some(("Checks running", theme.warning)),
+                "passing" => Some((Icon::new(IconName::CircleCheck), "Checks pass", theme.success)),
+                "failing" => Some((Icon::new(IconName::CircleX), "Checks fail", theme.error)),
+                "pending" => Some((icons::circle_dashed(), "Checks running", theme.warning)),
                 _ => None,
             };
+            card = card
+                .child(
+                    div()
+                        .flex()
+                        .items_start()
+                        .gap(px(space::S))
+                        .child(div().flex_none().pt(px(2.)).child(icon.size(px(14.)).text_color(tint)))
+                        .child(div().flex_1().min_w_0().font_weight(FontWeight::MEDIUM).line_clamp(2).child(pr.title.clone()))
+                        .when_some(chip, |d, c| {
+                            d.child(
+                                div()
+                                    .flex_none()
+                                    .mt(px(1.))
+                                    .px(px(space::XS + 2.))
+                                    .rounded(px(radius::SMALL))
+                                    .bg(tint.opacity(0.14))
+                                    .text_size(px(text::CAPTION))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(tint)
+                                    .child(c),
+                            )
+                        }),
+                )
+                .child(
+                    div()
+                        .pl(px(22.))
+                        .flex()
+                        .gap(px(space::XS + 2.))
+                        .text_size(px(text::CAPTION))
+                        .text_color(theme.secondary)
+                        .child(div().flex_none().child(format!("{} #{}", p.link.path, p.link.number)))
+                        .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_family(MONO).text_color(theme.tertiary).child(format!("{} → {}", pr.head, pr.base))),
+                )
+                .when(blocker.is_some() || review.is_some() || checks.is_some(), |d| {
+                    d.child(
+                        div()
+                            .pl(px(22.))
+                            .flex()
+                            .flex_wrap()
+                            .gap(px(space::S + 2.))
+                            .text_size(px(text::CAPTION))
+                            .when_some(blocker, |d, b| d.child(fact(Icon::new(IconName::TriangleAlert), b, theme.warning)))
+                            .when_some(review, |d, (i, t, c)| d.child(fact(i, t, c)))
+                            .when_some(checks, |d, (i, t, c)| d.child(fact(i, t, c))),
+                    )
+                });
+        }
+        Err(e) => {
             card = card
                 .child(
                     div()
                         .flex()
                         .items_center()
-                        .gap(px(7.))
-                        .child(div().flex_none().w(px(8.)).h(px(8.)).rounded_full().bg(dot))
-                        .child(div().flex_1().min_w_0().font_weight(FontWeight::MEDIUM).line_clamp(2).child(pr.title.clone()))
-                        .when_some(chip, |d, c| d.child(div().flex_none().text_size(px(10.)).px(px(6.)).rounded(px(8.)).bg(dot.opacity(0.15)).text_color(dot).child(c))),
+                        .gap(px(space::S))
+                        .child(icons::pull_request().size(px(14.)).text_color(theme.tertiary))
+                        .child(div().font_weight(FontWeight::MEDIUM).child(format!("{} #{}", p.link.path, p.link.number))),
                 )
-                .child(
-                    div()
-                        .flex()
-                        .gap(px(6.))
-                        .text_size(px(11.))
-                        .text_color(theme.secondary)
-                        .child(format!("{} #{}", p.link.path, p.link.number))
-                        .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().font_family(MONO).child(format!("{} → {}", pr.head, pr.base))),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap(px(8.))
-                        .text_size(px(11.))
-                        .when_some(blocker, |d, b| d.child(div().text_color(theme.warning).child(b)))
-                        .when_some(review, |d, (t, c)| d.child(div().text_color(c).child(t)))
-                        .when_some(checks, |d, (t, c)| d.child(div().text_color(c).child(t))),
-                );
-        }
-        Err(e) => {
-            card = card
-                .child(div().font_weight(FontWeight::MEDIUM).child(format!("{} #{}", p.link.path, p.link.number)))
-                .child(div().text_size(px(11.)).text_color(theme.secondary).line_clamp(2).child(format!("Couldn't look it up: {}", e.lines().next().unwrap_or(""))));
+                .child(div().pl(px(22.)).text_size(px(text::CAPTION)).text_color(theme.secondary).line_clamp(2).child(format!("Couldn't look it up: {}", e.lines().next().unwrap_or(""))));
         }
     }
     card
@@ -1885,14 +2095,15 @@ fn status_text(status: &str) -> &str {
     }
 }
 
-fn status_dot(status: &str, theme: &Theme) -> gpui_kit::Div {
-    let color = match status {
-        "running" => theme.accent,
-        "failed" => theme.error,
-        "stopped" | "killed" => theme.warning,
-        _ => gpui_kit::rgb(0x34c759).into(),
+/// A sub-agent's state as a small still icon: working, done, failed, stopped.
+fn status_icon(status: &str, theme: &Theme) -> gpui_kit::Div {
+    let (icon, color) = match status {
+        "running" => (Icon::new(IconName::LoaderCircle), theme.accent),
+        "failed" => (Icon::new(IconName::CircleX), theme.error),
+        "stopped" | "killed" => (Icon::new(IconName::Ban), theme.warning),
+        _ => (Icon::new(IconName::CircleCheck), theme.success),
     };
-    div().flex_none().w(px(7.)).h(px(7.)).rounded_full().bg(color)
+    div().flex_none().child(icon.size(px(13.)).text_color(color))
 }
 
 /// What a tool call is about, in a line: its file, command or pattern.
@@ -1912,15 +2123,123 @@ fn first_lines(text: &str, n: usize) -> String {
     out
 }
 
-fn empty(text: &str, theme: &Theme) -> gpui_kit::AnyElement {
+/// A file's icon by its kind: code, data, a picture, text.
+fn file_icon(name: &str) -> Icon {
+    let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+    match ext.as_str() {
+        _ if IMAGE_EXTENSIONS.contains(&ext.as_str()) => icons::file_image(),
+        "json" | "toml" | "yaml" | "yml" | "lock" | "xml" | "plist" => icons::file_braces(),
+        "md" | "txt" | "rst" | "log" | "csv" => Icon::new(IconName::FileText),
+        "rs" | "swift" | "ts" | "tsx" | "js" | "jsx" | "mjs" | "py" | "go" | "c" | "h" | "cc" | "cpp" | "hpp" | "java" | "kt" | "rb" | "sh" | "zsh" | "html" | "css" | "scss" | "sql" | "vue" | "svelte" | "lua" | "php" => icons::file_code(),
+        _ => Icon::new(IconName::File),
+    }
+}
+
+/// A line of quiet text in the middle of a panel: while something loads.
+fn empty(line: &str, theme: &Theme) -> gpui_kit::AnyElement {
     div()
         .size_full()
-        .p(px(24.))
+        .p(px(space::XL))
         .flex()
         .items_center()
         .justify_center()
-        .child(div().w_full().text_center().whitespace_normal().text_color(theme.secondary).child(text.to_string()))
+        .child(div().w_full().text_center().whitespace_normal().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child(line.to_string()))
         .into_any_element()
+}
+
+/// A panel with nothing in it yet: its icon, what it is, and what will show here.
+fn empty_state(icon: Icon, title: &str, detail: &str, theme: &Theme) -> gpui_kit::Div {
+    div()
+        .w_full()
+        .px(px(space::XL + 4.))
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap(px(space::S))
+        .child(
+            div()
+                .mb(px(2.))
+                .w(px(36.))
+                .h(px(36.))
+                .rounded(px(radius::LARGE - 2.))
+                .bg(theme.selected)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(icon.size(px(16.)).text_color(theme.secondary)),
+        )
+        .child(div().text_size(px(text::HEADLINE)).font_weight(FontWeight::SEMIBOLD).child(title.to_string()))
+        .child(div().w_full().text_center().whitespace_normal().text_size(px(text::FOOTNOTE)).line_height(px(17.)).text_color(theme.secondary).child(detail.to_string()))
+}
+
+/// `empty_state` centred in the whole panel.
+fn empty_panel(icon: Icon, title: &str, detail: &str, theme: &Theme) -> gpui_kit::AnyElement {
+    div().size_full().pb(px(space::XL * 2.)).flex().items_center().justify_center().child(empty_state(icon, title, detail, theme)).into_any_element()
+}
+
+/// A panel's header, as the thread's: its title, a secondary line, its actions after.
+fn panel_header(title: &str, subtitle: Option<String>, theme: &Theme) -> gpui_kit::Div {
+    div()
+        .flex_none()
+        .h(px(40.))
+        .flex()
+        .items_center()
+        .gap(px(2.))
+        .pl(px(space::L))
+        .pr(px(space::S + 2.))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .items_baseline()
+                .gap(px(space::S))
+                .child(div().flex_none().text_size(px(text::HEADLINE)).font_weight(FontWeight::SEMIBOLD).child(title.to_string()))
+                .when_some(subtitle, |d, s| d.child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child(s))),
+        )
+}
+
+/// A small ghost button with an icon and a tooltip, as in the thread's header.
+pub(crate) fn tool_button(id: impl Into<gpui_kit::ElementId>, icon: Icon, tip: impl Into<SharedString>, theme: &Theme) -> Button {
+    Button::new(id).small().ghost().icon(icon.size(px(14.)).text_color(theme.secondary)).tooltip(tip)
+}
+
+/// A tab in a strip (open files, browser pages): flat, the open one on a soft fill. Its close
+/// button (`tab_close`) is always there: hover never moves anything.
+pub(crate) fn strip_tab(id: SharedString, icon: Option<Icon>, title: String, on: bool, italic: bool, max_w: f32, theme: &Theme) -> gpui_kit::Stateful<gpui_kit::Div> {
+    div()
+        .id(id)
+        .flex_none()
+        .max_w(px(max_w))
+        .h(px(26.))
+        .flex()
+        .items_center()
+        .gap(px(space::XS + 2.))
+        .pl(px(space::S + 2.))
+        .pr(px(3.))
+        .rounded(px(radius::MEDIUM))
+        .text_size(px(text::FOOTNOTE))
+        .cursor_pointer()
+        .when(on, |d| d.bg(theme.selected).text_color(theme.text).font_weight(FontWeight::MEDIUM))
+        .when(!on, |d| d.text_color(theme.secondary).hover(|s| s.bg(theme.hover)))
+        .when(italic, |d| d.italic())
+        .when_some(icon, |d, i| d.child(div().flex_none().child(i.size(px(13.)).text_color(if on { theme.secondary } else { theme.tertiary }))))
+        .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(title))
+}
+
+/// The × on a tab.
+pub(crate) fn tab_close(id: SharedString, theme: &Theme) -> gpui_kit::Stateful<gpui_kit::Div> {
+    div()
+        .id(id)
+        .flex_none()
+        .w(px(18.))
+        .h(px(18.))
+        .rounded(px(radius::SMALL))
+        .flex()
+        .items_center()
+        .justify_center()
+        .hover(|s| s.bg(theme.selected))
+        .child(crate::ui::icons::x().size(px(11.)).text_color(theme.secondary))
 }
 
 impl Render for Inspector {
