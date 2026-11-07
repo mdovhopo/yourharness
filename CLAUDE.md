@@ -88,6 +88,15 @@ snapshots of hover states such as a sidebar row's Pin/Settle/… or a project's 
 refreshed` or why not), `YH_NOTIFICATION_CLICK=<seconds>` (a click on the last notification posted, which
 `YH_NOTIFICATIONS=log` only printed as `NOTIFY <kind>: title · project · body`: it opens that thread, printing `NOTIFY
 clicked`; real notifications go through a `UNUserNotificationCenter` delegate, never from a test).
+`YH_MEMORY_TAB=memories|tasks|activity`, after `YH_DRAFT_DELAY`), `YH_SPOTLIGHT=<words>` (⌘K typed;
+`YH_SPOTLIGHT_ENTER=1` with a session ID resumes it). Transcript: `YH_SCROLL_TO=<row>` (the open
+thread's transcript starts at that row; negative counts from the end), `YH_SELECT_PROBE=1` (drags across the
+last reply through the window's events, prints `SELECT PASS` and what ⌘C would copy, then clicks it away;
+`=keep` leaves it selected for a snapshot; `YH_SELECT_PROBE_DELAY`), `YH_OPEN_STEP_FILE=<Read|Edit|Write>`
+(the newest such step's file opens in the Files tab as clicking its path does), `YH_OPEN_DIAGRAM=<file.mmd>`
+(its diagram in the Open Large window; `YH_DIAGRAM_EXPORT=<file.png>` saves it as Save as PNG does,
+`YH_DIAGRAM_SNAPSHOT=<file.png>` draws that window). These need a selected thread (`YH_SELECT`): any
+`*_PROBE` variable stops the last thread from opening again.
 
 ## Performance is the product
 

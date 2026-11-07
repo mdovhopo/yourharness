@@ -11,21 +11,21 @@ Swift paths are under legacy/YourHarness/, Rust under crates/yh-app/src/. Tick i
 - [ ] 5. Long plans scroll inside the card's cap; question card capped too. AgentRequestCards.swift:167,206-225 · ui/composer.rs
 
 ## B. Transcript
-- [ ] 6. Text selection in replies, tool results, thinking, notices.
-- [ ] 7. Tool steps: icon, verb, key argument ("Read …/a/b.rs", "Run command"), readable browser/memory tool verbs, "Load browser tools". Views/ToolCallView.swift
-- [ ] 8. A path in a Read/Edit/Write step opens in the Files tab at the line.
-- [ ] 9. A running foreground command shows its last output line under its step.
-- [ ] 10. Failed tool: error icon/red border; spinner while running; pretty JSON; Bash as `$ cmd`.
-- [ ] 11. Browser steps: screenshot thumbnail, Show Browser button.
-- [ ] 12. Floating jump buttons (top/previous/next/end).
-- [ ] 13. Plan checklist inline at the newest task-tool call; one line for older ones. Views/PlanViews.swift
-- [ ] 14. `/command` in your messages in bold mono; `@file` as links.
-- [ ] 15. Right-click on media and attachments: Open Large, Preview/QuickTime, Show in Finder, Copy Path.
-- [ ] 16. Sub-agent card: Follow in Sidebar, stats line, agent-type chip.
-- [ ] 17. "Loading conversation…" while a thread opens slowly.
-- [ ] 18. Diagrams: Open Large (zoom, fit), Copy Image, Save as PNG.
-- [ ] Sent non-image files and folders in your message bubble (composer's `file_chip`).
-- [ ] Failed background-job notes in error colour.
+- [x] 6. Text selection in replies, tool results, thinking, notices. (`ui/selectable.rs`: gpui-base's window selection, which survives the cached transcript; a drag across rows works, ⌘C copies. Not yet: your own messages with links or a /command, diagram labels; a selection whose end row leaves the list's drawn rows is dropped.)
+- [x] 7. Tool steps: icon, verb, key argument ("Read …/a/b.rs", "Run command"), readable browser/memory tool verbs, "Load browser tools". Views/ToolCallView.swift (`ui/steps.rs`; icons from gpui-kit's default Lucide set)
+- [x] 8. A path in a Read/Edit/Write step opens in the Files tab at the line.
+- [x] 9. A running foreground command shows its last output line under its step.
+- [x] 10. Failed tool: error icon/red border; spinner while running; pretty JSON; Bash as `$ cmd`. (The running mark is a still loader icon: a GPUI animation redraws its view, here the whole transcript, every frame.)
+- [x] 11. Browser steps: screenshot thumbnail, Show Browser button.
+- [x] 12. Floating jump buttons (top/previous/next/end). (At the end, following it, "previous" shows whenever the thread doesn't fit, as the list can't say its top row then.)
+- [x] 13. Plan checklist inline at the newest task-tool call; one line for older ones. Views/PlanViews.swift
+- [x] 14. `/command` in your messages in bold mono; `@file` as links. (A command at the start only, not chained ones later in the message.)
+- [x] 15. Right-click on media and attachments: Open Large, Preview/QuickTime, Show in Finder, Copy Path.
+- [x] 16. Sub-agent card: Follow in Sidebar, stats line, agent-type chip. (Stats from what the rewrite tracks: activity and steps; no tokens or running clock.)
+- [x] 17. "Loading conversation…" while a thread opens slowly.
+- [x] 18. Diagrams: Open Large (zoom, fit), Copy Image, Save as PNG. (A GPUI window; images through resvg from an SVG of the layout, labels in Helvetica Neue.)
+- [x] Sent non-image files and folders in your message bubble (a chip of the transcript's own; the composer doesn't record non-image attachments yet: `YH_SEND_FILES` with a README sent none).
+- [x] Failed background-job notes in error colour (saved as `notice_style` error, as are `claude` exits and failed turns).
 
 ## C. Cards
 - [ ] 19. Permission card: "Allow Run command?", tool icon, key argument, description; narrow layout.

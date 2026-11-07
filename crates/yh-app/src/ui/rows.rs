@@ -1192,7 +1192,7 @@ fn plan_step(plan: &yh_core::plan::Plan, latest: bool, theme: &Theme) -> AnyElem
 
 /// Opens a Read, Write or Edit's file in the Files tab: where the edit went (looked up off the
 /// main thread), or where the read started.
-fn open_target(path: String, line: Option<usize>, written: Option<String>, cx: &mut App) {
+pub fn open_target(path: String, line: Option<usize>, written: Option<String>, cx: &mut App) {
     cx.spawn(async move |cx| {
         let line = match (line, written) {
             (Some(line), _) => Some(line),
@@ -1209,6 +1209,19 @@ fn open_target(path: String, line: Option<usize>, written: Option<String>, cx: &
         let _ = cx.update(|cx| crate::ui::inspector::open_link(&link, cx));
     })
     .detach();
+}
+
+/// The newest `tool` step's file, as its path's link has it: for `YH_OPEN_STEP_FILE`.
+pub fn step_file_target(state: &ThreadState, tool: &str) -> Option<(String, Option<usize>, Option<String>)> {
+    let root = state.linker.as_ref()?.root.clone();
+    state.items.iter().rev().flat_map(|i| i.entries.iter().rev()).find_map(|e| {
+        let b = e.borrow();
+        if b.data.tool_name.as_deref() != Some(tool) {
+            return None;
+        }
+        let input: serde_json::Value = serde_json::from_str(b.data.tool_input.as_deref().unwrap_or("")).ok()?;
+        steps::file_target(tool, &input, &root)
+    })
 }
 
 fn step(state: &ThreadState, ctx: &RowContext, pos: i64, n: usize, e: &EntryRef, theme: &Theme) -> AnyElement {

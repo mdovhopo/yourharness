@@ -219,6 +219,22 @@ impl Render for TranscriptView {
             if std::env::var("YH_SELECT_PROBE").is_ok() {
                 select_probe(self.thread.clone(), window, cx);
             }
+            // `YH_OPEN_STEP_FILE=<tool name>` (test runs): the newest such step's file opens in
+            // the Files tab, as clicking its path does, once the thread's files are read.
+            if let Ok(tool) = std::env::var("YH_OPEN_STEP_FILE") {
+                let thread = self.thread.clone();
+                cx.spawn(async move |_, cx| {
+                    cx.background_executor().timer(Duration::from_millis(1500)).await;
+                    let _ = cx.update(|cx| match rows::step_file_target(thread.read(cx), &tool) {
+                        Some((path, line, written)) => {
+                            eprintln!("STEP FILE {path} line {line:?} written {}", written.is_some());
+                            rows::open_target(path, line, written, cx);
+                        }
+                        None => eprintln!("STEP FILE FAIL: no {tool} step with a file in the thread's folder"),
+                    });
+                })
+                .detach();
+            }
             if let Ok(file) = std::env::var("YH_OPEN_DIAGRAM") {
                 crate::ui::diagram::open_file(&file, window, cx);
             }
