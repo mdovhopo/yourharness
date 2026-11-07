@@ -50,7 +50,7 @@ fn main() {
     let library = Arc::new(yh_core::library::Library::open());
     theme::set_chosen_appearance(library.setting("appearance").and_then(|v| v.as_str().map(str::to_string)));
 
-    gpui_kit::application().run(move |cx: &mut App| {
+    gpui_kit::application().with_assets(gpui_kit::assets::Assets).run(move |cx: &mut App| {
         gpui_kit::init(cx);
         cx.bind_keys([
             KeyBinding::new("cmd-.", Stop, None),
