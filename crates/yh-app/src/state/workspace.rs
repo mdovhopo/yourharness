@@ -1244,7 +1244,11 @@ impl Workspace {
                         eprintln!("event {id}: {e:?}");
                     }
                 }
-                let ended = batch.iter().any(|e| matches!(e, Event::Done { .. } | Event::Exit { .. }));
+                // A turn ends with its result, or with `claude` exiting mid-turn; an exit after a
+                // finished turn (the idle process going) doesn't end it again.
+                let had_done = batch.iter().any(|e| matches!(e, Event::Done { .. }));
+                let was_running = thread.read_with(cx, |t, _| t.running);
+                let ended = had_done || (was_running && batch.iter().any(|e| matches!(e, Event::Exit { .. })));
                 let exited = batch.iter().any(|e| matches!(e, Event::Exit { .. }));
                 let count = batch.len();
                 // What the workspace keeps (catalog, limits, session) before the rows take the rest.
