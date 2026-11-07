@@ -1,0 +1,47 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Input</title>
+<style>
+body{margin:0;font-family:-apple-system,sans-serif;height:3000px}
+#h{position:absolute;left:300px;top:200px;width:200px;height:80px;background:#ddd} #h:hover{background:#16a34a}
+#d{position:absolute;left:100px;top:400px;width:60px;height:60px;background:#f59e0b}
+#m{position:absolute;left:700px;top:200px;width:160px;padding:8px;background:#e0e7ff} #m .sub{display:none} #m:hover .sub{display:block}
+.col{position:absolute;top:600px;width:200px;height:200px;background:#f1f5f9;border:2px dashed #94a3b8} #a{left:100px} #b{left:400px}
+.item{margin:10px;padding:10px;background:#fff;border:1px solid #ccc}
+#nodrop{position:absolute;left:700px;top:600px;width:150px;height:100px;background:#fee2e2}
+#copyzone{position:absolute;left:900px;top:600px;width:150px;height:100px;background:#dbeafe}
+#cancel{position:absolute;left:700px;top:750px;padding:10px;background:#fef3c7}
+#s{position:absolute;left:100px;top:900px;width:300px;height:8px;background:#ddd} #knob{position:absolute;left:0;top:-6px;width:20px;height:20px;border-radius:10px;background:#2563eb}
+</style></head><body>
+<div id=h>hover me</div><div id=d></div><div id=m>Menu<div class=sub id=sub>Item one</div></div>
+<div class=col id=a><div class=item id=card draggable=true>Card</div></div><div class=col id=b></div>
+<div id=nodrop>no drop</div><div id=copyzone>copy</div><div id=cancel draggable=true>cancels</div>
+<div id=s><div id=knob></div></div>
+<script>
+// What happened, for the checks: window.log, and the button state each kind of event saw.
+window.log = []; window.seen = {};
+const L = (s) => log.push(s);
+for (const t of ['mouseover', 'mousemove', 'mousedown', 'mouseup', 'click', 'selectstart']) addEventListener(t, (e) => { seen[t] = e.buttons; }, true);
+document.addEventListener('click', (e) => L('click ' + e.clientX + ',' + e.clientY + ' ' + e.target.id));
+// A pointer-events drag (as dnd-kit and friends do it).
+let grab = null; const d = document.getElementById('d');
+d.addEventListener('pointerdown', (e) => { grab = [e.clientX - d.offsetLeft, e.clientY - d.offsetTop]; });
+addEventListener('pointermove', (e) => { if (grab) { d.style.left = (e.clientX - grab[0]) + 'px'; d.style.top = (e.clientY - grab[1]) + 'px'; } });
+addEventListener('pointerup', () => { if (grab) { L('dropped ' + d.offsetLeft + ',' + d.offsetTop); grab = null; } });
+// HTML drag and drop.
+const card = document.getElementById('card');
+card.addEventListener('dragstart', (e) => { L('dragstart'); e.dataTransfer.setData('text/plain', 'card'); });
+for (const c of document.querySelectorAll('.col')) {
+  c.addEventListener('dragover', (e) => e.preventDefault());
+  c.addEventListener('drop', (e) => { e.preventDefault(); c.appendChild(card); L('drop ' + c.id + ' ' + e.dataTransfer.getData('text/plain')); });
+}
+const cz = document.getElementById('copyzone');
+cz.addEventListener('dragover', (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; });
+cz.addEventListener('drop', (e) => { e.preventDefault(); L('copied ' + e.dataTransfer.getData('text/plain')); });
+document.getElementById('cancel').addEventListener('dragstart', (e) => { e.preventDefault(); L('cancelled'); });
+addEventListener('dragend', (e) => L('dragend ' + e.dataTransfer.dropEffect));
+// A slider that, like many libraries, ends its drag when a move says no button is down.
+const knob = document.getElementById('knob'); let sliding = false;
+knob.addEventListener('mousedown', () => { sliding = true; });
+addEventListener('mousemove', (e) => { if (!sliding) return; if (e.buttons === 0) { sliding = false; L('slider gave up'); return; } knob.style.left = Math.max(0, Math.min(280, e.clientX - 110)) + 'px'; });
+addEventListener('mouseup', () => { if (sliding) { sliding = false; L('slider at ' + knob.style.left); } });
+</script></body></html>

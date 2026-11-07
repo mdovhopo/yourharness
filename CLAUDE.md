@@ -63,7 +63,17 @@ overlay, then dropped), `YH_PREVIEW_MEDIA=1|draft` (the thread's last pictures, 
 in Quick Look, printing `PREVIEW PASS`; it shows on screen briefly), `YH_OPEN_BROWSER_WINDOW=1` (the open
 thread's browser in its own window after `YH_DRAFT_DELAY`, printing where the page went;
 `YH_BROWSER_WINDOW_SNAPSHOT=<png>` draws that window, `YH_BROWSER_WINDOW_CLOSE=<s>` then closes it, the pages
-going back to the sidebar; with `YH_BROWSER_OPEN=<url>`). Also
+going back to the sidebar; with `YH_BROWSER_OPEN=<url>`), `YH_BROWSER_PROBE=<steps.json>` (browser tool calls,
+`[{"tool": "click", "args": {"selector": "#go"}}, {"sleep": 1}]`, run on the selected thread's browser at launch
+as the agent makes them, a new thread in the first project if none is selected, so give it a `YH_PROJECT`; each
+result printed, screenshots next to the file as `<steps>.<n>.jpg`, then `== place …` and `== done`;
+`YH_BROWSER_PROBE_QUIT=1` quits after; `YH_BROWSER_AUTO_SHOW=0` keeps the page parked, the sidebar closed). After
+changing anything in `browser/`, `webview.rs` or the browser panel or window, run `scripts/browser-fidelity/run.sh
+[out dir]` (a few minutes; `SKIP_BUILD=1` reuses the copy in the out dir, `RUNS=panel` for one): it renders test
+pages in a plain, unscaled WKWebView (Safari's engine) at every page size and checks the built-in browser against
+it, what the page measures and how screenshots look (full page too), over the right sidebar, parked and in its own
+window, and its input against a real mouse (hover, exact clicks, pointer drags, HTML drag and drop, sliders,
+scrolling). The browser is how Claude sees the UI it builds, so this must pass. Also
 `YH_SEND_FILES=<a.png:b.pdf:folder>` (with it: images inline, the rest by path; alone: attached to the
 selected thread's composer, as a drop does), `YH_NEW_THREAD=1` (a new thread in the first project at launch:
 its empty state), `YH_QUEUE=<text>` (sent `YH_QUEUE_DELAY` s after launch, 3, so it queues behind the

@@ -319,6 +319,27 @@ fn main() {
                 }
             });
         }
+        // `YH_BROWSER_PROBE=<steps.json>`: browser tool calls run on the selected thread's browser
+        // (a new thread in the first project if none is), each result printed (browser::run_probe).
+        // `YH_BROWSER_AUTO_SHOW=0` first turns off showing the browser when a page opens, so it
+        // stays parked (saved: development data only).
+        if let Some(steps) = env("YH_BROWSER_PROBE") {
+            let found = workspace.update(cx, |ws, cx| {
+                if env("YH_BROWSER_AUTO_SHOW").as_deref() == Some("0") && env("YH_DATA_DIR").is_some() {
+                    ws.library.set_setting("browserAutoShow", &serde_json::json!(false));
+                }
+                if ws.selected_thread().is_none() {
+                    if let Some(project) = ws.projects.first().map(|p| p.id.clone()) {
+                        ws.new_thread(&project, cx);
+                    }
+                }
+                ws.selected_thread().map(|t| (t.read(cx).id().to_string(), t.read(cx).meta.project_id.clone()))
+            });
+            match found {
+                Some((thread, project)) => browser::run_probe(steps, thread, Some(project)),
+                None => eprintln!("BROWSER PROBE: no thread to run on (give it a YH_PROJECT)"),
+            }
+        }
         // `YH_SEND_FILES=<a.png:b.pdf:folder>` goes with it, through the composer as if attached
         // (images inline, the rest by path).
         if let Some(text) = env("YH_SEND") {

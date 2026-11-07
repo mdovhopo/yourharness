@@ -270,6 +270,114 @@ pub fn store_cookies(project: &str, cookies: Vec<yh_core::cookies::Cookie>, repl
     }
 }
 
+/// A WebKit switch with no public API (`_setWindowOcclusionDetectionEnabled:` and friends),
+/// looked up first so a WebKit without it just behaves as before.
+fn spi_bool(object: id, name: &str, value: bool) {
+    unsafe {
+        let selector = objc::runtime::Sel::register(name);
+        let responds: bool = msg_send![object, respondsToSelector: selector];
+        if !responds {
+            return;
+        }
+        let imp: *const std::ffi::c_void = msg_send![object, methodForSelector: selector];
+        let setter: extern "C" fn(id, objc::runtime::Sel, objc::runtime::BOOL) = std::mem::transmute(imp);
+        setter(object, selector, if value { YES } else { NO });
+    }
+}
+
+/// Lays the page out at `size` whatever the view's size, or at the view's size again (None):
+/// viewport units and media queries follow the layout size.
+fn fix_layout_size(view: id, size: Option<(f64, f64)>) {
+    unsafe {
+        let (set_size, set_mode) = (objc::runtime::Sel::register("_setFixedLayoutSize:"), objc::runtime::Sel::register("_setLayoutMode:"));
+        let (a, b): (bool, bool) = (msg_send![view, respondsToSelector: set_size], msg_send![view, respondsToSelector: set_mode]);
+        if !a || !b {
+            return;
+        }
+        if let Some((w, h)) = size {
+            let imp: *const std::ffi::c_void = msg_send![view, methodForSelector: set_size];
+            let f: extern "C" fn(id, objc::runtime::Sel, NSSize) = std::mem::transmute(imp);
+            f(view, set_size, NSSize::new(w, h));
+        }
+        // _WKLayoutModeViewSize, _WKLayoutModeFixedSize.
+        let imp: *const std::ffi::c_void = msg_send![view, methodForSelector: set_mode];
+        let f: extern "C" fn(id, objc::runtime::Sel, isize) = std::mem::transmute(imp);
+        f(view, set_mode, if size.is_some() { 1 } else { 0 });
+    }
+}
+
+/// The mouse buttons WebKit sees held while the agent's mouse events go in. WebKit reads them
+/// (`event.buttons`) from the real mouse, `+[NSEvent pressedMouseButtons]`, which is up: every
+/// press and drag said no button was down, and pages that check gave up on a drag halfway. So
+/// that method answers `HELD` while it's set (the Swift app's `SyntheticMouse`).
+mod synthetic_mouse {
+    use objc::runtime::{Class, Method, Sel};
+    use objc::{class, sel, sel_impl};
+    use std::sync::atomic::{AtomicIsize, AtomicUsize, Ordering};
+
+    static HELD: AtomicIsize = AtomicIsize::new(-1);
+    static ORIGINAL: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe extern "C" {
+        fn class_getClassMethod(cls: *const Class, name: Sel) -> *mut Method;
+        fn method_setImplementation(m: *mut Method, imp: *const std::ffi::c_void) -> *const std::ffi::c_void;
+    }
+
+    extern "C" fn pressed(cls: &Class, sel: Sel) -> usize {
+        let held = HELD.load(Ordering::SeqCst);
+        if held >= 0 {
+            return held as usize;
+        }
+        let original = ORIGINAL.load(Ordering::SeqCst);
+        if original == 0 {
+            return 0;
+        }
+        let f: extern "C" fn(&Class, Sel) -> usize = unsafe { std::mem::transmute(original) };
+        f(cls, sel)
+    }
+
+    fn install() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| unsafe {
+            let method = class_getClassMethod(class!(NSEvent), sel!(pressedMouseButtons));
+            if !method.is_null() {
+                let old = method_setImplementation(method, pressed as *const std::ffi::c_void);
+                ORIGINAL.store(old as usize, Ordering::SeqCst);
+            }
+        });
+    }
+
+    /// `buttons` as `pressedMouseButtons` (1 left, 2 right) while `body` sends events.
+    pub fn holding<T>(buttons: isize, body: impl FnOnce() -> T) -> T {
+        install();
+        HELD.store(buttons, Ordering::SeqCst);
+        let out = body();
+        HELD.store(-1, Ordering::SeqCst);
+        out
+    }
+}
+
+/// Safari's user agent, with the installed Safari's version (as Safari sends it), so sites serve
+/// the page this Mac's Safari gets; WebKit's own leaves out `Version/… Safari/…`.
+fn user_agent() -> String {
+    static AGENT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    AGENT
+        .get_or_init(|| {
+            let version = unsafe {
+                let bundle: id = msg_send![class!(NSBundle), bundleWithPath: ns_string("/Applications/Safari.app")];
+                if bundle == nil {
+                    None
+                } else {
+                    let info: id = msg_send![bundle, infoDictionary];
+                    rust_string(msg_send![info, objectForKey: ns_string("CFBundleShortVersionString")])
+                }
+            };
+            let version = version.filter(|v| v.chars().all(|c| c.is_ascii_digit() || c == '.')).unwrap_or_else(|| "26.0".into());
+            format!("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/{version} Safari/605.1.15")
+        })
+        .clone()
+}
+
 pub struct WebView {
     /// What sits over the window: it draws the page scaled when the page's viewport is
     /// bigger than the panel (its bounds are CSS pixels, its frame points).
@@ -277,6 +385,11 @@ pub struct WebView {
     view: id,
     /// The page's viewport in CSS pixels; None fits the panel.
     viewport: std::cell::Cell<Option<(f64, f64)>>,
+    /// While a full-page screenshot is taken: the view is this many CSS pixels tall, the page
+    /// still laid out at the viewport's size.
+    full_height: std::cell::Cell<Option<f64>>,
+    /// Where it was last given a place (`set_frame`), to lay it out again.
+    bounds: std::cell::Cell<Option<(f64, f64, f64, f64)>>,
 }
 
 /// The viewport presets (`resize`): a laptop is the default.
@@ -317,16 +430,19 @@ impl WebView {
             let _: () = msg_send![config, release];
             let _: () = msg_send![view, setHidden: YES];
             // Safari's user agent: sites serve the page a Mac browser gets.
-            let _: () = msg_send![view, setCustomUserAgent: ns_string("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15")];
+            let _: () = msg_send![view, setCustomUserAgent: ns_string(&user_agent())];
             let _: () = msg_send![view, setNavigationDelegate: delegate()];
             let _: () = msg_send![view, setUIDelegate: delegate()];
+            // A page parked, or in a window behind others, isn't treated as hidden: its timers
+            // and animations run at full speed while the agent works.
+            spi_bool(view, "_setWindowOcclusionDetectionEnabled:", false);
             let page: id = msg_send![class!(NSView), alloc];
             let page: id = msg_send![page, initWithFrame: frame];
             let _: () = msg_send![page, setHidden: YES];
             let _: () = msg_send![view, setHidden: NO];
             let _: () = msg_send![page, addSubview: view];
             let _: () = msg_send![host, addSubview: page];
-            let web = WebView { page, view, viewport: std::cell::Cell::new(Some(LAPTOP)) };
+            let web = WebView { page, view, viewport: std::cell::Cell::new(Some(LAPTOP)), full_height: Default::default(), bounds: Default::default() };
             web.lay_out(LAPTOP.0, LAPTOP.1, LAPTOP.0, LAPTOP.1);
             web
         }
@@ -368,22 +484,50 @@ impl WebView {
     /// page keeps its viewport). A viewport bigger than the panel is drawn scaled to fit,
     /// against the top.
     pub fn set_frame(&self, bounds: Option<(f64, f64, f64, f64)>) {
+        self.bounds.set(bounds);
         unsafe {
             let Some((x, y, w, h)) = bounds else {
                 let _: () = msg_send![self.page, setHidden: YES];
+                // Hidden, it still has its viewport's size: a screenshot needs no panel.
+                let (cw, ch) = self.viewport.get().unwrap_or(self.size());
+                let ch = self.full_height.get().unwrap_or(ch);
+                self.lay_out(cw, ch, cw, ch);
                 return;
             };
             let (cw, ch) = self.viewport.get().unwrap_or((w, h));
             let scale = (w / cw).min(h / ch);
             let (fw, fh) = (cw * scale, ch * scale);
+            // A full-page shot: as tall as the page, from the same top-left.
+            let (css_h, frame_h) = match self.full_height.get() {
+                Some(full) => (full, full * scale),
+                None => (ch, fh),
+            };
             let host: id = msg_send![self.page, superview];
             let flipped: bool = msg_send![host, isFlipped];
             let host_frame: NSRect = msg_send![host, bounds];
             let left = x + (w - fw) / 2.;
-            let bottom = if flipped { y } else { host_frame.size.height - y - fh };
-            let _: () = msg_send![self.page, setFrame: NSRect::new(NSPoint::new(left, bottom), NSSize::new(fw, fh))];
-            self.lay_out(fw, fh, cw, ch);
+            let bottom = if flipped { y } else { host_frame.size.height - y - frame_h };
+            let _: () = msg_send![self.page, setFrame: NSRect::new(NSPoint::new(left, bottom), NSSize::new(fw, frame_h))];
+            self.lay_out(fw, frame_h, cw, css_h);
             let _: () = msg_send![self.page, setHidden: NO];
+        }
+    }
+
+    /// For a full-page screenshot: the view `height` CSS pixels tall with the page still laid out
+    /// at its viewport (a `100vh` hero stays one screen), or back as it was (None).
+    pub fn hold_full_height(&self, height: Option<f64>) {
+        let (cw, ch) = self.size_for_layout();
+        fix_layout_size(self.view, height.map(|_| (cw, ch)));
+        self.full_height.set(height);
+        self.set_frame(self.bounds.get());
+    }
+
+    /// The viewport's size in CSS pixels, whatever the view is now.
+    fn size_for_layout(&self) -> (f64, f64) {
+        match (self.viewport.get(), self.bounds.get()) {
+            (Some(v), _) => v,
+            (None, Some((_, _, w, h))) => (w, h),
+            (None, None) => self.size(),
         }
     }
 
@@ -563,8 +707,8 @@ impl WebView {
             let number: isize = if window == nil { 0 } else { msg_send![window, windowNumber] };
             let info: id = msg_send![class!(NSProcessInfo), processInfo];
             let time: f64 = msg_send![info, systemUptime];
-            // 2 left up, 4 right up: no pressure.
-            let pressure: f32 = if kind == 2 || kind == 4 || kind == 5 { 0. } else { 1. };
+            // 2 left up, 4 right up, a plain move: no pressure.
+            let pressure: f32 = if kind == 2 || kind == 4 || kind == 5 || clicks == 0 { 0. } else { 1. };
             msg_send![class!(NSEvent), mouseEventWithType: kind location: at modifierFlags: modifiers timestamp: time windowNumber: number context: nil eventNumber: 0isize clickCount: clicks pressure: pressure]
         }
     }
@@ -576,11 +720,19 @@ impl WebView {
         unsafe {
             for n in 1..=count.max(1) {
                 if right {
-                    let _: () = msg_send![self.view, rightMouseDown: self.mouse_event(3, at, n, modifiers)];
-                    let _: () = msg_send![self.view, rightMouseUp: self.mouse_event(4, at, n, modifiers)];
+                    synthetic_mouse::holding(2, || {
+                        let _: () = msg_send![self.view, rightMouseDown: self.mouse_event(3, at, n, modifiers)];
+                    });
+                    synthetic_mouse::holding(0, || {
+                        let _: () = msg_send![self.view, rightMouseUp: self.mouse_event(4, at, n, modifiers)];
+                    });
                 } else {
-                    let _: () = msg_send![self.view, mouseDown: self.mouse_event(1, at, n, modifiers)];
-                    let _: () = msg_send![self.view, mouseUp: self.mouse_event(2, at, n, modifiers)];
+                    synthetic_mouse::holding(1, || {
+                        let _: () = msg_send![self.view, mouseDown: self.mouse_event(1, at, n, modifiers)];
+                    });
+                    synthetic_mouse::holding(0, || {
+                        let _: () = msg_send![self.view, mouseUp: self.mouse_event(2, at, n, modifiers)];
+                    });
                 }
             }
         }
@@ -590,26 +742,39 @@ impl WebView {
         self.hover_at(self.window_point(x, y), 0);
     }
 
-    /// WebKit hit-tests a plain move only in the key window; a drag-move it hit-tests anywhere.
+    /// The pointer to a window point, as the page sees a mouse move: `:hover`, mouseover,
+    /// mousemove, no button down. WebKit hit-tests a plain move only in the key window (in any
+    /// other it just updates scroll bars), and these pages rarely are in it. A move with the
+    /// left button held is hit-tested anywhere, and the page sees no button, since it reads
+    /// them from `pressedMouseButtons`; with no mouse down before it, nothing is selected.
     fn hover_at(&self, at: NSPoint, modifiers: usize) {
-        unsafe {
+        synthetic_mouse::holding(0, || unsafe {
             let _: () = msg_send![self.view, mouseDragged: self.mouse_event(6, at, 0, modifiers)];
-        }
+        });
     }
 
-    /// A drag with the mouse, in steps, from one point to another.
-    pub fn drag(&self, from: (f64, f64), to: (f64, f64)) {
-        let a = self.window_point(from.0, from.1);
-        unsafe {
-            let _: () = msg_send![self.view, mouseDown: self.mouse_event(1, a, 1, 0)];
-            for i in 1..=10 {
-                let t = i as f64 / 10.;
-                let p = self.window_point(from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t);
-                let _: () = msg_send![self.view, mouseDragged: self.mouse_event(6, p, 1, 0)];
-            }
-            let b = self.window_point(to.0, to.1);
-            let _: () = msg_send![self.view, mouseUp: self.mouse_event(2, b, 1, 0)];
-        }
+    /// The left button goes down at a point in CSS pixels (after the pointer moves there).
+    pub fn mouse_down(&self, x: f64, y: f64) {
+        let at = self.window_point(x, y);
+        self.hover_at(at, 0);
+        synthetic_mouse::holding(1, || unsafe {
+            let _: () = msg_send![self.view, mouseDown: self.mouse_event(1, at, 1, 0)];
+        });
+    }
+
+    /// The pointer moves to a point with the left button held.
+    pub fn mouse_dragged(&self, x: f64, y: f64) {
+        let at = self.window_point(x, y);
+        synthetic_mouse::holding(1, || unsafe {
+            let _: () = msg_send![self.view, mouseDragged: self.mouse_event(6, at, 1, 0)];
+        });
+    }
+
+    pub fn mouse_up(&self, x: f64, y: f64) {
+        let at = self.window_point(x, y);
+        synthetic_mouse::holding(0, || unsafe {
+            let _: () = msg_send![self.view, mouseUp: self.mouse_event(2, at, 1, 0)];
+        });
     }
 
     /// Text into what has focus in the page, as input events.

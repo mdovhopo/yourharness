@@ -776,6 +776,18 @@ impl BrowserTools {
         Ok(lines.join("\n"))
     }
 
+    /// A phone- or tablet-sized viewport (not fitting the panel) on a page that doesn't lay itself
+    /// out for one: a real device would show it 980px wide, shrunk.
+    fn mobile_note(&self, id: u32) -> Option<String> {
+        let (viewport, url) = self.with_tab(id, |t| (t.web.viewport(), t.web.url())).ok()?;
+        let (w, _) = viewport.filter(|(w, _)| *w < 1024.)?;
+        url.filter(|u| u != "about:blank")?;
+        let meta = self.helper(id, "return document.querySelector('meta[name=viewport]')?.content ?? ''").ok()?.as_str()?.to_string();
+        (!meta.replace(' ', "").to_lowercase().contains("width=device-width")).then(|| {
+            format!("This page has no <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">: on a real phone or tablet it's laid out 980px wide and shrunk to fit, so it won't look like this {}px layout there.", w as i64)
+        })
+    }
+
     fn screenshot(&self, id: u32, a: &Value, tool_use: Option<&str>) -> Result<ToolResult, Fail> {
         let rect = if Self::has_target(a) {
             let (_, _, r, _, _) = self.locate(id, a)?;
@@ -783,6 +795,22 @@ impl BrowserTools {
         } else {
             None
         };
+        let (w, h) = self.with_tab(id, |t| t.web.size())?;
+        // The whole page: the view grows to the page's height for the capture, then back. The
+        // layout stays at the viewport's size meanwhile, so a `100vh` hero is one screen tall.
+        let full = if rect.is_none() && a["full_page"].as_bool() == Some(true) {
+            self.helper(id, "return Math.min(document.documentElement.scrollHeight, 12000)")?.as_f64().filter(|full| *full > h + 1.)
+        } else {
+            None
+        };
+        let mut scrolled = 0.;
+        if let Some(full) = full {
+            scrolled = self.helper(id, "const s = document.scrollingElement; const y = s.scrollTop; s.scrollTop = 0; return y")?.as_f64().unwrap_or(0.);
+            self.with_tab(id, move |t| t.web.hold_full_height(Some(full)))?;
+            std::thread::sleep(Duration::from_millis(120));
+            self.settle(id, Duration::from_secs(1));
+        }
+        let rect = rect.or(full.map(|full| (0., 0., w, full)));
         let path = std::env::temp_dir().join(format!("yh-shot-{}-{id}.jpg", std::process::id())).to_string_lossy().into_owned();
         let (tx, rx) = flume::bounded(1);
         let p = path.clone();
@@ -791,7 +819,12 @@ impl BrowserTools {
             t.web.capture(rect, 1280., p, tx);
             shown
         })?;
-        let (pw, ph) = rx.recv_timeout(Duration::from_secs(20)).map_err(|_| if shown { "Couldn't capture the page." } else { "The browser isn't on screen: open it with open (show: true) first." }.to_string())??;
+        let captured = rx.recv_timeout(Duration::from_secs(20));
+        if full.is_some() {
+            self.with_tab(id, |t| t.web.hold_full_height(None))?;
+            let _ = self.helper(id, &format!("document.scrollingElement.scrollTop = {scrolled}"));
+        }
+        let (pw, ph) = captured.map_err(|_| if shown { "Couldn't capture the page." } else { "The browser isn't on screen: open it with open (show: true) first." }.to_string())??;
         let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
         let _ = std::fs::remove_file(&path);
         // A copy for the transcript, whose step shows it (`<thread>-browser-<tool use>.jpg`).
@@ -800,12 +833,14 @@ impl BrowserTools {
             let _ = std::fs::create_dir_all(&dir);
             let _ = std::fs::write(dir.join(format!("{}-browser-{tool_use}.jpg", self.thread)), &bytes);
         }
-        let (w, h) = self.with_tab(id, |t| t.web.size())?;
         let css_width = rect.map_or(w, |r| r.2);
         let scale = pw as f64 / css_width.max(1.);
         let mut text = format!("Screenshot of tab {id}, {} ({pw}×{ph}", self.with_tab(id, |t| t.short_url())?);
         text += &if (scale - 1.).abs() > 0.01 { format!(", {scale:.2}× CSS pixels") } else { ", 1 pixel = 1 CSS pixel".into() };
         text += &format!("; viewport {}×{}).", w as i64, h as i64);
+        if let Some(note) = self.mobile_note(id) {
+            text += &format!("\n{note}");
+        }
         if let Some(note) = self.news(id) {
             text += &format!("\n{note}");
         }
@@ -1022,7 +1057,32 @@ impl BrowserTools {
                 }
                 let (fx, fy, _, fd, _) = self.locate(id, &from)?;
                 let (tx, ty, _, td, _) = self.locate(id, &to)?;
-                self.with_tab(id, move |t| t.web.drag((fx, fy), (tx, ty)))?;
+                // From a `draggable` element it's an HTML drag and drop, played as the page's drag
+                // events: WebKit hands that to an AppKit drag session, which follows the real
+                // mouse, so mouse events alone never drop anything.
+                let html = self.script(id, format!("const from = [{fx}, {fy}], to = [{tx}, {ty}];\n{HTML_DRAG}"), true, Duration::from_secs(10))?;
+                if html.is_object() {
+                    self.with_tab(id, move |t| t.web.hover(tx, ty))?;
+                    self.settle(id, Duration::from_secs(10));
+                    let target = html["target"].as_str().unwrap_or("");
+                    let line = if html["started"].as_bool() != Some(true) {
+                        format!("The page cancelled the drag of {fd} at dragstart")
+                    } else if html["dropped"].as_bool() == Some(true) {
+                        format!("Dragged {fd} to {td} (HTML drag and drop; {target} took the drop)")
+                    } else {
+                        format!("Dragged {fd} to {td}, but nothing there accepts the drop (HTML drag and drop ended over {target}, which didn't cancel dragover)")
+                    };
+                    return Ok(self.result(id, &line, false));
+                }
+                // A mouse drag, a frame a step, as a hand moves it.
+                self.with_tab(id, move |t| t.web.mouse_down(fx, fy))?;
+                for step in 1..=12 {
+                    let f = step as f64 / 12.;
+                    let (x, y) = (fx + (tx - fx) * f, fy + (ty - fy) * f);
+                    self.with_tab(id, move |t| t.web.mouse_dragged(x, y))?;
+                    std::thread::sleep(Duration::from_millis(16));
+                }
+                self.with_tab(id, move |t| t.web.mouse_up(tx, ty))?;
                 self.settle(id, Duration::from_secs(10));
                 Ok(self.result(id, &format!("Dragged {fd} to {td}"), false))
             }
@@ -1210,11 +1270,8 @@ return JSON.stringify(__yhValue, (key, v) => {{
                 let (w, h) = self.with_tab(id, |t| t.web.size())?;
                 let scheme = self.with_tab(id, |t| t.color_scheme.clone())?;
                 let mut line = format!("Viewport is {}×{}{}", w as i64, h as i64, scheme.map(|s| format!(", {s}")).unwrap_or_default());
-                if w < 1024. {
-                    let meta = self.helper(id, "return document.querySelector('meta[name=viewport]')?.content ?? ''").ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
-                    if !meta.replace(' ', "").to_lowercase().contains("width=device-width") {
-                        line += &format!(".\nThis page has no <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">: on a real phone or tablet it's laid out 980px wide and shrunk to fit, so it won't look like this {}px layout there", w as i64);
-                    }
+                if let Some(note) = self.mobile_note(id) {
+                    line += &format!(".\n{}", note.trim_end_matches('.'));
                 }
                 Ok(self.result(id, &line, false))
             }
@@ -1257,6 +1314,56 @@ return JSON.stringify(__yhValue, (key, v) => {{
         }
     }
 }
+
+/// Null unless the drag starts on a `draggable` element; then the events a browser fires for
+/// it, in order, and whether the drop was taken (the last dragover was cancelled). Runs in the
+/// page's world, so its handlers see this drag's dropEffect and effectAllowed; `from` and `to`
+/// are defined before it. The Swift app's `BrowserTab.htmlDrag`.
+const HTML_DRAG: &str = r#"
+const [x0, y0] = from, [x1, y1] = to;
+const source = document.elementFromPoint(x0, y0)?.closest('[draggable="true"]');
+if (!source) return null;
+const data = new DataTransfer();
+// A DataTransfer made by script ignores these outside a real drag; here they work as in one.
+let dropEffect = 'none', effectAllowed = 'uninitialized';
+Object.defineProperty(data, 'dropEffect', { configurable: true, get: () => dropEffect,
+    set: (value) => { if (['none', 'copy', 'link', 'move'].includes(value)) dropEffect = value; } });
+Object.defineProperty(data, 'effectAllowed', { configurable: true, get: () => effectAllowed,
+    set: (value) => { if (['none', 'copy', 'copyLink', 'copyMove', 'link', 'linkMove', 'move', 'all', 'uninitialized'].includes(value)) effectAllowed = value; } });
+const init = (x, y, extra) => ({ bubbles: true, cancelable: true, composed: true, view: window,
+    clientX: x, clientY: y, screenX: screenX + x, screenY: screenY + y, ...extra });
+const fire = (target, type, x, y, extra = {}) => target.dispatchEvent(
+    type.startsWith('pointer') ? new PointerEvent(type, init(x, y, { pointerId: 1, pointerType: 'mouse', isPrimary: true, ...extra }))
+    : type.startsWith('mouse') ? new MouseEvent(type, init(x, y, extra))
+    : new DragEvent(type, init(x, y, { dataTransfer: data, ...extra })));
+// What a browser starts each dragenter and dragover with, from effectAllowed; the page may change it.
+const effect = () => ({ none: 'none', copy: 'copy', copyLink: 'copy', copyMove: 'copy', all: 'copy', link: 'link', linkMove: 'link' })[data.effectAllowed] ?? 'move';
+const describe = (el) => el.id ? '#' + el.id : el.localName + (el.classList.length ? '.' + [...el.classList].join('.') : '');
+fire(source, 'pointerdown', x0, y0, { button: 0, buttons: 1 });
+fire(source, 'mousedown', x0, y0, { button: 0, buttons: 1 });
+if (!fire(source, 'dragstart', x0, y0)) return { started: false, dropped: false, target: describe(source) };
+fire(source, 'pointercancel', x0, y0);
+let over = null, accepted = false;
+for (let step = 1; step <= 12; step++) {
+    const x = x0 + (x1 - x0) * step / 12, y = y0 + (y1 - y0) * step / 12;
+    fire(source, 'drag', x, y);
+    const under = document.elementFromPoint(x, y) ?? document.documentElement;
+    if (under !== over) {
+        data.dropEffect = effect();
+        fire(under, 'dragenter', x, y);
+        if (over) fire(over, 'dragleave', x, y);
+        over = under;
+    }
+    data.dropEffect = effect();
+    accepted = !fire(under, 'dragover', x, y) && data.dropEffect !== 'none';
+    await new Promise((done) => setTimeout(done, 16));
+}
+if (accepted) fire(over, 'drop', x1, y1);
+// dragend says what happened: the drop's effect, or none.
+if (!accepted) data.dropEffect = 'none';
+fire(source, 'dragend', x1, y1);
+return { started: true, dropped: accepted, target: describe(over) };
+"#;
 
 const COMMAND: usize = 1 << 20;
 
@@ -1452,4 +1559,60 @@ impl ToolServer for BrowserTools {
         }
         self.perform(name, a, tool_use).unwrap_or_else(ToolResult::error)
     }
+}
+
+/// Development: `YH_BROWSER_PROBE=<steps.json>` runs browser tool calls on a thread's browser
+/// at launch, as the agent makes them (on a thread aside, through `BrowserTools::call`), and
+/// prints each result to stderr; screenshots go next to the file as `<steps>.<n>.jpg`. The
+/// file is a list of `{"tool": "click", "args": {...}}`; `{"sleep": seconds}` waits. `== done`
+/// at the end, then it quits with `YH_BROWSER_PROBE_QUIT=1`. scripts/browser-fidelity runs it.
+pub fn run_probe(path: String, thread: String, project: Option<String>) {
+    let steps: Vec<Value> = match std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|s| serde_json::from_str(&s).map_err(|e| e.to_string())) {
+        Ok(Value::Array(steps)) => steps,
+        Ok(_) => return eprintln!("BROWSER PROBE {path}: not a list of steps"),
+        Err(e) => return eprintln!("BROWSER PROBE {path}: {e}"),
+    };
+    let tools = BrowserTools { thread: thread.clone(), project, read_only: false };
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(1));
+        let shots = yh_core::library::data_directory().join("attachments");
+        for (index, step) in steps.iter().enumerate() {
+            if let Some(seconds) = step["sleep"].as_f64() {
+                std::thread::sleep(Duration::from_secs_f64(seconds));
+                continue;
+            }
+            let Some(tool) = step["tool"].as_str() else { continue };
+            let args = if step["args"].is_object() { step["args"].clone() } else { json!({}) };
+            let started = Instant::now();
+            let tool_use = format!("probe-{index}");
+            let result = ToolServer::call(&tools, tool, &args, Some(&tool_use));
+            let mut lines = vec![format!("== {index} {tool} {args} ({} ms){}", started.elapsed().as_millis(), if result.is_error { " ERROR" } else { "" })];
+            if !result.images.is_empty() {
+                // The copy the transcript's step would show, moved next to the steps.
+                let from = shots.join(format!("{thread}-browser-{tool_use}.jpg"));
+                let to = format!("{path}.{index}.jpg");
+                let size = std::fs::metadata(&from).map(|m| m.len()).unwrap_or(0);
+                let _ = std::fs::rename(&from, &to);
+                lines.push(format!("[image {size} bytes → {to}]"));
+            }
+            lines.push(result.text);
+            eprintln!("{}", lines.join("\n"));
+        }
+        // Where the page was drawn, so a run can tell it tested the place it meant to.
+        let (tx, rx) = flume::bounded(1);
+        let t = thread.clone();
+        if let Some(jobs) = JOBS.get() {
+            let _ = jobs.send(Box::new(move |b, _| {
+                let _ = tx.send(b.sessions.get(&t).and_then(|s| s.selected_tab()).map(|tab| tab.web.report_place()));
+            }));
+        }
+        let place = rx.recv_timeout(Duration::from_secs(5)).ok().flatten().unwrap_or_else(|| "no tab".into());
+        eprintln!("== place {place}");
+        eprintln!("== done");
+        if std::env::var("YH_BROWSER_PROBE_QUIT").as_deref() == Ok("1") {
+            if let Some(jobs) = JOBS.get() {
+                let _ = jobs.send(Box::new(|_, cx| cx.quit()));
+            }
+        }
+    });
 }
