@@ -8,6 +8,8 @@ pub mod icons;
 pub mod inspector;
 pub mod jobs;
 pub mod mcp;
+pub mod page_icons;
+pub mod page_kit;
 pub mod memory;
 pub mod project;
 pub mod resume_sheet;

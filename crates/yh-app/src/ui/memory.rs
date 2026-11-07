@@ -4,11 +4,13 @@
 //! Memory is read off the main thread, again whenever it changes (`memory_revision`).
 
 use crate::state::workspace::Workspace;
-use crate::theme::{Theme, MONO};
+use crate::theme::{radius, space, text, Theme, MONO};
+use crate::ui::page_icons as icons;
+use crate::ui::page_kit::{self, Segment};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
-use gpui_kit::component::{Disableable, Sizable, WindowExt};
+use gpui_kit::component::{Disableable, IconName, Sizable, WindowExt};
 use gpui_kit::{div, prelude::*, px, App, Context, Entity, FontWeight, Hsla, SharedString, Subscription, Window};
 use yh_core::memory::{Actor, Memory, Store};
 
@@ -24,7 +26,7 @@ fn kind_color(kind: &str, theme: &Theme) -> Hsla {
         "user" => gpui_kit::rgb(0xaf52de).into(),
         "feedback" => theme.warning,
         "reference" => gpui_kit::rgb(0x30b0c7).into(),
-        "task" => gpui_kit::rgb(0x34c759).into(),
+        "task" => theme.success,
         _ => theme.accent,
     }
 }
@@ -32,9 +34,19 @@ fn kind_color(kind: &str, theme: &Theme) -> Hsla {
 fn state_color(state: &str, theme: &Theme) -> Hsla {
     match state {
         "blocked" => theme.warning,
-        "done" => gpui_kit::rgb(0x34c759).into(),
+        "done" => theme.success,
         "todo" => theme.secondary,
         _ => theme.accent,
+    }
+}
+
+/// A task state's icon: a dot in a ring under way, paused when blocked, dashed to do, a tick done.
+fn state_icon(state: &str) -> gpui_kit::component::Icon {
+    match state {
+        "blocked" => icons::circle_pause(),
+        "done" => icons::circle_check(),
+        "todo" => icons::circle_dashed(),
+        _ => icons::circle_dot(),
     }
 }
 
@@ -608,20 +620,17 @@ impl MemoryPage {
 // MARK: Drawing
 
 fn chip(label: impl Into<SharedString>, color: Hsla) -> gpui_kit::Div {
-    div()
-        .flex_none()
-        .px(px(7.))
-        .py(px(1.))
-        .rounded(px(9.))
-        .text_size(px(11.))
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(color)
-        .bg(color.opacity(0.14))
-        .child(label.into())
+    page_kit::chip(label, color)
 }
 
+/// A small heading over a group of the detail (Task, Use, Linked…).
 fn section(title: &str, theme: &Theme) -> gpui_kit::Div {
-    div().pt(px(6.)).text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.secondary).child(title.to_uppercase())
+    div().pt(px(space::S)).text_size(px(text::FOOTNOTE)).font_weight(FontWeight::SEMIBOLD).text_color(theme.secondary).child(title.to_string())
+}
+
+/// A meta line's piece: an icon and words, both quiet.
+fn meta(icon: gpui_kit::component::Icon, label: impl Into<SharedString>, theme: &Theme) -> gpui_kit::Div {
+    div().flex().items_center().gap(px(3.)).child(icon.size(px(11.)).text_color(theme.tertiary)).child(label.into())
 }
 
 impl MemoryPage {
@@ -630,80 +639,100 @@ impl MemoryPage {
             if self.workspace.read(cx).home_project().as_deref() == Some(p.id.as_str()) { "Home".to_string() } else { p.name.clone() }
         });
         let memory_on = self.workspace.read(cx).library.setting("memoryEnabled").and_then(|v| v.as_bool()).unwrap_or(true);
-        let tab_button = |id: &'static str, label: &'static str, tab: Tab, cx: &mut Context<Self>| {
-            let mut b = Button::new(id).small().label(label);
-            b = if self.tab == tab { b.primary() } else { b.ghost() };
-            b.on_click(cx.listener(move |this, _, _, cx| {
-                this.tab = tab;
-                cx.notify();
-            }))
-        };
         let tasks = self.memories.iter().filter(|m| m.is_task() && m.status == "active").count();
         // Back to the project's PRs and repos (Home has none).
         let is_home = self.workspace.read(cx).home_project().as_deref() == Some(self.project.as_str());
         let (ws_overview, project_overview) = (self.workspace.clone(), self.project.clone());
-        div()
+        let page = cx.entity().downgrade();
+        let tab = |id: &'static str, label: &'static str, icon: gpui_kit::component::Icon, t: Tab| {
+            let page = page.clone();
+            Segment::new(id, label, self.tab == t, move |_, _, cx| {
+                let _ = page.update(cx, |p, cx| {
+                    p.tab = t;
+                    cx.notify();
+                });
+            })
+            .icon(icon)
+        };
+        let segments = vec![
+            tab("tab-memories", "Memories", icons::brain(), Tab::Memories),
+            if tasks > 0 { tab("tab-tasks", "Tasks", icons::list_checks(), Tab::Tasks).badge(tasks.to_string()) } else { tab("tab-tasks", "Tasks", icons::list_checks(), Tab::Tasks) },
+            tab("tab-insights", "Insights", icons::lightbulb(), Tab::Insights),
+            tab("tab-activity", "Activity", icons::activity(), Tab::Activity),
+            tab("tab-graph", "Graph", icons::waypoints(), Tab::Graph),
+        ];
+        let tabs = div()
+            .flex_1()
             .flex()
-            .flex_wrap()
             .items_center()
-            .gap(px(14.))
-            .px(px(28.))
-            .py(px(16.))
-            .border_b_1()
-            .border_color(theme.separator)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(220.))
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.))
-                    .child(div().text_size(px(20.)).font_weight(FontWeight::SEMIBOLD).truncate().child(format!("{} Memory", name.unwrap_or_default())))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .child(div().text_color(theme.secondary).truncate().child(if self.loaded { self.summary() } else { "Loading…".into() }))
-                            .children(self.claude.as_ref().filter(|c| !c.needs_nudge()).map(|c| {
-                        // One memory: Claude Code's own is off here and nothing of it is left out.
-                        let tip = if c.files > 0 {
-                            format!("Claude Code's own memory is off for this folder, and its {} memory files are in YourHarness.", c.files)
-                        } else {
-                            "Claude Code's own memory is off for this folder: YourHarness keeps the only memory.".to_string()
-                        };
-                        div().id("one-memory").ml(px(10.)).text_size(px(12.)).text_color(Theme::get(cx).secondary).child("✓ One memory").tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
-                    })),
-                    )
-                    .when_some(self.notice.clone(), |d, n| d.child(div().text_size(px(12.)).text_color(theme.accent).truncate().child(n))),
-            )
-            .when(!memory_on, |d| d.child(chip("Off for agents", theme.warning)))
-            .child(
-                div()
-                    .flex()
-                    .gap(px(2.))
-                    .when(!is_home, |d| {
-                        d.child(Button::new("tab-overview").small().ghost().label("Overview").on_click(move |_, _, cx| ws_overview.update(cx, |ws, cx| ws.open_project(&project_overview, cx))))
-                    })
-                    .child(tab_button("tab-memories", "Memories", Tab::Memories, cx))
-                    .child(tab_button("tab-tasks", if tasks > 0 { "Tasks ·" } else { "Tasks" }, Tab::Tasks, cx).when(tasks > 0, |b| b.label(format!("Tasks {tasks}"))))
-                    .child(tab_button("tab-insights", "Insights", Tab::Insights, cx))
-                    .child(tab_button("tab-activity", "Activity", Tab::Activity, cx))
-                    .child(tab_button("tab-graph", "Graph", Tab::Graph, cx)),
-
-            )
+            .gap(px(space::S))
+            .child(page_kit::segmented(segments, theme))
+            .child(div().flex_1())
+            .when(!is_home, |d| {
+                d.child(
+                    Button::new("tab-overview")
+                        .small()
+                        .ghost()
+                        .icon(IconName::LayoutDashboard)
+                        .label("Project Overview")
+                        .tooltip("The project's pull requests, repos and worktrees")
+                        .on_click(move |_, _, cx| ws_overview.update(cx, |ws, cx| ws.open_project(&project_overview, cx))),
+                )
+            });
+        // The subtitle: what's remembered, that it's the only memory, what an import just did.
+        let one_memory = self.claude.as_ref().filter(|c| !c.needs_nudge()).map(|c| {
+            // One memory: Claude Code's own is off here and nothing of it is left out.
+            let tip = if c.files > 0 {
+                format!("Claude Code's own memory is off for this folder, and its {} memory files are in YourHarness.", c.files)
+            } else {
+                "Claude Code's own memory is off for this folder: YourHarness keeps the only memory.".to_string()
+            };
+            div()
+                .id("one-memory")
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(3.))
+                .text_color(theme.success)
+                .child(icons::circle_check().size(px(12.)))
+                .child(div().text_color(theme.secondary).child("One memory"))
+                .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
+        });
+        let subtitle = div()
+            .flex()
+            .items_center()
+            .gap(px(space::S))
+            .min_w_0()
+            .child(div().min_w_0().truncate().child(if self.loaded { self.summary() } else { "Loading…".into() }))
+            .children(one_memory)
+            .when_some(self.notice.clone(), |d, n| d.child(div().min_w_0().truncate().text_color(theme.accent).child(n)))
+            .into_any_element();
+        let toolbar = div()
+            .flex()
+            .items_center()
+            .gap(px(2.))
+            .when(!memory_on, |d| {
+                d.child(
+                    div()
+                        .id("memory-off")
+                        .mr(px(space::S))
+                        .child(chip("Off for agents", theme.warning))
+                        .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Agents don't get memory. Turn it on in Settings → General.").build(window, cx)),
+                )
+            })
             .child({
                 let page = cx.entity().downgrade();
                 let claude_files = self.claude_code_files(cx).len();
-                Button::new("memory-import").small().ghost().label("Import").dropdown_caret(true).dropdown_menu(move |mut menu, _, _| {
+                Button::new("memory-import").small().ghost().icon(icons::download()).label("Import").dropdown_caret(true).dropdown_menu(move |mut menu, _, _| {
                     let (a, b, c) = (page.clone(), page.clone(), page.clone());
                     menu = menu
-                        .item(PopupMenuItem::new("With the Importer…").on_click(move |_, window, cx| {
+                        .item(PopupMenuItem::new("With the Importer…").icon(icons::sparkles()).on_click(move |_, window, cx| {
                             if let Some(p) = a.upgrade() {
                                 let (ws, project) = (p.read(cx).workspace.clone(), p.read(cx).project.clone());
                                 open_setup(ws, "importer", project, vec![], window, cx);
                             }
                         }))
-                        .item(PopupMenuItem::new("File or Folder…").on_click(move |_, _, cx| {
+                        .item(PopupMenuItem::new("File or Folder…").icon(IconName::FolderOpen).on_click(move |_, _, cx| {
                             let _ = b.update(cx, |p, cx| p.import_file_dialog(cx));
                         }));
                     if claude_files > 0 {
@@ -716,7 +745,7 @@ impl MemoryPage {
             })
             .child({
                 let page = cx.entity().downgrade();
-                Button::new("memory-export").small().ghost().label("Export").dropdown_caret(true).dropdown_menu(move |menu, _, _| {
+                Button::new("memory-export").small().ghost().icon(icons::upload()).label("Export").dropdown_caret(true).dropdown_menu(move |menu, _, _| {
                     let (a, b) = (page.clone(), page.clone());
                     menu.item(PopupMenuItem::new("As JSON…").on_click(move |_, _, cx| {
                         let _ = a.update(cx, |p, cx| p.export_dialog(false, cx));
@@ -726,46 +755,61 @@ impl MemoryPage {
                     }))
                 })
             })
-            .child(Button::new("memory-reconcile").small().ghost().label("Reconcile").tooltip("The Reconciler finds duplicates, stale and vague memories, and fixes them with you").on_click(cx.listener(|this, _, window, cx| {
+            .child(Button::new("memory-reconcile").small().ghost().icon(icons::sparkles()).label("Reconcile").tooltip("The Reconciler finds duplicates, stale and vague memories, and fixes them with you").on_click(cx.listener(|this, _, window, cx| {
                 open_setup(this.workspace.clone(), "reconciler", this.project.clone(), vec![], window, cx);
             })))
-            .child(Button::new("new-memory").small().label("New Memory").on_click(cx.listener(|this, _, _, cx| this.new_memory(cx))))
+            .child(div().ml(px(space::XS)).child(Button::new("new-memory").small().primary().icon(IconName::Plus).label("New Memory").on_click(cx.listener(|this, _, _, cx| this.new_memory(cx)))))
+            .into_any_element();
+        page_kit::page_header(icons::brain(), format!("{} Memory", name.unwrap_or_default()), subtitle, toolbar, Some(tabs.into_any_element()), theme)
     }
 
     fn list(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let visible = self.visible(cx);
         let count = visible.len();
         let mut chips = div().flex().flex_wrap().gap(px(4.));
-        let filter_chip = |id: String, label: &'static str, on: bool, color: Hsla, value: Option<&'static str>, cx: &mut Context<Self>| {
+        let filter_chip = |id: String, label: &'static str, on: bool, color: Option<Hsla>, value: Option<&'static str>, cx: &mut Context<Self>| {
             div()
                 .id(SharedString::from(id))
+                .flex()
+                .items_center()
+                .gap(px(5.))
+                .h(px(22.))
                 .px(px(8.))
-                .py(px(2.))
-                .rounded(px(9.))
-                .text_size(px(11.))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(if on { color } else { theme.secondary })
-                .bg(if on { color.opacity(0.16) } else { theme.selected })
+                .rounded(px(radius::MEDIUM))
+                .text_size(px(text::FOOTNOTE))
+                .cursor_pointer()
+                .when(on, |d| d.bg(theme.accent_soft).text_color(theme.text).font_weight(FontWeight::MEDIUM))
+                .when(!on, |d| d.text_color(theme.secondary).hover(|s| s.bg(theme.hover).text_color(theme.text)))
+                .when_some(color, |d, c| d.child(page_kit::dot(c, 6.)))
                 .child(label)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.kind_filter = if this.kind_filter == value { None } else { value };
                     cx.notify();
                 }))
         };
-        chips = chips.child(filter_chip("kind-all".into(), "All", self.kind_filter.is_none(), theme.accent, None, cx));
+        chips = chips.child(filter_chip("kind-all".into(), "All", self.kind_filter.is_none(), None, None, cx));
         for (kind, label) in KINDS {
-            chips = chips.child(filter_chip(format!("kind-{kind}"), label, self.kind_filter == Some(kind), kind_color(kind, theme), Some(kind), cx));
+            chips = chips.child(filter_chip(format!("kind-{kind}"), label, self.kind_filter == Some(kind), Some(kind_color(kind, theme)), Some(kind), cx));
         }
-        let status = |id: &'static str, label: &'static str, archived: bool, cx: &mut Context<Self>| {
-            let b = Button::new(id).xsmall().label(label);
-            (if self.archived == archived { b.primary() } else { b.ghost() }).on_click(cx.listener(move |this, _, _, cx| {
-                this.archived = archived;
-                cx.notify();
-            }))
+        let page = cx.entity().downgrade();
+        let status = |id: &'static str, label: &'static str, archived: bool| {
+            let page = page.clone();
+            Segment::new(id, label, self.archived == archived, move |_, _, cx| {
+                let _ = page.update(cx, |p, cx| {
+                    p.archived = archived;
+                    cx.notify();
+                });
+            })
         };
-        let mut rows = div().id("memory-list").flex_1().min_h_0().overflow_y_scroll().p(px(8.)).flex().flex_col().gap(px(2.));
+        let mut rows = div().id("memory-list").flex_1().min_h_0().overflow_y_scroll().px(px(space::S)).py(px(space::XS)).flex().flex_col().gap(px(1.));
         if count == 0 {
-            rows = rows.child(div().p(px(16.)).text_color(theme.secondary).child(if self.memories.is_empty() { "Nothing remembered yet." } else { "No memories match." }));
+            rows = rows.child(div().p(px(space::L)).text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child(if self.memories.is_empty() {
+                "Nothing remembered yet."
+            } else if self.archived {
+                "Nothing archived."
+            } else {
+                "No memories match."
+            }));
         }
         for m in visible {
             let id = m.id.clone();
@@ -776,14 +820,14 @@ impl MemoryPage {
             rows = rows.child(
                 div()
                     .id(SharedString::from(format!("memory-{id}")))
-                    .px(px(10.))
-                    .py(px(7.))
-                    .rounded(px(7.))
-                    .when(selected, |d| d.bg(theme.accent.opacity(0.16)))
-                    .when(!selected, |d| d.hover(|s| s.bg(theme.selected)))
+                    .px(px(space::S + 2.))
+                    .py(px(space::S))
+                    .rounded(px(radius::MEDIUM))
+                    .when(selected, |d| d.bg(theme.accent_soft))
+                    .when(!selected, |d| d.hover(|s| s.bg(theme.hover)))
                     .flex()
-                    .gap(px(9.))
-                    .child(div().mt(px(6.)).w(px(7.)).h(px(7.)).flex_none().rounded_full().bg(kind_color(&m.kind, theme)))
+                    .gap(px(space::S + 1.))
+                    .child(div().mt(px(6.)).child(page_kit::dot(kind_color(&m.kind, theme), 7.)))
                     .child(
                         div()
                             .flex_1()
@@ -794,32 +838,38 @@ impl MemoryPage {
                             .child(
                                 div()
                                     .flex()
-                                    .gap(px(4.))
-                                    .child(div().font_weight(FontWeight::MEDIUM).overflow_hidden().whitespace_nowrap().text_ellipsis().child(if m.title.is_empty() { "Untitled".to_string() } else { m.title.clone() }))
-                                    .when(m.pinned, |d| d.child(div().text_size(px(10.)).text_color(theme.secondary).child("pinned"))),
+                                    .items_center()
+                                    .gap(px(5.))
+                                    .child(div().min_w_0().font_weight(FontWeight::MEDIUM).text_color(theme.text).truncate().child(if m.title.is_empty() { "Untitled".to_string() } else { m.title.clone() }))
+                                    .when(m.pinned, |d| d.child(icons::pin().size(px(11.)).text_color(theme.tertiary))),
                             )
-                            .child(div().text_size(px(12.)).text_color(theme.secondary).line_clamp(2).child(preview))
+                            .when(!preview.is_empty(), |d| d.child(div().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).line_clamp(2).child(preview)))
                             .when(m.is_task(), |d| {
                                 let state = m.task_state.clone().unwrap_or_else(|| "active".into());
+                                let color = state_color(&state, theme);
                                 d.child(
                                     div()
+                                        .pt(px(1.))
                                         .flex()
                                         .items_center()
-                                        .gap(px(6.))
-                                        .child(chip(yh_core::memory::state_label(&state), state_color(&state, theme)))
-                                        .when(!m.steps.is_empty(), |d| {
-                                            d.child(div().text_size(px(11.)).text_color(theme.secondary).child(format!("{} of {} steps", m.steps_done(), m.steps.len())))
-                                        }),
+                                        .gap(px(4.))
+                                        .text_size(px(text::CAPTION))
+                                        .text_color(theme.secondary)
+                                        .child(state_icon(&state).size(px(12.)).text_color(color))
+                                        .child(yh_core::memory::state_label(&state).to_string())
+                                        .when(!m.steps.is_empty(), |d| d.child(div().text_color(theme.tertiary).child(format!("· {} of {} steps", m.steps_done(), m.steps.len())))),
                                 )
                             })
                             .child(
                                 div()
+                                    .pt(px(1.))
                                     .flex()
-                                    .gap(px(8.))
-                                    .text_size(px(11.))
-                                    .text_color(theme.secondary.opacity(0.8))
-                                    .child(format!("read {}×", m.recall_count))
-                                    .when(!m.links.is_empty(), |d| d.child(format!("{} links", m.links.len())))
+                                    .items_center()
+                                    .gap(px(space::S))
+                                    .text_size(px(text::CAPTION))
+                                    .text_color(theme.tertiary)
+                                    .child(format!("Read {}×", m.recall_count))
+                                    .when(!m.links.is_empty(), |d| d.child(meta(icons::link(), m.links.len().to_string(), theme)))
                                     .child(div().flex_1())
                                     .child(ago(m.updated_at)),
                             ),
@@ -828,21 +878,21 @@ impl MemoryPage {
                     .context_menu(move |menu, _, _| {
                         let (a, b, c) = (page.clone(), page.clone(), page.clone());
                         let (i1, i2, i3) = (pin_id.clone(), status_id.clone(), del_id.clone());
-                        menu.item(PopupMenuItem::new(if pinned { "Unpin" } else { "Pin (Always Load in Full)" }).on_click(move |_, _, cx| {
+                        menu.item(PopupMenuItem::new(if pinned { "Unpin" } else { "Pin (Always Load in Full)" }).icon(if pinned { icons::pin_off() } else { icons::pin() }).on_click(move |_, _, cx| {
                             let _ = a.update(cx, |p, cx| p.set_pinned(&i1, !pinned, cx));
                         }))
-                        .item(PopupMenuItem::new(if archived { "Restore" } else { "Archive" }).on_click(move |_, _, cx| {
+                        .item(PopupMenuItem::new(if archived { "Restore" } else { "Archive" }).icon(if archived { icons::archive_restore() } else { icons::archive() }).on_click(move |_, _, cx| {
                             let _ = b.update(cx, |p, cx| p.set_status(&i2, if archived { "active" } else { "archived" }, cx));
                         }))
                         .separator()
-                        .item(PopupMenuItem::new("Delete").on_click(move |_, _, cx| {
+                        .item(PopupMenuItem::new("Delete").icon(icons::trash()).on_click(move |_, _, cx| {
                             let _ = c.update(cx, |p, cx| p.delete(&i3, cx));
                         }))
                     }),
             );
         }
         div()
-            .w(px(320.))
+            .w(px(300.))
             .flex_none()
             .h_full()
             .flex()
@@ -851,29 +901,34 @@ impl MemoryPage {
             .border_color(theme.separator)
             .child(
                 div()
-                    .p(px(12.))
+                    .px(px(space::M))
+                    .pt(px(space::M))
+                    .pb(px(space::S))
                     .flex()
                     .flex_col()
-                    .gap(px(8.))
-                    .border_b_1()
-                    .border_color(theme.separator)
-                    .child(Input::new(&self.search).small().cleanable(true))
+                    .gap(px(space::S))
+                    .child(Input::new(&self.search).small().cleanable(true).prefix(gpui_kit::component::Icon::new(IconName::Search).size(px(13.)).text_color(theme.tertiary)))
                     .child(chips)
-                    .child(div().flex().gap(px(2.)).child(status("in-use", "In Use", false, cx)).child(status("archived", "Archived", true, cx))),
+                    .child(div().flex().child(page_kit::segmented(vec![status("in-use", "In Use", false), status("archived", "Archived", true)], theme))),
             )
             .child(rows)
-            .child(div().py(px(5.)).text_center().text_size(px(11.)).text_color(theme.secondary).child(if count == 1 { "1 memory".to_string() } else { format!("{count} memories") }))
+            .child(
+                div()
+                    .py(px(6.))
+                    .border_t_1()
+                    .border_color(theme.separator)
+                    .text_center()
+                    .text_size(px(text::CAPTION))
+                    .text_color(theme.tertiary)
+                    .child(if count == 1 { "1 memory".to_string() } else { format!("{count} memories") }),
+            )
     }
 
     fn detail(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let Some(m) = self.editing.clone().filter(|e| Some(&e.id) == self.selection.as_ref()) else {
             return div()
                 .flex_1()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_color(theme.secondary)
-                .child("Choose a memory to see what it says, how agents use it and how it changed.")
+                .child(page_kit::empty_state(icons::brain(), "No Memory Selected", "Choose a memory to see what it says, how agents use it and how it changed.", None, theme))
                 .into_any_element();
         };
         let saved = self.memories.iter().find(|x| x.id == m.id).cloned();
@@ -885,7 +940,7 @@ impl MemoryPage {
         let kind_menu = {
             let page = page.clone();
             let current_kind = self.draft_kind.clone();
-            Button::new("kind").xsmall().ghost().label(kind_label(&self.draft_kind)).dropdown_caret(true).dropdown_menu(move |mut menu, _, _| {
+            Button::new("kind").small().ghost().label(kind_label(&self.draft_kind)).dropdown_caret(true).dropdown_menu(move |mut menu, _, _| {
                 for (kind, label) in KINDS {
                     let page = page.clone();
                     menu = menu.item(PopupMenuItem::new(label).checked(current_kind == kind).on_click(move |_, _, cx| {
@@ -906,64 +961,87 @@ impl MemoryPage {
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
-            .p(px(24.))
+            .px(px(space::XL))
+            .py(px(space::L))
             .flex()
             .flex_col()
-            .gap(px(12.))
+            .gap(px(space::S))
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(8.))
-                    .child(div().w(px(9.)).h(px(9.)).rounded_full().bg(kind_color(&self.draft_kind, theme)))
-                    .child(kind_menu)
-                    .when(pinned, |d| d.child(chip("Pinned", theme.secondary)))
+                    .gap(px(6.))
+                    .child(page_kit::dot(kind_color(&self.draft_kind, theme), 8.))
+                    .child(div().ml(px(-4.)).child(kind_menu))
+                    .when(pinned, |d| d.child(page_kit::quiet_chip("Pinned", theme)))
                     .when(current.status != "active", |d| d.child(chip(if archived { "Archived" } else { "Proposed" }, theme.warning)))
-                    .when(listed, |d| d.child(div().font_family(MONO).text_size(px(11.)).text_color(theme.secondary).child(current.short_id())))
+                    .when(listed, |d| d.child(div().font_family(MONO).text_size(px(text::CAPTION)).text_color(theme.tertiary).child(current.short_id())))
                     .child(div().flex_1())
                     .when(listed, |d| {
-                        d.child(Button::new("pin").xsmall().ghost().label(if pinned { "Unpin" } else { "Pin" }).tooltip("Pinned: every session gets it in full, not only its index line").on_click(
-                            cx.listener(move |this, _, _, cx| this.set_pinned(&pin_id, !pinned, cx)),
-                        ))
-                        .child(Button::new("archive").xsmall().ghost().label(if archived { "Restore" } else { "Archive" }).on_click(cx.listener(move |this, _, _, cx| {
+                        d.child(
+                            Button::new("pin")
+                                .small()
+                                .ghost()
+                                .icon(if pinned { icons::pin_off() } else { icons::pin() })
+                                .tooltip(if pinned { "Unpin: sessions get only its index line" } else { "Pin: every session gets it in full, not only its index line" })
+                                .on_click(cx.listener(move |this, _, _, cx| this.set_pinned(&pin_id, !pinned, cx))),
+                        )
+                        .child(Button::new("archive").small().ghost().icon(if archived { icons::archive_restore() } else { icons::archive() }).tooltip(if archived { "Restore" } else { "Archive" }).on_click(cx.listener(move |this, _, _, cx| {
                             this.set_status(&status_id, if archived { "active" } else { "archived" }, cx)
                         })))
-                        .child(Button::new("delete").xsmall().ghost().label("Delete").on_click(cx.listener(move |this, _, _, cx| this.delete(&del_id, cx))))
+                        .child(Button::new("delete").small().ghost().icon(icons::trash()).tooltip("Delete").on_click(cx.listener(move |this, _, _, cx| this.delete(&del_id, cx))))
                     }),
             )
-            .child(Input::new(&self.title).appearance(false).text_size(px(20.)).font_weight(FontWeight::SEMIBOLD))
-            .child(Input::new(&self.description).appearance(false).text_color(theme.secondary))
-            .child(div().p(px(10.)).rounded(px(8.)).bg(theme.card).child(Textarea::new(&self.body).appearance(false).max_h(px(420.))));
+            // The editors draw without a frame; their own inset is taken back so the text lines up.
+            .child(div().ml(px(-10.)).child(Input::new(&self.title).appearance(false).text_size(px(text::LARGE_TITLE)).font_weight(FontWeight::SEMIBOLD)))
+            .child(div().ml(px(-10.)).mt(px(-4.)).child(Input::new(&self.description).appearance(false).text_color(theme.secondary)))
+            .child(page_kit::card(theme).mt(px(space::XS)).px(px(space::M)).py(px(space::S + 2.)).child(Textarea::new(&self.body).appearance(false).max_h(px(420.))));
         if current.is_task() {
             let state = current.task_state.clone().unwrap_or_else(|| "active".into());
-            let mut states = div().flex().gap(px(2.));
-            for s in ["todo", "active", "blocked", "done"] {
-                let tid = id.clone();
-                let b = Button::new(SharedString::from(format!("state-{s}"))).xsmall().label(yh_core::memory::state_label(s));
-                states = states.child((if state == s { b.primary() } else { b.ghost() }).on_click(cx.listener(move |this, _, _, cx| this.set_task_state(&tid, s, cx))));
-            }
-            let mut steps = div().flex().flex_col().gap(px(3.));
+            let page = cx.entity().downgrade();
+            let states: Vec<Segment> = ["todo", "active", "blocked", "done"]
+                .into_iter()
+                .map(|s| {
+                    let (page, tid) = (page.clone(), id.clone());
+                    Segment::new(SharedString::from(format!("state-{s}")), yh_core::memory::state_label(s), state == s, move |_, _, cx| {
+                        let _ = page.update(cx, |p, cx| p.set_task_state(&tid, s, cx));
+                    })
+                    .icon(state_icon(s))
+                })
+                .collect();
+            let mut steps = div().flex().flex_col().gap(px(1.));
             for (i, step) in current.steps.iter().enumerate() {
                 let tid = id.clone();
                 steps = steps.child(
                     div()
                         .id(SharedString::from(format!("step-{i}")))
                         .flex()
-                        .gap(px(8.))
-                        .rounded(px(5.))
-                        .px(px(4.))
-                        .hover(|s| s.bg(theme.selected))
-                        .child(div().w(px(16.)).text_color(if step.done { state_color("done", theme) } else { theme.secondary }).child(if step.done { "✓" } else { "○" }))
+                        .items_center()
+                        .gap(px(space::S))
+                        .rounded(px(radius::SMALL))
+                        .px(px(6.))
+                        .py(px(3.))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme.hover))
+                        .child(if step.done { icons::circle_check().size(px(15.)).text_color(theme.success) } else { icons::circle().size(px(15.)).text_color(theme.tertiary) })
                         .child(div().flex_1().when(step.done, |d| d.text_color(theme.secondary).line_through()).child(step.text.clone()))
                         .on_click(cx.listener(move |this, _, _, cx| this.toggle_step(&tid, i, cx))),
                 );
             }
-            steps = steps.child(div().flex().items_center().gap(px(8.)).px(px(4.)).child(div().w(px(16.)).text_color(theme.secondary).child("+")).child(div().flex_1().child(Input::new(&self.new_step).small().appearance(false))));
-            body = body.child(section("Task", theme)).child(states).child(steps);
+            steps = steps.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S))
+                    .px(px(6.))
+                    .child(gpui_kit::component::Icon::new(IconName::Plus).size(px(15.)).text_color(theme.tertiary))
+                    .child(div().flex_1().child(Input::new(&self.new_step).small().appearance(false))),
+            );
+            body = body.child(section("Task", theme)).child(div().flex().child(page_kit::segmented(states, theme))).child(steps);
         }
         if listed {
             body = body.child(section("Use", theme)).child(
-                div().text_color(theme.secondary).child(format!(
+                div().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child(format!(
                     "Read by agents {}×, in the index of {} sessions{}. Saved {}, changed {}.",
                     current.recall_count,
                     current.surfaced_count,
@@ -976,16 +1054,25 @@ impl MemoryPage {
         if !current.links.is_empty() {
             let mut links = div().flex().flex_col().gap(px(2.));
             for (to, relation) in &current.links {
-                let title = self.memories.iter().find(|x| &x.id == to).map(|x| x.title.clone()).unwrap_or_else(|| to.chars().take(8).collect());
+                let other = self.memories.iter().find(|x| &x.id == to);
+                let title = other.map(|x| x.title.clone()).unwrap_or_else(|| to.chars().take(8).collect());
+                let color = other.map_or(theme.tertiary, |x| kind_color(&x.kind, theme));
                 let target = to.clone();
                 links = links.child(
                     div()
                         .id(SharedString::from(format!("link-{to}")))
                         .flex()
+                        .items_center()
                         .gap(px(6.))
-                        .text_color(theme.accent)
-                        .child(title)
-                        .when_some(relation.clone(), |d, r| d.child(div().text_color(theme.secondary).child(r)))
+                        .px(px(6.))
+                        .py(px(2.))
+                        .rounded(px(radius::SMALL))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme.hover))
+                        .child(icons::link().size(px(12.)).text_color(theme.tertiary))
+                        .child(page_kit::dot(color, 6.))
+                        .child(div().text_color(theme.accent).child(title))
+                        .when_some(relation.clone(), |d, r| d.child(div().text_size(px(text::FOOTNOTE)).text_color(theme.tertiary).child(r)))
                         .on_click(cx.listener(move |this, _, _, cx| this.select(&target, cx))),
                 );
             }
@@ -1000,37 +1087,48 @@ impl MemoryPage {
                 sources = sources.child(
                     div()
                         .id(SharedString::from(format!("source-{thread}")))
-                        .text_color(if title.is_some() { theme.accent } else { theme.secondary })
-                        .child(title.clone().unwrap_or_else(|| "A thread that's gone".into()))
-                        .when(title.is_some(), |d| d.on_click(move |_, _, cx| ws.update(cx, |ws, cx| ws.select(&thread_id, cx)))),
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .px(px(6.))
+                        .py(px(2.))
+                        .rounded(px(radius::SMALL))
+                        .child(icons::message_square().size(px(12.)).text_color(theme.tertiary))
+                        .child(div().text_color(if title.is_some() { theme.accent } else { theme.tertiary }).child(title.clone().unwrap_or_else(|| "A thread that's gone".into())))
+                        .when(title.is_some(), |d| d.cursor_pointer().hover(|s| s.bg(theme.hover)).on_click(move |_, _, cx| ws.update(cx, |ws, cx| ws.select(&thread_id, cx)))),
                 );
             }
             body = body.child(section("Learned in", theme)).child(sources);
         }
         if self.versions.len() > 1 {
-            let mut history = div().flex().flex_col().gap(px(2.));
-            for (version, title, text, status, at, actor) in self.versions.iter().rev() {
+            let mut history = div().flex().flex_col().gap(px(1.));
+            for (version, title, text_, status, at, actor) in self.versions.iter().rev() {
                 let open = self.shown_version == Some(*version);
                 let v = *version;
                 history = history.child(
                     div()
                         .id(SharedString::from(format!("version-{version}")))
                         .flex()
-                        .gap(px(8.))
-                        .rounded(px(5.))
-                        .px(px(4.))
-                        .hover(|s| s.bg(theme.selected))
-                        .child(div().w(px(28.)).text_color(theme.secondary).child(format!("v{version}")))
-                        .child(div().flex_1().overflow_hidden().whitespace_nowrap().text_ellipsis().child(title.clone()))
-                        .when(status != "active", |d| d.child(div().text_color(theme.secondary).child(status.clone())))
-                        .child(div().text_color(theme.secondary).child(format!("{} · {}", actor.clone().unwrap_or_else(|| "agent".into()), ago(*at))))
+                        .items_center()
+                        .gap(px(space::S))
+                        .rounded(px(radius::SMALL))
+                        .px(px(6.))
+                        .py(px(3.))
+                        .cursor_pointer()
+                        .when(open, |d| d.bg(theme.hover))
+                        .hover(|s| s.bg(theme.hover))
+                        .child(gpui_kit::component::Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).size(px(12.)).text_color(theme.tertiary))
+                        .child(div().w(px(26.)).font_family(MONO).text_size(px(text::CAPTION)).text_color(theme.secondary).child(format!("v{version}")))
+                        .child(div().flex_1().min_w_0().truncate().child(title.clone()))
+                        .when(status != "active", |d| d.child(page_kit::quiet_chip(status.clone(), theme)))
+                        .child(div().flex_none().text_size(px(text::CAPTION)).text_color(theme.tertiary).child(format!("{} · {}", actor.clone().unwrap_or_else(|| "agent".into()), ago(*at))))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.shown_version = if this.shown_version == Some(v) { None } else { Some(v) };
                             cx.notify();
                         })),
                 );
                 if open {
-                    history = history.child(div().ml(px(36.)).p(px(10.)).rounded(px(8.)).bg(theme.card).text_size(px(12.)).whitespace_normal().child(text.clone()));
+                    history = history.child(page_kit::card(theme).ml(px(space::XL)).my(px(space::XS)).p(px(space::M)).text_size(px(text::FOOTNOTE)).whitespace_normal().child(text_.clone()));
                 }
             }
             body = body.child(section("History", theme)).child(history);
@@ -1047,13 +1145,14 @@ impl MemoryPage {
                     div()
                         .flex()
                         .items_center()
-                        .gap(px(8.))
-                        .px(px(16.))
-                        .py(px(10.))
+                        .gap(px(space::S))
+                        .px(px(space::L))
+                        .py(px(space::S + 2.))
                         .border_t_1()
                         .border_color(theme.separator)
-                        .child(div().flex_1().text_color(theme.secondary).child(if listed { "Edited" } else { "New memory" }))
-                        .child(Button::new("revert").small().label(if listed { "Revert" } else { "Discard" }).on_click(cx.listener(move |this, _, _, cx| {
+                        .child(page_kit::dot(theme.accent, 6.))
+                        .child(div().flex_1().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child(if listed { "Edited, not saved" } else { "New memory, not saved" }))
+                        .child(Button::new("revert").small().outline().label(if listed { "Revert" } else { "Discard" }).on_click(cx.listener(move |this, _, _, cx| {
                             if listed {
                                 this.revert(cx);
                             } else {
@@ -1063,63 +1162,99 @@ impl MemoryPage {
                                 cx.notify();
                             }
                         })))
-                        .child(Button::new("save").small().primary().label("Save ⌘S").on_click(cx.listener(|this, _, _, cx| this.save(cx)))),
+                        .child(Button::new("save").small().primary().label("Save").tooltip("Save (⌘S)").on_click(cx.listener(|this, _, _, cx| this.save(cx)))),
                 )
             })
             .into_any_element()
     }
 
-    fn tasks(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut column = div().id("memory-tasks").size_full().overflow_y_scroll().p(px(24.)).flex().flex_col().gap(px(14.));
+    fn tasks(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let tasks: Vec<&Memory> = self.memories.iter().filter(|m| m.is_task() && m.status == "active").collect();
         if tasks.is_empty() {
-            return column.child(div().text_color(theme.secondary).child("No tasks. When you ask an agent for work with more than one step, it tracks it here."));
+            return page_kit::empty_state(icons::list_checks(), "No Tasks", "When you ask an agent for work with more than one step, it tracks it here, so every session knows where it stands.", None, theme).into_any_element();
         }
+        let column = div().id("memory-tasks").size_full().overflow_y_scroll();
+        let mut inner = div().flex().flex_col().gap(px(space::S));
         for (state, heading) in [("active", "In Progress"), ("blocked", "Blocked"), ("todo", "To Do"), ("done", "Done")] {
             let group: Vec<&&Memory> = tasks.iter().filter(|m| m.task_state.as_deref().unwrap_or("active") == state).collect();
             if group.is_empty() {
                 continue;
             }
-            column = column.child(section(&format!("{heading} · {}", group.len()), theme));
-            for m in group {
+            let color = state_color(state, theme);
+            inner = inner.child(
+                div()
+                    .pt(px(space::S))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(state_icon(state).size(px(14.)).text_color(color))
+                    .child(page_kit::section_title(heading, Some(group.len()), theme)),
+            );
+            let mut list = page_kit::card(theme).overflow_hidden().flex().flex_col();
+            for (n, m) in group.into_iter().enumerate() {
                 let id = m.id.clone();
                 let threads = self.threads_of(m, cx);
-                column = column.child(
+                let (done, total) = (m.steps_done(), m.steps.len());
+                list = list.child(
                     div()
                         .id(SharedString::from(format!("task-{id}")))
-                        .p(px(12.))
-                        .rounded(px(8.))
-                        .bg(theme.card)
-                        .hover(|s| s.bg(theme.selected))
+                        .px(px(space::L))
+                        .py(px(space::S + 2.))
+                        .when(n > 0, |d| d.border_t_1().border_color(theme.separator))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme.hover))
                         .flex()
                         .flex_col()
-                        .gap(px(4.))
+                        .gap(px(3.))
                         .child(
                             div()
                                 .flex()
                                 .items_center()
-                                .gap(px(8.))
-                                .child(chip(yh_core::memory::state_label(state), state_color(state, theme)))
-                                .child(div().flex_1().font_weight(FontWeight::MEDIUM).child(m.title.clone()))
-                                .when(!m.steps.is_empty(), |d| d.child(div().text_color(theme.secondary).child(format!("{} of {}", m.steps_done(), m.steps.len()))))
-                                .child(div().text_size(px(11.)).text_color(theme.secondary).child(ago(m.updated_at))),
+                                .gap(px(space::S))
+                                .child(div().flex_1().min_w_0().truncate().font_weight(FontWeight::MEDIUM).text_color(if state == "done" { theme.secondary } else { theme.text }).child(m.title.clone()))
+                                .when(total > 0, |d| {
+                                    // How far along: a thin bar and the count.
+                                    let f = done as f32 / total as f32;
+                                    d.child(
+                                        div()
+                                            .flex_none()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(6.))
+                                            .child(div().w(px(48.)).h(px(4.)).rounded(px(2.)).bg(theme.selected).child(div().h_full().rounded(px(2.)).w(gpui_kit::relative(f)).bg(color)))
+                                            .child(div().w(px(36.)).text_size(px(text::CAPTION)).text_color(theme.secondary).child(format!("{done} of {total}"))),
+                                    )
+                                })
+                                .child(div().flex_none().w(px(84.)).text_right().text_size(px(text::CAPTION)).text_color(theme.tertiary).child(ago(m.updated_at))),
                         )
                         .when_some(m.next_step().filter(|_| state != "done").map(str::to_string), |d, next| {
-                            d.child(div().text_size(px(12.)).text_color(theme.secondary).child(format!("Next: {next}")))
+                            d.child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(5.))
+                                    .text_size(px(text::FOOTNOTE))
+                                    .text_color(theme.secondary)
+                                    .child(gpui_kit::component::Icon::new(IconName::ArrowRight).size(px(11.)).text_color(theme.tertiary))
+                                    .child(div().min_w_0().truncate().child(next)),
+                            )
                         })
                         .when(!threads.is_empty(), |d| {
                             // The threads working on it: click one to open it.
-                            let mut row = div().flex().items_center().gap(px(8.)).text_size(px(11.)).child(div().text_color(theme.secondary).child("Threads:"));
+                            let mut row = div().flex().items_center().gap(px(space::S)).text_size(px(text::CAPTION));
                             for (tid, title) in threads.iter().take(3) {
                                 let (ws, tid) = (self.workspace.clone(), tid.clone());
                                 row = row.child(
                                     div()
                                         .id(SharedString::from(format!("task-thread-{id}-{tid}")))
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(4.))
                                         .max_w(px(220.))
-                                        .truncate()
                                         .text_color(theme.accent)
                                         .cursor_pointer()
-                                        .child(title.clone())
+                                        .child(icons::message_square().size(px(11.)).text_color(theme.tertiary))
+                                        .child(div().min_w_0().truncate().child(title.clone()))
                                         .on_click(move |_, _, cx| {
                                             cx.stop_propagation();
                                             ws.update(cx, |ws, cx| ws.select(&tid, cx));
@@ -1127,7 +1262,7 @@ impl MemoryPage {
                                 );
                             }
                             if threads.len() > 3 {
-                                row = row.child(div().text_color(theme.secondary).child(format!("+{}", threads.len() - 3)));
+                                row = row.child(div().text_color(theme.tertiary).child(format!("+{}", threads.len() - 3)));
                             }
                             d.child(row)
                         })
@@ -1138,14 +1273,15 @@ impl MemoryPage {
                         })),
                 );
             }
+            inner = inner.child(list);
         }
-        column
+        column.child(div().max_w(px(880.)).w_full().mx_auto().px(px(space::XL)).pt(px(space::M)).pb(px(space::XL)).child(inner)).into_any_element()
     }
 
     /// How memory is doing, in sentences first and figures after.
     fn insights(&self, theme: &Theme, _cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         use yh_core::memory_stats::Stats;
-        let Some(st) = &self.stats else { return div().p(px(24.)).text_color(theme.secondary).child("Reading…").into_any_element() };
+        let Some(st) = &self.stats else { return div().p(px(space::XL)).text_color(theme.secondary).child("Reading…").into_any_element() };
         let mut lines: Vec<(String, bool)> = vec![];
         let index_tokens = Stats::tokens(st.average_injected_bytes);
         lines.push((
@@ -1186,100 +1322,141 @@ impl MemoryPage {
             lines.push((format!("“{}” is the biggest at {} bytes; memories work best short and about one thing.", l.title, l.bytes), true));
         }
         let issues = lines.iter().any(|(_, issue)| *issue);
-        let mut how = div().p(px(14.)).rounded(px(8.)).bg(theme.card).flex().flex_col().gap(px(8.)).child(
-            div().flex().items_center().child(div().flex_1().font_weight(FontWeight::SEMIBOLD).child("How your memory is working")).when(issues, |d| {
-                let (ws, project) = (self.workspace.clone(), self.project.clone());
-                d.child(Button::new("insights-reconcile").small().primary().label("Reconcile").on_click(move |_, window, cx| {
-                    open_setup(ws.clone(), "reconciler", project.clone(), vec![], window, cx);
-                }))
-            }),
+        let mut how = page_kit::card(theme).px(px(space::L)).py(px(space::M + 2.)).flex().flex_col().gap(px(space::S + 2.)).child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(space::S))
+                .child(icons::lightbulb().size(px(15.)).text_color(theme.secondary))
+                .child(div().flex_1().text_size(px(text::HEADLINE)).font_weight(FontWeight::SEMIBOLD).child("How your memory is working"))
+                .when(issues, |d| {
+                    let (ws, project) = (self.workspace.clone(), self.project.clone());
+                    d.child(Button::new("insights-reconcile").small().primary().icon(icons::sparkles()).label("Reconcile").on_click(move |_, window, cx| {
+                        open_setup(ws.clone(), "reconciler", project.clone(), vec![], window, cx);
+                    }))
+                }),
         );
-        for (text, issue) in lines {
-            how = how.child(div().flex().gap(px(8.)).child(div().flex_none().w(px(8.)).h(px(8.)).mt(px(6.)).rounded_full().bg(if issue { theme.warning } else { theme.accent })).child(div().flex_1().whitespace_normal().child(text)));
+        for (text_, issue) in lines {
+            how = how.child(
+                div()
+                    .flex()
+                    .gap(px(space::S + 2.))
+                    .child(div().flex_none().mt(px(2.)).child(if issue { gpui_kit::component::Icon::new(IconName::TriangleAlert).size(px(14.)).text_color(theme.warning) } else { gpui_kit::component::Icon::new(IconName::Info).size(px(14.)).text_color(theme.tertiary) }))
+                    .child(div().flex_1().whitespace_normal().text_color(theme.text).child(text_)),
+            );
         }
-        let figure = |label: &str, value: String| {
-            div().flex_1().p(px(12.)).rounded(px(8.)).bg(theme.card).flex().flex_col().gap(px(2.)).child(div().text_size(px(11.)).text_color(theme.secondary).child(label.to_string())).child(div().text_size(px(18.)).font_weight(FontWeight::SEMIBOLD).child(value))
-        };
         let figures = div()
             .flex()
-            .gap(px(10.))
-            .child(figure("Memories", st.active.to_string()))
-            .child(figure("Index each session", format!("~{index_tokens} tokens")))
-            .child(figure("Read, last 30 days", match st.recall_rate() { Some(r) => format!("{:.0}%", r * 100.), None => "—".into() }))
-            .child(figure("Searches that found something", match st.search_hit_rate() { Some(r) => format!("{:.0}%", r * 100.), None => "—".into() }));
-        // Each day of the window: sessions, reads, searches as stacked bars.
+            .flex_wrap()
+            .gap(px(space::M))
+            .child(page_kit::stat_tile("Memories", st.active.to_string(), None, theme))
+            .child(page_kit::stat_tile("Index each session", format!("~{index_tokens}"), Some("tokens".into()), theme))
+            .child(page_kit::stat_tile("Read, last 30 days", match st.recall_rate() { Some(r) => format!("{:.0}%", r * 100.), None => "—".into() }, Some("of memories in use".into()), theme))
+            .child(page_kit::stat_tile("Searches that found something", match st.search_hit_rate() { Some(r) => format!("{:.0}%", r * 100.), None => "—".into() }, Some(if st.searches == 0 { "no searches yet".into() } else { format!("of {}", st.searches) }), theme));
+        // Each day of the window: sessions, reads, searches as stacked columns.
         let days = st.days.clone();
+        let total: usize = days.iter().map(|d| d.sessions + d.recalled + d.searches).sum();
         let max = days.iter().map(|d| d.sessions + d.recalled + d.searches).max().unwrap_or(0).max(1) as f32;
         let colors: [Hsla; 3] = [theme.accent, gpui_kit::rgb(0x1BAF7A).into(), theme.warning];
+        let (surface, base) = (theme.card, theme.separator);
         let chart = gpui_kit::canvas(
             |_, _, _| {},
             move |bounds, _, window, _| {
                 let n = days.len().max(1);
                 let w = f32::from(bounds.size.width) / n as f32;
                 let h = f32::from(bounds.size.height);
+                let bar = (w - 4.).clamp(1., 18.);
+                // The baseline: a hairline.
+                window.paint_quad(gpui_kit::fill(gpui_kit::Bounds::new(gpui_kit::point(bounds.origin.x, bounds.origin.y + px(h - 1.)), gpui_kit::size(bounds.size.width, px(1.))), base));
                 for (i, d) in days.iter().enumerate() {
-                    let mut y = f32::from(bounds.origin.y) + h;
-                    for (k, v) in [d.sessions, d.recalled, d.searches].into_iter().enumerate() {
-                        let seg = v as f32 / max * (h - 4.);
-                        if seg < 0.5 {
-                            continue;
-                        }
-                        window.paint_quad(gpui_kit::fill(gpui_kit::Bounds::new(gpui_kit::point(bounds.origin.x + px(i as f32 * w + 1.), px(y - seg)), gpui_kit::size(px((w - 2.).max(1.)), px((seg - 1.).max(0.5)))), colors[k]));
+                    let x = f32::from(bounds.origin.x) + i as f32 * w + (w - bar) / 2.;
+                    let mut y = f32::from(bounds.origin.y) + h - 1.;
+                    let segs: Vec<(usize, f32)> = [d.sessions, d.recalled, d.searches].into_iter().enumerate().map(|(k, v)| (k, v as f32 / max * (h - 6.))).filter(|(_, s)| *s >= 0.5).collect();
+                    let last = segs.len().saturating_sub(1);
+                    for (j, (k, seg)) in segs.into_iter().enumerate() {
+                        let top = j == last;
+                        let quad = gpui_kit::fill(gpui_kit::Bounds::new(gpui_kit::point(px(x), px(y - seg)), gpui_kit::size(px(bar), px(seg))), colors[k]);
+                        window.paint_quad(if top && bar > 4. { quad.corner_radii(gpui_kit::Corners { top_left: px(3.), top_right: px(3.), bottom_left: px(0.), bottom_right: px(0.) }) } else { quad });
                         y -= seg;
+                        if !top {
+                            // A 2px gap in the surface's colour between segments.
+                            window.paint_quad(gpui_kit::fill(gpui_kit::Bounds::new(gpui_kit::point(px(x), px(y - 1.)), gpui_kit::size(px(bar), px(2.))), surface));
+                        }
                     }
                 }
             },
         )
         .size_full();
-        let legend = div().flex().gap(px(12.)).text_size(px(11.)).text_color(theme.secondary).children(
-            [("Sessions", colors[0]), ("Reads", colors[1]), ("Searches", colors[2])].into_iter().map(|(l, c)| div().flex().items_center().gap(px(4.)).child(div().w(px(8.)).h(px(8.)).rounded(px(2.)).bg(c)).child(l)),
+        let legend = div().flex().gap(px(space::M)).text_size(px(text::CAPTION)).text_color(theme.secondary).children(
+            [("Sessions", colors[0]), ("Reads", colors[1]), ("Searches", colors[2])].into_iter().map(|(l, c)| div().flex().items_center().gap(px(5.)).child(div().w(px(8.)).h(px(8.)).rounded(px(2.)).bg(c)).child(l)),
         );
-        let list = |title: &str, items: Vec<String>, empty: &str| {
-            let mut d = div().flex_1().p(px(12.)).rounded(px(8.)).bg(theme.card).flex().flex_col().gap(px(3.)).child(div().font_weight(FontWeight::SEMIBOLD).pb(px(3.)).child(title.to_string()));
+        let chart_card = page_kit::card(theme)
+            .px(px(space::L))
+            .py(px(space::M + 2.))
+            .flex()
+            .flex_col()
+            .gap(px(space::S + 2.))
+            .child(div().flex().items_center().child(div().flex_1().child(page_kit::section_title(format!("Last {} days", st.window), None, theme))).child(legend))
+            .child(if total == 0 {
+                div().h(px(110.)).flex().items_center().justify_center().text_size(px(text::FOOTNOTE)).text_color(theme.tertiary).child("No sessions, reads or searches in this window yet.").into_any_element()
+            } else {
+                div().h(px(110.)).child(chart).into_any_element()
+            });
+        // A list as a card of rows: a label left, a figure right.
+        let list = |title: &str, items: Vec<(Option<Hsla>, String, Option<String>)>, empty: &str| {
+            let mut d = page_kit::card(theme).flex_1().min_w(px(240.)).px(px(space::L)).py(px(space::M)).flex().flex_col().child(div().pb(px(6.)).child(page_kit::section_title(title.to_string(), None, theme)));
             if items.is_empty() {
-                d = d.child(div().text_size(px(12.)).text_color(theme.secondary).child(empty.to_string()));
+                d = d.child(div().py(px(3.)).text_size(px(text::FOOTNOTE)).text_color(theme.tertiary).child(empty.to_string()));
             }
-            for i in items {
-                d = d.child(div().text_size(px(12.)).child(i));
+            for (i, (color, label, value)) in items.into_iter().enumerate() {
+                d = d.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(space::S))
+                        .py(px(5.))
+                        .when(i > 0, |d| d.border_t_1().border_color(theme.separator))
+                        .when_some(color, |d, c| d.child(page_kit::dot(c, 7.)))
+                        .child(div().flex_1().min_w_0().truncate().text_size(px(text::FOOTNOTE)).child(label))
+                        .when_some(value, |d, v| d.child(div().flex_none().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child(v))),
+                );
             }
             d
         };
-        let by_kind: Vec<String> = st.by_kind.iter().map(|(k, c)| format!("{}: {c}", kind_label(k))).collect();
-        let ages: Vec<String> = st.age_buckets.iter().map(|(l, c)| format!("{l}: {c}")).collect();
-        div()
-            .id("memory-insights")
-            .size_full()
-            .overflow_y_scroll()
-            .p(px(24.))
+        let by_kind = st.by_kind.iter().map(|(k, c)| (Some(kind_color(k, theme)), kind_label(k).to_string(), Some(c.to_string()))).collect();
+        let ages = st.age_buckets.iter().map(|(l, c)| (None, l.to_string(), Some(c.to_string()))).collect();
+        let row = || div().flex().flex_wrap().gap(px(space::M));
+        let content = div()
+            .max_w(px(960.))
+            .w_full()
+            .mx_auto()
+            .px(px(space::XL))
+            .py(px(space::L + space::XS))
             .flex()
             .flex_col()
-            .gap(px(16.))
+            .gap(px(space::M + 2.))
             .child(how)
             .child(figures)
-            .child(div().flex().flex_col().gap(px(6.)).child(div().font_weight(FontWeight::SEMIBOLD).child(format!("Last {} days", st.window))).child(div().h(px(120.)).child(chart)).child(legend))
-            .child(div().flex().gap(px(10.)).child(list("By kind", by_kind, "No memories yet.")).child(list("By age", ages, "No memories yet.")))
+            .child(chart_card)
+            .child(row().child(list("By kind", by_kind, "No memories yet.")).child(list("By age", ages, "No memories yet.")))
             .child(
-                div()
-                    .flex()
-                    .gap(px(10.))
-                    .child(list("Searched for, not found", st.missed_queries.iter().map(|q| format!("“{q}”")).collect(), "Every search found something."))
-                    .child(list("Never read, over a week old", st.never_recalled.iter().take(12).map(|m| m.title.clone()).collect(), "Everything gets read.")),
+                row()
+                    .child(list("Searched for, not found", st.missed_queries.iter().map(|q| (None, format!("“{q}”"), None)).collect(), "Every search found something."))
+                    .child(list("Never read, over a week old", st.never_recalled.iter().take(12).map(|m| (Some(kind_color(&m.kind, theme)), m.title.clone(), None)).collect(), "Everything gets read.")),
             )
             .child(
-                div()
-                    .flex()
-                    .gap(px(10.))
-                    .child(list("Read the most", st.top_recalled.iter().map(|m| format!("{} · {}×", m.title, m.recall_count)).collect(), "Nothing read yet."))
-                    .child(list("Look like duplicates", st.likely_duplicates.iter().map(|g| g.iter().map(|m| m.title.clone()).collect::<Vec<_>>().join(" · ")).collect(), "None.")),
-            )
-            .into_any_element()
+                row()
+                    .child(list("Read the most", st.top_recalled.iter().map(|m| (Some(kind_color(&m.kind, theme)), m.title.clone(), Some(format!("{}×", m.recall_count)))).collect(), "Nothing read yet."))
+                    .child(list("Look like duplicates", st.likely_duplicates.iter().map(|g| (None, g.iter().map(|m| m.title.clone()).collect::<Vec<_>>().join(" · "), None)).collect(), "None.")),
+            );
+        div().id("memory-insights").size_full().overflow_y_scroll().child(content).into_any_element()
     }
 
     /// The memory as a map: a dot a memory (its kind's color, bigger the more it's read), a
     /// line a link. Click a dot to open it.
     fn graph_view(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         if self.graph.ids.is_empty() {
-            return div().p(px(24.)).text_color(theme.secondary).child("No memories to map yet.").into_any_element();
+            return page_kit::empty_state(icons::waypoints(), "Nothing to Map Yet", "Memories and the links between them show here as a map once agents save some.", None, theme).into_any_element();
         }
         let (points, edges) = (self.graph.points.clone(), self.graph.edges.clone());
         let dots: Vec<(Hsla, f32, String)> = self
@@ -1294,8 +1471,8 @@ impl MemoryPage {
             })
             .collect();
         let selected = self.selection.as_ref().and_then(|s| self.graph.ids.iter().position(|i| i == s));
-        let (line, text, cell) = (theme.separator, theme.secondary, self.graph_bounds.clone());
-        let pad = 40.;
+        let (line, label, ring, cell) = (theme.secondary.opacity(0.28), theme.secondary, theme.canvas, self.graph_bounds.clone());
+        let pad = 48.;
         let canvas = gpui_kit::canvas(
             move |bounds, _, _| cell.set(bounds),
             move |bounds, _, window, cx| {
@@ -1314,23 +1491,43 @@ impl MemoryPage {
                 }
                 for (i, (color, r, title)) in dots.iter().enumerate() {
                     let (x, y) = at(points[i]);
-                    let r = if Some(i) == selected { r + 3. } else { *r };
-                    window.paint_quad(gpui_kit::fill(gpui_kit::Bounds::new(gpui_kit::point(px(x - r), px(y - r)), gpui_kit::size(px(r * 2.), px(r * 2.))), *color).corner_radii(px(r)));
+                    let picked = Some(i) == selected;
+                    let r = if picked { r + 3. } else { *r };
+                    // A ring in the canvas's colour keeps dots apart where they touch.
+                    let ring_r = r + 2.;
+                    window.paint_quad(gpui_kit::fill(gpui_kit::Bounds::new(gpui_kit::point(px(x - ring_r), px(y - ring_r)), gpui_kit::size(px(ring_r * 2.), px(ring_r * 2.))), if picked { *color } else { ring }).corner_radii(px(ring_r)));
+                    if picked {
+                        let inner = r + 0.5;
+                        window.paint_quad(gpui_kit::fill(gpui_kit::Bounds::new(gpui_kit::point(px(x - inner), px(y - inner)), gpui_kit::size(px(inner * 2.), px(inner * 2.))), ring).corner_radii(px(inner)));
+                    }
+                    window.paint_quad(gpui_kit::fill(gpui_kit::Bounds::new(gpui_kit::point(px(x - r + if picked { 2. } else { 0. }), px(y - r + if picked { 2. } else { 0. })), gpui_kit::size(px((r - if picked { 2. } else { 0. }) * 2.), px((r - if picked { 2. } else { 0. }) * 2.))), *color).corner_radii(px(r)));
                     // Titles of the read and the picked, small, beside their dots.
-                    if Some(i) == selected || dots.len() <= 40 {
-                        let run = gpui_kit::TextRun { len: title.len(), font: window.text_style().font(), color: text, background_color: None, underline: None, strikethrough: None };
-                        let shaped = window.text_system().shape_line(title.clone().into(), px(11.), &[run], None);
-                        let _ = shaped.paint(gpui_kit::point(px(x + r + 3.), px(y - 7.)), px(14.), gpui_kit::TextAlign::Left, None, window, cx);
+                    if picked || dots.len() <= 40 {
+                        let run = gpui_kit::TextRun { len: title.len(), font: window.text_style().font(), color: label, background_color: None, underline: None, strikethrough: None };
+                        let shaped = window.text_system().shape_line(title.clone().into(), px(text::CAPTION), &[run], None);
+                        let _ = shaped.paint(gpui_kit::point(px(x + r + 5.), px(y - 7.)), px(14.), gpui_kit::TextAlign::Left, None, window, cx);
                     }
                 }
             },
         )
         .size_full();
         let (cell, ids, pts) = (self.graph_bounds.clone(), self.graph.ids.clone(), self.graph.points.clone());
+        let legend = div()
+            .absolute()
+            .top(px(space::L))
+            .left(px(space::XL))
+            .flex()
+            .gap(px(space::M))
+            .text_size(px(text::CAPTION))
+            .text_color(theme.secondary)
+            .children(KINDS.iter().map(|(k, l)| div().flex().items_center().gap(px(5.)).child(page_kit::dot(kind_color(k, theme), 7.)).child(*l)))
+            .child(div().text_color(theme.tertiary).child("Bigger: read more · Lines: links"));
         div()
             .id("memory-graph")
+            .relative()
             .size_full()
             .child(canvas)
+            .child(legend)
             .on_mouse_down(
                 gpui_kit::MouseButton::Left,
                 cx.listener(move |this, e: &gpui_kit::MouseDownEvent, _, cx| {
@@ -1356,22 +1553,24 @@ impl MemoryPage {
             .into_any_element()
     }
 
-    fn activity(&self, theme: &Theme) -> impl IntoElement {
-        let mut column = div().id("memory-activity").size_full().overflow_y_scroll().p(px(24.)).flex().flex_col().gap(px(4.));
+    fn activity(&self, theme: &Theme) -> gpui_kit::AnyElement {
         if self.events.is_empty() {
-            return column.child(div().text_color(theme.secondary).child("Nothing yet: agents' saves, reads and searches show here."));
+            return page_kit::empty_state(icons::activity(), "No Activity Yet", "Agents' saves, reads and searches show here.", None, theme).into_any_element();
         }
-        for (kind, title, actor, at, query, count) in &self.events {
-            let what = match kind.as_str() {
-                "created" => format!("saved “{}”", title.clone().unwrap_or_default()),
-                "updated" => format!("updated “{}”", title.clone().unwrap_or_default()),
-                "archived" => format!("archived “{}”", title.clone().unwrap_or_default()),
-                "restored" => format!("restored “{}”", title.clone().unwrap_or_default()),
-                "deleted" => format!("deleted “{}”", title.clone().unwrap_or_default()),
-                "recalled" => format!("read “{}”", title.clone().unwrap_or_default()),
-                "searched" => format!("searched “{}”, {} found", query.clone().unwrap_or_default(), count.unwrap_or(0)),
-                "injected" => format!("started a session with {} memories in its index", count.unwrap_or(0)),
-                other => format!("{other} {}", title.clone().unwrap_or_default()),
+        let mut list = page_kit::card(theme).overflow_hidden().flex().flex_col();
+        for (n, (kind, title, actor, at, query, count)) in self.events.iter().enumerate() {
+            let t = || title.clone().unwrap_or_default();
+            let (what, icon): (String, gpui_kit::component::Icon) = match kind.as_str() {
+                "created" => (format!("saved “{}”", t()), gpui_kit::component::Icon::new(IconName::Plus)),
+                "updated" => (format!("updated “{}”", t()), icons::rotate_ccw()),
+                "archived" => (format!("archived “{}”", t()), icons::archive()),
+                "restored" => (format!("restored “{}”", t()), icons::archive_restore()),
+                "deleted" => (format!("deleted “{}”", t()), icons::trash()),
+                "recalled" => (format!("read “{}”", t()), gpui_kit::component::Icon::new(IconName::BookOpen)),
+                "searched" => (format!("searched “{}”, {} found", query.clone().unwrap_or_default(), count.unwrap_or(0)), gpui_kit::component::Icon::new(IconName::Search)),
+                "imported" => (if t().is_empty() { "imported memories".to_string() } else { format!("imported “{}”", t()) }, icons::download()),
+                "injected" => (format!("started a session with {} memories in its index", count.unwrap_or(0)), icons::zap()),
+                other => (format!("{other} {}", t()), icons::circle()),
             };
             let who = match actor.as_deref() {
                 Some("user") => "You",
@@ -1380,15 +1579,25 @@ impl MemoryPage {
                 Some("app") => "The app",
                 _ => "An agent",
             };
-            column = column.child(
+            list = list.child(
                 div()
                     .flex()
-                    .gap(px(10.))
-                    .child(div().w(px(110.)).flex_none().text_color(theme.secondary).child(ago(*at)))
-                    .child(div().flex_1().child(format!("{who} {what}"))),
+                    .items_center()
+                    .gap(px(space::M))
+                    .px(px(space::L))
+                    .py(px(space::S))
+                    .when(n > 0, |d| d.border_t_1().border_color(theme.separator))
+                    .child(div().flex_none().w(px(24.)).h(px(24.)).rounded_full().bg(theme.selected).flex().items_center().justify_center().child(icon.size(px(12.)).text_color(theme.secondary)))
+                    .child(div().flex_1().min_w_0().truncate().child(div().flex().gap(px(4.)).child(div().flex_none().font_weight(FontWeight::MEDIUM).child(who)).child(div().min_w_0().truncate().text_color(theme.text).child(what))))
+                    .child(div().flex_none().text_size(px(text::CAPTION)).text_color(theme.tertiary).child(ago(*at))),
             );
         }
-        column
+        div()
+            .id("memory-activity")
+            .size_full()
+            .overflow_y_scroll()
+            .child(div().max_w(px(880.)).w_full().mx_auto().px(px(space::XL)).py(px(space::L + space::XS)).child(list))
+            .into_any_element()
     }
 }
 
@@ -1424,29 +1633,32 @@ impl MemoryPage {
         let s1 = status.clone();
         Some(
             div()
-                .m(px(16.))
-                .mb(px(0.))
-                .p(px(14.))
-                .rounded(px(10.))
-                .bg(theme.warning.opacity(0.08))
+                .mx(px(space::L))
+                .mt(px(space::M))
+                .px(px(space::L))
+                .py(px(space::M))
+                .rounded(px(radius::LARGE))
+                .bg(theme.warning.opacity(0.07))
                 .border_1()
-                .border_color(theme.warning.opacity(0.3))
+                .border_color(theme.warning.opacity(0.28))
                 .flex()
-                .gap(px(12.))
-                .child(div().text_color(theme.warning).text_size(px(16.)).child("⧉"))
+                .gap(px(space::M))
+                .child(div().flex_none().mt(px(1.)).child(icons::layers().size(px(16.)).text_color(theme.warning)))
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
                         .flex()
                         .flex_col()
-                        .gap(px(8.))
-                        .child(div().font_weight(FontWeight::SEMIBOLD).child(if on { "Two memories" } else { "Not in YourHarness yet" }))
-                        .child(div().child(message))
+                        .gap(px(6.))
+                        .child(div().text_size(px(text::HEADLINE)).font_weight(FontWeight::SEMIBOLD).child(if on { "Two memories" } else { "Not in YourHarness yet" }))
+                        .child(div().text_color(theme.text).child(message))
                         .child(
                             div()
+                                .pt(px(2.))
                                 .flex()
-                                .gap(px(8.))
+                                .flex_wrap()
+                                .gap(px(space::S))
                                 .child(Button::new("one-memory").small().primary().label(primary).tooltip(if on { detail } else { "Brings Claude Code's memory files for this folder in." }).on_click(cx.listener(move |this, _, _, cx| this.use_one_memory(&s1, cx))))
                                 .when(count > 0, |d| {
                                     d.child(Button::new("memory-importer").small().outline().label("Open in the Importer…").on_click(cx.listener(|this, _, window, cx| {
@@ -1465,7 +1677,7 @@ impl MemoryPage {
                                     })))
                                 }),
                         )
-                        .when(on, |d| d.child(div().text_size(px(11.)).text_color(theme.secondary).child(detail))),
+                        .when(on, |d| d.child(div().text_size(px(text::CAPTION)).text_color(theme.secondary).child(detail))),
                 )
                 .into_any_element(),
         )
@@ -1778,28 +1990,52 @@ impl Render for SpecialistSetup {
         let theme = Theme::get(cx);
         let importer = self.role == "importer";
         let project_name = self.workspace.read(cx).project(&self.project).map(|p| p.name.clone()).unwrap_or_default();
-        let label = |t: &str| div().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.secondary).child(t.to_uppercase());
+        let label = |t: &str| page_kit::group_label(t.to_string(), &theme);
         let (title, detail) = if importer {
             (format!("Bring memory into {project_name}"), "The Importer reads what you give it (Claude Code's memory, notes, CLAUDE.md files, exports from ChatGPT or other assistants) and turns it into this workspace's memory: one fact a memory, sorted into kinds, without duplicates or secrets. It asks when something's unclear.")
         } else {
             (format!("Tidy up {project_name}'s memory"), "The Reconciler goes through the memory with you: it merges duplicates, fixes or archives what's out of date (checking the code when a memory names it), tightens long or vague memories and links related ones. It shows you the plan before it changes anything, and every change keeps the old version.")
         };
-        let mut column = div().id("specialist-setup").max_h(px(600.)).overflow_y_scroll().flex().flex_col().gap(px(16.)).child(
-            div().flex().flex_col().gap(px(4.)).child(div().text_size(px(17.)).font_weight(FontWeight::SEMIBOLD).child(title)).child(div().text_color(theme.secondary).child(detail)),
+        let mut column = div().id("specialist-setup").max_h(px(520.)).overflow_y_scroll().flex().flex_col().gap(px(space::L + 2.)).child(
+            div()
+                .flex()
+                .gap(px(space::M))
+                .child(page_kit::icon_tile(if importer { icons::download() } else { icons::sparkles() }, 36., &theme))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(3.))
+                        .child(div().text_size(px(text::TITLE)).font_weight(FontWeight::SEMIBOLD).child(title))
+                        .child(div().text_size(px(text::FOOTNOTE)).line_height(px(17.)).text_color(theme.secondary).child(detail)),
+                ),
         );
         if importer {
-            let mut list = div().flex().flex_col().rounded(px(8.)).bg(theme.card).border_1().border_color(theme.separator);
+            let mut list = page_kit::card(&theme).overflow_hidden().flex().flex_col();
             if self.sources.is_empty() {
-                list = list.child(div().p(px(12.)).text_color(theme.secondary).child("No sources yet. Add files or folders, or paste text below."));
+                list = list.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(space::S))
+                        .px(px(space::M))
+                        .py(px(space::M))
+                        .text_size(px(text::FOOTNOTE))
+                        .text_color(theme.secondary)
+                        .child(gpui_kit::component::Icon::new(IconName::Inbox).size(px(15.)).text_color(theme.tertiary))
+                        .child("No sources yet. Add files or folders, or paste text below."),
+                );
             }
             for (i, s) in self.sources.iter().enumerate() {
                 list = list.child(
                     div()
                         .flex()
                         .items_center()
-                        .gap(px(10.))
-                        .px(px(12.))
-                        .py(px(8.))
+                        .gap(px(space::S + 2.))
+                        .px(px(space::M))
+                        .py(px(space::S))
                         .when(i > 0, |d| d.border_t_1().border_color(theme.separator))
                         .child(gpui_kit::component::checkbox::Checkbox::new(SharedString::from(format!("source-{i}"))).checked(s.on).on_click(cx.listener(move |this, on: &bool, _, cx| {
                             if let Some(s) = this.sources.get_mut(i) {
@@ -1807,27 +2043,39 @@ impl Render for SpecialistSetup {
                             }
                             cx.notify();
                         })))
-                        .child(div().flex_1().min_w_0().flex().flex_col().child(div().child(s.title.clone())).child(div().text_size(px(11.)).text_color(theme.secondary).truncate().child(s.detail.clone()))),
+                        .child(gpui_kit::component::Icon::new(IconName::FileText).size(px(15.)).text_color(theme.tertiary))
+                        .child(div().flex_1().min_w_0().flex().flex_col().child(div().truncate().child(s.title.clone())).child(div().text_size(px(text::CAPTION)).text_color(theme.secondary).truncate().child(s.detail.clone()))),
                 );
             }
             column = column
-                .child(div().flex().flex_col().gap(px(8.)).child(label("Sources")).child(list).child(div().child(Button::new("add-sources").small().icon(gpui_kit::component::IconName::Plus).label("Add Files or Folders…").on_click(cx.listener(|this, _, _, cx| this.add_sources(cx))))))
-                .child(div().flex().flex_col().gap(px(8.)).child(label("Or paste text")).child(div().p(px(6.)).rounded(px(8.)).bg(theme.card).child(Textarea::new(&self.pasted).appearance(false).h(px(90.)))));
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(space::S))
+                        .child(div().flex().items_center().child(div().flex_1().child(label("Sources"))).child(Button::new("add-sources").small().ghost().icon(IconName::Plus).label("Add Files or Folders…").on_click(cx.listener(|this, _, _, cx| this.add_sources(cx)))))
+                        .child(list),
+                )
+                .child(div().flex().flex_col().gap(px(space::S)).child(label("Or paste text")).child(page_kit::card(&theme).px(px(space::S)).py(px(6.)).child(Textarea::new(&self.pasted).appearance(false).h(px(90.)))));
         } else if let Some(st) = &self.stats {
-            let mut facts = vec![format!("{} memories in use, {:.1} KB", st.active, st.bytes as f64 / 1024.)];
+            let mut facts: Vec<(gpui_kit::component::Icon, String)> = vec![(icons::brain(), format!("{} memories in use, {:.1} KB", st.active, st.bytes as f64 / 1024.))];
             if !st.never_recalled.is_empty() {
-                facts.push(format!("{} never read by an agent", st.never_recalled.len()));
+                facts.push((gpui_kit::component::Icon::new(IconName::EyeOff), format!("{} never read by an agent", st.never_recalled.len())));
             }
             if !st.likely_duplicates.is_empty() {
-                facts.push(format!("{} groups that look like duplicates", st.likely_duplicates.len()));
+                facts.push((gpui_kit::component::Icon::new(IconName::Copy), format!("{} groups that look like duplicates", st.likely_duplicates.len())));
             }
             if !st.missed_queries.is_empty() {
-                facts.push(format!("{} searches that found nothing", st.missed_queries.len()));
+                facts.push((gpui_kit::component::Icon::new(IconName::Search), format!("{} searches that found nothing", st.missed_queries.len())));
             }
             if st.orphans > 0 {
-                facts.push(format!("{} memories without links", st.orphans));
+                facts.push((icons::link(), format!("{} memories without links", st.orphans)));
             }
-            column = column.child(div().flex().flex_col().gap(px(8.)).child(label("What it starts from")).child(div().p(px(12.)).rounded(px(8.)).bg(theme.card).flex().flex_col().gap(px(4.)).children(facts.into_iter().map(|f| div().child(f)))));
+            let mut list = page_kit::card(&theme).overflow_hidden().flex().flex_col();
+            for (i, (icon, f)) in facts.into_iter().enumerate() {
+                list = list.child(div().flex().items_center().gap(px(space::S + 2.)).px(px(space::M)).py(px(space::S)).when(i > 0, |d| d.border_t_1().border_color(theme.separator)).child(icon.size(px(14.)).text_color(theme.secondary)).child(f));
+            }
+            column = column.child(div().flex().flex_col().gap(px(space::S)).child(label("What it starts from")).child(list));
         }
         let this = cx.entity().downgrade();
         let menus = model_menus(&format!("setup-{}", self.role), self.workspace.read(cx), self.model.clone(), self.effort.clone(), move |m, e, cx| {
@@ -1839,20 +2087,19 @@ impl Render for SpecialistSetup {
         });
         column = column
             .child(
-                div().flex().flex_col().gap(px(8.)).child(label("Model")).child(
-                    div().flex().items_center().gap(px(10.)).child(menus).child(div().flex_1().min_w_0().text_size(px(11.)).text_color(theme.secondary).child("A stronger model sorts and merges memory more carefully.")),
+                div().flex().flex_col().gap(px(space::S)).child(label("Model")).child(
+                    div().flex().items_center().gap(px(space::M)).child(menus).child(div().flex_1().min_w_0().text_size(px(text::CAPTION)).text_color(theme.secondary).child("A stronger model sorts and merges memory more carefully.")),
                 ),
             )
-            .child(div().flex().flex_col().gap(px(8.)).child(label(if importer { "Anything the Importer should know" } else { "Anything to focus on" })).child(Input::new(&self.note)))
-            .child(
-                div().flex().justify_end().gap(px(8.)).child(Button::new("setup-cancel").label("Cancel").on_click(|_, window, cx| window.close_dialog(cx))).child(
-                    Button::new("setup-start")
-                        .primary()
-                        .label(if importer { "Start Import" } else { "Start Review" })
-                        .disabled(!self.can_start(cx))
-                        .on_click(cx.listener(|this, _, window, cx| this.start(window, cx))),
-                ),
-            );
-        column
+            .child(div().flex().flex_col().gap(px(space::S)).child(label(if importer { "Anything the Importer should know" } else { "Anything to focus on" })).child(Input::new(&self.note)));
+        div().flex().flex_col().gap(px(space::L)).child(column).child(
+            div().flex().justify_end().gap(px(space::S)).child(Button::new("setup-cancel").outline().label("Cancel").on_click(|_, window, cx| window.close_dialog(cx))).child(
+                Button::new("setup-start")
+                    .primary()
+                    .label(if importer { "Start Import" } else { "Start Review" })
+                    .disabled(!self.can_start(cx))
+                    .on_click(cx.listener(|this, _, window, cx| this.start(window, cx))),
+            ),
+        )
     }
 }

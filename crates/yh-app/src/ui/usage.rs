@@ -5,9 +5,9 @@
 //! pointer, so moving along a year of bars redraws the band and the tooltip, nothing else.
 
 use crate::state::workspace::Workspace;
-use crate::theme::Theme;
-use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::Sizable;
+use crate::theme::{space, text, Theme};
+use crate::ui::page_icons as icons;
+use crate::ui::page_kit::{self, Segment};
 use gpui_kit::{
     canvas, div, fill, point, prelude::*, px, rgb, size, Bounds, Context, Entity, FontWeight, Hsla, Pixels, SharedString, Window,
 };
@@ -35,6 +35,7 @@ pub struct UsagePage {
     hovered: Option<usize>,
     /// The chart's place, from its last paint: where the pointer is in days.
     chart: Rc<Cell<Bounds<Pixels>>>,
+    probe_started: bool,
 }
 
 impl UsagePage {
@@ -56,6 +57,7 @@ impl UsagePage {
             reading: Some("Reading Claude Code's history…".into()),
             hovered: std::env::var("YH_USAGE_HOVER").ok().and_then(|d| d.parse::<usize>().ok()).map(|ago| days.saturating_sub(ago + 1)),
             chart: Rc::new(Cell::new(Bounds::default())),
+            probe_started: false,
         };
         page.refresh(cx);
         page
@@ -97,6 +99,57 @@ impl UsagePage {
         cx.notify();
     }
 
+    /// `YH_USAGE_PROBE=1` (test runs): once the report shows, moves the pointer across the chart
+    /// and scrolls over it through the window's own event path (two rounds, the second on a
+    /// year in dollars), then prints the main thread's longest stall: PASS under 100 ms. Each
+    /// step waits a frame's time; whatever it waited past that, the main thread was busy.
+    /// `YH_USAGE_PROBE_WAIT=<seconds>` before it starts, for attaching Time Profiler.
+    fn start_probe(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.probe_started || std::env::var("YH_USAGE_PROBE").as_deref() != Ok("1") {
+            return;
+        }
+        self.probe_started = true;
+        use gpui_kit::{Modifiers, MouseMoveEvent, PlatformInput, ScrollDelta, ScrollEvent, TouchPhase};
+        let cell = self.chart.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let wait = std::env::var("YH_USAGE_PROBE_WAIT").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
+            cx.background_executor().timer(std::time::Duration::from_secs_f64(wait)).await;
+            let tick = std::time::Duration::from_millis(16);
+            let (mut longest, mut steps) = (std::time::Duration::ZERO, 0);
+            for round in 0..2 {
+                if round == 1 {
+                    let _ = this.update(cx, |p, cx| {
+                        p.cost = true;
+                        p.set_range(365, cx);
+                    });
+                    cx.background_executor().timer(std::time::Duration::from_millis(500)).await;
+                }
+                for i in 0..=120 {
+                    let started = std::time::Instant::now();
+                    let sent = cx.update(|window, cx| {
+                        let b = cell.get();
+                        let at = point(b.origin.x + b.size.width * (i as f32 / 120.), b.origin.y + b.size.height / 2.);
+                        let m = Modifiers::default();
+                        window.dispatch_event(PlatformInput::MouseMove(MouseMoveEvent { position: at, pressed_button: None, modifiers: m }), cx);
+                        if i % 12 == 0 {
+                            let delta = ScrollDelta::Pixels(point(px(0.), px(if i % 24 == 0 { -12. } else { 12. })));
+                            window.dispatch_event(PlatformInput::Scroll(ScrollEvent { position: at, delta, modifiers: m, touch_phase: TouchPhase::Moved, source: Default::default() }), cx);
+                        }
+                    });
+                    if sent.is_err() {
+                        return;
+                    }
+                    cx.background_executor().timer(tick).await;
+                    longest = longest.max(started.elapsed().saturating_sub(tick));
+                    steps += 1;
+                }
+            }
+            let ms = longest.as_millis();
+            eprintln!("USAGE PROBE {} {steps} steps, longest main-thread stall {ms} ms", if ms < 100 { "PASS" } else { "FAIL" });
+        })
+        .detach();
+    }
+
     fn value(&self, s: &yh_core::usage::Spend) -> f64 {
         if self.cost {
             s.cost
@@ -118,6 +171,26 @@ impl UsagePage {
     }
 }
 
+impl UsagePage {
+    /// A grid line's value, as short as it can be: "200M", "$50", "2.5K".
+    fn tick(&self, v: f64) -> String {
+        if v == 0. {
+            return "0".into();
+        }
+        let trim = |s: String| if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.').to_string() } else { s };
+        if self.cost {
+            return format!("${}", trim(format!("{v:.2}")));
+        }
+        let (n, unit) = match v {
+            v if v >= 1e9 => (v / 1e9, "B"),
+            v if v >= 1e6 => (v / 1e6, "M"),
+            v if v >= 1e3 => (v / 1e3, "K"),
+            v => (v, ""),
+        };
+        format!("{}{unit}", trim(format!("{n:.1}")))
+    }
+}
+
 /// "12.4M", "830K", "912".
 fn tokens(v: f64) -> String {
     match v {
@@ -134,52 +207,62 @@ fn day_label(days: i64) -> String {
     format!("{} {d}", MONTHS[(m as usize).saturating_sub(1).min(11)])
 }
 
+/// A round number at or above `v` for the chart's top line: 1, 2, 2.5 or 5 times a power of ten.
+fn nice_ceil(v: f64) -> f64 {
+    if v <= 0. {
+        return 1.;
+    }
+    let e = 10f64.powf(v.log10().floor());
+    [1., 2., 2.5, 5., 10.].into_iter().map(|m| m * e).find(|x| *x >= v * 0.999).unwrap_or(10. * e)
+}
+
 impl Render for UsagePage {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::get(cx);
-        let dark = theme.canvas.l < 0.5;
+        let dark = page_kit::is_dark(&theme);
         let color = |c: (u32, u32)| -> Hsla { rgb(if dark { c.1 } else { c.0 }).into() };
-        let mut ranges = div().flex().gap(px(2.));
-        for (label, days) in RANGES {
-            let b = Button::new(SharedString::from(format!("range-{days}"))).small().label(label);
-            ranges = ranges.child((if self.days == days { b.primary() } else { b.ghost() }).on_click(cx.listener(move |this, _, _, cx| this.set_range(days, cx))));
-        }
-        let metric = |id: &'static str, label: &'static str, cost: bool, cx: &mut Context<Self>| {
-            let b = Button::new(id).small().label(label);
-            (if self.cost == cost { b.primary() } else { b.ghost() }).on_click(cx.listener(move |this, _, _, cx| {
-                this.cost = cost;
-                cx.notify();
-            }))
+        let page = cx.entity().downgrade();
+        let ranges: Vec<Segment> = RANGES
+            .into_iter()
+            .map(|(label, days)| {
+                let page = page.clone();
+                Segment::new(SharedString::from(format!("range-{days}")), label, self.days == days, move |_, _, cx| {
+                    let _ = page.update(cx, |p, cx| p.set_range(days, cx));
+                })
+            })
+            .collect();
+        let metric = |id: &'static str, label: &'static str, cost: bool, icon: gpui_kit::component::Icon| {
+            let page = page.clone();
+            Segment::new(id, label, self.cost == cost, move |_, _, cx| {
+                let _ = page.update(cx, |p, cx| {
+                    p.cost = cost;
+                    cx.notify();
+                });
+            })
+            .icon(icon)
         };
-        let header = div()
+        let tabs = div()
+            .flex_1()
             .flex()
             .items_center()
-            .gap(px(14.))
-            .px(px(28.))
-            .py(px(16.))
-            .border_b_1()
-            .border_color(theme.separator)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.))
-                    .child(div().text_size(px(20.)).font_weight(FontWeight::SEMIBOLD).child("Usage"))
-                    .child(
-                        div()
-                            .text_color(theme.secondary)
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .child(self.reading.clone().unwrap_or_else(|| "Every Claude Code session, here or in a terminal".into())),
-                    ),
-            )
-            .child(ranges)
-            .child(div().flex().gap(px(2.)).child(metric("metric-tokens", "Tokens", false, cx)).child(metric("metric-cost", "Cost", true, cx)));
+            .gap(px(space::S))
+            .child(page_kit::segmented(ranges, &theme))
+            .child(div().flex_1())
+            .child(page_kit::segmented(vec![metric("metric-tokens", "Tokens", false, icons::hash()), metric("metric-cost", "Cost", true, icons::coins())], &theme))
+            .into_any_element();
+        let subtitle = div().truncate().child(self.reading.clone().unwrap_or_else(|| "Every Claude Code session, here or in a terminal".into())).into_any_element();
+        let header = page_kit::page_header(icons::chart_column(), "Usage", subtitle, div().into_any_element(), Some(tabs), &theme);
+        if self.report.is_some() {
+            self.start_probe(window, cx);
+        }
         let Some(report) = &self.report else {
-            return div().size_full().flex().flex_col().child(header).child(div().flex_1().flex().items_center().justify_center().text_color(theme.secondary).child("Reading…")).into_any_element();
+            return div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(header)
+                .child(div().flex_1().child(page_kit::empty_state(icons::chart_column(), "Reading Claude Code's History", "Every session's replies, here or in a terminal, added up by day and by model.", None, &theme)))
+                .into_any_element();
         };
         // Colors follow the model, by when it was first used, never by this range's ranking.
         let used: Vec<&String> = report.models.iter().map(|(m, _)| m).collect();
@@ -208,35 +291,45 @@ impl Render for UsagePage {
                 by.into_iter().enumerate().filter(|(_, v)| *v > 0.).collect()
             })
             .collect();
-        let max = stacks.iter().map(|s| s.iter().map(|(_, v)| v).sum::<f64>()).fold(0., f64::max).max(1e-9);
+        let peak = stacks.iter().map(|s| s.iter().map(|(_, v)| v).sum::<f64>()).fold(0., f64::max);
+        // The chart's top: a round number over the busiest day, so the grid reads cleanly.
+        let max = nice_ceil(peak).max(1e-9);
         let colors: Vec<Hsla> = series.iter().map(|(_, _, c)| *c).collect();
         let bounds_cell = self.chart.clone();
         let hovered = self.hovered;
-        let band = theme.selected;
+        let (band, grid, surface) = (theme.hover, theme.separator, theme.card);
         let n = stacks.len();
+        const PLOT_H: f32 = 200.;
         let chart = canvas(
             move |bounds, _, _| bounds_cell.set(bounds),
             move |bounds, _, window, _| {
                 let w = f32::from(bounds.size.width) / n.max(1) as f32;
                 let h = f32::from(bounds.size.height);
-                let bar = (w - if w > 6. { 2. } else { 0.5 }).max(0.5);
-                if let Some(i) = hovered {
-                    window.paint_quad(fill(Bounds::new(point(bounds.origin.x + px(i as f32 * w), bounds.origin.y), size(px(w), bounds.size.height)), band));
+                // Hairline grid at the top, the middle and the baseline.
+                for f in [0., 0.5, 1.] {
+                    let y = f32::from(bounds.origin.y) + (h - 1.) * f;
+                    window.paint_quad(fill(Bounds::new(point(bounds.origin.x, px(y)), size(bounds.size.width, px(1.))), grid));
                 }
+                // Thin columns: at most 24 px, the rest of each day's slot is air.
+                let bar = (w - if w > 6. { 3. } else { 0.5 }).clamp(0.5, 24.);
+                if let Some(i) = hovered {
+                    window.paint_quad(fill(Bounds::new(point(bounds.origin.x + px(i as f32 * w), bounds.origin.y), size(px(w), bounds.size.height)), band).corner_radii(px(3.)));
+                }
+                let r = (bar / 2.).min(4.);
                 for (i, stack) in stacks.iter().enumerate() {
                     let x = bounds.origin.x + px(i as f32 * w + (w - bar) / 2.);
-                    let mut y = f32::from(bounds.origin.y) + h;
-                    let last = stack.len().saturating_sub(1);
-                    for (j, (k, v)) in stack.iter().enumerate() {
-                        let seg = (*v / max) as f32 * (h - 4.);
-                        if seg < 0.5 {
-                            continue;
-                        }
-                        // A 2px surface gap between stacked segments; the top one rounded.
-                        let gap = if j < last && seg > 3. { 2. } else { 0. };
-                        let quad = fill(Bounds::new(point(x, px(y - seg)), size(px(bar), px(seg - gap))), colors[*k]);
-                        window.paint_quad(if j == last && bar > 4. { quad.corner_radii(px(2.)) } else { quad });
+                    let mut y = f32::from(bounds.origin.y) + h - 1.;
+                    let segs: Vec<(usize, f32)> = stack.iter().map(|(k, v)| (*k, (*v / max) as f32 * (h - 1.))).filter(|(_, s)| *s >= 0.5).collect();
+                    let last = segs.len().saturating_sub(1);
+                    for (j, (k, seg)) in segs.into_iter().enumerate() {
+                        let quad = fill(Bounds::new(point(x, px(y - seg)), size(px(bar), px(seg))), colors[k]);
+                        // The data end rounded, square at the baseline.
+                        window.paint_quad(if j == last && bar > 3. { quad.corner_radii(gpui_kit::Corners { top_left: px(r), top_right: px(r), bottom_left: px(0.), bottom_right: px(0.) }) } else { quad });
                         y -= seg;
+                        if j < last && seg > 3. {
+                            // A 2 px gap in the card's colour between segments.
+                            window.paint_quad(fill(Bounds::new(point(x, px(y - 1.)), size(px(bar), px(2.))), if hovered == Some(i) { band } else { surface }));
+                        }
                     }
                 }
             },
@@ -245,8 +338,9 @@ impl Render for UsagePage {
         let cell = self.chart.clone();
         let chart_box = div()
             .id("usage-chart")
-            .h(px(220.))
-            .w_full()
+            .flex_1()
+            .min_w_0()
+            .h(px(PLOT_H))
             .child(chart)
             .on_mouse_move(cx.listener(move |this, e: &gpui_kit::MouseMoveEvent, _, cx| {
                 let b = cell.get();
@@ -263,16 +357,23 @@ impl Render for UsagePage {
                     cx.notify();
                 }
             }));
+        // The grid's values, in a gutter at the left; the days under the plot.
+        const GUTTER: f32 = 52.;
+        let tick = |f: f32, v: f64| div().absolute().right(px(space::S)).top(px((PLOT_H - 1.) * f - 7.)).text_size(px(text::CAPTION)).text_color(theme.tertiary).child(self.tick(v));
+        let gutter = div().relative().flex_none().w(px(GUTTER)).h(px(PLOT_H)).child(tick(0., max)).child(tick(0.5, max / 2.)).child(tick(1., 0.));
         let first = report.first_day;
         let axis = div()
+            .pl(px(GUTTER))
             .flex()
             .justify_between()
-            .text_size(px(11.))
-            .text_color(theme.secondary)
+            .text_size(px(text::CAPTION))
+            .text_color(theme.tertiary)
             .child(day_label(first))
             .child(day_label(first + n as i64 / 2))
             .child(day_label(first + n as i64 - 1));
-        // The hovered day, or the range: one line per model.
+        let legend = div().pl(px(GUTTER)).flex().flex_wrap().gap(px(space::M)).text_size(px(text::CAPTION)).text_color(theme.secondary).children(
+            series.iter().map(|(_, name, c)| div().flex().items_center().gap(px(5.)).child(div().w(px(8.)).h(px(8.)).rounded(px(2.)).bg(*c)).child(name.clone())),
+        );
         // A row per series (models past seven together as Other), the biggest first.
         let rows_of = |spends: Vec<(&String, &yh_core::usage::Spend)>| -> Vec<(Hsla, String, f64, i64)> {
             let mut by: Vec<(f64, i64)> = vec![(0., 0); series.len()];
@@ -286,92 +387,131 @@ impl Render for UsagePage {
             rows.sort_by(|a, b| b.2.total_cmp(&a.2).then(b.3.cmp(&a.3)));
             rows
         };
-        let (title, rows): (String, Vec<(Hsla, String, f64, i64)>) = match self.hovered.and_then(|i| report.days.get(i).map(|d| (i, d))) {
-            Some((i, d)) => (format!("{} · {}", day_label(first + i as i64), self.format(self.value(&d.total))), rows_of(d.models.iter().collect())),
-            None => (format!("Last {} days · {}", report.days.len(), self.format(self.value(&report.total))), rows_of(report.models.iter().map(|(m, s)| (m, s)).collect())),
+        // The hovered day, or the range: one line per model.
+        let (title, total, rows): (String, f64, Vec<(Hsla, String, f64, i64)>) = match self.hovered.and_then(|i| report.days.get(i).map(|d| (i, d))) {
+            Some((i, d)) => (day_label(first + i as i64), self.value(&d.total), rows_of(d.models.iter().collect())),
+            None => (format!("Last {} days", report.days.len()), self.value(&report.total), rows_of(report.models.iter().map(|(m, s)| (m, s)).collect())),
         };
-        let total_value = self.value(&report.total).max(1e-9);
-        let mut table = div().flex().flex_col().gap(px(2.)).child(div().font_weight(FontWeight::SEMIBOLD).pb(px(4.)).child(title));
-        for (c, name, v, toks) in rows {
+        let metric_name = if self.cost { "Cost at API prices" } else { "Tokens" };
+        let chart_card = page_kit::card(&theme)
+            .px(px(space::L))
+            .pt(px(space::M + 2.))
+            .pb(px(space::M))
+            .flex()
+            .flex_col()
+            .gap(px(space::S + 2.))
+            .child(
+                div()
+                    .flex()
+                    .items_baseline()
+                    .gap(px(space::S))
+                    .child(page_kit::section_title(format!("{metric_name} by day"), None, &theme))
+                    .child(div().flex_1())
+                    .child(div().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child(format!("{title} · ")))
+                    .child(div().text_size(px(text::FOOTNOTE)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(self.format(total))),
+            )
+            .child(div().pt(px(space::XS)).flex().child(gutter).child(chart_box))
+            .child(axis)
+            .child(legend);
+        let share_total = rows.iter().map(|r| r.2).sum::<f64>().max(1e-9);
+        let mut table = page_kit::card(&theme).px(px(space::L)).py(px(space::M)).flex().flex_col().child(
+            div()
+                .pb(px(6.))
+                .flex()
+                .items_baseline()
+                .gap(px(space::S))
+                .child(page_kit::section_title(format!("{title} by model"), None, &theme))
+                .child(div().flex_1())
+                .child(div().text_size(px(text::FOOTNOTE)).font_weight(FontWeight::SEMIBOLD).child(self.format(total))),
+        );
+        if rows.is_empty() {
+            table = table.child(div().py(px(space::S)).text_size(px(text::FOOTNOTE)).text_color(theme.tertiary).child("Nothing used on this day."));
+        }
+        for (i, (c, name, v, toks)) in rows.into_iter().enumerate() {
+            let share = (v / share_total) as f32;
             table = table.child(
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(8.))
-                    .py(px(2.))
-                    .child(div().flex_none().w(px(10.)).h(px(10.)).rounded(px(2.)).bg(c))
-                    .child(div().flex_1().child(name))
-                    .child(div().w(px(90.)).text_right().child(self.format(v)))
-                    .child(div().w(px(80.)).text_right().text_color(theme.secondary).child(if self.cost { tokens(toks as f64) } else { String::new() }))
-                    .child(div().w(px(50.)).text_right().text_color(theme.secondary).child(if self.hovered.is_none() { format!("{:.0}%", v / total_value * 100.) } else { String::new() })),
+                    .gap(px(space::S + 2.))
+                    .py(px(7.))
+                    .when(i > 0, |d| d.border_t_1().border_color(theme.separator))
+                    .child(div().flex_none().w(px(8.)).h(px(8.)).rounded(px(2.)).bg(c))
+                    .child(div().w(px(150.)).flex_none().truncate().child(name))
+                    // The share as a thin bar in the model's colour: the eye reads it before the number.
+                    .child(div().flex_1().min_w(px(40.)).h(px(4.)).rounded(px(2.)).bg(theme.selected).child(div().h_full().rounded(px(2.)).w(gpui_kit::relative(share)).bg(c.opacity(0.85))))
+                    .child(div().w(px(44.)).flex_none().text_right().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child(format!("{:.0}%", share * 100.)))
+                    .child(div().w(px(80.)).flex_none().text_right().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child(if self.cost { tokens(toks as f64) } else { String::new() }))
+                    .child(div().w(px(80.)).flex_none().text_right().font_weight(FontWeight::MEDIUM).child(self.format(v))),
             );
         }
-        let figure = |label: &str, value: String, note: String| {
-            div()
-                .flex_1()
-                .p(px(12.))
-                .rounded(px(8.))
-                .bg(theme.card)
-                .flex()
-                .flex_col()
-                .gap(px(2.))
-                .child(div().text_size(px(11.)).text_color(theme.secondary).child(label.to_string()))
-                .child(div().text_size(px(20.)).font_weight(FontWeight::SEMIBOLD).child(value))
-                .child(div().text_size(px(11.)).text_color(theme.secondary).child(note))
-        };
         let active_days = report.days.iter().filter(|d| d.total.messages > 0).count().max(1);
         let t = &report.total;
         let limits = self.workspace.read(cx).limits.clone();
-        let mut limit_row = div().flex().gap(px(12.));
+        let mut limit_row = div().flex().flex_wrap().gap(px(space::M));
+        let mut any_limit = false;
         if let Some(windows) = limits.as_ref().and_then(|l| l["unifiedWindows"].as_object().cloned()) {
             for (name, w) in windows {
+                any_limit = true;
                 let used = w["utilization"].as_f64().unwrap_or(0.).clamp(0., 1.);
                 let label = match name.as_str() {
                     "five_hour" => "5-hour limit".to_string(),
                     "seven_day" => "Weekly limit".to_string(),
                     other => other.replace('_', " "),
                 };
+                // The fill carries how close it is; the track is a lighter step of the same hue.
+                let tint = if used > 0.8 { theme.warning } else { theme.accent };
                 limit_row = limit_row.child(
-                    div()
+                    page_kit::card(&theme)
                         .flex_1()
-                        .p(px(12.))
-                        .rounded(px(8.))
-                        .bg(theme.card)
+                        .min_w(px(200.))
+                        .px(px(space::L))
+                        .py(px(space::M))
                         .flex()
                         .flex_col()
-                        .gap(px(6.))
-                        .child(div().flex().justify_between().child(label).child(format!("{:.0}%", used * 100.)))
-                        .child(div().h(px(6.)).rounded(px(3.)).bg(theme.selected).child(div().h_full().rounded(px(3.)).w(gpui_kit::relative(used as f32)).bg(if used > 0.8 { theme.warning } else { theme.accent }))),
+                        .gap(px(space::S))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .child(icons::gauge().size(px(14.)).text_color(theme.secondary))
+                                .child(div().flex_1().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child(label))
+                                .child(div().font_weight(FontWeight::SEMIBOLD).child(format!("{:.0}%", used * 100.))),
+                        )
+                        .child(div().h(px(6.)).rounded(px(3.)).bg(tint.opacity(0.16)).child(div().h_full().rounded(px(3.)).w(gpui_kit::relative(used as f32)).bg(tint))),
                 );
             }
         }
+        let figures = div()
+            .flex()
+            .flex_wrap()
+            .gap(px(space::M))
+            .child(page_kit::stat_tile("Tokens", tokens(t.tokens.total() as f64), Some(format!("{} out · {} cache reads", tokens(t.tokens.output as f64), tokens(t.tokens.cache_read as f64))), &theme))
+            .child(page_kit::stat_tile("At API prices", format!("${:.2}", t.cost), Some(if t.unpriced > 0 { format!("{} tokens of unpriced models", tokens(t.unpriced as f64)) } else { "What the tokens would cost on the API, not what you pay".into() }), &theme))
+            .child(page_kit::stat_tile("Replies", t.messages.to_string(), Some(format!("{} a day on days used", self.format(self.value(t) / active_days as f64))), &theme));
         div()
             .size_full()
             .flex()
             .flex_col()
             .child(header)
             .child(
-                div()
-                    .id("usage-body")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .px(px(28.))
-                    .py(px(20.))
-                    .flex()
-                    .flex_col()
-                    .gap(px(18.))
-                    .child(limit_row)
-                    .child(
-                        div()
-                            .flex()
-                            .gap(px(12.))
-                            .child(figure("Tokens", tokens(t.tokens.total() as f64), format!("{} out · {} cache reads", tokens(t.tokens.output as f64), tokens(t.tokens.cache_read as f64))))
-                            .child(figure("At API prices", format!("${:.2}", t.cost), if t.unpriced > 0 { format!("{} tokens of unpriced models", tokens(t.unpriced as f64)) } else { "what the tokens would cost on the API, not what you pay".into() }))
-                            .child(figure("Replies", t.messages.to_string(), format!("{} a day on days used", self.format(self.value(t) / active_days as f64)))),
-                    )
-                    .child(div().flex().flex_col().gap(px(6.)).child(chart_box).child(axis))
-                    .child(table),
+                div().id("usage-body").flex_1().min_h_0().overflow_y_scroll().child(
+                    div()
+                        .max_w(px(1040.))
+                        .w_full()
+                        .mx_auto()
+                        .px(px(space::XL))
+                        .pt(px(space::L + space::XS))
+                        .pb(px(space::XL))
+                        .flex()
+                        .flex_col()
+                        .gap(px(space::M + 2.))
+                        .when(any_limit, |d| d.child(limit_row))
+                        .child(figures)
+                        .child(chart_card)
+                        .child(table),
+                ),
             )
             .into_any_element()
     }
