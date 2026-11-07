@@ -99,19 +99,17 @@ impl Segment {
 
 }
 
-/// A segmented control, as macOS draws one: a quiet track, the chosen segment raised on it.
+/// A segmented control, as macOS draws one and as Settings does: a quiet track, the chosen
+/// segment raised on it (white in light, a lighter grey in dark), its icon in the accent.
 pub fn segmented(segments: Vec<Segment>, theme: &Theme) -> gpui_kit::Div {
-    let dark = is_dark(theme);
-    let track = if dark { gpui_kit::white().opacity(0.06) } else { gpui_kit::black().opacity(0.05) };
-    let raised = if dark { gpui_kit::white().opacity(0.16) } else { gpui_kit::white() };
-    let edge = if dark { gpui_kit::white().opacity(0.06) } else { gpui_kit::black().opacity(0.1) };
-    let mut row = div().flex_none().flex().items_center().gap(px(2.)).p(px(2.)).rounded(px(radius::MEDIUM + 1.)).bg(track);
+    let raised = if is_dark(theme) { theme.bubble } else { theme.canvas };
+    let mut row = div().flex_none().flex().items_center().gap(px(2.)).p(px(2.)).rounded(px(radius::MEDIUM + 1.)).bg(theme.selected);
     for s in segments {
         let selected = s.selected;
         let mut seg = div()
             .id(s.id.clone())
-            .h(px(24.))
-            .px(px(space::S + 2.))
+            .h(px(26.))
+            .px(px(space::M))
             .flex()
             .items_center()
             .gap(px(5.))
@@ -121,13 +119,13 @@ pub fn segmented(segments: Vec<Segment>, theme: &Theme) -> gpui_kit::Div {
             .whitespace_nowrap()
             .cursor_pointer();
         seg = if selected {
-            seg.bg(raised).border_color(edge).text_color(theme.text).font_weight(FontWeight::MEDIUM)
+            seg.bg(raised).border_color(theme.separator).text_color(theme.text).font_weight(FontWeight::MEDIUM)
         } else {
             seg.border_color(gpui_kit::transparent_black()).text_color(theme.secondary).hover(|d| d.text_color(theme.text).bg(theme.hover))
         };
         let on_click = s.on_click;
         seg = seg
-            .when_some(s.icon, |d, i| d.child(i.size(px(14.)).text_color(if selected { theme.text } else { theme.secondary })))
+            .when_some(s.icon, |d, i| d.child(i.size(px(14.)).text_color(if selected { theme.accent } else { theme.secondary })))
             .child(s.label)
             .when_some(s.badge, |d, b| d.child(div().text_size(px(text::CAPTION)).font_weight(FontWeight::MEDIUM).text_color(theme.tertiary).child(b)))
             .on_click(move |e, w, cx| on_click(e, w, cx));

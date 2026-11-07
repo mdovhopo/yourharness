@@ -327,14 +327,14 @@ impl ProjectPage {
                     .flex()
                     .flex_col()
                     .gap(px(12.))
-                    .child(div().text_color(theme.secondary).child("A new branch at the top branch's latest commit, checked out there. Commit to it, then Submit."))
+                    .child(div().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child("A new branch at the top branch's latest commit, checked out there. Commit to it, then Submit."))
                     .child(Input::new(&input))
                     .child(
                         div()
                             .flex()
                             .justify_end()
                             .gap(px(8.))
-                            .child(Button::new("branch-cancel").label("Cancel").on_click(|_, window, cx| window.close_dialog(cx)))
+                            .child(Button::new("branch-cancel").outline().label("Cancel").on_click(|_, window, cx| window.close_dialog(cx)))
                             .child(Button::new("branch-add").primary().label("Add").on_click(move |_, window, cx| {
                                 let branch = input.read(cx).value().trim().to_string();
                                 window.close_dialog(cx);
@@ -1747,7 +1747,8 @@ impl Render for NewWorktreeForm {
             .flex()
             .flex_col()
             .gap(px(12.))
-            .child(div().text_color(theme.secondary).child("Another checkout of the repo, on its own branch, so work there doesn't touch this one. A thread can work in as many as it needs."))
+            .text_size(px(text::BODY))
+            .child(div().text_size(px(text::FOOTNOTE)).line_height(px(17.)).text_color(theme.secondary).child("Another checkout of the repo, on its own branch, so work there doesn't touch this one. A thread can work in as many as it needs."))
             .child(field("Branch", Input::new(&self.branch).into_any_element()))
             .child(field("Starting from", Input::new(&self.base).into_any_element()))
             .child(div().pl(px(122.)).text_size(px(text::CAPTION)).text_color(theme.secondary).child("Used for a new branch. An existing branch is checked out as it is."))
@@ -1780,7 +1781,7 @@ impl Render for NewWorktreeForm {
                     .flex()
                     .justify_end()
                     .gap(px(8.))
-                    .child(Button::new("wt-cancel").label("Cancel").on_click(|_, window, cx| window.close_dialog(cx)))
+                    .child(Button::new("wt-cancel").outline().label("Cancel").on_click(|_, window, cx| window.close_dialog(cx)))
                     .child(Button::new("wt-create").primary().label("Create").loading(self.working).disabled(empty || self.working).on_click(cx.listener(|f, _, window, cx| f.create(window, cx)))),
             )
     }
@@ -1882,7 +1883,7 @@ impl Render for NewStackForm {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::get(cx);
         let trunk = self.trunk(cx);
-        let list_box = || div().id("list").flex_1().h(px(220.)).overflow_y_scroll().rounded(px(8.)).border_1().border_color(theme.separator).bg(theme.card).p(px(4.)).flex().flex_col();
+        let list_box = || div().id("list").flex_1().h(px(220.)).overflow_y_scroll().rounded(px(radius::MEDIUM + 1.)).border_1().border_color(theme.separator).bg(theme.card).p(px(4.)).flex().flex_col();
         let mut available = list_box();
         match &self.branches {
             None => available = available.child(div().p(px(8.)).text_color(theme.secondary).child("Reading branches…")),
@@ -1947,7 +1948,8 @@ impl Render for NewStackForm {
             .flex()
             .flex_col()
             .gap(px(12.))
-            .child(div().text_color(theme.secondary).child(format!("Existing branches, each a pull request on the one below it. Pick them bottom first: the first goes into {trunk}.")))
+            .text_size(px(text::BODY))
+            .child(div().text_size(px(text::FOOTNOTE)).line_height(px(17.)).text_color(theme.secondary).child(format!("Existing branches, each a pull request on the one below it. Pick them bottom first: the first goes into {trunk}.")))
             .child(div().flex().gap(px(12.)).child(available).child(chosen))
             .child(div().flex().items_center().gap(px(12.)).child(div().w(px(60.)).text_color(theme.secondary).child("Into")).child(div().flex_1().child(Input::new(&self.base))))
             .child(
@@ -1970,7 +1972,7 @@ impl Render for NewStackForm {
                     .flex()
                     .justify_end()
                     .gap(px(8.))
-                    .child(Button::new("stack-cancel").label("Cancel").on_click(|_, window, cx| window.close_dialog(cx)))
+                    .child(Button::new("stack-cancel").outline().label("Cancel").on_click(|_, window, cx| window.close_dialog(cx)))
                     .child(Button::new("stack-create").primary().label("Create Stack").loading(self.working).disabled(self.chosen.is_empty() || self.working || dirty || not_installed).on_click(cx.listener(|f, _, window, cx| f.create(window, cx)))),
             )
     }

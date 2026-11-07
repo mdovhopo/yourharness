@@ -727,7 +727,7 @@ impl MemoryPage {
             .child({
                 let page = cx.entity().downgrade();
                 let claude_files = self.claude_code_files(cx).len();
-                Button::new("memory-import").small().ghost().icon(icons::download()).when(!compact, |b| b.label("Import")).when(compact, |b| b.tooltip("Import")).dropdown_caret(true).dropdown_menu(move |mut menu, _, _| {
+                Button::new("memory-import").small().ghost().icon(icons::download()).when(!compact, |b| b.label("Import")).when(compact, |b| b.tooltip("Import")).dropdown_caret(!compact).dropdown_menu(move |mut menu, _, _| {
                     let (a, b, c) = (page.clone(), page.clone(), page.clone());
                     menu = menu
                         .item(PopupMenuItem::new("With the Importer…").icon(icons::sparkles()).on_click(move |_, window, cx| {
@@ -749,7 +749,7 @@ impl MemoryPage {
             })
             .child({
                 let page = cx.entity().downgrade();
-                Button::new("memory-export").small().ghost().icon(icons::upload()).when(!compact, |b| b.label("Export")).when(compact, |b| b.tooltip("Export")).dropdown_caret(true).dropdown_menu(move |menu, _, _| {
+                Button::new("memory-export").small().ghost().icon(icons::upload()).when(!compact, |b| b.label("Export")).when(compact, |b| b.tooltip("Export")).dropdown_caret(!compact).dropdown_menu(move |menu, _, _| {
                     let (a, b) = (page.clone(), page.clone());
                     menu.item(PopupMenuItem::new("As JSON…").on_click(move |_, _, cx| {
                         let _ = a.update(cx, |p, cx| p.export_dialog(false, cx));

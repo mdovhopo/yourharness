@@ -509,7 +509,7 @@ impl McpSheet {
             .flex()
             .flex_col()
             .gap(px(space::M))
-            .child(div().ml(px(-6.)).child(Button::new("mcp-back").small().ghost().icon(icons::chevron_left()).label("All Servers").on_click(cx.listener(|this, _, _, cx| {
+            .child(div().ml(px(-6.)).flex().child(Button::new("mcp-back").small().ghost().icon(icons::chevron_left()).label("All Servers").on_click(cx.listener(|this, _, _, cx| {
                 this.page = None;
                 cx.notify();
             }))))
