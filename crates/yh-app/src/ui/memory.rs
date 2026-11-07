@@ -135,8 +135,14 @@ pub struct MemoryPage {
     graph_bounds: std::rc::Rc<std::cell::Cell<gpui_kit::Bounds<gpui_kit::Pixels>>>,
     /// Add a step, under a task's steps.
     new_step: Entity<InputState>,
-    /// A narrow window: toolbar buttons as icons, a narrower list (from the last render).
+    /// The page's own width, measured where it's painted.
+    width: page_kit::PageWidth,
+    /// A narrow page: toolbar buttons as icons, a narrower list (from the last render).
     compact: bool,
+    /// Narrower still: tabs as icons, and the list or the memory, one at a time.
+    narrow: bool,
+    /// On a narrow page, the list shows rather than the selected memory.
+    narrow_list: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -146,7 +152,13 @@ impl MemoryPage {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search memories"));
         let title = cx.new(|cx| InputState::new(window, cx).placeholder("Title"));
         let description = cx.new(|cx| InputState::new(window, cx).placeholder("One line: when it matters"));
-        let body = cx.new(|cx| TextareaState::new(window, cx).placeholder("What to remember"));
+        // Grows with what it holds as the composer does, wrapped lines included, up to 20
+        // lines, then scrolls: a fixed Textarea clipped its second line in a narrow window.
+        let body = cx.new(|cx| {
+            let mut state = TextareaState::new(window, cx).placeholder("What to remember");
+            state.set_auto_grow(2, 20, cx);
+            state
+        });
         let new_step = cx.new(|cx| InputState::new(window, cx).placeholder("Add a step"));
         let subscriptions = vec![
             cx.subscribe_in(&new_step, window, |this, input, e: &InputEvent, window, cx| {
@@ -212,7 +224,10 @@ impl MemoryPage {
             graph: Graph::default(),
             graph_bounds: Default::default(),
             new_step,
+            width: Default::default(),
             compact: false,
+            narrow: false,
+            narrow_list: true,
             _subscriptions: subscriptions,
         };
         page.reload(cx);
@@ -339,6 +354,7 @@ impl MemoryPage {
 
     pub fn select(&mut self, id: &str, cx: &mut Context<Self>) {
         self.selection = Some(id.to_string());
+        self.narrow_list = false;
         self.pending_fill = self.selected().cloned();
         self.shown_version = None;
         cx.notify();
@@ -516,6 +532,7 @@ impl MemoryPage {
         self.tab = Tab::Memories;
         self.archived = false;
         self.selection = Some(m.id.clone());
+        self.narrow_list = false;
         // Listed once saved; until then it's only in the editors.
         self.pending_fill = Some(m);
         cx.notify();
@@ -631,6 +648,16 @@ fn section(title: &str, theme: &Theme) -> gpui_kit::Div {
     div().pt(px(space::S)).text_size(px(text::FOOTNOTE)).font_weight(FontWeight::SEMIBOLD).text_color(theme.secondary).child(title.to_string())
 }
 
+/// A graph label: a title cut to a few words' worth, so fewer of them collide.
+fn short_title(title: &str) -> String {
+    const MAX: usize = 32;
+    if title.chars().count() <= MAX {
+        return title.to_string();
+    }
+    let cut: String = title.chars().take(MAX - 1).collect();
+    format!("{}…", cut.trim_end())
+}
+
 /// A meta line's piece: an icon and words, both quiet.
 fn meta(icon: gpui_kit::component::Icon, label: impl Into<SharedString>, theme: &Theme) -> gpui_kit::Div {
     div().flex().items_center().gap(px(3.)).child(icon.size(px(11.)).text_color(theme.tertiary)).child(label.into())
@@ -657,6 +684,7 @@ impl MemoryPage {
                 });
             })
             .icon(icon)
+            .icon_only(self.narrow)
         };
         let segments = vec![
             tab("tab-memories", "Memories", icons::brain(), Tab::Memories),
@@ -847,7 +875,7 @@ impl MemoryPage {
                                     .child(div().min_w_0().font_weight(FontWeight::MEDIUM).text_color(theme.text).truncate().child(if m.title.is_empty() { "Untitled".to_string() } else { m.title.clone() }))
                                     .when(m.pinned, |d| d.child(icons::pin().size(px(11.)).text_color(theme.tertiary))),
                             )
-                            .when(!preview.is_empty(), |d| d.child(div().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).line_clamp(2).child(preview)))
+                            .when(!preview.is_empty(), |d| d.child(div().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).line_clamp(2).text_ellipsis().child(preview)))
                             .when(m.is_task(), |d| {
                                 let state = m.task_state.clone().unwrap_or_else(|| "active".into());
                                 let color = state_color(&state, theme);
@@ -896,12 +924,11 @@ impl MemoryPage {
             );
         }
         div()
-            .w(px(if self.compact { 240. } else { 300. }))
-            .flex_none()
+            .when(self.narrow, |d| d.flex_1().min_w_0())
+            .when(!self.narrow, |d| d.w(px(if self.compact { 240. } else { 300. })).flex_none().border_r_1())
             .h_full()
             .flex()
             .flex_col()
-            .border_r_1()
             .border_color(theme.separator)
             .child(
                 div()
@@ -975,6 +1002,12 @@ impl MemoryPage {
                     .flex()
                     .items_center()
                     .gap(px(6.))
+                    .when(self.narrow, |d| {
+                        d.child(div().ml(px(-8.)).child(crate::ui::thread_toolbar::icon_button("memory-back", gpui_kit::component::Icon::new(IconName::ChevronLeft), "All Memories", theme).on_click(cx.listener(|this, _, _, cx| {
+                            this.narrow_list = true;
+                            cx.notify();
+                        }))))
+                    })
                     .child(page_kit::dot(kind_color(&self.draft_kind, theme), 8.))
                     .child(div().ml(px(-4.)).child(kind_menu))
                     .when(pinned, |d| d.child(page_kit::quiet_chip("Pinned", theme)))
@@ -999,7 +1032,7 @@ impl MemoryPage {
             // The editors draw without a frame; their own inset is taken back so the text lines up.
             .child(div().ml(px(-10.)).child(Input::new(&self.title).appearance(false).text_size(px(text::LARGE_TITLE)).font_weight(FontWeight::SEMIBOLD)))
             .child(div().ml(px(-10.)).mt(px(-4.)).child(Input::new(&self.description).appearance(false).text_color(theme.secondary)))
-            .child(page_kit::card(theme).mt(px(space::XS)).px(px(space::M)).py(px(space::S + 2.)).child(Textarea::new(&self.body).appearance(false).max_h(px(420.))));
+            .child(page_kit::card(theme).mt(px(space::XS)).px(px(space::M)).py(px(space::S + 2.)).child(Textarea::new(&self.body).appearance(false)));
         if current.is_task() {
             let state = current.task_state.clone().unwrap_or_else(|| "active".into());
             let page = cx.entity().downgrade();
@@ -1493,7 +1526,7 @@ impl MemoryPage {
                         window.paint_path(p, line);
                     }
                 }
-                for (i, (color, r, title)) in dots.iter().enumerate() {
+                for (i, (color, r, _)) in dots.iter().enumerate() {
                     let (x, y) = at(points[i]);
                     let picked = Some(i) == selected;
                     let r = if picked { r + 3. } else { *r };
@@ -1505,11 +1538,42 @@ impl MemoryPage {
                         window.paint_quad(gpui_kit::fill(gpui_kit::Bounds::new(gpui_kit::point(px(x - inner), px(y - inner)), gpui_kit::size(px(inner * 2.), px(inner * 2.))), ring).corner_radii(px(inner)));
                     }
                     window.paint_quad(gpui_kit::fill(gpui_kit::Bounds::new(gpui_kit::point(px(x - r + if picked { 2. } else { 0. }), px(y - r + if picked { 2. } else { 0. })), gpui_kit::size(px((r - if picked { 2. } else { 0. }) * 2.), px((r - if picked { 2. } else { 0. }) * 2.))), *color).corner_radii(px(r)));
-                    // Titles of the read and the picked, small, beside their dots.
-                    if picked || dots.len() <= 40 {
-                        let run = gpui_kit::TextRun { len: title.len(), font: window.text_style().font(), color: label, background_color: None, underline: None, strikethrough: None };
-                        let shaped = window.text_system().shape_line(title.clone().into(), px(text::CAPTION), &[run], None);
-                        let _ = shaped.paint(gpui_kit::point(px(x + r + 5.), px(y - 7.)), px(14.), gpui_kit::TextAlign::Left, None, window, cx);
+                }
+                // Titles, small, beside their dots: the picked first, then the most read. Each
+                // takes the first side (right, left, below, above) where it covers no other
+                // title and no dot; where dots cluster, the rest are left out.
+                let mut order: Vec<usize> = (0..dots.len()).filter(|&i| Some(i) == selected || dots.len() <= 40).collect();
+                order.sort_by(|&a, &b| (Some(b) == selected).cmp(&(Some(a) == selected)).then(dots[b].1.total_cmp(&dots[a].1)));
+                let circles: Vec<(f32, f32, f32)> = dots.iter().enumerate().map(|(i, d)| {
+                    let (x, y) = at(points[i]);
+                    (x, y, d.1 + 2.)
+                }).collect();
+                let mut placed: Vec<gpui_kit::Bounds<gpui_kit::Pixels>> = vec![];
+                for i in order {
+                    let (x, y) = at(points[i]);
+                    let r = if Some(i) == selected { dots[i].1 + 3. } else { dots[i].1 };
+                    let title = short_title(&dots[i].2);
+                    if title.is_empty() {
+                        continue;
+                    }
+                    let run = gpui_kit::TextRun { len: title.len(), font: window.text_style().font(), color: label, background_color: None, underline: None, strikethrough: None };
+                    let shaped = window.text_system().shape_line(title.into(), px(text::CAPTION), &[run], None);
+                    let (tw, th) = (f32::from(shaped.width), 14.);
+                    let candidates = [(x + r + 5., y - th / 2.), (x - r - 5. - tw, y - th / 2.), (x - tw / 2., y + r + 3.), (x - tw / 2., y - r - 3. - th)];
+                    let fits = |rect: &gpui_kit::Bounds<gpui_kit::Pixels>| {
+                        let inside = rect.left() >= bounds.left() && rect.right() <= bounds.right() && rect.top() >= bounds.top() && rect.bottom() <= bounds.bottom();
+                        let (l, t, rr, b) = (f32::from(rect.left()), f32::from(rect.top()), f32::from(rect.right()), f32::from(rect.bottom()));
+                        let on_dot = circles.iter().enumerate().any(|(j, &(cx_, cy, cr))| {
+                            j != i && cx_ + cr > l && cx_ - cr < rr && cy + cr > t && cy - cr < b
+                        });
+                        inside && !on_dot && !placed.iter().any(|p| p.intersects(rect))
+                    };
+                    let rect_at = |(lx, ly): (f32, f32)| gpui_kit::Bounds::new(gpui_kit::point(px(lx), px(ly)), gpui_kit::size(px(tw), px(th)));
+                    let spot = candidates.iter().map(|&c| rect_at(c)).find(|rect| fits(rect)).or_else(|| (Some(i) == selected).then(|| rect_at(candidates[0])));
+                    if let Some(rect) = spot {
+                        // A little room around each, so neighbours don't touch.
+                        placed.push(gpui_kit::Bounds::new(rect.origin - gpui_kit::point(px(3.), px(1.)), rect.size + gpui_kit::size(px(6.), px(2.))));
+                        let _ = shaped.paint(rect.origin, px(th), gpui_kit::TextAlign::Left, None, window, cx);
                     }
                 }
             },
@@ -1656,7 +1720,7 @@ impl MemoryPage {
                         .flex_col()
                         .gap(px(6.))
                         .child(div().text_size(px(text::HEADLINE)).font_weight(FontWeight::SEMIBOLD).child(if on { "Two memories" } else { "Not in YourHarness yet" }))
-                        .child(div().text_color(theme.text).child(message))
+                        .when(!self.narrow, |d| d.child(div().text_color(theme.text).child(message)))
                         .child(
                             div()
                                 .pt(px(2.))
@@ -1681,7 +1745,7 @@ impl MemoryPage {
                                     })))
                                 }),
                         )
-                        .when(on, |d| d.child(div().text_size(px(text::CAPTION)).text_color(theme.secondary).child(detail))),
+                        .when(on && !self.compact, |d| d.child(div().text_size(px(text::CAPTION)).text_color(theme.secondary).child(detail))),
                 )
                 .into_any_element(),
         )
@@ -1726,17 +1790,25 @@ impl Render for MemoryPage {
         if let Some(m) = self.pending_fill.take() {
             self.fill(m, window, cx);
         }
-        self.compact = page_kit::is_compact(window);
+        // By the page's own width (measured at paint), not the window's: the sidebar's width
+        // and whether it shows change what's left.
+        self.compact = self.width.compact(window);
+        self.narrow = self.width.narrow(window);
         let theme = Theme::get(cx);
         let content = match self.tab {
-            Tab::Memories => div()
-                .flex_1()
-                .min_h_0()
-                .flex()
-                .flex_col()
-                .children(self.claude_nudge(&theme, cx))
-                .child(div().flex_1().min_h_0().flex().child(self.list(&theme, cx)).child(self.detail(&theme, cx)))
-                .into_any_element(),
+            Tab::Memories => {
+                // A narrow page shows the list or a memory, with a way back to the list.
+                let one = self.narrow && (self.narrow_list || self.selection.is_none());
+                let columns = div().flex_1().min_h_0().flex();
+                let columns = if !self.narrow {
+                    columns.child(self.list(&theme, cx)).child(self.detail(&theme, cx))
+                } else if one {
+                    columns.child(self.list(&theme, cx))
+                } else {
+                    columns.child(self.detail(&theme, cx))
+                };
+                div().flex_1().min_h_0().flex().flex_col().children(self.claude_nudge(&theme, cx)).child(columns).into_any_element()
+            }
             Tab::Tasks => div().flex_1().min_h_0().child(self.tasks(&theme, cx)).into_any_element(),
             Tab::Activity => div().flex_1().min_h_0().child(self.activity(&theme)).into_any_element(),
             Tab::Insights => div().flex_1().min_h_0().child(self.insights(&theme, cx)).into_any_element(),
@@ -1746,10 +1818,12 @@ impl Render for MemoryPage {
             .key_context("MemoryPage")
             .on_action(cx.listener(|this, _: &SaveMemory, _, cx| this.save(cx)))
             .size_full()
+            .relative()
             .flex()
             .flex_col()
             .child(self.header(&theme, cx))
             .child(content)
+            .child(self.width.probe(cx.entity().downgrade()))
     }
 }
 

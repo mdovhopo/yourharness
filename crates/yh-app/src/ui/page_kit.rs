@@ -12,10 +12,57 @@ pub fn is_dark(theme: &Theme) -> bool {
     theme.canvas.l < 0.5
 }
 
-/// A window too narrow for a page's toolbar with labels (beside the sidebar): buttons go to
-/// icons with tooltips, lists narrow.
-pub fn is_compact(window: &Window) -> bool {
-    window.viewport_size().width < gpui_kit::px(1180.)
+/// A page narrower than this has no room for its toolbar with labels: buttons go to icons
+/// with tooltips, lists narrow.
+pub const COMPACT_BELOW: f32 = 920.;
+/// Narrower still (a 640 pt window beside the sidebar): tabs as icons, one column at a time.
+pub const NARROW_BELOW: f32 = 640.;
+
+/// How wide a page is: what it measured at its last paint (`PageWidth::probe`), or before
+/// its first, the window less a sidebar.
+#[derive(Clone, Default)]
+pub struct PageWidth(std::rc::Rc<std::cell::Cell<f32>>);
+
+impl PageWidth {
+    pub fn get(&self, window: &Window) -> f32 {
+        match self.0.get() {
+            w if w > 0. => w,
+            _ => f32::from(window.viewport_size().width) - 260.,
+        }
+    }
+
+    pub fn compact(&self, window: &Window) -> bool {
+        self.get(window) < COMPACT_BELOW
+    }
+
+    pub fn narrow(&self, window: &Window) -> bool {
+        self.get(window) < NARROW_BELOW
+    }
+
+    /// Laid over the page (absolute, full size): reads its width where it's painted, and when
+    /// that crosses `COMPACT_BELOW` or `NARROW_BELOW` tells the page to draw again, after this
+    /// frame. Costs nothing else: no layout of its own, no redraw while the width stays in a band.
+    pub fn probe<V: 'static>(&self, view: gpui_kit::WeakEntity<V>) -> impl IntoElement {
+        let cell = self.0.clone();
+        let band = |w: f32| (w >= NARROW_BELOW) as u8 + (w >= COMPACT_BELOW) as u8;
+        gpui_kit::canvas(
+            move |bounds, _, cx| {
+                let w = f32::from(bounds.size.width);
+                let old = cell.replace(w);
+                if old <= 0. || band(old) != band(w) {
+                    let view = view.clone();
+                    cx.defer(move |cx| {
+                        let _ = view.update(cx, |_, cx| cx.notify());
+                    });
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+    }
 }
 
 /// A page's header: an icon in a tile, the large title and a subtitle line, the toolbar on the
@@ -77,17 +124,25 @@ pub struct Segment {
     label: SharedString,
     icon: Option<Icon>,
     badge: Option<SharedString>,
+    /// Drawn as its icon alone, the label as a tooltip (a narrow page).
+    icon_only: bool,
     selected: bool,
     on_click: OnClick,
 }
 
 impl Segment {
     pub fn new(id: impl Into<SharedString>, label: impl Into<SharedString>, selected: bool, on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self {
-        Segment { id: id.into(), label: label.into(), icon: None, badge: None, selected, on_click: Box::new(on_click) }
+        Segment { id: id.into(), label: label.into(), icon: None, badge: None, icon_only: false, selected, on_click: Box::new(on_click) }
     }
 
     pub fn icon(mut self, icon: Icon) -> Self {
         self.icon = Some(icon);
+        self
+    }
+
+    /// Its icon alone, the label in a tooltip, when `on` (and it has an icon).
+    pub fn icon_only(mut self, on: bool) -> Self {
+        self.icon_only = on && self.icon.is_some();
         self
     }
 
@@ -124,9 +179,14 @@ pub fn segmented(segments: Vec<Segment>, theme: &Theme) -> gpui_kit::Div {
             seg.border_color(gpui_kit::transparent_black()).text_color(theme.secondary).hover(|d| d.text_color(theme.text).bg(theme.hover))
         };
         let on_click = s.on_click;
+        let label = s.label;
         seg = seg
             .when_some(s.icon, |d, i| d.child(i.size(px(14.)).text_color(if selected { theme.accent } else { theme.secondary })))
-            .child(s.label)
+            .when(s.icon_only, |d| {
+                let tip = label.clone();
+                d.px(px(space::S + 2.)).tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
+            })
+            .when(!s.icon_only, |d| d.child(label))
             .when_some(s.badge, |d, b| d.child(div().text_size(px(text::CAPTION)).font_weight(FontWeight::MEDIUM).text_color(theme.tertiary).child(b)))
             .on_click(move |e, w, cx| on_click(e, w, cx));
         row = row.child(seg);
@@ -185,7 +245,7 @@ pub fn stat_tile(label: impl Into<SharedString>, value: impl Into<SharedString>,
         .gap(px(2.))
         .child(div().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).truncate().child(label.into()))
         .child(div().text_size(px(text::LARGE_TITLE)).line_height(px(28.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).truncate().child(value.into()))
-        .when_some(note, |d, n| d.child(div().text_size(px(text::CAPTION)).text_color(theme.secondary).line_clamp(2).child(n)))
+        .when_some(note, |d, n| d.child(div().text_size(px(text::CAPTION)).text_color(theme.secondary).line_clamp(2).text_ellipsis().child(n)))
 }
 
 /// What a page or tab shows with nothing in it: an icon, a title, a line or two, actions.

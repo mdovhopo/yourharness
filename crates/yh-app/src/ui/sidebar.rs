@@ -824,7 +824,7 @@ impl Sidebar {
                 .items_center()
                 .gap(px(6.))
                 .text_size(px(text::CAPTION))
-                .child(div().flex_1().min_w_0().text_color(theme.secondary).line_clamp(2).child(text))
+                .child(div().flex_1().min_w_0().text_color(theme.secondary).line_clamp(2).text_ellipsis().child(text))
                 .when_some(action, |d, (label, restart)| {
                     d.child(Button::new("update-action").xsmall().primary().label(label).on_click(move |_, _, cx| {
                         updater.update(cx, |u, cx| if restart { u.restart(cx) } else { u.download(cx) })

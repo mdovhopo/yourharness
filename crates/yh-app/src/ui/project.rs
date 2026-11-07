@@ -14,7 +14,8 @@ use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{Disableable, IconName, Sizable, WindowExt};
+use crate::ui::thread_toolbar::icon_button;
+use gpui_kit::component::{Disableable, Icon, IconName, Sizable, WindowExt};
 use gpui_kit::{div, prelude::*, px, App, ClipboardItem, Context, Entity, FontWeight, Hsla, SharedString, Task, WeakEntity, Window};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -48,7 +49,9 @@ pub struct ProjectPage {
     /// `YH_PROJECT_PROBE`: what to do once the repos have been read (see `run_probe`).
     probe: Option<String>,
     scroll: gpui_kit::ScrollHandle,
-    /// A narrow window (from the last render): the toolbar keeps to its buttons.
+    /// The page's own width, measured where it's painted.
+    width: page_kit::PageWidth,
+    /// A narrow page (from the last render): the toolbar keeps to its buttons.
     compact: bool,
     _poll: Option<Task<()>>,
 }
@@ -115,6 +118,7 @@ impl ProjectPage {
             show_uncloned: false,
             probe: std::env::var("YH_PROJECT_PROBE").ok(),
             scroll: gpui_kit::ScrollHandle::new(),
+            width: Default::default(),
             compact: false,
             _poll: None,
         };
@@ -701,19 +705,15 @@ impl ProjectPage {
             .flex()
             .items_center()
             .gap(px(2.))
-            .when_some(self.activity.clone(), |d, a| d.child(div().mr(px(space::S)).max_w(px(300.)).text_size(px(text::FOOTNOTE)).text_color(theme.secondary).line_clamp(2).child(a)))
+            .when_some(self.activity.clone(), |d, a| d.child(div().mr(px(space::S)).max_w(px(300.)).text_size(px(text::FOOTNOTE)).text_color(theme.secondary).line_clamp(2).text_ellipsis().child(a)))
             .when_some(updated.filter(|_| !self.compact), |d, u| d.child(div().mr(px(space::XS)).flex_none().text_size(px(text::CAPTION)).text_color(theme.tertiary).child(u)))
             .child(
-                Button::new("project-refresh")
-                    .small()
-                    .ghost()
-                    .icon(IconName::RefreshCw)
+                icon_button("project-refresh", Icon::new(IconName::RefreshCw), "Refresh repos and pull requests", theme)
                     .loading(self.refreshing)
                     .disabled(self.refreshing)
-                    .tooltip("Refresh repos and pull requests")
                     .on_click(cx.listener(|p, _, _, cx| p.refresh(true, cx))),
             )
-            .child(Button::new("project-finder").small().ghost().icon(IconName::FolderOpen).tooltip("Show in Finder").on_click(move |_, _, cx| cx.reveal_path(Path::new(&p2))))
+            .child(icon_button("project-finder", Icon::new(IconName::FolderOpen), "Show in Finder", theme).on_click(move |_, _, cx| cx.reveal_path(Path::new(&p2))))
             .child(div().ml(px(space::XS)).child(Button::new("project-new-thread").small().primary().label("New Thread").icon(IconName::Plus).on_click(cx.listener(|p, _, _, cx| p.new_thread_in(None, cx)))))
             .into_any_element();
         let icon = if workspace_kind { gpui_kit::component::Icon::new(IconName::LayoutDashboard) } else { icons::folder_git_2() };
@@ -724,6 +724,11 @@ impl ProjectPage {
                 menu.item(PopupMenuItem::new("Show in Finder").icon(IconName::Folder).on_click(move |_, _, cx| cx.reveal_path(Path::new(&p))))
             })
             .child(page_kit::page_header(icon, name, div().truncate().child(subtitle).into_any_element(), toolbar, Some(tabs), theme))
+    }
+
+    /// One repo (or none read yet): PR rows needn't say which repo.
+    fn single_repo(&self) -> bool {
+        self.core.as_ref().is_none_or(|c| c.repos().len() <= 1)
     }
 
     /// A PR's row: its graph slice (in a stack), state, title, branches, what blocks it.
@@ -826,7 +831,11 @@ impl ProjectPage {
                             .gap(px(space::S + 2.))
                             .text_size(px(text::CAPTION))
                             .text_color(theme.secondary)
-                            .child(div().flex_none().child(format!("{} #{}", pr.link.path.rsplit('/').next().unwrap_or(&pr.link.path), pr.link.number)))
+                            .child(div().flex_none().child(if self.single_repo() {
+                                format!("#{}", pr.link.number)
+                            } else {
+                                format!("{} #{}", pr.link.path.rsplit('/').next().unwrap_or(&pr.link.path), pr.link.number)
+                            }))
                             .child(
                                 div()
                                     .min_w_0()
@@ -903,7 +912,7 @@ impl ProjectPage {
             let top_checkout = clone.as_ref().and_then(|r| branches.last().and_then(|b| core.checkout_on_any_of(r, std::slice::from_ref(b))));
             let any_checkout = clone.as_ref().and_then(|r| core.checkout_on_any_of(r, &all.iter().map(|p| p.head.clone()).collect::<Vec<_>>()));
             let page = cx.entity().downgrade();
-            actions = actions.child(Button::new(SharedString::from(format!("more-{sid}"))).small().ghost().icon(IconName::Ellipsis).tooltip("More for this stack").dropdown_menu(move |menu, _, _| {
+            actions = actions.child(icon_button(SharedString::from(format!("more-{sid}")), Icon::new(IconName::Ellipsis), "More for this stack", theme).dropdown_menu(move |menu, _, _| {
                 let (p1, p2) = (page.clone(), page.clone());
                 let (t, a) = (top_checkout.clone(), any_checkout.clone());
                 let (t2, a2) = (t.clone(), a.clone());
@@ -1417,7 +1426,7 @@ impl ProjectPage {
             .when(status.is_none() && refreshing, |d| d.child(div().text_size(px(text::CAPTION)).text_color(theme.secondary).child("…")))
             .when(prs > 0, |d| d.child(chip(&format!("{prs} PR{}", if prs == 1 { "" } else { "s" }), theme.secondary)))
             .when_some(web.zip(forge_name), |d, (w, f)| {
-                d.child(div().invisible().group_hover("repo-row", |s| s.visible()).child(Button::new(SharedString::from(format!("web-{id}"))).xsmall().ghost().icon(IconName::ExternalLink).tooltip(format!("Open on {f}")).on_click(move |_, _, cx| cx.open_url(&w))))
+                d.child(div().invisible().group_hover("repo-row", |s| s.visible()).child(icon_button(SharedString::from(format!("web-{id}")), Icon::new(IconName::ExternalLink), format!("Open on {f}"), theme).xsmall().on_click(move |_, _, cx| cx.open_url(&w))))
             });
         let mut card = div().flex().flex_col().rounded(px(radius::LARGE)).overflow_hidden().bg(theme.card).border_1().border_color(theme.separator).child(header);
         if open {
@@ -1571,12 +1580,9 @@ impl ProjectPage {
             .child(
                 // Always there when it's safe to remove; on hover otherwise.
                 div().when(!safe, |d| d.invisible().group_hover(group, |s| s.visible())).child(
-                    Button::new(SharedString::from(format!("rm-wt-{}", wt.path)))
+                    icon_button(SharedString::from(format!("rm-wt-{}", wt.path)), icons::trash(), remove_tip, theme)
                         .xsmall()
-                        .ghost()
-                        .icon(icons::trash())
                         .disabled(wt.is_locked)
-                        .tooltip(remove_tip)
                         .on_click(cx.listener(move |p, _, window, cx| p.request_removal(w1.clone(), r1.clone(), window, cx))),
                 ),
             )
@@ -1615,7 +1621,7 @@ impl Render for ProjectPage {
                 cx.defer_in(window, move |p, window, cx| p.run_probe(probe, window, cx));
             }
         }
-        self.compact = page_kit::is_compact(window);
+        self.compact = self.width.compact(window);
         let theme = Theme::get(cx);
         let plain = self.core.as_ref().and_then(|c| c.layout.as_ref()).is_some_and(|l| l.kind == LayoutKind::Plain);
         let body = if plain {
@@ -1623,12 +1629,15 @@ impl Render for ProjectPage {
         } else {
             div().flex().flex_col().child(self.pulls_section(&theme, cx)).child(self.repos_section(&theme, cx)).into_any_element()
         };
+        let pad = if self.width.narrow(window) { space::L } else { 32. };
         div()
             .size_full()
+            .relative()
             .flex()
             .flex_col()
             .child(self.header(&theme, cx))
-            .child(div().id("project-body").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.scroll).child(div().max_w(px(880.)).w_full().mx_auto().px(px(32.)).py(px(20.)).child(body)))
+            .child(div().id("project-body").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.scroll).child(div().max_w(px(880.)).w_full().mx_auto().px(px(pad)).py(px(20.)).child(body)))
+            .child(self.width.probe(cx.entity().downgrade()))
     }
 }
 
@@ -1928,15 +1937,15 @@ impl Render for NewStackForm {
                     .py(px(2.))
                     .child(div().w(px(16.)).text_size(px(text::CAPTION)).text_color(theme.secondary).child((i + 1).to_string()))
                     .child(div().flex_1().min_w_0().truncate().text_size(px(text::FOOTNOTE)).font_family(MONO).child(b.clone()))
-                    .child(Button::new(SharedString::from(format!("up-{i}"))).xsmall().ghost().icon(IconName::ChevronUp).disabled(i + 1 == n).tooltip("Higher in the stack").on_click(cx.listener(move |f, _, _, cx| {
+                    .child(icon_button(SharedString::from(format!("up-{i}")), Icon::new(IconName::ChevronUp), "Higher in the stack", &theme).xsmall().disabled(i + 1 == n).on_click(cx.listener(move |f, _, _, cx| {
                         f.chosen.swap(i, i + 1);
                         cx.notify();
                     })))
-                    .child(Button::new(SharedString::from(format!("down-{i}"))).xsmall().ghost().icon(IconName::ChevronDown).disabled(i == 0).tooltip("Lower in the stack").on_click(cx.listener(move |f, _, _, cx| {
+                    .child(icon_button(SharedString::from(format!("down-{i}")), Icon::new(IconName::ChevronDown), "Lower in the stack", &theme).xsmall().disabled(i == 0).on_click(cx.listener(move |f, _, _, cx| {
                         f.chosen.swap(i, i - 1);
                         cx.notify();
                     })))
-                    .child(Button::new(SharedString::from(format!("rm-{i}"))).xsmall().ghost().icon(IconName::Minus).tooltip("Remove").on_click(cx.listener(move |f, _, _, cx| {
+                    .child(icon_button(SharedString::from(format!("rm-{i}")), Icon::new(IconName::Minus), "Remove", &theme).xsmall().on_click(cx.listener(move |f, _, _, cx| {
                         f.chosen.remove(i);
                         cx.notify();
                     }))),

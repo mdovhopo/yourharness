@@ -35,11 +35,35 @@ const KEPT_TRANSCRIPTS: usize = 6;
 const SIDEBAR_DEFAULT: f32 = 260.;
 const SIDEBAR_MIN: f32 = 200.;
 const SIDEBAR_MAX: f32 = 440.;
+/// The middle column (a thread or a page) asks for this much: below it the sidebar narrows
+/// to its minimum, then the right sidebar narrows to `INSPECTOR_MIN`.
+const MAIN_MIN: f32 = 360.;
+/// Below this even then, the left sidebar folds away (not saved: it comes back when there's
+/// room, or when Show Sidebar closes the right sidebar to make some).
+const MAIN_FOLD: f32 = 300.;
+const INSPECTOR_MIN: f32 = 320.;
+
+/// The two sidebars' widths in a window this wide: (left, right), 0 when not shown.
+fn column_widths(window: f32, left: f32, right: f32) -> (f32, f32) {
+    let (mut left, mut right) = (left, right);
+    if left > 0. && window - left - right < MAIN_MIN {
+        left = (window - right - MAIN_MIN).max(SIDEBAR_MIN).min(left);
+        if window - left - right < MAIN_FOLD {
+            left = 0.;
+        }
+    }
+    if right > 0. && window - left - right < MAIN_MIN {
+        right = (window - left - MAIN_MIN).max(INSPECTOR_MIN).min(right);
+    }
+    (left, right)
+}
 
 pub struct RootView {
     /// The left sidebar: hidden with ⌃⌘S (`sidebarHidden`), and its width while resizing.
     sidebar_hidden: bool,
     sidebar_width: f32,
+    /// Folded away for want of room at the last render (`column_widths`), though not hidden.
+    sidebar_folded: bool,
     resizing_sidebar: bool,
     save_frame: Option<gpui_kit::Task<()>>,
     pub workspace: Entity<Workspace>,
@@ -121,7 +145,7 @@ impl RootView {
             )
         };
         let working = cx.new(|cx| crate::ui::working::WorkingTimer::new(workspace.clone(), cx));
-        RootView { sidebar_hidden, sidebar_width, resizing_sidebar: false, save_frame: None, workspace, sidebar, composer, find, spotlight, resume, inspector, mcp, jobs, deck: vec![], memory: None, project: None, usage: None, tasks: vec![], tasks_for: None, focus: cx.focus_handle(), working, _subscriptions: subscriptions }
+        RootView { sidebar_hidden, sidebar_width, sidebar_folded: false, resizing_sidebar: false, save_frame: None, workspace, sidebar, composer, find, spotlight, resume, inspector, mcp, jobs, deck: vec![], memory: None, project: None, usage: None, tasks: vec![], tasks_for: None, focus: cx.focus_handle(), working, _subscriptions: subscriptions }
     }
 
     fn show(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -486,7 +510,7 @@ impl RootView {
             .items_center()
             .justify_center()
             .pb(px(40.))
-            .when(self.sidebar_hidden, |d| {
+            .when(self.sidebar_hidden || self.sidebar_folded, |d| {
                 d.child(
                     div().absolute().top(px(8.)).left(px(84.)).child(
                         crate::ui::thread_toolbar::icon_button("show-sidebar-empty", Icon::new(IconName::PanelLeft), "Show Sidebar (⌃⌘S)", theme)
@@ -534,7 +558,7 @@ impl Focusable for RootView {
 }
 
 impl Render for RootView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::get(cx);
         let project_page = match &self.workspace.read(cx).page {
             Some(crate::state::workspace::Page::Project(p)) => self.project.clone().filter(|e| e.read(cx).project == *p),
@@ -553,6 +577,16 @@ impl Render for RootView {
             crate::browser::Browsers::show(None);
         }
         let tasks = if selected.is_some() { self.tasks.clone() } else { vec![] };
+        // What each column gets in this window: a narrow one squeezes the sidebars before the
+        // thread or page, and folds the left one away last.
+        let inspector_open = selected.is_some() && self.workspace.read(cx).shows_inspector;
+        let (left_w, right_w) = column_widths(
+            f32::from(window.viewport_size().width),
+            if self.sidebar_hidden { 0. } else { self.sidebar_width },
+            if inspector_open { crate::ui::inspector::WIDTH } else { 0. },
+        );
+        self.sidebar_folded = !self.sidebar_hidden && left_w == 0.;
+        let sidebar_shown = left_w > 0.;
         let start = selected.as_ref().and_then(|t| start_prompt(&self.workspace.read(cx), &t.read(cx)));
         div()
             .id("root")
@@ -580,6 +614,11 @@ impl Render for RootView {
                 })
             }))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
+                // Folded for want of room: the right sidebar makes room for it.
+                if this.sidebar_folded {
+                    this.workspace.update(cx, |ws, cx| ws.set_shows_inspector(false, cx));
+                    return cx.notify();
+                }
                 this.sidebar_hidden = !this.sidebar_hidden;
                 this.workspace.read(cx).library.set_setting("sidebarHidden", &serde_json::Value::Bool(this.sidebar_hidden));
                 cx.notify();
@@ -634,8 +673,8 @@ impl Render for RootView {
             .line_height(px(19.5))
             .text_color(theme.text)
             .bg(theme.canvas)
-            .when(!self.sidebar_hidden, |d| {
-                let width = self.sidebar_width;
+            .when(sidebar_shown, |d| {
+                let width = left_w;
                 d.child(AnyView::from(self.sidebar.clone()).cached(StyleRefinement::default().h_full().w(px(width)).flex_none())).child(
                     // The sidebar's edge: drag to resize, double-click for the default width.
                     div()
@@ -674,7 +713,7 @@ impl Render for RootView {
                                 .items_center()
                                 .gap(px(space::M))
                                 .px(px(space::XL - 4.))
-                                .when(self.sidebar_hidden, |d| d.pl(px(84.)).child(
+                                .when(!sidebar_shown, |d| d.pl(px(84.)).child(
                                     crate::ui::thread_toolbar::icon_button("show-sidebar", gpui_kit::component::Icon::new(gpui_kit::component::IconName::PanelLeft), "Show Sidebar (⌃⌘S)", &theme)
                                         .on_click(cx.listener(|this, _, window, cx| this.on_toggle_sidebar(window, cx))),
                                 ))
@@ -763,17 +802,16 @@ impl Render for RootView {
                     })
                     .when(selected.is_none() && self.workspace.read(cx).page.is_none(), |d| d.child(self.empty_state(&theme, cx))),
             )
-            .when(selected.is_some() && self.workspace.read(cx).shows_inspector, |d| {
+            .when(inspector_open, |d| {
                 // Cached: it redraws when its tab's data changes, not with the transcript.
-                d.child(AnyView::from(self.inspector.clone()).cached(StyleRefinement::default().h_full().w(px(crate::ui::inspector::WIDTH)).flex_none()))
+                d.child(AnyView::from(self.inspector.clone()).cached(StyleRefinement::default().h_full().w(px(right_w)).flex_none()))
             })
             .when_some(self.workspace.read(cx).undo_notice().map(str::to_string), |d, message| {
                 // What the last thread action did, with a way back.
                 let ws = self.workspace.clone();
                 // Centred over the content just under its header, where it covers neither the
                 // sidebar's footer nor the composer.
-                let left = if self.sidebar_hidden { 0. } else { self.sidebar_width };
-                let right = if selected.is_some() && self.workspace.read(cx).shows_inspector { crate::ui::inspector::WIDTH } else { 0. };
+                let (left, right) = (left_w, right_w);
                 d.child(
                     div().absolute().top(px(44. + space::M)).left(px(left)).right(px(right)).flex().justify_center().child(
                         div()
@@ -863,4 +901,23 @@ fn start_prompt(ws: &crate::state::workspace::Workspace, t: &crate::state::threa
         _ => folder,
     };
     Some((headline, folder))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn narrow_windows_squeeze_the_sidebars_first() {
+        // Room for everything: nothing changes.
+        assert_eq!(column_widths(1728., 260., 380.), (260., 380.));
+        // The narrowest window, sidebar only: the thread keeps 380.
+        assert_eq!(column_widths(640., 260., 0.), (260., 0.));
+        // A bit short: the sidebar narrows, toward its minimum.
+        assert_eq!(column_widths(960., 260., 380.), (220., 380.));
+        // The narrowest window with the right sidebar: the left one folds, the right narrows.
+        assert_eq!(column_widths(640., 260., 380.), (0., 320.));
+        // A hidden sidebar stays hidden.
+        assert_eq!(column_widths(900., 0., 380.), (0., 380.));
+    }
 }
