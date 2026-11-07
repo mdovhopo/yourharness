@@ -53,6 +53,8 @@ pub struct ProjectPage {
     width: page_kit::PageWidth,
     /// A narrow page (from the last render): the toolbar keeps to its buttons.
     compact: bool,
+    /// Narrower still: PR rows leave out when they changed, for their branches' room.
+    narrow: bool,
     _poll: Option<Task<()>>,
 }
 
@@ -120,6 +122,7 @@ impl ProjectPage {
             scroll: gpui_kit::ScrollHandle::new(),
             width: Default::default(),
             compact: false,
+            narrow: false,
             _poll: None,
         };
         page.refresh(true, cx);
@@ -850,7 +853,7 @@ impl ProjectPage {
                             .when_some(review, |d, (i, t, c)| d.child(status(i, c, t, theme)))
                             .when_some(checks, |d, (i, t, c)| d.child(status(i, c, t, theme)))
                             .child(div().flex_1())
-                            .child(div().flex_none().text_color(theme.tertiary).child(age(pr.updated_at.as_deref()))),
+                            .when(!self.narrow, |d| d.child(div().flex_none().text_color(theme.tertiary).child(age(pr.updated_at.as_deref())))),
                     ),
             )
             .into_any_element()
@@ -1622,6 +1625,7 @@ impl Render for ProjectPage {
             }
         }
         self.compact = self.width.compact(window);
+        self.narrow = self.width.narrow(window);
         let theme = Theme::get(cx);
         let plain = self.core.as_ref().and_then(|c| c.layout.as_ref()).is_some_and(|l| l.kind == LayoutKind::Plain);
         let body = if plain {
@@ -1629,7 +1633,7 @@ impl Render for ProjectPage {
         } else {
             div().flex().flex_col().child(self.pulls_section(&theme, cx)).child(self.repos_section(&theme, cx)).into_any_element()
         };
-        let pad = if self.width.narrow(window) { space::L } else { 32. };
+        let pad = if self.narrow { space::L } else { 32. };
         div()
             .size_full()
             .relative()

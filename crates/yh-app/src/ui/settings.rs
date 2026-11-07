@@ -674,7 +674,7 @@ fn row_owned(label: String, control: impl IntoElement) -> AnyElement {
 }
 
 impl Render for SettingsView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::get(cx);
         // A segmented control, each tab with its icon.
         let current = self.tab;
@@ -726,7 +726,8 @@ impl Render for SettingsView {
                         .child(tab_button("settings-tab-releases", icons::download(), "Releases", Tab::Releases, cx)),
                 ),
             )
-            .child(div().id("settings-body").max_h(px(560.)).overflow_y_scroll().pr(px(space::XS)).pb(px(space::XS)).child(body))
+            // Short windows keep the whole sheet on screen: the body scrolls in what is left.
+            .child(div().id("settings-body").max_h(px((f32::from(window.viewport_size().height) - 200.).clamp(160., 560.))).overflow_y_scroll().pr(px(space::XS)).pb(px(space::XS)).child(body))
     }
 }
 
@@ -737,5 +738,5 @@ pub fn open(workspace: Entity<Workspace>, window: &mut Window, cx: &mut App) {
 
 pub fn open_on(workspace: Entity<Workspace>, tab: Tab, window: &mut Window, cx: &mut App) {
     let view = cx.new(|cx| SettingsView::new(workspace, tab, window, cx));
-    window.open_dialog(cx, move |dialog, _, _| dialog.title("Settings").w(px(620.)).child(view.clone()));
+    window.open_dialog(cx, move |dialog, window, _| dialog.title("Settings").w(px(620f32.min(f32::from(window.viewport_size().width) - 24.))).child(view.clone()));
 }

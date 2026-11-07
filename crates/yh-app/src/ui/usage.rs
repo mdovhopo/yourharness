@@ -17,6 +17,8 @@ use std::sync::Arc;
 use yh_core::usage::{civil, display_name, Report, UsageStore};
 
 const RANGES: [(&str, usize); 5] = [("Week", 7), ("Month", 30), ("Quarter", 90), ("Half Year", 182), ("Year", 365)];
+/// The ranges' labels on a narrow page, as Health and Stocks write them.
+const SHORT_RANGES: [&str; 5] = ["W", "M", "3M", "6M", "Y"];
 
 /// The categorical palette (light, dark), in the order checked for color blindness (the
 /// Swift app's; validated with the dataviz script against both surfaces). Past seven
@@ -36,6 +38,8 @@ pub struct UsagePage {
     /// The chart's place, from its last paint: where the pointer is in days.
     chart: Rc<Cell<Bounds<Pixels>>>,
     probe_started: bool,
+    /// The page's own width, measured where it's painted.
+    width: page_kit::PageWidth,
 }
 
 impl UsagePage {
@@ -58,6 +62,7 @@ impl UsagePage {
             hovered: std::env::var("YH_USAGE_HOVER").ok().and_then(|d| d.parse::<usize>().ok()).map(|ago| days.saturating_sub(ago + 1)),
             chart: Rc::new(Cell::new(Bounds::default())),
             probe_started: false,
+            width: Default::default(),
         };
         page.refresh(cx);
         page
@@ -222,11 +227,14 @@ impl Render for UsagePage {
         let dark = page_kit::is_dark(&theme);
         let color = |c: (u32, u32)| -> Hsla { rgb(if dark { c.1 } else { c.0 }).into() };
         let page = cx.entity().downgrade();
+        // A narrow page: short range labels, the metric as icons, so the tabs fit one row.
+        let narrow = self.width.narrow(window);
         let ranges: Vec<Segment> = RANGES
             .into_iter()
-            .map(|(label, days)| {
+            .zip(SHORT_RANGES)
+            .map(|((label, days), short)| {
                 let page = page.clone();
-                Segment::new(SharedString::from(format!("range-{days}")), label, self.days == days, move |_, _, cx| {
+                Segment::new(SharedString::from(format!("range-{days}")), if narrow { short } else { label }, self.days == days, move |_, _, cx| {
                     let _ = page.update(cx, |p, cx| p.set_range(days, cx));
                 })
             })
@@ -240,6 +248,7 @@ impl Render for UsagePage {
                 });
             })
             .icon(icon)
+            .icon_only(narrow)
         };
         let tabs = div()
             .flex_1()
@@ -258,9 +267,11 @@ impl Render for UsagePage {
         let Some(report) = &self.report else {
             return div()
                 .size_full()
+                .relative()
                 .flex()
                 .flex_col()
                 .child(header)
+                .child(self.width.probe(page.clone()))
                 .child(div().flex_1().child(page_kit::empty_state(icons::chart_column(), "Reading Claude Code's History", "Every session's replies, here or in a terminal, added up by day and by model.", None, &theme)))
                 .into_any_element();
         };
@@ -492,16 +503,18 @@ impl Render for UsagePage {
             .child(page_kit::stat_tile("Replies", t.messages.to_string(), Some(format!("{} a day on days used", self.format(self.value(t) / active_days as f64))), &theme));
         div()
             .size_full()
+            .relative()
             .flex()
             .flex_col()
             .child(header)
+            .child(self.width.probe(page.clone()))
             .child(
                 div().id("usage-body").flex_1().min_h_0().overflow_y_scroll().child(
                     div()
                         .max_w(px(1040.))
                         .w_full()
                         .mx_auto()
-                        .px(px(space::XL))
+                        .px(px(if narrow { space::L } else { space::XL }))
                         .pt(px(space::L + space::XS))
                         .pb(px(space::XL))
                         .flex()
