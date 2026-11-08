@@ -363,7 +363,7 @@ impl Browsers {
     }
 
     /// Lays the shown thread's current tab over the panel, and a popped-out thread's over its
-    /// own window; every other tab hidden. A tab moves to the view it shows in.
+    /// own window; every other tab parked off screen. A tab moves to the view it shows in.
     pub fn place(&self) {
         for (thread, session) in &self.sessions {
             let current = session.selected_tab().map(|t| t.id);
@@ -373,10 +373,12 @@ impl Browsers {
             };
             let here = here.filter(|_| !self.covered);
             for tab in &session.tabs {
-                if host != 0 {
+                // Shown, over its view; else parked off screen (`WebView::set_frame(None)`).
+                let bounds = if Some(tab.id) == current { here } else { None };
+                if host != 0 && bounds.is_some() {
                     tab.web.move_to(host as cocoa::base::id);
                 }
-                tab.web.set_frame(if Some(tab.id) == current { here } else { None });
+                tab.web.set_frame(bounds);
             }
         }
     }

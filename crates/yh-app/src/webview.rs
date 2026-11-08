@@ -478,6 +478,71 @@ pub struct WebView {
     /// and snapshots never see it. Made on first use.
     overlay: std::cell::Cell<id>,
     activity: std::cell::Cell<u64>,
+    /// In the parking window (`parking_view`), off screen, rather than over a panel.
+    parked: std::cell::Cell<bool>,
+}
+
+/// A parked page is drawn at half its CSS size, as the Swift app parked it.
+const PARKED_SCALE: f64 = 0.5;
+
+/// Where pages wait while no panel shows them (the Swift app's `BrowserParking`): the content
+/// view of a borderless, non-activating panel far off screen that never takes focus or the
+/// mouse, stays out of the Window menu, Mission Control, Exposé and ⌘` cycling, and stays
+/// ordered in, so WebKit keeps laying pages out, running their timers and animation frames
+/// and drawing screenshots (its occlusion detection is off for every page). Made on first use.
+fn parking_view() -> id {
+    use objc::declare::ClassDecl;
+    use objc::runtime::{Object, Sel};
+    static VIEW: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    const ORIGIN: NSPoint = NSPoint { x: -30_000., y: -30_000. };
+    *VIEW.get_or_init(|| unsafe {
+        // AppKit brings windows back onto a screen when screens change (going full screen):
+        // this one always goes back where nothing can see it.
+        let mut decl = ClassDecl::new("YHParkingPanel", class!(NSPanel)).expect("YHParkingPanel");
+        extern "C" fn constrain(_: &Object, _: Sel, rect: NSRect, _: id) -> NSRect {
+            NSRect::new(ORIGIN, rect.size)
+        }
+        extern "C" fn set_frame(this: &Object, _: Sel, rect: NSRect, display: objc::runtime::BOOL) {
+            unsafe {
+                let _: () = msg_send![super(this, class!(NSPanel)), setFrame: NSRect::new(ORIGIN, rect.size) display: display];
+            }
+        }
+        extern "C" fn set_origin(this: &Object, _: Sel, _: NSPoint) {
+            unsafe {
+                let _: () = msg_send![super(this, class!(NSPanel)), setFrameOrigin: ORIGIN];
+            }
+        }
+        extern "C" fn never(_: &Object, _: Sel) -> objc::runtime::BOOL {
+            NO
+        }
+        decl.add_method(sel!(constrainFrameRect:toScreen:), constrain as extern "C" fn(&Object, Sel, NSRect, id) -> NSRect);
+        decl.add_method(sel!(setFrame:display:), set_frame as extern "C" fn(&Object, Sel, NSRect, objc::runtime::BOOL));
+        decl.add_method(sel!(setFrameOrigin:), set_origin as extern "C" fn(&Object, Sel, NSPoint));
+        decl.add_method(sel!(canBecomeKeyWindow), never as extern "C" fn(&Object, Sel) -> objc::runtime::BOOL);
+        decl.add_method(sel!(canBecomeMainWindow), never as extern "C" fn(&Object, Sel) -> objc::runtime::BOOL);
+        let cls = decl.register();
+        let panel: id = msg_send![cls, alloc];
+        // NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel; buffered.
+        let panel: id = msg_send![panel, initWithContentRect: NSRect::new(ORIGIN, NSSize::new(2600., 2000.)) styleMask: 1usize << 7 backing: 2usize defer: NO];
+        let _: () = msg_send![panel, setTitle: ns_string("YourHarness Parked Pages")];
+        // Panels hide when the app goes to the background; this one's pages must not.
+        let _: () = msg_send![panel, setHidesOnDeactivate: NO];
+        let _: () = msg_send![panel, setReleasedWhenClosed: NO];
+        let _: () = msg_send![panel, setIgnoresMouseEvents: YES];
+        let _: () = msg_send![panel, setHasShadow: NO];
+        let _: () = msg_send![panel, setExcludedFromWindowsMenu: YES];
+        let _: () = msg_send![panel, setCanHide: NO];
+        // Transient | Stationary | IgnoresCycle | FullScreenNone: not in Mission Control or ⌘`.
+        let behavior: usize = (1 << 3) | (1 << 4) | (1 << 6) | (1 << 9);
+        let _: () = msg_send![panel, setCollectionBehavior: behavior];
+        // NSWindowAnimationBehaviorNone.
+        let _: () = msg_send![panel, setAnimationBehavior: 2isize];
+        let content: id = msg_send![class!(NSView), alloc];
+        let content: id = msg_send![content, initWithFrame: NSRect::new(NSPoint::new(0., 0.), NSSize::new(2600., 2000.))];
+        let _: () = msg_send![panel, setContentView: content];
+        let _: () = msg_send![panel, orderFrontRegardless];
+        content as usize
+    }) as id
 }
 
 fn yes_number() -> id {
@@ -595,6 +660,7 @@ impl WebView {
                 bounds: Default::default(),
                 overlay: std::cell::Cell::new(nil),
                 activity: Default::default(),
+                parked: Default::default(),
             };
             web.lay_out(LAPTOP.0, LAPTOP.1, LAPTOP.0, LAPTOP.1);
             web
@@ -614,7 +680,8 @@ impl WebView {
             };
             let hidden: bool = msg_send![self.page, isHidden];
             let frame: NSRect = msg_send![self.page, frame];
-            format!("in window \"{title}\" {} at {:.0},{:.0} {:.0}x{:.0}", if hidden { "hidden" } else { "shown" }, frame.origin.x, frame.origin.y, frame.size.width, frame.size.height)
+            let state = if self.parked.get() { "parked, hidden off screen," } else if hidden { "hidden" } else { "shown" };
+            format!("in window \"{title}\" {state} at {:.0},{:.0} {:.0}x{:.0}", frame.origin.x, frame.origin.y, frame.size.width, frame.size.height)
         }
     }
 
@@ -640,13 +707,26 @@ impl WebView {
         self.bounds.set(bounds);
         unsafe {
             let Some((x, y, w, h)) = bounds else {
-                let _: () = msg_send![self.page, setHidden: YES];
-                // Hidden, it still has its viewport's size: a screenshot needs no panel.
+                // Parked: off screen in a window of its own, where WebKit keeps laying it out,
+                // running its timers and animation frames and drawing screenshots (hidden in
+                // the main window, it got no frames, and every action waited on them). It keeps
+                // its viewport's size: a screenshot needs no panel.
                 let (cw, ch) = self.viewport.get().unwrap_or(self.size());
                 let ch = self.full_height.get().unwrap_or(ch);
-                self.lay_out(cw, ch, cw, ch);
+                let parking = parking_view();
+                if parking != nil {
+                    self.move_to(parking);
+                    self.parked.set(true);
+                    self.lay_out(cw * PARKED_SCALE, ch * PARKED_SCALE, cw, ch);
+                    let _: () = msg_send![self.page, setFrameOrigin: NSPoint::new(0., 0.)];
+                    let _: () = msg_send![self.page, setHidden: NO];
+                } else {
+                    let _: () = msg_send![self.page, setHidden: YES];
+                    self.lay_out(cw, ch, cw, ch);
+                }
                 return;
             };
+            self.parked.set(false);
             let (cw, ch) = self.viewport.get().unwrap_or((w, h));
             let scale = (w / cw).min(h / ch);
             let (fw, fh) = (cw * scale, ch * scale);
@@ -705,9 +785,11 @@ impl WebView {
     pub fn set_viewport(&self, viewport: Option<(f64, f64)>) {
         self.viewport.set(viewport);
         if let Some((w, h)) = viewport {
-            // Hidden, it still takes the size, for a screenshot without the panel.
+            // Parked or hidden, it still takes the size, for a screenshot without the panel.
             let hidden: bool = unsafe { msg_send![self.page, isHidden] };
-            if hidden {
+            if self.parked.get() {
+                self.lay_out(w * PARKED_SCALE, h * PARKED_SCALE, w, h);
+            } else if hidden {
                 self.lay_out(w, h, w, h);
             }
         }
@@ -815,10 +897,11 @@ impl WebView {
         }
     }
 
+    /// On screen, over a panel or the browser's window (not parked).
     pub fn is_shown(&self) -> bool {
         unsafe {
             let hidden: bool = msg_send![self.page, isHidden];
-            !hidden
+            !hidden && !self.parked.get()
         }
     }
 
