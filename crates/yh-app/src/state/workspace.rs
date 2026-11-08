@@ -196,6 +196,8 @@ pub struct Workspace {
     /// Whether `gh stack` is installed, once looked (aside, at launch): its instructions then
     /// go to every thread's agent.
     stacks_installed: Option<bool>,
+    /// Projects whose commands were read with a throwaway `claude` this launch.
+    command_loads: std::collections::HashSet<String>,
 }
 
 impl EventEmitter<WorkspaceEvent> for Workspace {}
@@ -259,6 +261,7 @@ impl Workspace {
             merge_links: Default::default(),
             title_error: None,
             stacks_installed: None,
+            command_loads: Default::default(),
         };
         // Is `gh stack` there? Looked aside, so the first thread's agent knows how stacks are made.
         cx.spawn(async move |this, cx| {
@@ -1300,6 +1303,9 @@ impl Workspace {
             return;
         }
         if images.is_empty() && files.is_empty() {
+            // Typed as the menu shows an MCP prompt, "/github:review", which Claude Code doesn't take.
+            let project = thread.read(cx).meta.project_id.clone();
+            text = yh_core::claude::translate_mcp_prompt(&text, self.commands(&project));
             match self.handle_command(thread, &text, cx) {
                 CommandHandling::Done => return,
                 CommandHandling::Send(rest) => text = rest,
@@ -2166,19 +2172,9 @@ impl Workspace {
                     Some(Value::Object(m)) => m,
                     _ => serde_json::Map::new(),
                 };
-                // In the Swift app's shape (it decodes its own `SlashCommand`).
-                let swift: Vec<Value> = list
-                    .iter()
-                    .filter(|c| c["name"].as_str().is_some_and(|n| !n.is_empty()))
-                    .map(|c| {
-                        serde_json::json!({
-                            "name": c["name"], "description": c["description"].as_str().unwrap_or(""),
-                            "argumentHint": c["argumentHint"].as_str().unwrap_or(""),
-                            "aliases": c["aliases"].as_array().cloned().unwrap_or_default(),
-                            "isBuiltin": c["builtin"].as_bool().unwrap_or(false),
-                        })
-                    })
-                    .collect();
+                // In the Swift app's shape (it decodes its own `SlashCommand`, MCP prompts by
+                // the name Claude Code takes, with their server).
+                let swift: Vec<Value> = self.commands[project_id].iter().map(SlashCommand::saved).collect();
                 all.insert(project_id.to_string(), Value::Array(swift));
                 self.library.set_setting("slashCommands", &Value::Object(all));
             }
@@ -2763,6 +2759,63 @@ pub fn app_commands() -> Vec<SlashCommand> {
 const TERMINAL_ONLY: &[&str] = &["color", "focus", "heapdump"];
 
 impl Workspace {
+    /// A project's commands and skills, from a throwaway `claude` in its folder (it's only asked
+    /// for its catalog: no request is made, nothing's saved), once per launch: the "/" menu is
+    /// right before any session there has started. Off the main thread; 20 s at most.
+    pub fn load_commands(&mut self, project_id: &str, cx: &mut Context<Self>) {
+        if std::env::var("YH_NO_CLAUDE").is_ok() || !self.command_loads.insert(project_id.to_string()) {
+            return;
+        }
+        let Some(folder) = self.project(project_id).map(|p| p.path.clone()).filter(|p| std::path::Path::new(p).is_dir()) else { return };
+        let project = project_id.to_string();
+        cx.spawn(async move |this, cx| {
+            let catalog = cx
+                .background_executor()
+                .spawn(async move {
+                    let options = LaunchOptions {
+                        cwd: folder,
+                        session_id: None,
+                        model: None,
+                        mode: None,
+                        effort: None,
+                        add_dirs: vec![],
+                        env: vec![],
+                        append_system_prompt: None,
+                        allowed_tools: vec![],
+                        servers: vec![],
+                        extra_args: vec!["--no-session-persistence".into()],
+                    };
+                    let (tx, rx) = flume::unbounded();
+                    let mut process = ClaudeProcess::spawn(options, tx).ok()?;
+                    process.initialize();
+                    let deadline = Instant::now() + Duration::from_secs(20);
+                    let mut found = None;
+                    while let Ok(event) = rx.recv_deadline(deadline) {
+                        match event {
+                            Event::Catalog { models, commands } => {
+                                found = Some((models, commands));
+                                break;
+                            }
+                            Event::Exit { .. } => break,
+                            _ => {}
+                        }
+                    }
+                    process.terminate();
+                    found
+                })
+                .await;
+            let Some((models, commands)) = catalog else { return };
+            let _ = this.update(cx, |ws, cx| {
+                if std::env::var("YH_DATA_DIR").is_ok() {
+                    eprintln!("COMMANDS loaded for {project}: {}", commands.as_array().map_or(0, |a| a.len()));
+                }
+                ws.note_catalog(&models, &commands, &project, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// What the "/" menu offers in a project: the app's own, then the CLI's.
     pub fn menu_commands(&self, project_id: &str) -> Vec<SlashCommand> {
         let own = app_commands();
@@ -2829,8 +2882,15 @@ impl Workspace {
                 self.ask_aside(&id, &args, cx);
                 CommandHandling::Done
             }
-            "mcp" if args.is_empty() => {
-                self.open_mcp(cx);
+            // `/mcp` opens the servers sheet; `/mcp enable|disable <server|all>` and `/mcp
+            // reconnect <server>` are done here, as in the terminal, with a note of what happened.
+            "mcp" => {
+                let (verb, target) = args.split_once(char::is_whitespace).map(|(v, t)| (v.to_lowercase(), t.trim().to_string())).unwrap_or((args.to_lowercase(), String::new()));
+                if !["enable", "disable", "reconnect"].contains(&verb.as_str()) || target.is_empty() {
+                    self.open_mcp(cx);
+                } else {
+                    self.mcp_command(thread, &verb, &target, cx);
+                }
                 CommandHandling::Done
             }
             "model" if !args.is_empty() => {
@@ -2868,6 +2928,69 @@ impl Workspace {
         if !question.is_empty() {
             self.send(&chat, question, false, cx);
         }
+    }
+
+    /// `/mcp enable|disable|reconnect <server|all>` through the thread's `claude`, one server after
+    /// another; "Turned on MCP: a, b", and what failed in the error colour.
+    fn mcp_command(&mut self, thread: &Entity<ThreadState>, verb: &str, target: &str, cx: &mut Context<Self>) {
+        let (verb, target) = (verb.to_string(), target.to_string());
+        let weak = thread.downgrade();
+        cx.spawn(async move |this, cx| {
+            let Some(thread) = weak.upgrade() else { return };
+            let names: Vec<String> = if target == "all" && verb != "reconnect" {
+                let Ok(status) = this.update(cx, |ws, cx| ws.mcp(&thread, serde_json::json!({ "subtype": "mcp_status" }), cx)) else { return };
+                match status.await {
+                    Ok(v) => crate::ui::mcp::parse_status(&v).into_iter().map(|s| s.name).collect(),
+                    Err(e) => {
+                        let _ = this.update(cx, |ws, cx| ws.composer_error(&thread, &format!("Couldn't {verb} MCP servers: {e}"), cx));
+                        return;
+                    }
+                }
+            } else {
+                vec![target.clone()]
+            };
+            let (mut done, mut failed) = (vec![], vec![]);
+            for name in names {
+                let request = match verb.as_str() {
+                    "reconnect" => serde_json::json!({ "subtype": "mcp_reconnect", "serverName": name }),
+                    v => serde_json::json!({ "subtype": "mcp_toggle", "serverName": name, "enabled": v == "enable" }),
+                };
+                let Ok(task) = this.update(cx, |ws, cx| ws.mcp(&thread, request, cx)) else { return };
+                match task.await {
+                    Ok(_) => done.push(name),
+                    Err(e) => failed.push(format!("{name}: {e}")),
+                }
+            }
+            let past = match verb.as_str() {
+                "enable" => "Turned on",
+                "disable" => "Turned off",
+                _ => "Reconnected",
+            };
+            let _ = this.update(cx, |ws, cx| {
+                if !done.is_empty() {
+                    ws.composer_notice(&thread, &format!("{past} MCP: {}", done.join(", ")), cx);
+                }
+                if !failed.is_empty() {
+                    ws.composer_error(&thread, &format!("Couldn't {verb} MCP {}", failed.join("; ")), cx);
+                }
+                ws.refresh_mcp_attention(&thread, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// A note in the error colour from the app, saved with its rows.
+    fn composer_error(&mut self, thread: &Entity<ThreadState>, text: &str, cx: &mut Context<Self>) {
+        let id = thread.read(cx).id().to_string();
+        if thread.read(cx).total.is_none() {
+            let total = self.library.db.as_ref().map_or(0, |db| db.transcript_count(&id));
+            thread.update(cx, |t, _| t.total = Some(total));
+        }
+        thread.update(cx, |t, cx| {
+            t.error_notice(text);
+            cx.notify();
+        });
+        self.save_rows(thread, cx);
     }
 
     /// A note in the thread from the app (`Model set to Haiku`), saved with its rows.

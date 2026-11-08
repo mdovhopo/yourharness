@@ -48,6 +48,8 @@ pub struct Composer {
     pub withdrawing: HashSet<String>,
     /// The placeholder says how to steer (Claude works in the open thread).
     steering: bool,
+    /// The "/" menu's scroll, kept on the item picked with the arrows.
+    suggest_scroll: gpui_kit::ScrollHandle,
     _mentions: Option<gpui_kit::Task<()>>,
     /// An MCP server's question, as a card.
     elicit: Option<(String, Entity<ElicitCard>)>,
@@ -428,6 +430,7 @@ impl Composer {
             elicit: None,
             empty: true,
             steering: false,
+            suggest_scroll: gpui_kit::ScrollHandle::new(),
             _subscriptions: subscriptions,
         }
     }
@@ -1594,6 +1597,8 @@ fn grouped(value: u64) -> String {
 struct Suggestion {
     label: String,
     detail: String,
+    /// Where a command comes from: YourHarness, MCP, project, user, a plugin.
+    chip: Option<String>,
     insert: String,
     /// ↩ sends this right away (a command that needs nothing more); ⇥ still completes.
     run: Option<String>,
@@ -1637,6 +1642,9 @@ impl Composer {
             let q = q.to_lowercase();
             let project = thread.read(cx).meta.project_id.clone();
             let chained = start > 0;
+            // The project's own commands, read with a throwaway `claude` once per launch, so
+            // the menu is right before any session there has started.
+            self.workspace.update(cx, |ws, cx| ws.load_commands(&project, cx));
             let commands = {
                 let ws = self.workspace.read(cx);
                 if chained {
@@ -1645,11 +1653,13 @@ impl Composer {
                     ws.menu_commands(&project)
                 }
             };
+            // An MCP prompt is found by what it shows ("github:review") too.
             let rank = |c: &yh_core::claude::SlashCommand| {
                 let name = c.name.to_lowercase();
-                if q.is_empty() || name == q {
+                let shown = c.display_name().to_lowercase();
+                if q.is_empty() || name == q || shown == q {
                     Some(0)
-                } else if name.starts_with(&q) {
+                } else if name.starts_with(&q) || shown.starts_with(&q) {
                     Some(1)
                 } else if c.aliases.iter().any(|a| a.to_lowercase().starts_with(&q)) {
                     Some(2)
@@ -1661,13 +1671,19 @@ impl Composer {
             };
             let mut ranked: Vec<(usize, &yh_core::claude::SlashCommand)> = commands.iter().filter_map(|c| rank(c).map(|r| (r, c))).collect();
             ranked.sort_by_key(|(r, _)| *r);
+            let own = crate::state::workspace::app_commands();
+            // Every match: the menu scrolls.
             let items: Vec<Suggestion> = ranked
                 .into_iter()
-                .take(12)
-                .map(|(_, c)| Suggestion {
-                    label: format!("/{}", c.name),
-                    detail: if c.hint.is_empty() { c.description.clone() } else { format!("{} · {}", c.hint, c.description) },
-                    insert: format!("/{} ", c.name),
+                .map(|(_, c)| {
+                    let (description, chip) = c.source(own.iter().any(|o| o.name == c.name));
+                    (c, description, chip)
+                })
+                .map(|(c, description, chip)| Suggestion {
+                    label: format!("/{}", c.display_name()),
+                    detail: if c.hint.is_empty() { description } else { format!("{} · {}", c.hint, description) },
+                    chip,
+                    insert: format!("/{} ", c.display_name()),
                     // ↩ runs one that takes nothing more (`/compact`'s instructions are optional);
                     // later in a message it's only put in.
                     run: (!chained && (c.hint.is_empty() || c.hint.starts_with('[') || c.hint.to_lowercase().contains("optional"))).then(|| format!("/{}", c.name)),
@@ -1696,6 +1712,7 @@ impl Composer {
                         label: f.trim_end_matches('/').rsplit('/').next().unwrap_or(&f).to_string(),
                         insert: if f.contains(' ') { format!("@\"{f}\" ") } else { format!("@{f} ") },
                         run: None,
+                        chip: None,
                         detail: f,
                     })
                     .collect();
@@ -1732,8 +1749,14 @@ impl Composer {
         let Some(s) = &mut self.suggest else { return };
         let n = s.items.len();
         match event.keystroke.key.as_str() {
-            "up" => s.index = (s.index + n - 1) % n,
-            "down" => s.index = (s.index + 1) % n,
+            "up" => {
+                s.index = (s.index + n - 1) % n;
+                self.suggest_scroll.scroll_to_item(s.index);
+            }
+            "down" => {
+                s.index = (s.index + 1) % n;
+                self.suggest_scroll.scroll_to_item(s.index);
+            }
             "enter" | "tab" if !event.keystroke.modifiers.shift && !event.keystroke.modifiers.alt => {
                 let index = s.index;
                 let run = event.keystroke.key == "enter";
@@ -1748,7 +1771,12 @@ impl Composer {
 
     fn suggestions(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let s = self.suggest.as_ref()?;
+        // Every match, scrolling past 300 pt, as the Swift app's menu.
         let mut list = div()
+            .id("suggestions")
+            .track_scroll(&self.suggest_scroll)
+            .max_h(px(300.))
+            .overflow_y_scroll()
             .flex()
             .flex_col()
             .mb(px(space::S))
@@ -1773,6 +1801,21 @@ impl Composer {
                     .when(!on, |d| d.hover(|d| d.bg(theme.hover)))
                     .child(div().flex_none().font_weight(FontWeight::MEDIUM).when(on, |d| d.text_color(theme.accent)).child(item.label.clone()))
                     .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child(item.detail.clone()))
+                    .when_some(item.chip.clone(), |d, chip| {
+                        let own = chip == "YourHarness";
+                        d.child(
+                            div()
+                                .flex_none()
+                                .px(px(6.))
+                                .rounded(px(radius::SMALL))
+                                .text_size(px(text::CAPTION))
+                                .line_height(px(16.))
+                                .bg(if own { theme.accent_soft } else { theme.selected })
+                                .text_color(if own { theme.accent } else { theme.secondary })
+                                .child(chip),
+                        )
+                    })
+                    .flex_none()
                     .on_mouse_down(gpui_kit::MouseButton::Left, cx.listener(move |this, _, window, cx| this.accept(i, true, window, cx))),
             );
         }

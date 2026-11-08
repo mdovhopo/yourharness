@@ -62,32 +62,105 @@ impl Decision {
 }
 
 /// A slash command or skill, as the CLI's catalog lists it (saved in the Swift app's shape:
-/// `name`, `description`, `argumentHint`, `aliases`, `isBuiltin`).
+/// `name`, `description`, `argumentHint`, `aliases`, `isBuiltin`, `mcpServer`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct SlashCommand {
+    /// What Claude Code takes after the slash: an MCP prompt's is `mcp__server__prompt`.
     pub name: String,
     pub description: String,
     pub hint: String,
     pub aliases: Vec<String>,
     /// One of Claude Code's own (`/compact`), not a skill or a command of yours.
     pub builtin: bool,
+    /// An MCP server's prompt: its server, as Claude Code names it.
+    pub mcp_server: Option<String>,
+}
+
+/// How Claude Code puts a name into a tool's or command's: anything but letters, digits, `_`
+/// and `-` becomes `_` ("claude.ai Linear" → "claude_ai_Linear").
+pub fn normalized_name(name: &str) -> String {
+    name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' }).collect()
+}
+
+/// "github:review (MCP)" → ("github", "review"): how the catalog lists an MCP prompt.
+fn mcp_prompt(listed: &str) -> Option<(String, String)> {
+    let bare = listed.strip_suffix(" (MCP)")?;
+    let colon = bare.rfind(':')?;
+    (colon > 0 && colon + 1 < bare.len()).then(|| (bare[..colon].to_string(), bare[colon + 1..].to_string()))
 }
 
 impl SlashCommand {
     pub fn from_json(v: &Value) -> Option<SlashCommand> {
-        let name = v["name"].as_str().filter(|n| !n.is_empty())?;
+        let listed = v["name"].as_str().filter(|n| !n.is_empty())?;
+        // Saved by either app with its server; from the CLI as "server:prompt (MCP)", typed as
+        // /mcp__server__prompt.
+        let (name, mcp_server) = match (v["mcpServer"].as_str(), mcp_prompt(listed)) {
+            (Some(server), _) => (listed.to_string(), Some(server.to_string())),
+            (None, Some((server, prompt))) => (format!("mcp__{}__{}", normalized_name(&server), normalized_name(&prompt)), Some(server)),
+            (None, None) => (listed.to_string(), None),
+        };
         Some(SlashCommand {
-            name: name.to_string(),
+            name,
             description: v["description"].as_str().unwrap_or("").to_string(),
             hint: v["argumentHint"].as_str().unwrap_or("").to_string(),
             aliases: v["aliases"].as_array().map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect()).unwrap_or_default(),
             // The CLI says `builtin`, the Swift app saved `isBuiltin`.
             builtin: v["builtin"].as_bool().or(v["isBuiltin"].as_bool()).unwrap_or(false),
+            mcp_server,
         })
     }
 
     pub fn new(name: &str, hint: &str, description: &str) -> SlashCommand {
-        SlashCommand { name: name.into(), description: description.into(), hint: hint.into(), aliases: vec![], builtin: true }
+        SlashCommand { name: name.into(), description: description.into(), hint: hint.into(), aliases: vec![], builtin: true, mcp_server: None }
+    }
+
+    /// What the menu shows: "server:prompt" for an MCP prompt, as Claude Code lists it.
+    pub fn display_name(&self) -> String {
+        let Some(server) = &self.mcp_server else { return self.name.clone() };
+        match self.name.strip_prefix(&format!("mcp__{}__", normalized_name(server))) {
+            Some(prompt) => format!("{server}:{prompt}"),
+            None => self.name.clone(),
+        }
+    }
+
+    /// As the Swift app saves it (`slashCommands`).
+    pub fn saved(&self) -> Value {
+        let mut v = json!({ "name": self.name, "description": self.description, "argumentHint": self.hint, "aliases": self.aliases, "isBuiltin": self.builtin });
+        if let Some(server) = &self.mcp_server {
+            v["mcpServer"] = server.clone().into();
+        }
+        v
+    }
+
+    /// Its description, and where it comes from for the menu's chip: the app's own commands,
+    /// an MCP server's prompts, else "(project)", "(user)" or "(plugin …)" ending the
+    /// description, as Claude Code writes it (taken off the description then).
+    pub fn source(&self, app_command: bool) -> (String, Option<String>) {
+        if app_command {
+            return (self.description.clone(), Some("YourHarness".into()));
+        }
+        if self.mcp_server.is_some() {
+            return (self.description.clone(), Some("MCP".into()));
+        }
+        let d = self.description.trim_end();
+        if let (true, Some(open)) = (d.ends_with(')'), d.rfind('(')) {
+            let source = &d[open + 1..d.len() - 1];
+            if !source.is_empty() && source.chars().count() <= 40 && (!source.contains(' ') || source.starts_with("plugin")) {
+                return (d[..open].trim().to_string(), Some(source.to_string()));
+            }
+        }
+        (self.description.clone(), None)
+    }
+}
+
+/// Typed as the menu shows an MCP prompt ("/github:review fix"): what Claude Code takes
+/// ("/mcp__github__review fix"). Anything else comes back as it was.
+pub fn translate_mcp_prompt(text: &str, commands: &[SlashCommand]) -> String {
+    let Some((name, args)) = parse_command(text) else { return text.to_string() };
+    match commands.iter().find(|c| c.mcp_server.is_some() && c.display_name() == name) {
+        Some(prompt) if args.is_empty() => format!("/{}", prompt.name),
+        Some(prompt) => format!("/{} {args}", prompt.name),
+        None => text.to_string(),
     }
 }
 
@@ -1038,6 +1111,29 @@ mod tests {
             chain_note(&["review".into(), "commit".into(), "deploy".into()]).unwrap(),
             "(Run the /review, /commit and /deploy skills where they come up above, in that order, with the Skill tool.)"
         );
+    }
+
+    #[test]
+    fn mcp_prompts_are_typed_as_claude_code_takes_them() {
+        let c = SlashCommand::from_json(&serde_json::json!({"name": "claude.ai Linear:triage (MCP)", "description": "Triage issues"})).unwrap();
+        assert_eq!(c.name, "mcp__claude_ai_Linear__triage");
+        assert_eq!(c.display_name(), "claude.ai Linear:triage");
+        assert_eq!(SlashCommand::from_json(&c.saved()), Some(c.clone()));
+        let review = SlashCommand::from_json(&serde_json::json!({"name": "github:review (MCP)"})).unwrap();
+        let all = vec![c, review];
+        assert_eq!(translate_mcp_prompt("/github:review the PR", &all), "/mcp__github__review the PR");
+        assert_eq!(translate_mcp_prompt("/github:review", &all), "/mcp__github__review");
+        assert_eq!(translate_mcp_prompt("/compact", &all), "/compact");
+        assert_eq!(SlashCommand::from_json(&serde_json::json!({"name": "x (MCP)"})).unwrap().mcp_server, None);
+    }
+
+    #[test]
+    fn says_where_a_command_comes_from() {
+        let c = |d: &str| SlashCommand { description: d.into(), ..SlashCommand::new("x", "", "") };
+        assert_eq!(c("Say hello (project)").source(false), ("Say hello".to_string(), Some("project".to_string())));
+        assert_eq!(c("Deploy (plugin acme)").source(false).1.as_deref(), Some("plugin acme"));
+        assert_eq!(c("Compact the conversation (keeps a summary)").source(false).1, None);
+        assert_eq!(c("Ask aside").source(true).1.as_deref(), Some("YourHarness"));
     }
 
     #[test]
