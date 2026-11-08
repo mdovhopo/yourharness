@@ -84,6 +84,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 - ⌘K's matches in conversations read as plain text, without the reply's `**` and backtick marks.
 - VoiceOver reaches the rest of the sidebar: Show more, the Settled shelf, Add Project, and each project's collapse, Memory and New Thread buttons.
 - Memory's Graph keeps a few memories together in the middle of the page instead of flinging them to its far corners.
+- A Claude Code session's title (Resume Session, ⌘K) is cut on a word with an ellipsis instead of mid-word.
 - In Settings → General, scrolling over the title prompt scrolls the page once the prompt reaches its top or bottom, instead of stopping there.
 - VoiceOver reads the conversation: your messages, Claude's replies, notices, sub-agents, a turn's "Worked for …" line and each step by what it did and on what, with whether it's open, running or failed.
 

@@ -26,7 +26,15 @@ pub fn peek(path: &Path) -> (Option<String>, Option<String>) {
             });
             if let Some(text) = text {
                 if !text.starts_with('<') && !text.starts_with("Caveat:") && !text.trim().is_empty() {
-                    title = Some(text.lines().next().unwrap_or("").chars().take(80).collect());
+                    // Cut at 80 characters, on a word where there's one, marked as cut.
+                    let first = text.lines().next().unwrap_or("").trim();
+                    title = Some(if first.chars().count() > 80 {
+                        let cut: String = first.chars().take(79).collect();
+                        let cut = cut.rsplit_once(' ').filter(|(a, _)| a.chars().count() > 40).map_or(cut.as_str(), |(a, _)| a);
+                        format!("{}…", cut.trim_end_matches([',', '.', ':', ';', ' ']))
+                    } else {
+                        first.to_string()
+                    });
                 }
             }
         }
