@@ -62,6 +62,24 @@ impl Job {
         format!("{} “{}” {}{took}", self.kind(), self.description, self.outcome())
     }
 
+    /// In its tool call's header: "In background 1:12", "Running 0:05" while it runs; "Exited 1
+    /// · 3s", "Done · 12s", "Stopped · 4s" after. True when it failed (red).
+    pub fn status_label(&self) -> (String, bool) {
+        if self.status == JobStatus::Running {
+            let kind = if self.background { "In background" } else { "Running" };
+            return (format!("{kind} {}", clock(self.started.elapsed().as_secs())), false);
+        }
+        let took = self.ended.map(|e| format!(" · {}", format_duration(e.duration_since(self.started).as_secs_f64()))).unwrap_or_default();
+        let text = match self.status {
+            JobStatus::Running => String::new(),
+            JobStatus::Completed if self.watch => "Ended".into(),
+            JobStatus::Completed => self.exit_code.map_or("Done".into(), |c| format!("Exited {c}")),
+            JobStatus::Failed => self.exit_code.map_or("Failed".into(), |c| format!("Exited {c}")),
+            JobStatus::Stopped => "Stopped".into(),
+        };
+        (text + &took, self.status == JobStatus::Failed)
+    }
+
     fn end(&mut self, status: JobStatus) {
         if self.status == JobStatus::Running {
             self.status = status;
@@ -102,6 +120,8 @@ pub struct Jobs {
     pub folder: Option<String>,
     /// Your latest message's ID.
     pub turn: Option<String>,
+    /// Jobs that ended, by the tool call that started them: its header says how.
+    pub ended: std::collections::HashMap<String, Job>,
 }
 
 impl Jobs {
@@ -144,7 +164,9 @@ impl Jobs {
             job.output_file = output_file;
         }
         self.version += 1;
-        job.background.then(|| (job.end_note(), job.status == JobStatus::Failed))
+        let note = job.background.then(|| (job.end_note(), job.status == JobStatus::Failed));
+        self.keep_ended(job);
+        note
     }
 
     /// What a watch saw: its last line.
@@ -167,7 +189,9 @@ impl Jobs {
         gone.into_iter()
             .map(|mut j| {
                 j.end(JobStatus::Stopped);
-                j.end_note()
+                let note = j.end_note();
+                self.keep_ended(j);
+                note
             })
             .collect()
     }
@@ -182,9 +206,10 @@ impl Jobs {
             }
             self.version += 1;
         }
-        let before = self.running.len();
-        self.running.retain(|j| j.background || j.tool_id.as_deref() != Some(tool_id));
-        if self.running.len() != before {
+        if let Some(ix) = self.running.iter().position(|j| !j.background && j.tool_id.as_deref() == Some(tool_id)) {
+            let mut job = self.running.remove(ix);
+            job.end(JobStatus::Completed);
+            self.keep_ended(job);
             self.version += 1;
         }
     }
@@ -195,17 +220,35 @@ impl Jobs {
             return vec![];
         }
         self.version += 1;
-        std::mem::take(&mut self.running)
-            .into_iter()
-            .filter(|j| j.background)
-            .map(|j| format!("{} “{}” {outcome}", j.kind(), j.description))
-            .collect()
+        let mut notes = vec![];
+        for mut j in std::mem::take(&mut self.running) {
+            if j.background {
+                notes.push(format!("{} “{}” {outcome}", j.kind(), j.description));
+            }
+            j.end(JobStatus::Stopped);
+            self.keep_ended(j);
+        }
+        notes
     }
 
     /// Background jobs started since your latest message: Claude ended its turn but is back
     /// when they report. Older ones (a dev server from earlier) just run.
     pub fn waiting(&self) -> usize {
         self.running.iter().filter(|j| j.background && j.turn == self.turn).count()
+    }
+
+    /// Kept by its tool call for its header (the newest 200).
+    fn keep_ended(&mut self, job: Job) {
+        let Some(tool) = job.tool_id.clone() else { return };
+        if self.ended.len() >= 200 {
+            self.ended.clear();
+        }
+        self.ended.insert(tool, job);
+    }
+
+    /// The job a tool call started, running or ended.
+    pub fn for_tool(&self, tool_id: &str) -> Option<&Job> {
+        self.running.iter().find(|j| j.tool_id.as_deref() == Some(tool_id)).or_else(|| self.ended.get(tool_id))
     }
 
     pub fn background(&self) -> impl Iterator<Item = &Job> {

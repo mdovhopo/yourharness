@@ -441,6 +441,8 @@ pub struct ThreadState {
     /// What each running foreground command printed last, by its tool call: the transcript
     /// reads it once a second.
     pub job_lines: HashMap<String, String>,
+    /// What an open job step shows of its output (its last 40 lines), by its tool call.
+    pub job_outputs: HashMap<String, String>,
     /// The composer's: how full the context is, queued messages, MCP servers needing you.
     pub composer: ComposerState,
 }
@@ -508,6 +510,7 @@ impl ThreadState {
             folded_plan_calls: Default::default(),
             latest_plan_step: None,
             job_lines: HashMap::new(),
+            job_outputs: HashMap::new(),
             composer,
         }
     }
@@ -775,6 +778,56 @@ impl ThreadState {
             changed = true;
         }
         changed
+    }
+
+    /// Tool calls whose job's output shows (their step is open, the job running or in the
+    /// background), with the file it writes to: what the ticker reads.
+    pub fn open_job_files(&self) -> Vec<(String, String)> {
+        self.jobs
+            .running
+            .iter()
+            .chain(self.jobs.ended.values().filter(|j| j.background))
+            .filter_map(|j| {
+                let tool = j.tool_id.clone()?;
+                let (e, _) = self.tools.get(&tool)?;
+                (e.borrow().open || expand_all()).then_some(())?;
+                Some((tool, j.output_file.clone()?))
+            })
+            .collect()
+    }
+
+    /// What open job steps show of their output (the last 40 lines): rows whose text changed
+    /// are measured again. True when any did.
+    pub fn set_job_outputs(&mut self, outputs: Vec<(String, String)>) -> bool {
+        let mut changed = false;
+        for (tool, text) in outputs {
+            if self.job_outputs.get(&tool) == Some(&text) {
+                continue;
+            }
+            if let Some((_, pos)) = self.tools.get(&tool) {
+                let pos = *pos;
+                self.touch_pos(pos);
+            }
+            self.job_outputs.insert(tool, text);
+            changed = true;
+        }
+        changed
+    }
+
+    /// Rows with a running job whose clock shows: drawn again (one row each, nothing measured
+    /// but them). Only those laid out in the list, so a clock off screen costs nothing.
+    pub fn tick_job_clocks(&mut self) -> bool {
+        let rows: Vec<i64> = self
+            .jobs
+            .running
+            .iter()
+            .filter_map(|j| self.tools.get(j.tool_id.as_deref()?).map(|(_, pos)| *pos))
+            .filter(|pos| self.index(*pos).is_some_and(|ix| self.list.bounds_for_item(ix).is_some()))
+            .collect();
+        for pos in &rows {
+            self.touch_pos(*pos);
+        }
+        !rows.is_empty()
     }
 
     /// A notice in the error colour (saved as such: `notice_style` "error").

@@ -114,8 +114,14 @@ impl TranscriptView {
 
     /// A foreground command that's taking a while shows what it printed last under its step:
     /// read once a second, off the main thread, and only a row whose line changed is redrawn.
+    /// Also, once a second while jobs run: their steps' clocks ("In background 1:12") and what an
+    /// open job step shows of its output. Each redraws only the rows that changed.
     fn follow_jobs(&mut self, cx: &mut Context<Self>) {
-        if self.foreground_files(cx).is_empty() {
+        let (running, unread_open) = {
+            let t = self.thread.read(cx);
+            (!t.jobs.running.is_empty(), t.open_job_files().iter().any(|(tool, _)| !t.job_outputs.contains_key(tool)))
+        };
+        if !running && !unread_open {
             self.job_ticker = None;
             return;
         }
@@ -123,30 +129,52 @@ impl TranscriptView {
             return;
         }
         self.job_ticker = Some(cx.spawn(async move |this, cx| loop {
-            let Ok(files) = this.update(cx, |this, cx| this.foreground_files(cx)) else { break };
-            // None left: the thread's next change clears the ticker (`follow_jobs`).
-            if files.is_empty() {
-                break;
-            }
+            let Ok((files, open)) = this.update(cx, |this, cx| (this.foreground_files(cx), this.thread.read(cx).open_job_files())) else { break };
             let lines = cx
                 .background_executor()
                 .spawn(async move {
-                    files
+                    let lines = files
                         .into_iter()
                         .filter_map(|(tool, path)| {
                             let tail = jobs::tail(&path, 1024)?;
                             let last = tail.lines().rev().find(|l| !l.trim().is_empty())?.trim_end().to_string();
                             Some((tool, last))
                         })
-                        .collect::<Vec<_>>()
+                        .collect::<Vec<_>>();
+                    // The last 40 lines, as the Swift app's `JobOutput`.
+                    let outputs = open
+                        .into_iter()
+                        .map(|(tool, path)| {
+                            let text = jobs::tail(&path, 16 * 1024).map(|t| {
+                                let all: Vec<&str> = t.lines().collect();
+                                all[all.len().saturating_sub(40)..].join("\n")
+                            });
+                            (tool, match text {
+                                Some(t) if t.is_empty() => "No output yet".to_string(),
+                                Some(t) => t,
+                                None => "…".to_string(),
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    (lines, outputs)
                 })
                 .await;
             let Ok(thread) = this.update(cx, |this, _| this.thread.clone()) else { break };
-            let _ = thread.update(cx, |t, cx| {
-                if t.set_job_lines(lines) {
+            let still = thread.update(cx, |t, cx| {
+                let (lines, outputs) = lines;
+                let mut changed = t.set_job_lines(lines);
+                changed |= t.set_job_outputs(outputs);
+                changed |= t.tick_job_clocks();
+                if changed {
                     cx.notify();
                 }
+                !t.jobs.running.is_empty()
             });
+            // None left: done, so the next job starts it again.
+            if !still {
+                let _ = this.update(cx, |this, _| this.job_ticker = None);
+                break;
+            }
             cx.background_executor().timer(Duration::from_secs(1)).await;
         }));
     }

@@ -915,6 +915,8 @@ fn diff_of(e: &crate::state::thread::Entry) -> Option<Vec<(char, String)>> {
 /// A change as a unified diff: its file as a header, then each line with its sign in a gutter,
 /// removed lines on red, added on green.
 fn diff_view(lines: Vec<(char, String)>, theme: &Theme) -> impl IntoElement {
+    // Long changes scroll inside the box past 320 pt, as tool output does.
+    let key = copy_hash("diff-box", (lines.len(), lines.iter().take(3).map(|(_, t)| t.clone()).collect::<Vec<_>>()));
     let mut column = div()
         .font_family(MONO)
         .text_size(px(ts::CAPTION))
@@ -955,7 +957,7 @@ fn diff_view(lines: Vec<(char, String)>, theme: &Theme) -> impl IntoElement {
             _ => body = body.child(div().pl(px(22.)).text_color(theme.tertiary).child(text)),
         }
     }
-    column.child(body)
+    column.child(capped_box(key, 320., body))
 }
 
 fn highlight_style(span: Span, theme: &Theme) -> HighlightStyle {
@@ -1150,14 +1152,25 @@ fn code_block(code: &Text, lang: &str, theme: &Theme, ctx: Option<&RowContext>, 
                     .when_some(ctx, |d, ctx| d.child(copy_button("copy-code", (ctx.pos, n, &code.text), code.text.clone(), ctx, theme))),
             )
         })
+        // Long lines scroll sideways instead of wrapping, as in the Swift app; a vertical wheel
+        // over it still scrolls the transcript (the box takes only the horizontal axis).
         .child(
             div()
-                .px(px(space::M))
-                .py(px(10.))
-                .font_family(MONO)
-                .text_size(px(ts::CODE))
-                .line_height(px(ts::CODE_LINE + 2.))
-                .child(styled_text(code, theme, None)),
+                .id(id_of("code-scroll", (n, code.text.len(), ctx.map(|c| c.pos))))
+                .w_full()
+                .overflow_x_scroll()
+                .restrict_scroll_to_axis()
+                .child(
+                    div()
+                        .flex_none()
+                        .px(px(space::M))
+                        .py(px(10.))
+                        .whitespace_nowrap()
+                        .font_family(MONO)
+                        .text_size(px(ts::CODE))
+                        .line_height(px(ts::CODE_LINE + 2.))
+                        .child(styled_text(code, theme, None)),
+                ),
         )
         .into_any_element()
 }
@@ -1363,18 +1376,68 @@ fn work_row(state: &ThreadState, ctx: &RowContext, item: &Item, theme: &Theme) -
     row.into_any_element()
 }
 
-/// Monospaced text in a box: a command, a tool's input or output. `tint` colours it (a failure).
-fn mono_box(text: String, tint: Option<Hsla>, theme: &Theme) -> impl IntoElement {
+/// A box's scroll and where it was before the latest wheel event, kept between frames by key.
+type BoxScroll = (gpui_kit::ScrollHandle, Rc<std::cell::Cell<gpui_kit::Point<gpui_kit::Pixels>>>);
+
+thread_local! {
+    /// The scrolls of boxes that scroll inside a row (a long tool output), by what they show:
+    /// rows are drawn anew each frame, their scroll isn't.
+    static BOX_SCROLLS: std::cell::RefCell<HashMap<u64, BoxScroll>> = std::cell::RefCell::new(HashMap::new());
+}
+
+fn box_scroll(key: u64) -> BoxScroll {
+    BOX_SCROLLS.with(|s| {
+        let mut s = s.borrow_mut();
+        // Kept for the boxes seen lately; the rest start at the top again.
+        if s.len() > 400 {
+            s.clear();
+        }
+        s.entry(key).or_insert_with(|| (gpui_kit::ScrollHandle::new(), Rc::new(std::cell::Cell::new(gpui_kit::Point::default())))).clone()
+    })
+}
+
+/// A box capped at `max` tall whose content scrolls inside it. A vertical wheel moves the box
+/// while it can go that way, and the transcript once it's at its end (the Swift app's
+/// `TranscriptWheelRouter`): GPUI hands the event to every scroll under the pointer, so the box
+/// stops it from reaching the list only when it took it.
+fn capped_box(key: u64, max: f32, content: impl IntoElement) -> gpui_kit::Stateful<gpui_kit::Div> {
+    let (handle, before) = box_scroll(key);
+    let h = handle.clone();
     div()
-        .font_family(MONO)
-        .text_size(px(ts::CAPTION))
-        .line_height(px(16.))
-        .bg(theme.code)
-        .rounded(px(radius::MEDIUM))
-        .px(px(10.))
-        .py(px(space::S))
-        .text_color(tint.unwrap_or(theme.text))
-        .child(selectable(text, theme))
+        .id(ElementId::NamedInteger("capped-box".into(), key))
+        .max_h(px(max))
+        .overflow_y_scroll()
+        .track_scroll(&handle)
+        .on_scroll(move |e: &gpui_kit::ScrollEvent, window, cx| {
+            let delta = e.delta.pixel_delta(window.line_height());
+            let (was, top) = (before.get(), h.max_offset());
+            let inside = delta.y.abs() >= delta.x.abs()
+                && ((delta.y > px(0.) && was.y < px(0.)) || (delta.y < px(0.) && was.y > -top.y));
+            let now = h.offset();
+            before.set(gpui_kit::point(now.x, now.y.clamp(-top.y, px(0.))));
+            if inside {
+                cx.stop_propagation();
+            }
+        })
+        .child(content)
+}
+
+/// Monospaced text in a box: a command, a tool's input or output. `tint` colours it (a failure).
+/// Past 320 pt it scrolls inside the box, as the Swift app's `CodeBox`.
+fn mono_box(text: String, tint: Option<Hsla>, theme: &Theme) -> impl IntoElement {
+    // Keyed by its length and start: hashing a long output whole on every frame costs.
+    let key = copy_hash("mono-box", (text.len(), text.chars().take(160).collect::<String>()));
+    capped_box(
+        key,
+        320.,
+        div().px(px(10.)).py(px(space::S)).child(selectable(text, theme)),
+    )
+    .font_family(MONO)
+    .text_size(px(ts::CAPTION))
+    .line_height(px(16.))
+    .bg(theme.code)
+    .rounded(px(radius::MEDIUM))
+    .text_color(tint.unwrap_or(theme.text))
 }
 
 /// A screenshot a browser tool took, where the browser kept it.
@@ -1529,6 +1592,17 @@ fn step(state: &ThreadState, ctx: &RowContext, pos: i64, n: usize, e: &EntryRef,
     let shot = (name == format!("{}screenshot", steps::BROWSER_PREFIX) && done && !failed).then(|| browser_shot(&ctx.thread_id, &id)).filter(|p| p.exists());
     // A foreground command that's taking a while: what it printed last.
     let last_line = (running && !open).then(|| state.job_lines.get(&id).cloned()).flatten().filter(|l| !l.is_empty());
+    // A job it started (a command in the background, one taking a while): how long it's run or
+    // how it ended, in the header; open, what it printed.
+    let job = state.jobs.for_tool(&id).map(|j| {
+        let (label, failed) = j.status_label();
+        (label, failed, j.status == crate::state::jobs::JobStatus::Running, j.background, j.output_file.is_some())
+    });
+    let job_output = job.as_ref().filter(|j| j.2 || j.3).map(|j| match state.job_outputs.get(&id) {
+        Some(text) => text.clone(),
+        None if j.4 => "…".to_string(),
+        None => "Its output shows once it reports".to_string(),
+    });
     let handle = ctx.thread.clone();
     let entry = e.clone();
     let detail_base = || {
@@ -1573,8 +1647,12 @@ fn step(state: &ThreadState, ctx: &RowContext, pos: i64, n: usize, e: &EntryRef,
         .child(div().w(px(16.)).flex_none().flex().justify_center().child(icon(p.icon, 14., if failed { theme.error } else { theme.secondary })))
         .child(div().flex_none().font_weight(FontWeight::MEDIUM).text_color(if failed { theme.error } else { theme.text }).child(p.verb.clone()))
         .child(detail)
-        .when(running, |d| d.child(icon(IconName::LoaderCircle, 13., theme.accent)))
-        .when(failed, |d| d.child(icon(IconName::CircleX, 13., theme.error)))
+        .when_some(job.clone(), |d, (label, job_failed, job_running, _, _)| {
+            d.child(div().flex_none().text_color(if job_failed { theme.error } else { theme.secondary }).child(label))
+                .when(job_running, |d| d.child(icon(IconName::LoaderCircle, 13., theme.accent)))
+        })
+        .when(job.is_none() && running, |d| d.child(icon(IconName::LoaderCircle, 13., theme.accent)))
+        .when(job.is_none() && failed, |d| d.child(icon(IconName::CircleX, 13., theme.error)))
         .child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, 12., theme.tertiary))
         .on_click(move |_, _, cx| {
             let entry = entry.clone();
@@ -1617,7 +1695,10 @@ fn step(state: &ThreadState, ctx: &RowContext, pos: i64, n: usize, e: &EntryRef,
                 _ => details,
             },
         };
-        if let Some(result) = b.data.tool_result.as_ref().filter(|r| !r.is_empty()) {
+        if let Some(output) = job_output {
+            // A background command's result only says it started: what it prints instead.
+            details = details.child(mono_box(output, None, theme));
+        } else if let Some(result) = b.data.tool_result.as_ref().filter(|r| !r.is_empty()) {
             let more = b.data.result_len.saturating_sub(result.len());
             let text = if more > 0 { format!("{result}\n… {more} more characters") } else { result.clone() };
             details = details.child(mono_box(text, failed.then_some(theme.error), theme));
