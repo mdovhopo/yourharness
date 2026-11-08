@@ -159,6 +159,11 @@ impl RootView {
                 cx.notify();
             }),
             cx.subscribe_in(&spotlight, window, |this, _, event: &crate::ui::spotlight::SpotlightEvent, window, cx| this.spotlight_action(event.0.clone(), window, cx)),
+            // What had the keyboard went from the screen (⌘K, Find or Resume Session closed, a
+            // page closed, the right sidebar's tab changed under an open file): the keyboard
+            // comes back here. Else GPUI asks only its root, and ⌘N, ⌘F, ⌘. and the menu bar's
+            // items do nothing until you click somewhere.
+            cx.on_focus_lost(window, |this, window, cx| this.refocus(window, cx)),
             // The composer saves its draft when it loses focus or the thread changes; quitting
             // does neither, so what's typed is saved here, before the workspace's own quit
             // handler (registered after this view is made) writes everything out.
@@ -224,6 +229,28 @@ impl RootView {
             input.update(cx, |i, cx| i.focus(window, cx));
         }
         cx.notify();
+    }
+
+    /// Whether the left sidebar is hidden (⌃⌘S), for the perf probe.
+    pub fn sidebar_hidden(&self) -> bool {
+        self.sidebar_hidden
+    }
+
+    /// Whether the keyboard is on something drawn in this view, so shortcuts reach its actions
+    /// (the perf probe checks it after every step).
+    pub fn keyboard_reaches_actions(&self, window: &Window, cx: &App) -> bool {
+        self.focus.contains_focused(window, cx)
+    }
+
+    /// The keyboard to the composer when a thread is open, else to the window.
+    fn refocus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let ws = self.workspace.read(cx);
+        if ws.page.is_none() && ws.selected.is_some() {
+            let composer = self.composer.read(cx).input.clone();
+            composer.update(cx, |i, cx| i.focus(window, cx));
+        } else {
+            window.focus(&self.focus, cx);
+        }
     }
 
     fn open_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1003,6 +1030,7 @@ impl Render for RootView {
                         .right(px(right_w - 3.))
                         .w(px(6.))
                         .cursor_col_resize()
+                        .when(crate::probe::enabled(), |d| d.child(crate::probe::tracker("inspector-edge".into())))
                         .on_mouse_down(gpui_kit::MouseButton::Left, cx.listener(|this, e: &gpui_kit::MouseDownEvent, _, cx| {
                             this.resizing_inspector = true;
                             if e.click_count == 2 {
