@@ -814,7 +814,7 @@ impl Inspector {
         });
         let report = handback
             .or_else(|| sub.as_ref().and_then(|s| s.report.clone()))
-            .or_else(|| (status != "running").then(|| entry.data.tool_result.clone()).flatten());
+            .or_else(|| (status != "running").then(|| entry.data.tool_result.as_deref().map(crate::ui::steps::subagent_report)).flatten());
         // Its final message is the report, shown once, below.
         let shown: Vec<&SubStep> = {
             let mut v: Vec<&SubStep> = log.iter().filter(|s| s.tool.as_deref() != Some("SubagentHandback")).collect();

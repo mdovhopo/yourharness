@@ -740,7 +740,7 @@ fn agent_row(thread: &Entity<ThreadState>, item: &Item, theme: &Theme) -> AnyEle
     let steps = e.sub.as_ref().map_or(0, |s| s.steps);
     let running = status == "running";
     let failed = status == "failed" || e.data.is_error;
-    let report = e.sub.as_ref().and_then(|s| s.report.clone()).or_else(|| e.data.tool_result.clone()).unwrap_or_default();
+    let report = e.sub.as_ref().and_then(|s| s.report.clone()).or_else(|| e.data.tool_result.as_deref().map(crate::ui::steps::subagent_report)).unwrap_or_default();
     // Its last three tool calls while it works, so it visibly moves.
     let recent: Vec<(steps::Presentation, bool, bool)> = if running {
         e.sub

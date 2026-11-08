@@ -224,10 +224,36 @@ pub fn line_of(path: &str, text: &str) -> Option<usize> {
     Some(content[..at].matches('\n').count() + 1)
 }
 
+/// A sub-agent's report as the Agent tool hands it back, without the CLI's frame: the notes
+/// above `[Subagent hand-back] … The report follows:`, the two spaces it indents every line by,
+/// and the `agentId:` and `<usage>` lines after (as the Swift app's `SubagentReport.text`).
+pub fn subagent_report(result: &str) -> String {
+    const START: &str = "The report follows:\n";
+    let Some(frame) = result.find("[Subagent hand-back]") else { return result.to_string() };
+    let Some(at) = result[frame..].find(START) else { return result.to_string() };
+    let mut lines = vec![];
+    for line in result[frame + at + START.len()..].lines() {
+        // The report's lines are indented; the CLI's own notes after it are at column zero.
+        match line.strip_prefix("  ") {
+            Some(l) => lines.push(l),
+            None if line.trim().is_empty() => lines.push(""),
+            None => break,
+        }
+    }
+    lines.join("\n").trim().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn subagent_report_without_its_frame() {
+        let result = "  <tools-used-before-summary>Bash</tools-used-before-summary>\n  \n[Subagent hand-back] The text below is the final report. The report follows:\n  Succeeded: `touch a.txt` ran.\n\n  - one\n    - nested\nagentId: a7fe (use SendMessage)\n<usage>subagent_tokens: 21238\ntool_uses: 1</usage>";
+        assert_eq!(subagent_report(result), "Succeeded: `touch a.txt` ran.\n\n- one\n  - nested");
+        assert_eq!(subagent_report("Plain report."), "Plain report.");
+    }
 
     #[test]
     fn verbs_and_details() {
