@@ -1170,6 +1170,10 @@ impl Inspector {
                         .when(!on, |d| d.hover(|s| s.bg(theme.hover)))
                         .child(status_icon(&status, theme))
                         .child(div().flex_1().overflow_hidden().whitespace_nowrap().text_ellipsis().child(description))
+                        .when_some(
+                            b.data.tool_input.as_deref().and_then(|i| serde_json::from_str::<serde_json::Value>(i).ok()).and_then(|v| v["subagent_type"].as_str().map(str::to_string)),
+                            |d, kind| d.child(div().flex_none().max_w(px(120.)).truncate().text_size(px(text::CAPTION)).text_color(theme.secondary).child(kind)),
+                        )
                         .on_click(move |_, _, cx| {
                             t.update(cx, |t, cx| {
                                 t.inspected_subagent = Some(id2.clone());
@@ -1268,7 +1272,13 @@ impl Inspector {
                                     .text_color(theme.secondary)
                                     .child(status_icon(&status, theme))
                                     .child(format!("{} · {tools} tool{}", status_text(&status), if tools == 1 { "" } else { "s" }))
-                                    .when_some(agent_type, |d, t| d.child(div().child(format!("· {t}")))),
+                                    .when_some(
+                                        {
+                                            let kind: Vec<String> = agent_type.into_iter().chain(input["run_in_background"].as_bool().filter(|b| *b).map(|_| "in the background".to_string())).collect();
+                                            (!kind.is_empty()).then(|| kind.join(" · "))
+                                        },
+                                        |d, t| d.child(div().child(format!("· {t}"))),
+                                    ),
                             ),
                     )
                     .when_some(stop, |d, b| d.child(b)),
@@ -1306,11 +1316,22 @@ impl Inspector {
                     })),
             );
         }
+        // Its steps as the transcript reads them: what it said as Markdown, each tool call by its
+        // icon, verb and the argument that matters, its output under it, all selectable.
         for step in shown {
             detail = detail.child(match &step.tool {
-                None => div().text_size(px(text::BODY)).line_height(px(text::BODY_LINE)).whitespace_normal().child(step.text.clone()),
+                None => div().text_size(px(text::BODY)).line_height(px(text::BODY_LINE)).child(crate::ui::rows::markdown_view(&yh_core::markdown::parse(&step.text), theme)).into_any_element(),
                 Some(name) => {
-                    let gist = gist(name, &step.text);
+                    let input: serde_json::Value = serde_json::from_str(&step.text).unwrap_or_default();
+                    let p = crate::ui::steps::present(name, &input, step.result.as_deref());
+                    let running = step.result.is_none() && status == "running";
+                    let (icon, color) = if step.is_error {
+                        (IconName::CircleX, theme.error)
+                    } else if running {
+                        (IconName::LoaderCircle, theme.accent)
+                    } else {
+                        (p.icon, theme.secondary)
+                    };
                     div()
                         .flex()
                         .flex_col()
@@ -1321,14 +1342,14 @@ impl Inspector {
                                 .items_center()
                                 .gap(px(space::XS + 2.))
                                 .text_size(px(text::FOOTNOTE))
-                                .child(div().flex_none().child(Icon::new(if step.is_error { IconName::CircleX } else { IconName::ChevronRight }).size(px(12.)).text_color(if step.is_error { theme.error } else { theme.tertiary })))
-                                .child(div().flex_none().font_weight(FontWeight::MEDIUM).child(name.clone()))
-                                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_family(MONO).text_size(px(text::CAPTION)).text_color(theme.secondary).child(gist)),
+                                .child(div().flex_none().child(Icon::new(icon).size(px(13.)).text_color(color)))
+                                .child(div().flex_none().font_weight(FontWeight::MEDIUM).child(p.verb.clone()))
+                                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_family(MONO).text_size(px(text::CAPTION)).text_color(theme.secondary).child(if p.detail.is_empty() { gist(name, &step.text) } else { p.detail.clone() })),
                         )
-                        .when_some(step.result.as_ref().map(|r| first_lines(r, 3)), |d, r| {
+                        .when_some(step.result.as_ref().map(|r| first_lines(r, 4)).filter(|r| !r.trim().is_empty()), |d, r| {
                             d.child(
                                 div()
-                                    .ml(px(18.))
+                                    .ml(px(19.))
                                     .px(px(space::S))
                                     .py(px(space::XS + 1.))
                                     .rounded(px(radius::SMALL))
@@ -1337,22 +1358,38 @@ impl Inspector {
                                     .text_size(px(text::CAPTION))
                                     .line_height(px(15.))
                                     .text_color(if step.is_error { theme.error } else { theme.secondary })
-                                    .child(r),
+                                    .child(crate::ui::rows::selectable(r, theme)),
                             )
                         })
+                        .into_any_element()
                 }
             });
         }
         if status == "running" {
-            detail = detail.child(div().flex().items_center().gap(px(space::XS + 2.)).text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child(Icon::new(IconName::LoaderCircle).size(px(13.)).text_color(theme.accent)).child("Working…"));
+            // What it's doing now: its last tool call still out, as its card in the thread says.
+            let activity = log.iter().rev().find(|s| s.tool.is_some()).filter(|s| s.result.is_none()).map(|s| {
+                let input: serde_json::Value = serde_json::from_str(&s.text).unwrap_or_default();
+                let p = crate::ui::steps::present(s.tool.as_deref().unwrap_or(""), &input, None);
+                if p.detail.is_empty() { p.verb } else { format!("{} {}", p.verb, p.detail) }
+            });
+            detail = detail.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(space::XS + 2.))
+                    .text_size(px(text::FOOTNOTE))
+                    .text_color(theme.secondary)
+                    .child(Icon::new(IconName::LoaderCircle).size(px(13.)).text_color(theme.accent))
+                    .child(div().flex_1().min_w_0().truncate().child(activity.map(|a| format!("{a}…")).unwrap_or_else(|| "Working…".into()))),
+            );
         } else if let Some(report) = report.filter(|r| !r.trim().is_empty()) {
             detail = detail.child(
                 div()
                     .p(px(space::M))
                     .rounded(px(radius::LARGE))
                     .border_1()
-                    .border_color(theme.separator)
-                    .bg(theme.card)
+                    .border_color(theme.accent.opacity(0.25))
+                    .bg(theme.accent_soft)
                     .flex()
                     .flex_col()
                     .gap(px(space::S))
@@ -1366,7 +1403,7 @@ impl Inspector {
                             .child(Icon::new(IconName::FileText).size(px(14.)).text_color(theme.secondary))
                             .child("Report"),
                     )
-                    .child(div().text_size(px(text::BODY)).line_height(px(text::BODY_LINE)).whitespace_normal().child(report)),
+                    .child(div().text_size(px(text::BODY)).line_height(px(text::BODY_LINE)).child(crate::ui::rows::markdown_view(&yh_core::markdown::parse(&report), theme))),
             );
         }
         column.child(detail).into_any_element()
