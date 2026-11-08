@@ -359,6 +359,43 @@ impl Library {
         );
     }
 
+    /// Every sub-agent call of a thread, oldest first, its run summarized (`Database::subagent_calls`),
+    /// held or not. Runs on a background thread.
+    pub fn subagent_calls(&self, thread: &str) -> Vec<crate::db::SubagentCall> {
+        if thread.starts_with("cc:") {
+            return self
+                .archive(thread)
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| e.kind == Kind::Tool && e.tool_name.as_deref().is_some_and(|n| n == "Agent" || n == "Task"))
+                .map(|(seq, e)| {
+                    let input: Value = e.tool_input.as_deref().and_then(|i| serde_json::from_str(i).ok()).unwrap_or_default();
+                    crate::db::SubagentCall {
+                        seq,
+                        id: e.id.clone(),
+                        tool_name: e.tool_name.clone(),
+                        description: input["description"].as_str().map(str::to_string),
+                        agent_type: input["subagent_type"].as_str().map(str::to_string),
+                        background: input["run_in_background"] == true,
+                        has_result: e.tool_result.is_some(),
+                        is_error: e.is_error,
+                        run: e.subagent.as_deref().and_then(crate::subagent_record::SubagentRecord::summary),
+                    }
+                })
+                .collect();
+        }
+        self.db.as_ref().map(|db| db.subagent_calls(thread)).unwrap_or_default()
+    }
+
+    /// One row of a thread by its ID, whole, with its number. Runs on a background thread.
+    pub fn entry(&self, thread: &str, id: &str) -> Option<(usize, EntryData)> {
+        if thread.starts_with("cc:") {
+            return self.archive(thread).iter().enumerate().find(|(_, e)| e.id == id).map(|(seq, e)| (seq, e.clone()));
+        }
+        let (seq, row) = self.db.as_ref()?.read_row(thread, id)?;
+        Some((seq, EntryData::from_row(row)?))
+    }
+
     /// Rows `from..before` of a thread: the newest `limit` before `before` (or the end).
     /// Runs on a background thread.
     pub fn page(&self, thread: &str, before: Option<usize>, limit: usize) -> Page {

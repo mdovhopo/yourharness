@@ -129,6 +129,24 @@ impl Subagent {
         }
     }
 
+    /// A saved run as the panel lists it before its steps are read.
+    fn from_summary(s: yh_core::subagent_record::SubagentSummary) -> Subagent {
+        Subagent {
+            description: s.description,
+            status: s.status,
+            steps: s.tool_uses.unwrap_or(0) as usize,
+            report: None,
+            log: vec![],
+            task_id: None,
+            activity: None,
+            tokens: s.tokens,
+            tool_uses: s.tool_uses,
+            started_at: s.started_at,
+            duration_ms: s.duration_ms,
+            base: Default::default(),
+        }
+    }
+
     fn apply(&mut self, usage: yh_core::claude::SubagentUsage) {
         let plus = |n: Option<u64>, base: Option<u64>| n.map(|n| n + base.unwrap_or(0));
         self.tokens = plus(usage.tokens, self.base.tokens).or(self.tokens);
@@ -183,6 +201,47 @@ fn entry(mut data: EntryData, seq: usize) -> EntryRef {
 
         delivery: None,
     }))
+}
+
+/// A sub-agent call that isn't held, as the Sub-agents panel lists it: what it was asked
+/// (only what the list shows) and its run summarized, no steps.
+fn summary_entry(call: yh_core::db::SubagentCall) -> EntryRef {
+    let mut data = EntryData::new(call.id, Kind::Tool, "");
+    data.tool_name = call.tool_name;
+    let mut input = serde_json::Map::new();
+    if let Some(d) = call.description {
+        input.insert("description".into(), d.into());
+    }
+    if let Some(t) = call.agent_type {
+        input.insert("subagent_type".into(), t.into());
+    }
+    if call.background {
+        input.insert("run_in_background".into(), true.into());
+    }
+    data.tool_input = Some(serde_json::Value::Object(input).to_string());
+    data.tool_result = call.has_result.then(String::new);
+    data.is_error = call.is_error;
+    let e = entry(data, call.seq);
+    // A call with neither a run nor a result was cut off with the process it ran in.
+    e.borrow_mut().sub = Some(call.run.map(Subagent::from_summary).unwrap_or_else(|| {
+        let mut s = Subagent::new(String::new());
+        s.status = if !call.has_result { "stopped".into() } else if call.is_error { "failed".into() } else { "completed".into() };
+        s.started_at = 0.0;
+        s
+    }));
+    e
+}
+
+/// A held sub-agent call let go of, kept for the panel as `summary_entry` would read it back.
+fn summary_of(e: &Entry) -> EntryRef {
+    let mut data = EntryData::new(e.data.id.clone(), Kind::Tool, "");
+    data.tool_name = e.data.tool_name.clone();
+    data.tool_input = e.data.tool_input.clone();
+    data.tool_result = e.data.tool_result.as_ref().map(|_| String::new());
+    data.is_error = e.data.is_error;
+    let summary = entry(data, e.seq);
+    summary.borrow_mut().sub = e.sub.as_ref().map(|s| Subagent { log: vec![], report: None, ..s.clone() });
+    summary
 }
 
 fn kind_name(kind: Kind) -> &'static str {
@@ -445,6 +504,14 @@ pub struct ThreadState {
     pub subagents_version: u64,
     /// The sub-agent you picked in the right sidebar (its Agent tool call's id).
     pub inspected_subagent: Option<String>,
+    /// Sub-agent calls in rows that aren't held (earlier pages, or let go of), for the panel,
+    /// by call id: (row number, the call summarized, `summary_entry`). The one in
+    /// `run_detail` is read whole.
+    saved_runs: HashMap<String, (usize, EntryRef)>,
+    /// `saved_runs` was asked of the database for this thread.
+    saved_runs_read: bool,
+    /// The saved run read whole for the panel (its steps, report), by call id; `true` once in.
+    run_detail: Option<(String, bool)>,
     /// Calls that continued a sub-agent (`SendMessage` to it), by the Agent call that started
     /// it: the CLI reports the continued run under the new call, the run is the same.
     agent_alias: HashMap<String, String>,
@@ -527,6 +594,9 @@ impl ThreadState {
             tools: HashMap::new(),
             subagents_version: 0,
             inspected_subagent: None,
+            saved_runs: HashMap::new(),
+            saved_runs_read: false,
+            run_detail: None,
             agent_alias: HashMap::new(),
             folds: vec![],
             turns: vec![],
@@ -576,6 +646,10 @@ impl ThreadState {
                 let b = e.borrow();
                 if b.data.kind == Kind::Tool {
                     self.tools.insert(b.data.id.clone(), (e.clone(), item.pos));
+                    // Held again: the row is the run, its summary goes.
+                    if self.saved_runs.remove(&b.data.id).is_some() && self.run_detail.as_ref().is_some_and(|(id, _)| *id == b.data.id) {
+                        self.run_detail = None;
+                    }
                 }
             }
         }
@@ -695,6 +769,9 @@ impl ThreadState {
                 }
                 if b.data.kind == Kind::Tool {
                     self.tools.remove(&b.data.id);
+                    if is_agent_entry(&b) {
+                        self.saved_runs.insert(b.data.id.clone(), (b.seq, summary_of(&b)));
+                    }
                 }
             }
         }
@@ -709,7 +786,19 @@ impl ThreadState {
         self.list.reset(0);
         self.before = 0;
         self.blocks.clear();
-        self.tools.clear();
+        // Its sub-agents stay listed, summarized; the one read whole goes back to a summary.
+        for (id, (e, _)) in self.tools.drain() {
+            let b = e.borrow();
+            if is_agent_entry(&b) {
+                self.saved_runs.insert(id, (b.seq, summary_of(&b)));
+            }
+        }
+        if let Some((id, _)) = self.run_detail.take() {
+            if let Some((_, e)) = self.saved_runs.get_mut(&id) {
+                let summary = summary_of(&e.borrow());
+                *e = summary;
+            }
+        }
         self.loaded = false;
         self.loading = false;
         self.folds.clear();
@@ -1628,7 +1717,9 @@ impl ThreadState {
         self.touch_pos(pos);
     }
 
-    /// The thread's sub-agents still held, oldest first: (Agent tool call id, its entry).
+    /// The thread's sub-agents, oldest first: (Agent tool call id, its entry). The held rows'
+    /// as they are (live, running ones among them), and the rest's as saved, summarized
+    /// (`saved_runs`) unless read whole (`run_detail`).
     pub fn subagents(&self) -> Vec<(String, EntryRef)> {
         let mut found: Vec<(usize, String, EntryRef)> = self
             .tools
@@ -1638,8 +1729,66 @@ impl ThreadState {
             .filter(|(_, (e, _))| is_agent_entry(&e.borrow()))
             .map(|(id, (e, _))| (e.borrow().seq, id.clone(), e.clone()))
             .collect();
+        found.extend(self.saved_runs.iter().filter(|(id, _)| !self.tools.contains_key(*id)).map(|(id, (seq, e))| (*seq, id.clone(), e.clone())));
         found.sort_by_key(|(seq, _, _)| *seq);
         found.into_iter().map(|(_, id, e)| (id, e)).collect()
+    }
+
+    /// The panel wants every sub-agent and the saved ones haven't been asked for yet.
+    pub fn needs_saved_runs(&self) -> bool {
+        !self.saved_runs_read && !self.id().starts_with("new:")
+    }
+
+    pub fn mark_saved_runs_read(&mut self) {
+        self.saved_runs_read = true;
+    }
+
+    /// The saved sub-agent calls, as `Library::subagent_calls` read them: those not held join
+    /// the list. One let go of meanwhile is kept as it was let go of, newer than what was read.
+    pub fn set_saved_runs(&mut self, calls: Vec<yh_core::db::SubagentCall>) {
+        for call in calls {
+            if self.tools.contains_key(&call.id) || self.saved_runs.contains_key(&call.id) {
+                continue;
+            }
+            let (id, seq) = (call.id.clone(), call.seq);
+            self.saved_runs.insert(id, (seq, summary_entry(call)));
+        }
+        self.subagents_version += 1;
+    }
+
+    /// A run listed from its summary that the panel shows: its steps and report are to be read.
+    pub fn wants_run_detail(&self, id: &str) -> bool {
+        self.saved_runs.contains_key(id) && !self.tools.contains_key(id) && self.run_detail.as_ref().is_none_or(|(d, _)| d != id)
+    }
+
+    pub fn mark_run_detail(&mut self, id: &str) {
+        self.run_detail = Some((id.to_string(), false));
+    }
+
+    /// The run's whole row, read for the panel: it replaces its summary, and the one read
+    /// before goes back to a summary (one run's steps are held at a time).
+    pub fn set_run_detail(&mut self, id: &str, row: Option<(usize, EntryData)>) {
+        if self.run_detail.as_ref().is_none_or(|(d, _)| d != id) {
+            return; // another was picked meanwhile
+        }
+        self.run_detail = Some((id.to_string(), true));
+        for (other, (_, e)) in self.saved_runs.iter_mut() {
+            if other != id && e.borrow().sub.as_ref().is_some_and(|s| !s.log.is_empty() || s.report.is_some()) {
+                let summary = summary_of(&e.borrow());
+                *e = summary;
+            }
+        }
+        if let (Some((seq, data)), Some(slot)) = (row, self.saved_runs.get_mut(id)) {
+            if !self.tools.contains_key(id) && data.id == id {
+                let whole = entry(data, seq);
+                if whole.borrow().sub.is_none() {
+                    // No run saved with it: keep what the summary made of its call.
+                    whole.borrow_mut().sub = slot.1.borrow().sub.clone();
+                }
+                *slot = (seq, whole);
+            }
+        }
+        self.subagents_version += 1;
     }
 
     fn end_turn(&mut self) {
@@ -1660,5 +1809,76 @@ impl ThreadState {
             self.dirty.insert(b.seq);
         }
         self.folds_dirty = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use yh_core::db::SubagentCall;
+    use yh_core::subagent_record::{SubagentEntry, SubagentRecord, SubagentSummary};
+
+    fn agent(id: &str, description: &str, run: Option<&SubagentRecord>) -> EntryData {
+        let mut d = EntryData::new(id, Kind::Tool, "");
+        d.tool_name = Some("Agent".into());
+        d.tool_input = Some(format!(r#"{{"description":"{description}","prompt":"go"}}"#));
+        d.tool_result = Some("done".into());
+        d.subagent = run.map(|r| r.encode());
+        d
+    }
+
+    fn call(seq: usize, id: &str, description: &str) -> SubagentCall {
+        SubagentCall {
+            seq,
+            id: id.into(),
+            tool_name: Some("Agent".into()),
+            description: Some(description.into()),
+            has_result: true,
+            run: Some(SubagentSummary { description: description.into(), status: "completed".into(), tool_uses: Some(3), ..Default::default() }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_panel_lists_saved_runs_with_the_held_ones_and_reads_one_whole_on_demand() {
+        let mut t = ThreadState::new(ThreadMeta::new("T".into(), "P".into(), "t".into()));
+        // The newest page holds rows 10.. with one run; rows 0..10 aren't held.
+        t.prepend(vec![EntryData::new("u", Kind::User, "hi"), agent("a3", "Held", None)], 10);
+        assert_eq!(t.subagents().len(), 1);
+        assert!(t.needs_saved_runs());
+        t.mark_saved_runs_read();
+        // What the database lists: two older runs, and the held one (held wins).
+        t.set_saved_runs(vec![call(2, "a1", "First"), call(6, "a2", "Second"), call(11, "a3", "Saved copy")]);
+        let runs = t.subagents();
+        assert_eq!(runs.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), vec!["a1", "a2", "a3"]);
+        assert_eq!(runs[2].1.borrow().data.tool_result.as_deref(), Some("done"));
+        assert_eq!(runs[0].1.borrow().sub.as_ref().map(|s| (s.description.as_str(), s.steps, s.log.len())), Some(("First", 3, 0)));
+        // Picked: read whole, steps and all.
+        assert!(t.wants_run_detail("a1") && !t.wants_run_detail("a3"));
+        t.mark_run_detail("a1");
+        assert!(!t.wants_run_detail("a1"));
+        let run = SubagentRecord {
+            description: "First".into(),
+            status: "completed".into(),
+            report: Some("Found it".into()),
+            entries: vec![SubagentEntry { id: "x".into(), kind: "tool".into(), tool_name: Some("Read".into()), tool_input: Some("{}".into()), ..Default::default() }],
+            ..Default::default()
+        };
+        t.set_run_detail("a1", Some((2, agent("a1", "First", Some(&run)))));
+        let a1 = t.subagents()[0].1.clone();
+        assert_eq!(a1.borrow().sub.as_ref().map(|s| (s.log.len(), s.report.clone())), Some((1, Some("Found it".into()))));
+        // Another picked: the first goes back to a summary.
+        t.mark_run_detail("a2");
+        t.set_run_detail("a2", Some((6, agent("a2", "Second", Some(&run)))));
+        assert!(t.subagents()[0].1.borrow().sub.as_ref().is_some_and(|s| s.log.is_empty()));
+        // Let go of: the held run stays listed, summarized.
+        t.unload();
+        let runs = t.subagents();
+        assert_eq!(runs.len(), 3);
+        assert_eq!(runs[2].1.borrow().data.tool_input.as_deref(), Some(r#"{"description":"Held","prompt":"go"}"#));
+        // Read back: it's held again, its summary gone.
+        t.prepend(vec![agent("a3", "Held", None)], 11);
+        assert_eq!(t.subagents().len(), 3);
+        assert!(!t.saved_runs.contains_key("a3"));
     }
 }

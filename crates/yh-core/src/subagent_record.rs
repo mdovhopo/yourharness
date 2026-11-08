@@ -45,6 +45,56 @@ fn number(f: f64) -> String {
     if f.fract() == 0.0 && f.abs() < 1e15 { format!("{}", f as i64) } else { format!("{f}") }
 }
 
+/// `startedAt` as saved: seconds since 2001 (or ISO 8601, from older builds), to since 1970.
+fn started_at(v: Option<&Value>) -> f64 {
+    match v {
+        Some(Value::Number(n)) => n.as_f64().map(|f| f + REFERENCE_DATE),
+        Some(Value::String(iso)) => crate::legacy_import::parse_iso8601(iso),
+        _ => None,
+    }
+    .unwrap_or(0.0)
+}
+
+/// A run as the Sub-agents panel lists it: what it was and how it went, without its steps.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct SubagentSummary {
+    pub description: String,
+    pub agent_type: Option<String>,
+    pub is_background: bool,
+    /// As `SubagentRecord::decode` reads it: a run saved `running` is `stopped`.
+    pub status: String,
+    pub tool_uses: Option<u64>,
+    pub tokens: Option<u64>,
+    pub duration_ms: Option<u64>,
+    pub has_report: bool,
+    /// Seconds since 1970.
+    pub started_at: f64,
+}
+
+/// The summary's fields; the rest (its steps, prompt and report) skipped, never kept.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SummaryFields {
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    agent_type: Option<String>,
+    #[serde(default)]
+    is_background: Option<bool>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    tool_uses: Option<u64>,
+    #[serde(default)]
+    tokens: Option<u64>,
+    #[serde(default)]
+    duration_ms: Option<u64>,
+    #[serde(default)]
+    report: Option<serde::de::IgnoredAny>,
+    #[serde(default)]
+    started_at: Option<Value>,
+}
+
 struct Writer(String);
 
 impl Writer {
@@ -122,18 +172,31 @@ impl SubagentRecord {
         w.end().into_bytes()
     }
 
+    /// What the panel lists of a saved run, read without keeping its steps; None when it
+    /// isn't a run.
+    pub fn summary(bytes: &[u8]) -> Option<SubagentSummary> {
+        let f: SummaryFields = serde_json::from_slice(bytes).ok()?;
+        let status = f.status.unwrap_or_else(|| "stopped".into());
+        Some(SubagentSummary {
+            description: f.description.unwrap_or_default(),
+            agent_type: f.agent_type,
+            is_background: f.is_background.unwrap_or(false),
+            status: if status == "running" { "stopped".into() } else { status },
+            tool_uses: f.tool_uses,
+            tokens: f.tokens,
+            duration_ms: f.duration_ms,
+            has_report: f.report.is_some(),
+            started_at: started_at(f.started_at.as_ref()),
+        })
+    }
+
     /// What was saved; None when it isn't a run.
     pub fn decode(bytes: &[u8]) -> Option<SubagentRecord> {
         let v: Value = serde_json::from_slice(bytes).ok()?;
         let o = v.as_object()?;
         let s = |k: &str| o.get(k).and_then(|v| v.as_str()).map(str::to_string);
         let status = s("status").unwrap_or_else(|| "stopped".into());
-        let started_at = match o.get("startedAt") {
-            Some(Value::Number(n)) => n.as_f64().map(|f| f + REFERENCE_DATE),
-            Some(Value::String(iso)) => crate::legacy_import::parse_iso8601(iso),
-            _ => None,
-        }
-        .unwrap_or(0.0);
+        let started_at = started_at(o.get("startedAt"));
         let entries = o
             .get("entries")
             .and_then(|e| e.as_array())
@@ -195,6 +258,33 @@ mod tests {
         let json = String::from_utf8(run.encode()).unwrap();
         assert!(json.starts_with(r#"{"description":"Look","prompt":"Find it","status":"completed","toolUses":2,"report":"Found in a\/b","startedAt":814183200,"entries":[{"id":"s1","kind":"assistant","text":"ok"}"#), "{json}");
         assert_eq!(SubagentRecord::decode(json.as_bytes()), Some(run));
+    }
+
+    #[test]
+    fn a_summary_is_what_decode_reads_without_the_steps() {
+        let run = SubagentRecord {
+            description: "Look".into(),
+            agent_type: Some("Explore".into()),
+            prompt: "Find it".into(),
+            is_background: true,
+            status: "running".into(),
+            tool_uses: Some(7),
+            tokens: Some(1200),
+            duration_ms: Some(5000),
+            report: Some("Found".into()),
+            started_at: REFERENCE_DATE + 814183200.,
+            entries: vec![SubagentEntry { id: "t1".into(), kind: "tool".into(), tool_name: Some("Read".into()), ..Default::default() }],
+        };
+        let s = SubagentRecord::summary(&run.encode()).unwrap();
+        let full = SubagentRecord::decode(&run.encode()).unwrap();
+        assert_eq!(s.description, full.description);
+        assert_eq!(s.agent_type.as_deref(), Some("Explore"));
+        assert!(s.is_background && s.has_report);
+        assert_eq!(s.status, "stopped");
+        assert_eq!((s.tool_uses, s.tokens, s.duration_ms), (Some(7), Some(1200), Some(5000)));
+        assert_eq!(s.started_at, full.started_at);
+        assert_eq!(SubagentRecord::summary(b"[1]"), None);
+        assert_eq!(SubagentRecord::summary(b"{}").map(|s| s.status), Some("stopped".into()));
     }
 
     #[test]

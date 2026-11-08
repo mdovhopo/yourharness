@@ -1341,6 +1341,11 @@ impl Inspector {
 
     fn subagents(&mut self, theme: &Theme, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let Some(thread) = self.thread.clone() else { return empty("No thread open.", theme) };
+        // Runs in pages that aren't held are listed from what was saved, read once, aside.
+        if thread.read(cx).needs_saved_runs() {
+            let (ws, t) = (self.workspace.clone(), thread.clone());
+            cx.defer(move |cx| ws.update(cx, |ws, cx| ws.ensure_subagent_runs(&t, cx)));
+        }
         let runs = thread.read(cx).subagents();
         if runs.is_empty() {
             return div()
@@ -1364,6 +1369,11 @@ impl Inspector {
             .and_then(|id| runs.iter().find(|(r, _)| *r == id).cloned())
             .or_else(|| runs.iter().rev().find(|(_, e)| e.borrow().sub.as_ref().is_some_and(|s| s.status == "running")).cloned())
             .unwrap_or_else(|| runs[runs.len() - 1].clone());
+        // Listed from its summary: its steps and report are read now, aside.
+        if thread.read(cx).wants_run_detail(&selected.0) {
+            let (ws, t, run) = (self.workspace.clone(), thread.clone(), selected.0.clone());
+            cx.defer(move |cx| ws.update(cx, |ws, cx| ws.ensure_run_detail(&t, &run, cx)));
+        }
         let mut column = div().size_full().flex().flex_col().child(panel_header("Sub-agents", Some(subtitle), theme));
         if runs.len() > 1 {
             let mut list = div().id("subagent-runs").max_h(px(176.)).overflow_y_scroll().px(px(space::S)).pb(px(space::S)).flex().flex_col().gap(px(1.)).border_b_1().border_color(theme.separator);

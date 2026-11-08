@@ -353,6 +353,32 @@ impl Database {
         })
     }
 
+    /// Every sub-agent call of a thread, oldest first, as the Sub-agents panel lists them:
+    /// `Agent`/`Task` calls (and calls with a run but no tool name yet), each with its run's
+    /// summary, without its steps or the rest of the transcript. Walks the thread's rows by its
+    /// `(thread_id, seq)` index; runs kept as blobs are read and summarized.
+    pub fn subagent_calls(&self, thread: &str) -> Vec<SubagentCall> {
+        self.before_reading(thread);
+        self.read(|c| subagent_calls(c, thread)).unwrap_or_else(|e| {
+            eprintln!("harness.sqlite: sub-agents of {thread}: {e}");
+            vec![]
+        })
+    }
+
+    /// One row by its ID, with its number: (seq, row).
+    pub fn read_row(&self, thread: &str, id: &str) -> Option<(usize, Row)> {
+        self.before_reading(thread);
+        self.read(|c| {
+            let seq: Option<i64> = c.query_row("SELECT seq FROM entries WHERE thread_id = ? AND id = ? ORDER BY seq DESC LIMIT 1", [thread, id], |r| r.get(0)).optional()?;
+            let Some(seq) = seq else { return Ok(None) };
+            Ok(read_rows(c, thread, seq as usize, 1)?.into_iter().next().map(|row| (seq as usize, row)))
+        })
+        .unwrap_or_else(|e| {
+            eprintln!("harness.sqlite: reading {thread}/{id}: {e}");
+            None
+        })
+    }
+
     /// A whole tool result kept as a blob.
     pub fn blob_string(&self, hash: &str) -> Option<String> {
         self.read(|c| blob(c, hash)).ok().flatten().map(|b| String::from_utf8_lossy(&b).into_owned())
@@ -475,6 +501,63 @@ fn read_rows(c: &Connection, thread: &str, from: usize, limit: i64) -> rusqlite:
         rows.push(row);
     }
     Ok(rows)
+}
+
+/// A sub-agent's call as listed: its row and what it was asked, its run summarized.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct SubagentCall {
+    pub seq: usize,
+    pub id: String,
+    pub tool_name: Option<String>,
+    /// From its input (`description`, `subagent_type`, `run_in_background`), when it's in the row.
+    pub description: Option<String>,
+    pub agent_type: Option<String>,
+    pub background: bool,
+    pub has_result: bool,
+    pub is_error: bool,
+    pub run: Option<crate::subagent_record::SubagentSummary>,
+}
+
+fn subagent_calls(c: &Connection, thread: &str) -> rusqlite::Result<Vec<SubagentCall>> {
+    let mut s = c.prepare_cached(
+        "SELECT seq, id, tool_name, tool_input, tool_result IS NOT NULL OR tool_result_blob IS NOT NULL, tool_is_error, subagent, subagent_blob
+         FROM entries WHERE thread_id = ?1 AND kind = 'tool'
+           AND (tool_name IN ('Agent', 'Task') OR (tool_name IS NULL AND (subagent IS NOT NULL OR subagent_blob IS NOT NULL)))
+         ORDER BY seq",
+    )?;
+    let raw: Vec<(SubagentCall, Option<String>, Option<Vec<u8>>, Option<String>)> = s
+        .query_map([thread], |r| {
+            Ok((
+                SubagentCall {
+                    seq: r.get::<_, i64>(0)? as usize,
+                    id: r.get(1)?,
+                    tool_name: r.get(2)?,
+                    has_result: r.get(4)?,
+                    is_error: r.get::<_, Option<i64>>(5)?.is_some_and(|v| v != 0),
+                    ..Default::default()
+                },
+                r.get(3)?,
+                opt_bytes(r, 6)?,
+                r.get(7)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut calls = Vec::with_capacity(raw.len());
+    for (mut call, input, run, run_blob) in raw {
+        if let Some(input) = input.and_then(|i| serde_json::from_str::<serde_json::Value>(&i).ok()) {
+            call.description = input["description"].as_str().map(str::to_string);
+            call.agent_type = input["subagent_type"].as_str().map(str::to_string);
+            call.background = input["run_in_background"] == true;
+        }
+        let run = match (run, run_blob) {
+            (Some(run), _) => Some(run),
+            (None, Some(hash)) => blob(c, &hash)?,
+            _ => None,
+        };
+        call.run = run.as_deref().and_then(crate::subagent_record::SubagentRecord::summary);
+        calls.push(call);
+    }
+    Ok(calls)
 }
 
 fn blob(c: &Connection, hash: &str) -> rusqlite::Result<Option<Vec<u8>>> {
@@ -1060,6 +1143,60 @@ mod tests {
         // Fewer rows: the rest go.
         db.save_rows("T1", 1, vec![]);
         assert_eq!(db.transcript_count("T1"), 1);
+    }
+
+    #[test]
+    fn subagent_calls_list_every_agent_call_with_its_run_summarized() {
+        use crate::subagent_record::{SubagentEntry, SubagentRecord};
+        let dir = scratch("subagents");
+        let db = Database::open(&dir).unwrap();
+        let call = |id: &str, name: Option<&str>, input: &str, run: Option<SubagentRecord>, result: Option<&str>| {
+            let mut r = row(id, "tool", "");
+            r.tool_name = name.map(str::to_string);
+            r.tool_input = Some(input.into());
+            r.tool_result = result.map(str::to_string);
+            r.tool_is_error = result.map(|_| id.ends_with("bad"));
+            r.subagent = run.map(|r| r.encode());
+            r
+        };
+        let run = |d: &str, steps: usize| SubagentRecord {
+            description: d.into(),
+            status: "completed".into(),
+            tool_uses: Some(steps as u64),
+            report: Some("done".into()),
+            started_at: 1_700_000_000.0,
+            // Enough steps to go in `blobs`.
+            entries: (0..steps).map(|n| SubagentEntry { id: format!("t{n}"), kind: "tool".into(), tool_name: Some("Read".into()), tool_result: Some("x".repeat(100)), ..Default::default() }).collect(),
+            ..Default::default()
+        };
+        let rows = vec![
+            (0, row("u1", "user", "go")),
+            (1, call("a1", Some("Agent"), r#"{"description":"First","subagent_type":"Explore","prompt":"p"}"#, Some(run("First", 2)), Some("ok"))),
+            (2, call("b1", Some("Bash"), r#"{"command":"ls"}"#, None, Some("x"))),
+            (3, call("a2", Some("Task"), r#"{"description":"Big","run_in_background":true}"#, Some(run("Big", 500)), None)),
+            (4, call("a3bad", Some("Agent"), r#"{"description":"No run"}"#, None, Some("boom"))),
+            (5, call("a4", None, "not json", Some(run("Unnamed", 1)), None)),
+            (6, row("x1", "assistant", "Agent")),
+        ];
+        db.save_rows("T1", rows.len(), rows);
+        db.save_rows("T2", 1, vec![(0, call("other", Some("Agent"), "{}", None, None))]);
+        let calls = db.subagent_calls("T1");
+        assert_eq!(calls.iter().map(|c| (c.seq, c.id.as_str())).collect::<Vec<_>>(), vec![(1, "a1"), (3, "a2"), (4, "a3bad"), (5, "a4")]);
+        assert_eq!(calls[0].description.as_deref(), Some("First"));
+        assert_eq!(calls[0].agent_type.as_deref(), Some("Explore"));
+        assert!(calls[0].has_result && !calls[0].is_error);
+        assert_eq!(calls[0].run.as_ref().map(|r| (r.description.as_str(), r.tool_uses)), Some(("First", Some(2))));
+        // Kept as a blob, still summarized.
+        assert!(calls[1].background && !calls[1].has_result);
+        assert_eq!(calls[1].run.as_ref().map(|r| r.tool_uses), Some(Some(500)));
+        assert!(calls[2].run.is_none() && calls[2].is_error);
+        assert_eq!(calls[3].description, None);
+        assert_eq!(calls[3].run.as_ref().map(|r| r.description.as_str()), Some("Unnamed"));
+        // Its whole row on demand, steps and all.
+        let (seq, whole) = db.read_row("T1", "a2").unwrap();
+        assert_eq!(seq, 3);
+        assert_eq!(SubagentRecord::decode(whole.subagent.as_deref().unwrap()).unwrap().entries.len(), 500);
+        assert_eq!(db.read_row("T1", "nope"), None);
     }
 
     #[test]

@@ -611,6 +611,56 @@ impl Workspace {
         .detach();
     }
 
+    /// Every sub-agent call of the thread for the Sub-agents panel, held or not: the saved
+    /// ones summarized, read once, aside.
+    pub fn ensure_subagent_runs(&mut self, thread: &Entity<ThreadState>, cx: &mut Context<Self>) {
+        if !thread.read(cx).needs_saved_runs() {
+            return;
+        }
+        // Held runs list as they are, and let go of ones as they were let go of (`trim`): what's
+        // read only adds the others.
+        let id = thread.update(cx, |t, _| {
+            t.mark_saved_runs_read();
+            t.id().to_string()
+        });
+        let library = self.library.clone();
+        let weak = thread.downgrade();
+        cx.spawn(async move |_, cx| {
+            let t0 = std::time::Instant::now();
+            let calls = cx.background_executor().spawn(async move { library.subagent_calls(&id) }).await;
+            if std::env::var("YH_TIMING").as_deref() == Ok("1") {
+                eprintln!("subagent calls: {} in {:.1} ms", calls.len(), t0.elapsed().as_secs_f64() * 1000.0);
+            }
+            let _ = weak.update(cx, |t, cx| {
+                t.set_saved_runs(calls);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// A run the panel shows that's listed from its summary: its row read whole, aside.
+    pub fn ensure_run_detail(&mut self, thread: &Entity<ThreadState>, run: &str, cx: &mut Context<Self>) {
+        if !thread.read(cx).wants_run_detail(run) {
+            return;
+        }
+        let id = thread.update(cx, |t, _| {
+            t.mark_run_detail(run);
+            t.id().to_string()
+        });
+        let (library, run) = (self.library.clone(), run.to_string());
+        let weak = thread.downgrade();
+        cx.spawn(async move |_, cx| {
+            let call = run.clone();
+            let row = cx.background_executor().spawn(async move { library.entry(&id, &call) }).await;
+            let _ = weak.update(cx, |t, cx| {
+                t.set_run_detail(&run, row);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// The transcript was let go of on screen: save its rows and keep only what a running turn
     /// needs.
     pub fn release(&mut self, thread: &Entity<ThreadState>, cx: &mut Context<Self>) {

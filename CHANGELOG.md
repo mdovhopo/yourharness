@@ -71,6 +71,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 - Code blocks scroll sideways rather than wrap, and long tool input and output scroll inside their box, the wheel moving on to the thread at their ends.
 
 ### Fixed
+- The Sub-agents tab lists every sub-agent the thread ever ran again, not only those in the part of a long thread that's loaded: after a restart it no longer drops to the last few, and picking an old one shows its steps and report.
 - When your shell is slow to start, `gh`, `glab` and other Homebrew tools are still found: the usual tool folders are added to PATH. Settings → Agents says how the environment was read.
 - Long task steps wrap inside the thread's tasks popover, which now scrolls instead of running off the screen.
 - Pictures attached to a message, and pictures Claude shows, are thumbnails of a set size again, instead of drawing at full size over the message and the rows below.
