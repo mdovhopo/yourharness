@@ -160,6 +160,7 @@ fn branch_pull(folder: &Path, path_env: Option<&str>) -> Option<Link> {
     let branch = forge::branch(folder)?;
     let mut command = std::process::Command::new("gh");
     command.args(["pr", "view", &branch, "--json", "url"]).current_dir(folder);
+    yh_core::shell_env::apply(&mut command);
     if let Some(p) = path_env {
         command.env("PATH", p);
     }

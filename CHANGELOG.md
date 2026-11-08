@@ -66,6 +66,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 - Code blocks scroll sideways rather than wrap, and long tool input and output scroll inside their box, the wheel moving on to the thread at their ends.
 
 ### Fixed
+- Pull requests load again in the right sidebar when the app is opened from the Dock or Finder: looking them up now finds `gh` and `glab` on your shell's PATH.
 - The conversation and a sub-agent's detail have a scroll bar again, following your Mac's Show scroll bars setting: while scrolling, or always.
 - A web page in the browser no longer takes your typing. Pages that focus a field on their own (YouTube, sign-in forms) used to pull the keyboard out of the composer, so Space, Shift+Space and other keys went to the page. Now the page gets the keyboard only after you press Take Control, and Give Back returns it to the app.
 - Opened work no longer has an empty "Thought" line between steps where Claude Code keeps the thinking to itself, and a refused tool call reads without its `<tool_use_error>` tags.

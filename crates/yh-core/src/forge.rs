@@ -379,6 +379,9 @@ pub fn look_up(link: &Link, path_env: Option<&str>) -> Result<PullRequest, Strin
     };
     let mut command = Command::new(tool);
     command.args(&args).current_dir(std::env::temp_dir());
+    // The login shell's environment: opened from the Dock the app's own PATH has no Homebrew,
+    // so `gh` and `glab` aren't found (and their tokens' variables are missing).
+    crate::shell_env::apply(&mut command);
     if let Some(p) = path_env {
         command.env("PATH", p);
     }
