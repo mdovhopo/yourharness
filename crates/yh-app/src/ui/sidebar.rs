@@ -419,6 +419,10 @@ impl Sidebar {
                 .child(div().flex_none().w(px(CHEVRON + GAP + ICON)).flex().justify_end().child(icon.size(px(ICON)).text_color(if strong { theme.accent } else { theme.secondary })))
                 .child(div().flex_1().when(!strong, |d| d.text_color(theme.secondary)).child(label))
                 .child(div().flex_none().text_size(px(text::CAPTION)).text_color(theme.tertiary).child(key))
+                .role(gpui_kit::Role::Button)
+                .aria_label(label)
+                .aria_description(tip)
+                .aria_keyshortcuts(key)
                 .tooltip(tooltip(tip))
         };
         div()
@@ -494,6 +498,8 @@ impl Sidebar {
         let (new_id, memory_tip) = (pid.clone(), format!("What agents remember in {name} (⇧⌘M)"));
         div()
             .id(SharedString::from(format!("project-{}", project.id)))
+            .role(gpui_kit::Role::Heading)
+            .aria_label(format!("{}{}", project.name, if collapsed { ", collapsed" } else { "" }))
             .group(group.clone())
             .flex()
             .items_center()
@@ -736,8 +742,31 @@ impl Sidebar {
                         .child(div().w(px(2.))),
                 )
         };
+        // VoiceOver: the title, then what it's doing, as the Swift app's row reads.
+        let spoken = {
+            let mut parts = vec![t.title.clone()];
+            if generating {
+                parts.push("Generating title".into());
+            }
+            if waiting {
+                parts.push("Waiting for your approval".into());
+            } else if running {
+                parts.push("Working".into());
+            } else if unread {
+                parts.push("New reply".into());
+            }
+            if pinned {
+                parts.push("Pinned".into());
+            }
+            if settled {
+                parts.push("Settled".into());
+            }
+            parts.join(", ")
+        };
         div()
             .id(SharedString::from(format!("thread-{id}")))
+            .role(gpui_kit::Role::ListItem)
+            .aria_label(spoken)
             .group(group)
             .relative()
             .flex()

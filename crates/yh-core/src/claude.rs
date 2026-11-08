@@ -316,6 +316,9 @@ pub fn set_chosen_claude(path: Option<std::path::PathBuf>) {
     *CHOSEN.lock().unwrap() = path;
 }
 
+/// What a thread says when there's no `claude` to run (the Swift app's `claudeNotFound`).
+pub const CLAUDE_NOT_FOUND: &str = "Couldn't find a working `claude` CLI. Check Settings → Agents.";
+
 /// The chosen `claude`, else the one on `YH_PATH` (as the app's test runs pass it), `PATH` and the usual places.
 pub fn find_claude() -> Option<std::path::PathBuf> {
     CHOSEN.lock().unwrap().clone().filter(|p| p.is_file()).or_else(|| crate::agents::which("claude"))
@@ -323,7 +326,7 @@ pub fn find_claude() -> Option<std::path::PathBuf> {
 
 impl ClaudeProcess {
     pub fn spawn(options: LaunchOptions, events: flume::Sender<Event>) -> Result<ClaudeProcess, String> {
-        let executable = find_claude().ok_or("claude isn't on PATH")?;
+        let executable = find_claude().ok_or(CLAUDE_NOT_FOUND)?;
         let mut args: Vec<String> = [
             "-p",
             "--input-format",
@@ -373,7 +376,7 @@ impl ClaudeProcess {
         for (k, v) in &options.env {
             command.env(k, v);
         }
-        let mut child = command.spawn().map_err(|e| format!("couldn't start claude: {e}"))?;
+        let mut child = command.spawn().map_err(|e| format!("{CLAUDE_NOT_FOUND} ({e})"))?;
         let pid = child.id();
         let stdout = child.stdout.take().unwrap();
         let stderr = child.stderr.take().unwrap();

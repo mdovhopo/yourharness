@@ -1303,7 +1303,8 @@ impl Workspace {
         }
         if let Err(error) = self.ensure_runtime(thread, cx) {
             thread.update(cx, |t, cx| {
-                t.notice(&format!("Couldn't send: {error}"));
+                // As the Swift app's `fail`: the reason itself, in error colour.
+                t.error_notice(&error);
                 t.running = false;
                 cx.notify();
             });

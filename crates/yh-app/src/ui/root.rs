@@ -901,7 +901,7 @@ impl Render for RootView {
                                         .flex()
                                         .items_baseline()
                                         .gap(px(space::S))
-                                        .child(div().flex_none().max_w(gpui_kit::relative(0.7)).text_size(px(text::HEADLINE)).font_weight(FontWeight::SEMIBOLD).overflow_hidden().whitespace_nowrap().text_ellipsis().child(title))
+                                        .child(div().id("thread-title").role(gpui_kit::Role::Heading).aria_label(title.clone()).flex_none().max_w(gpui_kit::relative(0.7)).text_size(px(text::HEADLINE)).font_weight(FontWeight::SEMIBOLD).overflow_hidden().whitespace_nowrap().text_ellipsis().child(title))
                                         .child(div().min_w_0().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).overflow_hidden().whitespace_nowrap().text_ellipsis().child(subtitle)),
                                 )
                                 .child(
