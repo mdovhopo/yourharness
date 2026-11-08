@@ -453,6 +453,11 @@ fn main() {
                     cx.background_executor().timer(Duration::from_millis(400)).await;
                 }
                 cx.background_executor().timer(Duration::from_millis(300)).await;
+                #[allow(deprecated)]
+                {
+                    let w = ns as cocoa::base::id;
+                    eprintln!("TYPE first responder before typing: {}", platform::first_responder_class(w));
+                }
                 for step in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
                     let (shift, key) = match step.strip_prefix("shift-") { Some(k) => (true, k), None => (false, step) };
                     let (plain, code): (String, u16) = match key {

@@ -66,6 +66,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 - Code blocks scroll sideways rather than wrap, and long tool input and output scroll inside their box, the wheel moving on to the thread at their ends.
 
 ### Fixed
+- A web page in the browser no longer takes your typing. Pages that focus a field on their own (YouTube, sign-in forms) used to pull the keyboard out of the composer, so Space, Shift+Space and other keys went to the page. Now the page gets the keyboard only after you press Take Control, and Give Back returns it to the app.
 - Opened work no longer has an empty "Thought" line between steps where Claude Code keeps the thinking to itself, and a refused tool call reads without its `<tool_use_error>` tags.
 - `/compact` no longer shows the output of `/context` and other built-in commands a second time.
 - Reading back while Claude works, "Working…" no longer sits on top of the conversation's text: it floats in a pill of its own, as the jump buttons do.

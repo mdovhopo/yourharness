@@ -524,6 +524,8 @@ pub struct WebView {
     activity: std::cell::Cell<u64>,
     /// In the parking window (`parking_view`), off screen, rather than over a panel.
     parked: std::cell::Cell<bool>,
+    /// The page may have the keyboard: only after Take Control (`set_keyboard`).
+    keyboard: std::cell::Cell<bool>,
 }
 
 /// A parked page is drawn at half its CSS size, as the Swift app parked it.
@@ -705,7 +707,11 @@ impl WebView {
                 overlay: std::cell::Cell::new(nil),
                 activity: Default::default(),
                 parked: Default::default(),
+                keyboard: Default::default(),
             };
+            // The page never takes the keyboard by itself (a page focusing a field, your click
+            // in it): what you type goes to the composer until you take control.
+            web.set_keyboard(false);
             web.lay_out(LAPTOP.0, LAPTOP.1, LAPTOP.0, LAPTOP.1);
             web
         }
@@ -1003,6 +1009,11 @@ impl WebView {
     /// the keyboard out of the composer you're typing in: the agent's input mustn't. Off again
     /// once the page has handled the events, so your own clicks focus it as usual.
     fn without_taking_focus(&self, body: impl FnOnce()) {
+        // Without control the page can't take the keyboard at all: nothing to guard.
+        if !self.keyboard.get() {
+            body();
+            return;
+        }
         unsafe {
             let window: id = msg_send![self.view, window];
             let first: id = if window == nil { nil } else { msg_send![window, firstResponder] };
@@ -1021,6 +1032,39 @@ impl WebView {
             })
             .copy();
             let _: () = msg_send![self.view, evaluateJavaScript: ns_string("0") completionHandler: &*done];
+        }
+    }
+
+    /// Whether the page may have the keyboard. Off (the default), WebKit never makes it the
+    /// window's first responder, so keys go to the app, and if it had the keyboard it goes
+    /// back to the app's own view. On (Take Control), it gets the keyboard now.
+    pub fn set_keyboard(&self, allowed: bool) {
+        self.keyboard.set(allowed);
+        unsafe {
+            let selector = sel!(_setShouldSuppressFirstResponderChanges:);
+            let can: bool = msg_send![self.view, respondsToSelector: selector];
+            if can {
+                let suppress = if allowed { NO } else { YES };
+                let _: () = msg_send![self.view, _setShouldSuppressFirstResponderChanges: suppress];
+            }
+            let window: id = msg_send![self.view, window];
+            if window == nil {
+                return;
+            }
+            if allowed {
+                let _: () = msg_send![window, makeFirstResponder: self.view];
+                return;
+            }
+            let first: id = msg_send![window, firstResponder];
+            if first == nil {
+                return;
+            }
+            let is_view: bool = msg_send![first, isKindOfClass: class!(NSView)];
+            let inside: bool = is_view && msg_send![first, isDescendantOf: self.view];
+            if inside {
+                let content: id = msg_send![window, contentView];
+                let _: () = msg_send![window, makeFirstResponder: content];
+            }
         }
     }
 

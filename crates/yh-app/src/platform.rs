@@ -1063,3 +1063,16 @@ pub fn key_code(c: char) -> u16 {
         _ => 49,
     }
 }
+
+/// The class of what has the keyboard in `w` (its first responder), for test logs.
+pub fn first_responder_class(w: id) -> String {
+    unsafe {
+        let first: id = msg_send![w, firstResponder];
+        if first == nil {
+            return "none".into();
+        }
+        let class: id = msg_send![first, className];
+        let utf8: *const std::os::raw::c_char = msg_send![class, UTF8String];
+        std::ffi::CStr::from_ptr(utf8).to_string_lossy().into_owned()
+    }
+}

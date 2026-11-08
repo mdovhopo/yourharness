@@ -319,6 +319,15 @@ impl Browsers {
             for t in &s.tabs {
                 t.reset_refs();
             }
+            // The keyboard goes with control: to the shown tab when you take it, back to the
+            // app when you give it back.
+            let shown = s.selected_tab().map(|t| t.id);
+            for t in s.tabs.iter().filter(|t| Some(t.id) != shown) {
+                t.web.set_keyboard(false);
+            }
+            if let Some(t) = s.selected_tab() {
+                t.web.set_keyboard(on);
+            }
             if std::env::var("YH_DATA_DIR").is_ok() {
                 eprintln!("BROWSER control {}", if on { "taken" } else { "given back" });
             }
@@ -345,6 +354,9 @@ impl Browsers {
             s.next_id += 1;
             let id = s.next_id;
             let mut tab = Tab::new(id, web);
+            if s.user_has_control {
+                tab.web.set_keyboard(true);
+            }
             tab.log(&json!({"kind": "console", "level": "info", "text": format!("Opened by tab {from} ({})", url.as_deref().unwrap_or("a new window"))}));
             s.tabs.push(tab);
             s.selected = Some(id);
@@ -480,6 +492,9 @@ impl Browsers {
         let web = WebView::new(host, project);
         if let Some(u) = url_from(url) {
             web.load(&u);
+        }
+        if session.user_has_control {
+            web.set_keyboard(true);
         }
         session.tabs.push(Tab::new(id, web));
         session.selected = Some(id);
