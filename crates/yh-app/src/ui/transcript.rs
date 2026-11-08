@@ -299,7 +299,8 @@ impl Render for TranscriptView {
                 .into_any_element();
         }
         let thread = self.thread.clone();
-        let mut root = div().size_full().relative();
+        // The list VoiceOver goes through: its rows on screen are its items (`rows::render_item`).
+        let mut root = div().id("transcript").role(gpui_kit::Role::List).aria_label("Conversation").size_full().relative();
         if probe::enabled() {
             root = root.child(probe::tracker("transcript".into()));
         }

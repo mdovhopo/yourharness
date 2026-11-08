@@ -278,3 +278,50 @@ pub fn form_row(label: impl Into<SharedString>, control: AnyElement, theme: &The
 pub fn group_label(title: impl Into<SharedString>, theme: &Theme) -> gpui_kit::Div {
     div().text_size(px(text::FOOTNOTE)).font_weight(FontWeight::SEMIBOLD).text_color(theme.secondary).child(title.into())
 }
+
+/// A multi-line field inside a page that scrolls: the wheel moves the field while it can go
+/// that way, and the page once the field is at its end (as the transcript's capped boxes do,
+/// the Swift app's `TranscriptWheelRouter`). The field keeps every wheel event over it once its
+/// text overflows, so this watches from the capture phase where each event was before it, and
+/// after the event, if neither the field nor the page moved, moves the page by it.
+pub fn wheel_passes_to_page(
+    field: &gpui_kit::Entity<gpui_kit::component::input::TextareaState>,
+    page: &gpui_kit::ScrollHandle,
+    content: impl IntoElement,
+) -> impl IntoElement {
+    use gpui_kit::{DispatchPhase, ScrollEvent};
+    let (field, page) = (field.clone(), page.clone());
+    div().relative().child(content).child(
+        gpui_kit::canvas(
+            |_, _, _| {},
+            move |bounds, _, window, _| {
+                let (field, page) = (field.clone(), page.clone());
+                window.on_mouse_event(move |e: &ScrollEvent, phase, window, cx| {
+                    if phase != DispatchPhase::Capture || !bounds.contains(&e.position) {
+                        return;
+                    }
+                    let delta = e.delta.pixel_delta(window.line_height());
+                    if delta.y.abs() < delta.x.abs() || delta.y == px(0.) {
+                        return;
+                    }
+                    let (field_was, page_was) = (field.read(cx).scroll_offset(), page.offset());
+                    let (field, page) = (field.clone(), page.clone());
+                    window.defer(cx, move |window, cx| {
+                        if page.offset() != page_was || field.read(cx).scroll_offset() != field_was {
+                            return;
+                        }
+                        let y = (page_was.y + delta.y).clamp(-page.max_offset().y, px(0.));
+                        if y != page_was.y {
+                            page.set_offset(gpui_kit::point(page_was.x, y));
+                            window.refresh();
+                        }
+                    });
+                });
+            },
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full(),
+    )
+}

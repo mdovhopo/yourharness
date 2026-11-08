@@ -79,6 +79,9 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 - The first thread you start right after launch is told how `gh stack` makes stacked PRs too, not only the ones after it.
 - VoiceOver reads the sidebar, the thread's header and the composer: the thread list and the footer's buttons were missing from what it saw, icon-only buttons now say what they do, and the Model, effort and Permissions pickers say their current choice.
 - Switches have a white knob in dark mode, as macOS's do.
+- What's New and Release Notes open in the middle of the window, like the app's other dialogs, instead of beside the button you clicked.
+- In Settings → General, scrolling over the title prompt scrolls the page once the prompt reaches its top or bottom, instead of stopping there.
+- VoiceOver reads the conversation: your messages, Claude's replies, notices, sub-agents, a turn's "Worked for …" line and each step by what it did and on what, with whether it's open, running or failed.
 
 ## [0.0.16] - 2026-11-04
 

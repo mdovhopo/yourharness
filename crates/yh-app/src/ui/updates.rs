@@ -8,8 +8,8 @@ use crate::state::updater::{Phase, Updater};
 use crate::state::workspace::Workspace;
 use crate::theme::{radius, space, text, Theme};
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::popover::Popover;
-use gpui_kit::component::{Icon, IconName, Sizable};
+use gpui_kit::component::popover::{Popover, PopoverState};
+use gpui_kit::component::{Icon, IconName, Sizable, WindowExt};
 use gpui_kit::{div, prelude::*, px, AnyElement, App, Context, Entity, FontWeight, IntoElement, SharedString, Window};
 use yh_core::updates::{Notes, Version, RELEASES_PAGE};
 
@@ -39,6 +39,26 @@ impl ReleaseNotesView {
         self.updater.update(cx, |u, cx| u.load_notes(cx));
         cx.notify();
     }
+}
+
+/// Opens these releases' notes as a dialog, centred over the window as the app's other dialogs
+/// are (a popover put them beside whatever button asked, the version popover's included).
+pub fn open_notes(notes: &Entity<ReleaseNotesView>, after: Option<Version>, through: Version, window: &mut Window, cx: &mut App) {
+    notes.update(cx, |n, cx| n.show(after, through, cx));
+    let n = notes.clone();
+    window.open_dialog(cx, move |d, _, _| d.w(px(460.)).p_0().child(n.clone()));
+}
+
+/// The button that opens them; inside a popover (`popover`), the popover closes first, so it
+/// doesn't stay over the dialog.
+fn notes_button(id: impl Into<gpui_kit::ElementId>, label: &'static str, notes: &Entity<ReleaseNotesView>, after: Option<Version>, through: Version, popover: Option<&Entity<PopoverState>>) -> Button {
+    let (notes, popover) = (notes.clone(), popover.cloned());
+    Button::new(id).ghost().label(label).on_click(move |_, window, cx| {
+        if let Some(p) = &popover {
+            p.update(cx, |p, cx| p.dismiss(window, cx));
+        }
+        open_notes(&notes, after.clone(), through.clone(), window, cx)
+    })
 }
 
 impl Render for ReleaseNotesView {
@@ -83,7 +103,8 @@ impl Render for ReleaseNotesView {
                 div()
                     .flex()
                     .items_center()
-                    .px(px(space::L))
+                    .pl(px(space::L))
+                    .pr(px(space::L + 28.))
                     .pt(px(space::L))
                     .pb(px(space::S + 2.))
                     .child(div().flex_1().text_size(px(text::TITLE)).font_weight(FontWeight::SEMIBOLD).child(title))
@@ -179,20 +200,7 @@ pub fn banner(updater: &Entity<Updater>, workspace: &Entity<Workspace>, notes: &
     let dismiss = |id: &'static str, tip: &'static str, f: Box<dyn Fn(&mut App)>| {
         Button::new(id).xsmall().ghost().icon(Icon::new(IconName::CircleX).size(px(13.)).text_color(theme.secondary)).tooltip(tip).on_click(move |_, _, cx| f(cx))
     };
-    let whats_new = |id: &'static str, after: Option<Version>, through: Version| {
-        let notes = notes.clone();
-        let n2 = notes.clone();
-        Popover::new(id)
-            .anchor(gpui_kit::Anchor::BottomLeft)
-            .trigger(Button::new(SharedString::from(format!("{id}-button"))).xsmall().ghost().label("What's New"))
-            .content(move |_, _, _| n2.clone())
-            .on_open_change(move |open, _, cx| {
-                if *open {
-                    let (a, t) = (after.clone(), through.clone());
-                    notes.update(cx, |n, cx| n.show(a, t, cx));
-                }
-            })
-    };
+    let whats_new = |id: &'static str, after: Option<Version>, through: Version| notes_button(SharedString::from(format!("{id}-button")), "What's New", notes, after, through, None).xsmall();
     let (u1, u2) = (updater.clone(), updater.clone());
     let row = div().flex().items_center().gap(px(space::S));
     let body = match u.phase.clone() {
@@ -247,7 +255,8 @@ pub fn banner(updater: &Entity<Updater>, workspace: &Entity<Workspace>, notes: &
 }
 
 /// Where updates stand and what you can do next, in a line: for Settings and the version popover.
-pub fn status(updater: &Entity<Updater>, workspace: &Entity<Workspace>, notes: &Entity<ReleaseNotesView>, theme: &Theme, cx: &App) -> AnyElement {
+/// `popover`: the one it's in, closed when What's New opens.
+pub fn status(updater: &Entity<Updater>, workspace: &Entity<Workspace>, notes: &Entity<ReleaseNotesView>, popover: Option<&Entity<PopoverState>>, theme: &Theme, cx: &App) -> AnyElement {
     let u = updater.read(cx);
     let row = div().flex().items_center().gap(px(space::S)).min_h(px(28.));
     if let Some(why) = u.why_not() {
@@ -271,20 +280,8 @@ pub fn status(updater: &Entity<Updater>, workspace: &Entity<Workspace>, notes: &
         }
         Phase::Checking => row.child(Icon::new(IconName::LoaderCircle).size(px(14.)).text_color(theme.secondary)).child("Checking…").into_any_element(),
         Phase::Available(r) => {
-            let (notes, current, v) = (notes.clone(), u.current.clone(), r.version.clone());
-            let n2 = notes.clone();
             row.child(div().flex_1().child(format!("{} is available", r.version)))
-                .child(
-                    Popover::new("status-notes")
-                        .trigger(Button::new("status-notes-button").small().ghost().label("What's New"))
-                        .content(move |_, _, _| n2.clone())
-                        .on_open_change(move |open, _, cx| {
-                            if *open {
-                                let (a, t) = (current.clone(), v.clone());
-                                notes.update(cx, |n, cx| n.show(a, t, cx));
-                            }
-                        }),
-                )
+                .child(notes_button("status-notes-button", "What's New", notes, u.current.clone(), r.version.clone(), popover).small())
                 .child(Button::new("status-update").small().primary().label("Update").on_click(move |_, _, cx| u2.update(cx, |u, cx| u.download(cx))))
                 .into_any_element()
         }
@@ -321,6 +318,7 @@ pub fn version_button(updater: &Entity<Updater>, workspace: &Entity<Workspace>, 
         .default_open(std::env::var("YH_OPEN_VERSION").is_ok())
         .trigger(Button::new("version-button").xsmall().ghost().child(div().text_size(px(text::CAPTION)).text_color(theme.tertiary).child(label.clone())).accessibility_label(format!("YourHarness {label}")).tooltip(format!("YourHarness {label}")))
         .content(move |_, _, cx| {
+            let popover = cx.entity();
             let u = updater.read(cx);
             let current = u.current.clone();
             let n = notes.clone();
@@ -344,22 +342,9 @@ pub fn version_button(updater: &Entity<Updater>, workspace: &Entity<Workspace>, 
                                 .child(div().font_weight(FontWeight::SEMIBOLD).child(format!("YourHarness {}", u.version_label())))
                                 .when_some(u.build.clone(), |d, b| d.child(div().text_size(px(text::CAPTION)).text_color(theme.secondary).child(format!("Build {b}")))),
                         )
-                        .when_some(current, |d, v| {
-                            let n2 = n.clone();
-                            d.child(
-                                Popover::new("current-notes")
-                                    .trigger(Button::new("current-notes-button").small().ghost().label("Release Notes").tooltip(format!("What changed in {v}")))
-                                    .content(move |_, _, _| n2.clone())
-                                    .on_open_change(move |open, _, cx| {
-                                        if *open {
-                                            let v = v.clone();
-                                            n.update(cx, |n, cx| n.show(None, v, cx));
-                                        }
-                                    }),
-                            )
-                        }),
+                        .when_some(current, |d, v| d.child(notes_button("current-notes-button", "Release Notes", &n, None, v.clone(), Some(&popover)).small().tooltip(format!("What changed in {v}")))),
                 )
-                .child(status(&updater, &workspace, &notes, &theme, cx))
+                .child(status(&updater, &workspace, &notes, Some(&popover), &theme, cx))
         })
         .into_any_element()
 }

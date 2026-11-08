@@ -61,7 +61,8 @@ in window points through the window, a second apart, after `YH_DRAFT_DELAY` + 0.
 the plan card's Approve menu; `YH_CLICK_WINDOW=<title>` sends them, and `YH_WHEEL`'s, to that window instead:
 `Settings`), `YH_WHEEL=<x,y,dy,count>[;…]` (`count` pixel wheel events of `dy`, positive scrolling up, at that point
 through the window as a real wheel goes, same delay; after each step `WHEEL …` prints the open transcript's top row
-and every capped tool box that can scroll, `key:offset/max`: for the 320 pt boxes and sideways code blocks),
+and every capped tool box that can scroll, `key:offset/max`: for the 320 pt boxes and sideways code blocks; with Settings
+open, also where its page and title prompt stand),
 `YH_AX_DUMP=<s>` (the window's accessibility tree as VoiceOver reads it, from inside the app so no permission
 prompt, printed as `AX …` lines; never dump another app's tree from outside, which needs Accessibility access),
 `YH_RUNTIME_LOG=1` (each thread's `claude` started and ended, `RUNTIME …`: its effort, whether `gh stack`'s

@@ -70,6 +70,8 @@ pub struct SettingsView {
     tab: Tab,
     found: Found,
     title_prompt: Entity<TextareaState>,
+    /// The body's scroll, which the title prompt hands the wheel on to at its ends.
+    body_scroll: gpui_kit::ScrollHandle,
     /// Settings → MCP: the servers everywhere, the `/mcp` sheet's list drawn in place.
     /// Made when the tab shows and let go when it doesn't, so it only asks while it's seen.
     mcp: Option<Entity<crate::ui::mcp::McpSheet>>,
@@ -81,13 +83,14 @@ pub struct SettingsView {
 impl SettingsView {
     fn new(workspace: Entity<Workspace>, tab: Tab, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let rules = workspace.read(cx).title_prompt().unwrap_or_else(|| yh_core::titles::DEFAULT_RULES.to_string());
-        let title_prompt = cx.new(|cx| TextareaState::new(window, cx).default_value(rules));
+        // No bounce at its ends: there the wheel goes on to the page (`page_kit::wheel_passes_to_page`).
+        let title_prompt = cx.new(|cx| TextareaState::new(window, cx).default_value(rules).scroll_bounce(false));
         crate::platform::refresh_notification_status();
         let mut watch = vec![cx.observe(&workspace, |_, _, cx| cx.notify())];
         if let Some(u) = cx.try_global::<SettingsLinks>().map(|l| l.updater.clone()) {
             watch.push(cx.observe(&u, |_, _, cx| cx.notify()));
         }
-        let mut view = SettingsView { workspace, tab, found: Found::default(), title_prompt, mcp: None, copied: false, _watch: watch };
+        let mut view = SettingsView { workspace, tab, found: Found::default(), title_prompt, body_scroll: gpui_kit::ScrollHandle::new(), mcp: None, copied: false, _watch: watch };
         view.detect(cx);
         view.tab_shown(window, cx);
         view
@@ -418,6 +421,7 @@ impl SettingsView {
         let denied = crate::platform::notifications_denied();
         let (l1, l2, l3) = (lib.clone(), lib.clone(), lib.clone());
         let title_prompt = self.title_prompt.clone();
+        let body_scroll = self.body_scroll.clone();
         div()
             .flex()
             .flex_col()
@@ -582,7 +586,7 @@ impl SettingsView {
                                     .border_color(theme.separator)
                                     .font_family(MONO)
                                     .text_size(px(text::CODE))
-                                    .child(Textarea::new(&title_prompt).appearance(false).h(px(110.))),
+                                    .child(crate::ui::page_kit::wheel_passes_to_page(&title_prompt, &body_scroll, Textarea::new(&title_prompt).appearance(false).h(px(110.)))),
                             ),
                     )
                     .inline({
@@ -745,7 +749,7 @@ impl SettingsView {
                                     .when_some(build, |d, b| d.child(div().text_size(px(text::CAPTION)).text_color(theme.secondary).child(format!("Build {b}")))),
                             ),
                     )
-                    .child(div().px(px(space::M)).py(px(space::S)).child(crate::ui::updates::status(&updater, &self.workspace, &notes, theme, cx)))
+                    .child(div().px(px(space::M)).py(px(space::S)).child(crate::ui::updates::status(&updater, &self.workspace, &notes, None, theme, cx)))
                     .footer("Looks for a new release on GitHub at launch and every few hours. Updates download only when you ask, and apply when you restart."),
             )
             .child(
@@ -901,13 +905,21 @@ impl Render for SettingsView {
                 ),
             )
             // The body scrolls in what the window leaves it.
-            .child(div().id("settings-body").flex_1().min_h_0().overflow_y_scroll().px(px(space::XL)).pb(px(space::XL)).child(body))
+            .child(div().id("settings-body").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.body_scroll).px(px(space::XL)).pb(px(space::XL)).child(body))
     }
 }
 
 thread_local! {
     /// Settings' own window, while it's open.
     static WINDOW: std::cell::RefCell<Option<(gpui_kit::AnyWindowHandle, gpui_kit::WeakEntity<SettingsView>)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Where Settings' page and its title prompt stand, `down/max`, for `YH_WHEEL`'s report.
+pub fn wheel_report(cx: &App) -> Option<String> {
+    let view = WINDOW.with(|w| w.borrow().as_ref().map(|(_, v)| v.clone()))?.upgrade()?;
+    let v = view.read(cx);
+    let (page, max) = (v.body_scroll.offset(), v.body_scroll.max_offset());
+    Some(format!("settings page {:.0}/{:.0}, title prompt {:.0}", -f32::from(page.y), f32::from(max.y), -f32::from(v.title_prompt.read(cx).scroll_offset().y)))
 }
 
 /// Opens Settings on General (⌘,), or brings its window forward.

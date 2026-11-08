@@ -602,7 +602,8 @@ fn main() {
                         let top = root.read(cx).workspace.read(cx).selected_thread().map(|t| t.read(cx).list.logical_scroll_top());
                         let top = top.map_or("none".to_string(), |t| format!("row {} +{:.0}", t.item_ix, f32::from(t.offset_in_item)));
                         let boxes: Vec<String> = crate::ui::rows::box_offsets().iter().map(|(k, at, max)| format!("{:04x}:{at:.0}/{max:.0}", k & 0xffff)).collect();
-                        eprintln!("WHEEL {label}: transcript at {top}; boxes [{}]", boxes.join(" "));
+                        let settings = crate::ui::settings::wheel_report(cx).map(|s| format!("; {s}")).unwrap_or_default();
+                        eprintln!("WHEEL {label}: transcript at {top}; boxes [{}]{settings}", boxes.join(" "));
                     });
                 };
                 report("start".into(), cx);

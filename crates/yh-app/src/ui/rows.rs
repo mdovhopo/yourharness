@@ -99,6 +99,8 @@ pub fn render_item(thread: &Entity<ThreadState>, ix: usize, window: &mut Window,
         return div().into_any_element();
     }
     start_reading_order(item.pos);
+    // What VoiceOver reads is only worked out while it listens (`spoken`).
+    SPEAKS.with(|s| s.set(window.is_a11y_active()));
     // Videos' first frames, made aside the first time their row shows.
     let videos = if matches!(item.ty, ItemType::User | ItemType::Media) { row_videos(state, item) } else { vec![] };
     if !videos.is_empty() {
@@ -146,6 +148,7 @@ pub fn render_item(thread: &Entity<ThreadState>, ix: usize, window: &mut Window,
     // Open work keeps its spacing inside its box, so the rule down its side runs unbroken
     // from row to row.
     let in_box = matches!(fold, Fold::Open);
+    let label = speaks().then(|| row_label(item, fold, state.linker.as_deref())).flatten();
     // The column: centred, at most 820 wide, as the web transcript's.
     div()
         .when(hit, |d| d.bg(theme.accent.opacity(0.10)))
@@ -157,6 +160,10 @@ pub fn render_item(thread: &Entity<ThreadState>, ix: usize, window: &mut Window,
         .child(div().w_full().max_w(px(764.)).child(content))
         // Right-click on selected text: Copy and Look Up (nothing opens without a selection).
         .id(("row", item.pos as u64 as usize))
+        // A row on screen is an item of the transcript's list for VoiceOver (the list makes
+        // only those): what it says, or its parts (a turn's summary, steps) when it's work.
+        .when(speaks(), |d| d.role(gpui_kit::Role::ListItem))
+        .when_some(label, |d, l| d.aria_label(l))
         .context_menu(|menu, window, cx| {
             let text = gpui_kit::base::TextSelection::selected_text(window, cx);
             if text.trim().is_empty() {
@@ -170,6 +177,64 @@ pub fn render_item(thread: &Entity<ThreadState>, ix: usize, window: &mut Window,
                 }))
         })
         .into_any_element()
+}
+
+thread_local! {
+    /// Whether VoiceOver (or another assistive app) listens to the window drawing rows now.
+    static SPEAKS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether to name rows and their parts for VoiceOver this frame: only while it listens, so
+/// the rest of the time a row costs nothing more.
+fn speaks() -> bool {
+    SPEAKS.with(|s| s.get())
+}
+
+/// What VoiceOver reads for a row, from what the row already holds (the reply's parsed
+/// markdown is the one the row draws). None when its parts speak for it: work, whose summary
+/// and steps are named themselves, and a turn's summary folded shut.
+fn row_label(item: &Item, fold: Fold, linker: Option<&Linker>) -> Option<String> {
+    if matches!(fold, Fold::Summary { open: false, .. }) {
+        return None;
+    }
+    let entry = item.entries.first()?;
+    let e = entry.borrow();
+    match item.ty {
+        ItemType::User => {
+            let n = e.data.attachments.len();
+            let files = match n {
+                0 => String::new(),
+                1 => ", 1 attachment".into(),
+                n => format!(", {n} attachments"),
+            };
+            Some(format!("Your message: {}{files}", e.data.text.trim()))
+        }
+        ItemType::Text => {
+            drop(e);
+            Some(format!("Claude: {}", markdown_of(entry, linker).plain_text()))
+        }
+        ItemType::Notice if e.data.kind == Kind::Command => {
+            drop(e);
+            Some(format!("Command output: {}", markdown_of(entry, None).plain_text()))
+        }
+        ItemType::Notice => Some(if e.data.is_error { format!("Error: {}", e.data.text.trim()) } else { e.data.text.trim().to_string() }),
+        ItemType::Agent => {
+            let input: serde_json::Value = serde_json::from_str(e.data.tool_input.as_deref().unwrap_or("{}")).unwrap_or_default();
+            let title = e.sub.as_ref().map(|s| s.description.clone()).filter(|d| !d.is_empty()).or_else(|| input["description"].as_str().map(str::to_string)).unwrap_or_default();
+            let status = e.sub.as_ref().map(|s| s.status.clone()).unwrap_or_else(|| match &e.data.tool_result {
+                Some(_) if e.data.is_error => "failed".into(),
+                Some(_) => "completed".into(),
+                None => "running".into(),
+            });
+            Some(if title.is_empty() { format!("Sub-agent, {status}") } else { format!("Sub-agent: {title}, {status}") })
+        }
+        ItemType::Media => {
+            let input: serde_json::Value = serde_json::from_str(e.data.tool_input.as_deref().unwrap_or("{}")).unwrap_or_default();
+            let caption = input["caption"].as_str().filter(|c| !c.is_empty()).map(|c| format!(": {c}")).unwrap_or_default();
+            Some(format!("{}{caption}", showed(&media_paths(&input))))
+        }
+        ItemType::Work => None,
+    }
 }
 
 /// A finished turn's work shown open: a hairline down its side, under the summary's chevron,
@@ -238,8 +303,10 @@ fn turn_summary(state: &ThreadState, work: &TurnWork, open: bool, pos: i64, thre
     let details = turn_details(state, work);
     let handle = thread.clone();
     // Quiet, like a disclosure line: secondary text on the canvas, a fill under the pointer.
+    let spoken = speaks().then(|| if details.is_empty() { worked.clone() } else { format!("{worked}, {}", details.replace(" · ", ", ")) });
     div()
         .id(("turn", pos as u64 as usize))
+        .when_some(spoken, |d, l| d.role(gpui_kit::Role::Button).aria_label(l).aria_expanded(open))
         .flex()
         .items_center()
         .gap(px(6.))
@@ -689,15 +756,8 @@ fn text_row(e: &EntryRef, ctx: &RowContext, theme: &Theme, window: &Window) -> A
         .into_any_element()
 }
 
-/// Images and videos Claude showed you (`show_media`), from the thread's own copies.
-fn media_row(e: &EntryRef, ctx: &RowContext, theme: &Theme) -> AnyElement {
-    let b = e.borrow();
-    let input: serde_json::Value = serde_json::from_str(b.data.tool_input.as_deref().unwrap_or("{}")).unwrap_or_default();
-    let paths = media_paths(&input);
-    let caption = input["caption"].as_str().filter(|c| !c.is_empty()).map(str::to_string);
-    let (done, failed, result) = (b.data.tool_result.is_some(), b.data.is_error, b.data.tool_result.clone().unwrap_or_default());
-    let tool_use = b.data.id.clone();
-    drop(b);
+/// "Claude showed 2 images and a video".
+fn showed(paths: &[String]) -> String {
     let kinds: Vec<MediaKind> = paths.iter().filter_map(|p| media_kind(p)).collect();
     let videos = kinds.iter().filter(|k| **k == MediaKind::Video).count();
     let images = kinds.len() - videos;
@@ -708,7 +768,19 @@ fn media_row(e: &EntryRef, ctx: &RowContext, theme: &Theme) -> AnyElement {
     if videos > 0 {
         said.push(if videos == 1 { "a video".to_string() } else { format!("{videos} videos") });
     }
-    let summary = format!("Claude showed {}", if said.is_empty() { "media".to_string() } else { said.join(" and ") });
+    format!("Claude showed {}", if said.is_empty() { "media".to_string() } else { said.join(" and ") })
+}
+
+/// Images and videos Claude showed you (`show_media`), from the thread's own copies.
+fn media_row(e: &EntryRef, ctx: &RowContext, theme: &Theme) -> AnyElement {
+    let b = e.borrow();
+    let input: serde_json::Value = serde_json::from_str(b.data.tool_input.as_deref().unwrap_or("{}")).unwrap_or_default();
+    let paths = media_paths(&input);
+    let caption = input["caption"].as_str().filter(|c| !c.is_empty()).map(str::to_string);
+    let (done, failed, result) = (b.data.tool_result.is_some(), b.data.is_error, b.data.tool_result.clone().unwrap_or_default());
+    let tool_use = b.data.id.clone();
+    drop(b);
+    let summary = showed(&paths);
     let items: Vec<(String, String, MediaKind)> = paths
         .iter()
         .enumerate()
@@ -1452,8 +1524,10 @@ fn work_row(state: &ThreadState, ctx: &RowContext, item: &Item, theme: &Theme) -
     drop(last);
     let open = item.open || expand_all();
     let handle = ctx.thread.clone();
+    let spoken = speaks().then(|| if live { format!("{}, now: {latest}", summary(&item.entries)) } else { summary(&item.entries) });
     let head = div()
         .id(("work", pos as u64 as usize))
+        .when_some(spoken, |d, l| d.role(gpui_kit::Role::Button).aria_label(l).aria_expanded(open))
         .flex()
         .items_center()
         .gap(px(6.))
@@ -1756,8 +1830,21 @@ fn step(state: &ThreadState, ctx: &RowContext, pos: i64, n: usize, e: &EntryRef,
     };
     // Closed: one quiet line (an icon, what it did, on what), a fill under the pointer. Open:
     // the same line heading a card with what went in and what came back.
+    // A step by its verb and target: "Read …/ui/rows.rs, failed".
+    let spoken = speaks().then(|| {
+        let mut l = if p.detail.is_empty() { p.verb.clone() } else { format!("{} {}", p.verb, p.detail) };
+        if let Some((label, _, _, _, _)) = &job {
+            l.push_str(&format!(", {label}"));
+        } else if running {
+            l.push_str(", running");
+        } else if failed {
+            l.push_str(", failed");
+        }
+        l
+    });
     let head = div()
         .id(("step", ((pos as u64) << 20 | n as u64) as usize))
+        .when_some(spoken, |d, l| d.role(gpui_kit::Role::Button).aria_label(l).aria_expanded(open))
         .flex()
         .items_center()
         .gap(px(space::S))
@@ -1877,8 +1964,10 @@ fn thinking_step(thread: &Entity<ThreadState>, pos: i64, n: usize, e: &EntryRef,
     drop(b);
     let handle = thread.clone();
     let entry = e.clone();
+    let spoken = speaks().then(|| format!("{}{}", if live { "Thinking" } else { "Thought" }, if gist.is_empty() { String::new() } else { format!(": {gist}") }));
     let head = div()
         .id(("step", ((pos as u64) << 20 | n as u64) as usize))
+        .when_some(spoken, |d, l| d.role(gpui_kit::Role::Button).aria_label(l).when(!empty, |d| d.aria_expanded(open)))
         .flex()
         .items_center()
         .gap(px(space::S))

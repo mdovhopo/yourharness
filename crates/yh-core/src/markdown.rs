@@ -95,6 +95,28 @@ impl Builder {
     }
 }
 
+impl Markdown {
+    /// The text as it reads aloud, without the markup: a block a line, list items and table
+    /// rows on lines of their own (for VoiceOver).
+    pub fn plain_text(&self) -> String {
+        let mut out: Vec<String> = Vec::with_capacity(self.blocks.len());
+        for block in &self.blocks {
+            match block {
+                MdBlock::Paragraph(s) | MdBlock::Heading(_, s) | MdBlock::Quote(s) => out.push(s.text.clone()),
+                MdBlock::Code { code, .. } => out.push(code.text.clone()),
+                MdBlock::List(items) => out.extend(items.iter().map(|(_, _, s)| s.text.clone())),
+                MdBlock::Table { header, rows } => {
+                    for row in std::iter::once(header).chain(rows) {
+                        out.push(row.iter().map(|c| c.text.as_str()).collect::<Vec<_>>().join(", "));
+                    }
+                }
+                MdBlock::Rule => {}
+            }
+        }
+        out.join("\n")
+    }
+}
+
 pub fn parse(source: &str) -> Markdown {
     let mut b = Builder::default();
     let parser = Parser::new_ext(source, Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH);
@@ -459,6 +481,12 @@ fn scan(text: &str, m: Multiline, carry: Carry, span: &mut dyn FnMut(Range<usize
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plain_text_drops_the_markup() {
+        let md = parse("# Done\n\nIt **builds** now, see `main.rs`.\n\n- one\n- two\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n---");
+        assert_eq!(md.plain_text(), "Done\nIt builds now, see main.rs.\none\ntwo\na, b\n1, 2");
+    }
 
     #[test]
     fn code_blocks_keep_their_language() {
