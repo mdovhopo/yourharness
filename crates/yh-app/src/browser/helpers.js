@@ -89,6 +89,8 @@
       if (!n && el.labels?.length) n = clean([...el.labels].map(l => l.innerText || l.textContent).join(' '));
       if (!n) n = clean(el.getAttribute('placeholder'));
       if (!n && t === 'image') n = clean(el.getAttribute('alt'));
+      // A file input reads as its button does in the page.
+      if (!n && t === 'file') n = el.multiple ? 'Choose Files' : 'Choose File';
     }
     if (!n && (el.localName === 'img' || el.localName === 'area')) n = clean(el.getAttribute('alt'));
     if (!n && el.localName === 'svg') n = clean(el.querySelector('title')?.textContent);
@@ -162,6 +164,7 @@
   }
 
   function value(el, r) {
+    if (el.localName === 'input' && el.type === 'file') return el.files?.length ? clean([...el.files].map(f => f.name).join(', ')) : null;
     if (el.localName === 'select') return clean([...el.selectedOptions].map(o => o.label).join(', '));
     if (r === 'textbox' || r === 'searchbox' || r === 'combobox' || r === 'spinbutton' || r === 'slider') {
       if (el.isContentEditable) return clip(clean(el.innerText), MAX_TEXT);
