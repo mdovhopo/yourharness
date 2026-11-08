@@ -8,6 +8,8 @@
 #   APP=<path.app>    somewhere else (test copies go in test-harness-root/…, never build/,
 #                     which may be the copy the user has open)
 #   FEATURES=snapshots  YH_SNAPSHOT support, for test copies (not for perf runs)
+#   SIGN=1            a Next build signed with the app's own identity, not ad hoc, so macOS keeps
+#                     what it allowed across rebuilds: the user's own Next copy in /Applications
 # Its own bundle ID until the switch, so it never shares permissions or data with the user's
 # app (/Applications/YourHarness.app, the frozen Swift 0.0.16).
 set -euo pipefail
@@ -63,7 +65,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 SIGNED="signed ad hoc"
-if [[ -n "${RELEASE:-}" ]]; then
+if [[ -n "${RELEASE:-}" || -n "${SIGN:-}" ]]; then
     SIGNING="${YH_SIGNING_DIR:-$HOME/.yourharness/signing}"
     IDENTITY="${YH_SIGN_IDENTITY:-}"
     KEYCHAIN="${YH_SIGN_KEYCHAIN:-}"
