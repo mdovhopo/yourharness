@@ -275,14 +275,35 @@ pub fn buttons(workspace: &Entity<Workspace>, theme: &Theme, cx: &App) -> AnyEle
     let ws = workspace.read(cx);
     let shows = ws.shows_inspector;
     let (w1, w2) = (workspace.clone(), workspace.clone());
+    // As the Swift app's: the count of PRs the thread worked on beside the icon; the icon alone
+    // for ones only mentioned; hidden when it links none (shown until that's known).
+    let counts = ws.selected.as_ref().and_then(|id| ws.pull_counts.get(id).copied());
+    let tip = match counts {
+        Some((1, _)) => "The pull request this thread worked on".to_string(),
+        Some((n, _)) if n > 1 => format!("The {n} pull requests this thread worked on"),
+        _ => "Pull requests mentioned in this thread".to_string(),
+    };
+    let mut pulls = icon_button("thread-pulls", icons::pull_request(), tip, theme);
+    if let Some((worked, _)) = counts.filter(|c| c.0 > 0) {
+        pulls = pulls.label(worked.to_string());
+    }
     div()
         .flex()
         .items_center()
         .gap(px(2.))
         .children(specialist(workspace, cx))
-        .child(icon_button("thread-pulls", icons::pull_request(), "Pull requests this thread worked on or mentioned", theme).on_click(move |_, _, cx| {
-            w1.update(cx, |ws, cx| ws.show_panel(Panel::PullRequests, cx));
-        }))
+        .when(counts.is_none_or(|(_, all)| all > 0), |d| {
+            d.child(pulls.on_click(move |_, _, cx| {
+                // Open on the PRs tab already: it closes, as in the Swift app.
+                w1.update(cx, |ws, cx| {
+                    if ws.shows_inspector && ws.panel == Panel::PullRequests {
+                        ws.set_shows_inspector(false, cx);
+                    } else {
+                        ws.show_panel(Panel::PullRequests, cx);
+                    }
+                });
+            }))
+        })
         .when(!shows, |d| {
             d.child(icon_button("thread-sidebar", Icon::new(IconName::PanelRight), "Show the right sidebar (⌥⌘0)", theme).on_click(move |_, _, cx| {
                 w2.update(cx, |ws, cx| ws.set_shows_inspector(true, cx));

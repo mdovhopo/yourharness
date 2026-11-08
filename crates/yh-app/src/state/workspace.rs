@@ -201,6 +201,9 @@ pub struct Workspace {
     /// Where each thread's working folder stood when its turn began, for what git sees change
     /// in the turn (`turn_changes`), by thread.
     turn_baselines: HashMap<String, TurnBaseline>,
+    /// Each thread's PRs as its rows link them, read aside: (worked on, all), for the
+    /// toolbar's button.
+    pub pull_counts: HashMap<String, (usize, usize)>,
 }
 
 /// A turn's start, for the files it changed.
@@ -288,6 +291,7 @@ impl Workspace {
             stacks_installed: None,
             command_loads: Default::default(),
             turn_baselines: HashMap::new(),
+            pull_counts: HashMap::new(),
         };
         // Is `gh stack` there? Looked aside, so the first thread's agent knows how stacks are made.
         cx.spawn(async move |this, cx| {
@@ -948,6 +952,29 @@ impl Workspace {
         thread.update(cx, |t, _| t.title_needs_refinement = false);
         let sent = messages.iter().filter(|m| m.0).count();
         self.update_title_for_agent(&id, messages, sent, None, cx);
+    }
+
+    /// How many PRs the thread worked on, of those its rows link: read aside (as the PRs tab
+    /// reads them, without looking each up), for the toolbar's count.
+    pub fn count_pulls(&mut self, thread: &Entity<ThreadState>, cx: &mut Context<Self>) {
+        let Some(db) = self.library.db.clone() else { return };
+        let id = thread.read(cx).id().to_string();
+        if id.starts_with(SIDE) || id.starts_with(MEMORY_AGENT) || id.starts_with(SETTINGS) {
+            return;
+        }
+        let folder = self.folder_of(thread.read(cx));
+        let path = std::env::var("YH_PATH").ok();
+        cx.spawn(async move |this, cx| {
+            let key = id.clone();
+            let links = cx.background_executor().spawn(async move { crate::state::pulls::links(&db, &id, &folder, path.as_deref()) }).await;
+            let counts = (links.iter().filter(|(_, worked)| *worked).count(), links.len());
+            let _ = this.update(cx, |ws, cx| {
+                if ws.pull_counts.insert(key, counts) != Some(counts) {
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// Other threads working in a folder overlapping `folder` now, or active there since `since`.
@@ -1877,6 +1904,15 @@ impl Workspace {
             r.insert("updatedAt".into(), iso_now().into());
         });
         self.save_rows(thread, cx);
+        // The toolbar's PR count follows what the turn did (once its rows are saved).
+        if self.selected.as_deref() == Some(id.as_str()) {
+            let t = thread.clone();
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(Duration::from_millis(1500)).await;
+                let _ = this.update(cx, |ws, cx| ws.count_pulls(&t, cx));
+            })
+            .detach();
+        }
         // Effort changed mid-turn: the process starts over now, unless jobs it left run on.
         let restart = self.runtimes.get(&id).is_some_and(|rt| rt.restart_when_idle) && thread.read(cx).jobs.running.is_empty() && !waiting_on_jobs;
         if restart {

@@ -64,6 +64,11 @@ impl TranscriptView {
         let mut view = TranscriptView { thread, workspace, was_running, slow_load: false, job_ticker: None, probed: false, _observe: observe };
         view.load_links(cx);
         view.follow_jobs(cx);
+        // The toolbar's PR count, read aside when the thread's transcript is first made.
+        {
+            let (ws, thread) = (view.workspace.clone(), view.thread.clone());
+            cx.defer(move |cx| ws.update(cx, |ws, cx| ws.count_pulls(&thread, cx)));
+        }
         view
     }
 

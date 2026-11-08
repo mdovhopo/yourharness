@@ -10,6 +10,7 @@ mod ui;
 mod webview;
 mod keep_awake;
 mod browser;
+mod video_thumb;
 
 use gpui_kit::{
     point, prelude::*, px, size, App, Bounds, Focusable, KeyBinding, TitlebarOptions,

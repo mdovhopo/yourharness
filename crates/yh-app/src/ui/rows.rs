@@ -99,6 +99,14 @@ pub fn render_item(thread: &Entity<ThreadState>, ix: usize, window: &mut Window,
         return div().into_any_element();
     }
     start_reading_order(item.pos);
+    // Videos' first frames, made aside the first time their row shows.
+    let videos = if matches!(item.ty, ItemType::User | ItemType::Media) { row_videos(state, item) } else { vec![] };
+    if !videos.is_empty() {
+        let pos = item.pos;
+        ensure_video_thumbs(videos, thread, pos, cx);
+    }
+    let state = thread.read(cx);
+    let Some(item) = state.item_at(ix) else { return div().into_any_element() };
     // Find open: this row's texts mark what it looks for (nothing to do when it's closed).
     FIND.with(|f| *f.borrow_mut() = state.find_query.clone().map(|q| (q, state.find_hit == Some(item.pos))));
     let ctx = RowContext {
@@ -241,6 +249,19 @@ fn turn_summary(state: &ThreadState, work: &TurnWork, open: bool, pos: i64, thre
                 .text_color(theme.tertiary)
                 .when(!details.is_empty(), |d| d.child(format!("· {details}"))),
         )
+        // "Show work" under the pointer, "Hide work" while open: its room is always kept.
+        .group("turn-summary")
+        .child(
+            div()
+                .flex_none()
+                .text_size(px(ts::CAPTION))
+                .text_color(theme.secondary)
+                .when(!open, |d| d.opacity(0.).group_hover("turn-summary", |s| s.opacity(1.)))
+                .child(if open { "Hide work" } else { "Show work" }),
+        )
+        .tooltip(move |window, cx| {
+            gpui_kit::component::tooltip::Tooltip::new(if open { "Hide Claude's work" } else { "Show what Claude did: thinking, tool calls and sub-agents" }).build(window, cx)
+        })
         .on_click(move |_, _, cx| {
             handle.update(cx, |t, cx| {
                 t.toggle_turn(pos);
@@ -248,6 +269,80 @@ fn turn_summary(state: &ThreadState, work: &TurnWork, open: bool, pos: i64, thre
             })
         })
         .into_any_element()
+}
+
+thread_local! {
+    /// Videos' first frames, once made (`video_thumb`), and the ones being made.
+    static THUMBS: std::cell::RefCell<HashMap<String, Option<std::path::PathBuf>>> = std::cell::RefCell::new(HashMap::new());
+}
+
+/// A video's first frame, if it's made.
+fn video_thumb(video: &str) -> Option<std::path::PathBuf> {
+    THUMBS.with(|t| t.borrow().get(video).cloned().flatten())
+}
+
+/// The videos a row shows.
+fn row_videos(state: &ThreadState, item: &Item) -> Vec<String> {
+    let b = item.entries[0].borrow();
+    match item.ty {
+        ItemType::User => b.data.attachments.iter().filter(|n| !n.ends_with('/') && media_kind(n) == Some(MediaKind::Video)).map(|n| attachments_dir().join(n).to_string_lossy().into_owned()).collect(),
+        ItemType::Media if b.data.tool_result.is_some() => {
+            let input: serde_json::Value = serde_json::from_str(b.data.tool_input.as_deref().unwrap_or("{}")).unwrap_or_default();
+            media_paths(&input)
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| media_kind(p) == Some(MediaKind::Video))
+                .map(|(n, p)| attachments_dir().join(media_name(state.id(), &b.data.id, n, p)).to_string_lossy().into_owned())
+                .collect()
+        }
+        _ => vec![],
+    }
+}
+
+/// A row's videos' first frames are made aside (once each), the row drawn again once they are.
+fn ensure_video_thumbs(videos: Vec<String>, thread: &Entity<ThreadState>, pos: i64, cx: &mut App) {
+    for video in videos {
+        let asked = THUMBS.with(|t| t.borrow().contains_key(&video));
+        if asked {
+            continue;
+        }
+        THUMBS.with(|t| t.borrow_mut().insert(video.clone(), None));
+        let weak = thread.downgrade();
+        cx.spawn(async move |cx| {
+            let v = video.clone();
+            let made = cx
+                .background_executor()
+                .spawn(async move {
+                    let out = crate::video_thumb::path_for(&v);
+                    crate::video_thumb::make(&v, &out).then_some(out)
+                })
+                .await;
+            if let Some(out) = made {
+                THUMBS.with(|t| t.borrow_mut().insert(video, Some(out)));
+                let _ = cx.update(|cx| redraw_row(&weak, pos, cx));
+            }
+        })
+        .detach();
+    }
+}
+
+/// A video's tile: its first frame with a play mark over it, or a dark poster until it's made.
+fn video_tile(tile: gpui_kit::Stateful<gpui_kit::Div>, video: &str, w: f32, h: f32, caption: Option<String>) -> gpui_kit::Stateful<gpui_kit::Div> {
+    let mark = div()
+        .absolute()
+        .inset_0()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(px(6.))
+        .child(div().p(px(8.)).rounded_full().bg(gpui_kit::black().opacity(0.45)).child(icon(IconName::Play, 24., gpui_kit::white().opacity(0.95))))
+        .children(caption.map(|c| div().text_size(px(ts::CAPTION)).text_color(gpui_kit::white().opacity(0.8)).child(c)));
+    let tile = tile.relative().w(px(w)).h(px(h)).overflow_hidden().bg(gpui_kit::black().opacity(0.82));
+    match video_thumb(video) {
+        Some(frame) => tile.child(gpui_kit::img(frame).size_full().object_fit(gpui_kit::ObjectFit::Cover)).child(mark),
+        None => tile.child(mark),
+    }
 }
 
 /// Where sent images are kept.
@@ -498,15 +593,7 @@ fn user_row(item: &Item, ctx: &RowContext, theme: &Theme, window: &Window) -> An
                     });
                 let tile = match kind {
                     Some(MediaKind::Image) => tile.child(gpui_kit::img(std::path::PathBuf::from(&path)).max_w(px(240.)).max_h(px(180.)).rounded(px(radius::LARGE))),
-                    Some(MediaKind::Video) => tile
-                        .w(px(220.))
-                        .h(px(124.))
-                        .rounded(px(radius::LARGE))
-                        .bg(gpui_kit::black().opacity(0.82))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(icon(IconName::Play, 28., gpui_kit::white().opacity(0.9))),
+                    Some(MediaKind::Video) => video_tile(tile.rounded(px(radius::LARGE)), &path, 220., 124., None),
                     None => tile.child(file_chip(name, theme)),
                 };
                 tile.context_menu(move |menu, _, _| media_menu(menu, &menu_path, &menu_all, kind))
@@ -646,18 +733,8 @@ fn media_row(e: &EntryRef, ctx: &RowContext, theme: &Theme) -> AnyElement {
                 .on_click(move |_, _, _| crate::platform::quick_look(all.clone(), n));
             match kind {
                 MediaKind::Image => tile.child(gpui_kit::img(std::path::PathBuf::from(&stored)).max_w(px(max_w)).max_h(px(max_h))),
-                // A poster of its own: a play mark and its name; Quick Look plays it.
-                MediaKind::Video => tile
-                    .w(px(max_w.min(360.)))
-                    .h(px(max_h.min(200.)))
-                    .bg(gpui_kit::black().opacity(0.82))
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .gap(px(6.))
-                    .child(icon(IconName::Play, 30., gpui_kit::white().opacity(0.9)))
-                    .child(div().text_size(px(ts::CAPTION)).text_color(gpui_kit::white().opacity(0.7)).child(yh_core::library::last_component(&original))),
+                // Its first frame with a play mark and its name; Quick Look plays it.
+                MediaKind::Video => video_tile(tile, &stored, max_w.min(360.), max_h.min(200.), Some(yh_core::library::last_component(&original).to_string())),
             }
             .context_menu(move |menu, _, _| media_menu(menu, &menu_path, &menu_all, Some(kind)))
         })));
@@ -677,7 +754,22 @@ fn notice_row(e: &EntryRef, theme: &Theme) -> AnyElement {
             .rounded(px(radius::LARGE))
             .px(px(space::M))
             .py(px(10.))
+            .flex()
+            .flex_col()
+            .gap(px(space::S))
             .text_size(px(ts::FOOTNOTE))
+            // What a built-in command printed (`/context`'s table), headed as such.
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .text_size(px(ts::CAPTION))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.secondary)
+                    .child(icon(IconName::SquareTerminal, 12., theme.secondary))
+                    .child("Command output"),
+            )
             .child(markdown_view_in(&md, theme, None, None))
             .into_any_element();
     }
@@ -998,7 +1090,8 @@ fn is_local(url: &str) -> bool {
 fn follow(url: &str, ctx: Option<&(SharedString, SharedString)>, window: &Window, cx: &mut App) {
     let is_web = url.contains("://") || url.starts_with("mailto:");
     if is_web {
-        if let (Some((thread, project)), true) = (ctx, is_local(url)) {
+        // A local address opens in the thread's own browser; with ⌘, in your default one.
+        if let (Some((thread, project)), true, false) = (ctx, is_local(url), window.modifiers().platform) {
             crate::browser::Browsers::open_page(thread, Some(project), url, cx);
             return;
         }
