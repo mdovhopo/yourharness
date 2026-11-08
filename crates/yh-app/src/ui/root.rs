@@ -138,6 +138,18 @@ impl RootView {
                 cx.notify();
             }),
             cx.subscribe_in(&spotlight, window, |this, _, event: &crate::ui::spotlight::SpotlightEvent, window, cx| this.spotlight_action(event.0.clone(), window, cx)),
+            // The composer saves its draft when it loses focus or the thread changes; quitting
+            // does neither, so what's typed is saved here, before the workspace's own quit
+            // handler (registered after this view is made) writes everything out.
+            cx.on_app_quit(|this, cx| {
+                let text = this.composer.read(cx).input.read(cx).value().to_string();
+                this.workspace.update(cx, |ws, cx| {
+                    if let Some(id) = ws.selected.clone() {
+                        ws.save_draft(&id, &text, cx);
+                    }
+                });
+                async {}
+            }),
         ];
         let (sidebar_hidden, sidebar_width) = {
             let lib = &workspace.read(cx).library;
