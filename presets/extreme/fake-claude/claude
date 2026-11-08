@@ -122,6 +122,18 @@ def subagent(rate):
 jobs_dir = os.path.join(os.environ.get("TMPDIR", "/tmp"), f"yh-fake-jobs-{os.getpid()}")
 jobs = []
 
+def remove_job_files(*_):
+    # The app ends this process when it quits: the jobs' files go with it.
+    for name in os.listdir(jobs_dir) if os.path.isdir(jobs_dir) else []:
+        os.remove(os.path.join(jobs_dir, name))
+    if os.path.isdir(jobs_dir): os.rmdir(jobs_dir)
+    if _: os._exit(0)
+
+import atexit, signal
+atexit.register(remove_job_files)
+for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+    signal.signal(sig, remove_job_files)
+
 def background_job(rate):
     # A command left running (`run_in_background`): the jobs strip above the composer shows it,
     # its output read from a file, until a later step says it ended.
@@ -200,6 +212,3 @@ for line in sys.stdin:
         worker = threading.Thread(target=turn, args=(seconds, rate, "nosubagents" not in text), daemon=True)
         worker.start()
 if worker: worker.join()
-for name in os.listdir(jobs_dir) if os.path.isdir(jobs_dir) else []:
-    os.remove(os.path.join(jobs_dir, name))
-if os.path.isdir(jobs_dir): os.rmdir(jobs_dir)
