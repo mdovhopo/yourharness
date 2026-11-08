@@ -560,7 +560,8 @@ impl RootView {
                         .tooltip(tip),
                 )
                 .content(move |_, _, _| {
-                    let mut list = div().w(px(340.)).p(px(space::L)).flex().flex_col().gap(px(space::M + 2.));
+                    // Scrolls inside when the tasks are taller than this: it ran off the screen.
+                    let mut list = div().id("thread-tasks-list").w(px(340.)).max_h(px(560.)).overflow_y_scroll().p(px(space::L)).flex().flex_col().gap(px(space::M + 2.));
                     for task in &tasks {
                         let state = task.task_state.clone().unwrap_or_else(|| "active".into());
                         let mut card = div().flex().flex_col().gap(px(6.)).child(
@@ -568,7 +569,7 @@ impl RootView {
                                 .flex()
                                 .items_center()
                                 .gap(px(8.))
-                                .child(div().flex_1().min_w_0().font_weight(FontWeight::SEMIBOLD).child(task.title.clone()))
+                                .child(div().flex_1().min_w_0().whitespace_normal().font_weight(FontWeight::SEMIBOLD).child(task.title.clone()))
                                 .child(
                                     div()
                                         .flex_none()
@@ -591,8 +592,9 @@ impl RootView {
                                         .gap(px(6.))
                                         .text_size(px(text::FOOTNOTE))
                                         .when(step.done, |d| d.text_color(theme.secondary))
-                                        .child(Icon::new(if step.done { IconName::CircleCheck } else { IconName::Square }).size(px(12.)).text_color(if step.done { theme.secondary } else { theme.text }))
-                                        .child(step.text.clone()),
+                                        .child(Icon::new(if step.done { IconName::CircleCheck } else { IconName::Square }).size(px(12.)).text_color(if step.done { theme.secondary } else { theme.text }).flex_none().mt(px(2.)))
+                                        // Wraps inside the popover: a long step ran out past its edge.
+                                        .child(div().flex_1().min_w_0().whitespace_normal().child(step.text.clone())),
                                 );
                             }
                         }

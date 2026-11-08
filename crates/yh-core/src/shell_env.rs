@@ -90,6 +90,7 @@ pub fn apply(command: &mut Command) {
 pub fn load(inherited: &HashMap<String, String>) -> HashMap<String, String> {
     // Development: what the test run was given, with its PATH, no shell started.
     if let Some(path) = inherited.get("YH_PATH").filter(|p| !p.is_empty()) {
+        set_outcome("YH_PATH given (a development run): the login shell isn't read.".into());
         let mut env = without_session_variables(inherited.clone());
         env.insert("PATH".into(), path.clone());
         return env;
@@ -102,13 +103,47 @@ pub fn load(inherited: &HashMap<String, String>) -> HashMap<String, String> {
     // Interactive first (PATH is often set in .zshrc), then login only if the rc files hang or
     // fail. Killed with SIGKILL on timeout: interactive shells ignore SIGTERM.
     for (flags, timeout) in [("-ilc", 4.0), ("-lc", 3.0)] {
+        let began = Instant::now();
         if let Some(out) = run(&shell, flags, &command, &base, Duration::from_secs_f64(timeout)) {
             if let Some(env) = parse(&out) {
+                set_outcome(format!("Read from your shell ({shell} {flags}) in {:.1} s.", began.elapsed().as_secs_f64()));
                 return without_session_variables(env);
             }
         }
     }
-    without_session_variables(inherited.clone())
+    // The shell didn't answer in time (a slow rc file) or printed no environment: the app's own,
+    // whose PATH from launchd has none of the usual tool folders, so `gh`, `glab` and Homebrew's
+    // tools would go missing. The usual folders are added.
+    set_outcome(format!("Your shell ({shell}) didn't give its environment within 7 s, so the app's own is used, with the usual tool folders added to PATH."));
+    let mut env = without_session_variables(inherited.clone());
+    let path = env.get("PATH").cloned().unwrap_or_default();
+    env.insert("PATH".into(), with_usual_folders(&path, inherited.get("HOME").map(String::as_str).unwrap_or("")));
+    env
+}
+
+/// `path` with the folders tools are usually installed in appended, when missing.
+pub fn with_usual_folders(path: &str, home: &str) -> String {
+    let mut parts: Vec<String> = path.split(':').filter(|p| !p.is_empty()).map(str::to_string).collect();
+    for extra in ["/opt/homebrew/bin".to_string(), "/opt/homebrew/sbin".into(), "/usr/local/bin".into(), format!("{home}/.local/bin"), format!("{home}/.claude/local"), "/usr/bin".into(), "/bin".into(), "/usr/sbin".into(), "/sbin".into()] {
+        if !parts.contains(&extra) {
+            parts.push(extra);
+        }
+    }
+    parts.join(":")
+}
+
+fn outcome_cell() -> &'static Mutex<Option<String>> {
+    static OUTCOME: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+    OUTCOME.get_or_init(|| Mutex::new(None))
+}
+
+fn set_outcome(text: String) {
+    *outcome_cell().lock().unwrap() = Some(text);
+}
+
+/// How the environment was read, for Settings → Agents; None until it has been.
+pub fn outcome() -> Option<String> {
+    outcome_cell().lock().unwrap().clone()
 }
 
 fn run(shell: &str, flags: &str, command: &str, env: &HashMap<String, String>, timeout: Duration) -> Option<Vec<u8>> {
@@ -170,6 +205,14 @@ pub fn parse(output: &[u8]) -> Option<HashMap<String, String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usual_folders_are_added_once() {
+        let p = with_usual_folders("/usr/bin:/bin:/opt/homebrew/bin", "/Users/x");
+        assert!(p.starts_with("/usr/bin:/bin:/opt/homebrew/bin:"));
+        assert_eq!(p.matches("/opt/homebrew/bin").count(), 1);
+        assert!(p.contains("/usr/local/bin") && p.contains("/Users/x/.local/bin"));
+    }
 
     #[test]
     fn parses_after_the_marker() {

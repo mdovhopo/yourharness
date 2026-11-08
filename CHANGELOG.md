@@ -70,6 +70,8 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 - Code blocks scroll sideways rather than wrap, and long tool input and output scroll inside their box, the wheel moving on to the thread at their ends.
 
 ### Fixed
+- When your shell is slow to start, `gh`, `glab` and other Homebrew tools are still found: the usual tool folders are added to PATH. Settings → Agents says how the environment was read.
+- Long task steps wrap inside the thread's tasks popover, which now scrolls instead of running off the screen.
 - Pictures attached to a message, and pictures Claude shows, are thumbnails of a set size again, instead of drawing at full size over the message and the rows below.
 - Pull requests load again in the right sidebar when the app is opened from the Dock or Finder: looking them up now finds `gh` and `glab` on your shell's PATH.
 - The conversation and a sub-agent's detail have a scroll bar again, following your Mac's Show scroll bars setting: while scrolling, or always.

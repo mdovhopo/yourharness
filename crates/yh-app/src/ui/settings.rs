@@ -280,7 +280,11 @@ impl SettingsView {
             .child(tool("git", "Git", "https://git-scm.com/download/mac", None))
             .child(tool("gh", "GitHub CLI (gh)", "https://cli.github.com", accounts.get(&yh_core::git::Forge::GitHub).cloned()))
             .child(tool("glab", "GitLab CLI (glab)", "https://gitlab.com/gitlab-org/cli", accounts.get(&yh_core::git::Forge::GitLab).cloned()))
-            .footer("Pull requests come from `gh` and `glab`, signed in as you. YourHarness never sees their tokens.");
+            .footer(match yh_core::shell_env::outcome() {
+                // How the tools are found: the shell's PATH, or the usual folders when it didn't answer.
+                Some(how) => format!("Pull requests come from `gh` and `glab`, signed in as you. YourHarness never sees their tokens. Environment: {how}"),
+                None => "Pull requests come from `gh` and `glab`, signed in as you. YourHarness never sees their tokens.".to_string(),
+            });
         let mut others = section("Other Agents");
         for cli in yh_core::agents::ALL.iter().filter(|c| !c.supported) {
             let url = cli.install_url;
@@ -778,7 +782,7 @@ struct Group {
     title: Option<&'static str>,
     /// Each item, and whether a hairline goes above it (rows) or not (parts of the row above).
     items: Vec<(AnyElement, bool)>,
-    footers: Vec<&'static str>,
+    footers: Vec<SharedString>,
 }
 
 impl Group {
@@ -802,8 +806,8 @@ impl Group {
         self
     }
 
-    fn footer(mut self, text: &'static str) -> Group {
-        self.footers.push(text);
+    fn footer(mut self, text: impl Into<SharedString>) -> Group {
+        self.footers.push(text.into());
         self
     }
 }
