@@ -11,7 +11,6 @@
 #    DMG again and publishes the release with those notes, which every installed copy's
 #    updater picks up.
 # 5. Installs the app it built in /Applications.
-# From main only: nothing is released from `rewrite` until it's the whole app.
 set -euo pipefail
 
 ROOT="${0:A:h:h}"

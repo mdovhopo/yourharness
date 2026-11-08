@@ -1,6 +1,6 @@
 #!/bin/zsh
 # Claude's usage limits right now, from the report the CLI sends alongside a tiny Haiku request
-# (as HarnessCore's ClaudeUsageProbe does: no tools, no MCP, no settings, nothing saved).
+# (no tools, no MCP, no settings, nothing saved, as the app's own refresh does).
 # Prints e.g. "five_hour 23% resets 17:00 (1793991600)" and "seven_day 37% resets …".
 # For pacing long autonomous work: pause before five_hour runs out, resume after it resets.
 set -euo pipefail

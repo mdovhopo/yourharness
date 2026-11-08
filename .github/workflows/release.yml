@@ -1,10 +1,10 @@
-# Builds YourHarness-<version>.dmg (and its .sha256) from the Rust app: tests, then
+# Builds YourHarness-<version>.dmg (and its .sha256): tests, then
 # RELEASE=1 scripts/bundle.sh, scripts/dmg.sh, and scripts/check-dmg.sh checks it the way the
 # updaters will. A pushed v<version> tag (scripts/release.sh) also publishes it as a GitHub
 # release, with that version's CHANGELOG.md notes.
 #
 # Run it by hand to test the pipeline on any branch: the DMG is a workflow artifact and nothing
-# is published. `gh workflow run release.yml --ref rewrite`
+# is published. `gh workflow run release.yml --ref <branch>`
 # `publish` only matters when it's run on a v* tag (a release whose job failed): it creates the
 # release, or replaces its files.
 name: Release

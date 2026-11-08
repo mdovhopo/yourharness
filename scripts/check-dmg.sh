@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Checks a release disk image the way the updaters (state/updater.rs, and the Swift app's)
+# Checks a release disk image the way the updaters (state/updater.rs, and 0.0.x's)
 # will: scripts/check-dmg.sh build/YourHarness-<version>.dmg [<signing identity's name>]
 #   - <dmg>.sha256 sits next to it and matches it
 #   - mounted read-only, it holds YourHarness.app and an Applications link, nothing else

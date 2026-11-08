@@ -4,14 +4,14 @@
 #                     signed with the app's own identity when it's here (YH_SIGN_IDENTITY and
 #                     YH_SIGN_KEYCHAIN from scripts/signing-keychain.sh, as the release workflow
 #                     does, or ~/.yourharness/signing): the updater only installs builds signed
-#                     the same way. Only for releases and the switch.
+#                     the same way. Only for releases.
 #   APP=<path.app>    somewhere else (test copies go in test-harness-root/…, never build/,
 #                     which may be the copy the user has open)
 #   FEATURES=snapshots  YH_SNAPSHOT support, for test copies (not for perf runs)
 #   SIGN=1            a Next build signed with the app's own identity, not ad hoc, so macOS keeps
 #                     what it allowed across rebuilds: the user's own Next copy in /Applications
-# Its own bundle ID until the switch, so it never shares permissions or data with the user's
-# app (/Applications/YourHarness.app, the frozen Swift 0.0.16).
+# A Next build has its own bundle ID, so it never shares permissions or data with the user's
+# installed app (/Applications/YourHarness.app).
 set -euo pipefail
 ROOT="${0:A:h:h}"
 export DEVELOPER_DIR=${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}
