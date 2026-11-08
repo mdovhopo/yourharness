@@ -680,10 +680,11 @@ pub fn set_working_activity(working: bool) {
 }
 
 static QUIT_ALLOWED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static TERMINATE_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 thread_local! {
-    /// Asks whether to quit (the jobs question): the app's `ui::jobs` guard.
+    /// Whether quitting needs asking now (background jobs run), and the asking: the app's
+    /// `ui::jobs` guard.
+    static NEEDS_ASKING: std::cell::RefCell<Option<Box<dyn Fn() -> bool>>> = const { std::cell::RefCell::new(None) };
     static ASK_TO_QUIT: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
 }
 
@@ -692,37 +693,26 @@ pub fn allow_quit() {
     QUIT_ALLOWED.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
-/// A quit from outside the app (Dock → Quit, logging out, restarting the Mac) is waiting for
-/// the answer: true goes on with it, false stops it. False when none was waiting.
-pub fn answer_terminate(quit: bool) -> bool {
-    if !TERMINATE_PENDING.swap(false, std::sync::atomic::Ordering::SeqCst) {
-        return false;
-    }
-    if quit {
-        allow_quit();
-    }
-    unsafe {
-        let app: id = msg_send![class!(NSApplication), sharedApplication];
-        let _: () = msg_send![app, replyToApplicationShouldTerminate: if quit { YES } else { NO }];
-    }
-    true
-}
-
 /// Every way of quitting asks first, as ⌘Q does: GPUI's delegate is taught
-/// `applicationShouldTerminate:`, which lets a quit the app decided go (`allow_quit`) and holds
-/// any other (`NSTerminateLater`) until `ask` has called `answer_terminate`.
-pub fn guard_terminate(ask: impl Fn() + 'static) {
+/// `applicationShouldTerminate:`. A quit the app decided (`allow_quit`) goes through; another
+/// (Dock → Quit, logging out, GPUI's own quit) goes through when there's nothing to ask, and
+/// otherwise is stopped and the question asked once the run loop is back (`ask`), which quits
+/// for good on Quit. (`NSTerminateLater` would keep the logout waiting, but AppKit's modal run
+/// loop then never runs the app's own work, the question included.)
+pub fn guard_terminate(needs_asking: impl Fn() -> bool + 'static, ask: impl Fn() + 'static) {
     use objc::runtime::{Class, Object, Sel};
+    NEEDS_ASKING.with(|a| *a.borrow_mut() = Some(Box::new(needs_asking)));
     ASK_TO_QUIT.with(|a| *a.borrow_mut() = Some(Box::new(ask)));
     extern "C" fn should_terminate(_: &Object, _: Sel, _: id) -> u64 {
-        if QUIT_ALLOWED.load(std::sync::atomic::Ordering::SeqCst) {
+        let allowed = QUIT_ALLOWED.load(std::sync::atomic::Ordering::SeqCst);
+        // Called from AppKit, never inside the app's own updates (GPUI's quit is dispatched).
+        let asks = !allowed && NEEDS_ASKING.with(|a| a.borrow().as_ref().is_some_and(|f| f()));
+        if std::env::var("YH_QUIT_LOG").is_ok() {
+            eprintln!("QUIT applicationShouldTerminate allowed={allowed} asks={asks}");
+        }
+        if !asks {
             return 1; // NSTerminateNow
         }
-        if !ASK_TO_QUIT.with(|a| a.borrow().is_some()) {
-            return 1;
-        }
-        TERMINATE_PENDING.store(true, std::sync::atomic::Ordering::SeqCst);
-        // Asked once this callback has returned: the app may be borrowed right now.
         run_on_main(Box::new(|| {
             ASK_TO_QUIT.with(|a| {
                 if let Some(ask) = a.borrow().as_ref() {
@@ -730,7 +720,7 @@ pub fn guard_terminate(ask: impl Fn() + 'static) {
                 }
             })
         }));
-        2 // NSTerminateLater
+        0 // NSTerminateCancel
     }
     static TAUGHT: std::sync::Once = std::sync::Once::new();
     unsafe {
@@ -773,6 +763,14 @@ pub fn terminate_from_outside() {
     run_on_main(Box::new(|| unsafe {
         let app: id = msg_send![class!(NSApplication), sharedApplication];
         let _: () = msg_send![app, terminate: nil];
+    }));
+}
+
+/// The window's close button, as clicking it does (`performClose:`), outside any update.
+pub fn perform_close(window: &Window) {
+    let w = ns_window(window) as usize;
+    run_on_main(Box::new(move || unsafe {
+        let _: () = msg_send![w as id, performClose: nil];
     }));
 }
 

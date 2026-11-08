@@ -288,10 +288,11 @@ impl Global for QuitGuard {}
 
 /// Quits for good: what was decided goes through `applicationShouldTerminate:`.
 pub fn quit_now(cx: &mut App) {
-    if !crate::platform::answer_terminate(true) {
-        crate::platform::allow_quit();
-        cx.quit();
+    if std::env::var("YH_QUIT_LOG").is_ok() {
+        eprintln!("QUIT now");
     }
+    crate::platform::allow_quit();
+    cx.quit();
 }
 
 pub fn quit(cx: &mut App) {
@@ -299,7 +300,7 @@ pub fn quit(cx: &mut App) {
 }
 
 /// Asks the quit question when there's one, then does `then` if you said Quit (or there was
-/// nothing to ask). Cancel also stops a quit from outside that was waiting.
+/// nothing to ask). 
 pub fn ask_then(then: Box<dyn FnOnce(&mut App)>, cx: &mut App) {
     match cx.try_global::<QuitGuard>().cloned() {
         Some(guard) => (guard.0)(then, cx),
@@ -311,14 +312,13 @@ pub fn ask_then(then: Box<dyn FnOnce(&mut App)>, cx: &mut App) {
 /// (`QUIT asked: …`); `YH_QUIT_AFTER=<seconds>` chooses Quit that long after launch, and
 /// `YH_TERMINATE_AFTER=<seconds>` quits as Dock → Quit does.
 pub fn guard_quit(workspace: Entity<Workspace>, window: AnyWindowHandle, cx: &mut App) {
+    let ws = workspace.clone();
     cx.set_global(QuitGuard(Rc::new(move |then: Box<dyn FnOnce(&mut App)>, cx: &mut App| {
         let Some((title, detail)) = workspace.read(cx).quit_question(cx) else { return then(cx) };
         if let Ok(answer) = std::env::var("YH_QUIT_ANSWER") {
             eprintln!("QUIT asked: {title} / {detail} -> {answer}");
             if answer == "quit" {
                 then(cx);
-            } else {
-                crate::platform::answer_terminate(false);
             }
             return;
         }
@@ -330,18 +330,17 @@ pub fn guard_quit(workspace: Entity<Workspace>, window: AnyWindowHandle, cx: &mu
             let _ = cx.update(|cx| {
                 if quit {
                     then(cx);
-                } else {
-                    crate::platform::answer_terminate(false);
                 }
             });
         })
         .detach();
     })));
     // Dock → Quit, logging out, restarting the Mac: the same question.
-    let async_cx = cx.to_async();
-    crate::platform::guard_terminate(move || {
-        let _ = async_cx.update(|cx| ask_then(Box::new(quit_now), cx));
-    });
+    let (asks_cx, ask_cx) = (cx.to_async(), cx.to_async());
+    crate::platform::guard_terminate(
+        move || asks_cx.update(|cx| ws.read(cx).quit_question(cx).is_some()),
+        move || ask_cx.update(|cx| ask_then(Box::new(quit_now), cx)),
+    );
     if let Some(seconds) = std::env::var("YH_QUIT_AFTER").ok().and_then(|s| s.parse::<f64>().ok()) {
         cx.spawn(async move |cx| {
             cx.background_executor().timer(Duration::from_secs_f64(seconds)).await;

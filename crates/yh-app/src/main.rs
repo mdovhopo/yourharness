@@ -961,7 +961,7 @@ fn main() {
                             ("next", _) => window.dispatch_action(Box::new(NextThread), cx),
                             ("inspector", _) => window.dispatch_action(Box::new(ToggleInspector), cx),
                             ("settings", _) => window.dispatch_action(Box::new(OpenSettings), cx),
-                            ("close", _) => cx.defer(ui::jobs::quit),
+                            ("close", _) => platform::perform_close(window),
                             (other, _) => eprintln!("ACTION unknown {other}"),
                         }
                     });
