@@ -195,6 +195,8 @@ impl HarnessTools {
         match self.mcp(json!({ "subtype": "mcp_authenticate", "serverName": name })) {
             Ok(v) => {
                 if let Some(url) = v["authUrl"].as_str() {
+                    // Kept for the card's Open Again.
+                    crate::ui::mcp::note_sign_in_page(name, url);
                     let _ = self.requests.send(ToolRequest::OpenUrl(url.to_string()));
                 }
             }

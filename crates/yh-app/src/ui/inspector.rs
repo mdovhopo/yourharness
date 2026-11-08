@@ -438,6 +438,27 @@ impl Inspector {
         };
         inspector.follow_selection(cx);
         Self::watch_pull_activity(cx);
+        // `YH_SEARCH_PROBE=<words>`: how long until the full-text index (caught up in the
+        // background a few seconds after launch) finds them, and what it finds.
+        if let (Ok(words), Some(db)) = (std::env::var("YH_SEARCH_PROBE"), inspector.workspace.read(cx).library.db.clone()) {
+            cx.background_executor()
+                .spawn(async move {
+                    let started = std::time::Instant::now();
+                    let mut hits = vec![];
+                    while started.elapsed().as_secs() < 60 {
+                        hits = db.search(&words, 20);
+                        if !hits.is_empty() {
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(250));
+                    }
+                    eprintln!("SEARCH {words:?}: {} found after {:.1} s", hits.len(), started.elapsed().as_secs_f64());
+                    for h in hits.iter().take(5) {
+                        eprintln!("SEARCH hit {} #{}: {}", h.thread, h.seq, h.snippet);
+                    }
+                })
+                .detach();
+        }
         if std::env::var("YH_FILES_PROBE").is_ok() {
             inspector.files_probe(cx);
         }

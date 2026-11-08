@@ -54,12 +54,26 @@ pub struct Composer {
     _subscriptions: Vec<Subscription>,
 }
 
-/// What an MCP server asks mid-call: a form, its fields filled with their defaults, or a page
-/// to visit. Accept sends what's in the fields.
+/// What an MCP server asks mid-call: a form, its fields filled with their defaults (yes/no as
+/// a switch, a choice as a menu, the rest typed), or a page to visit. Accept sends the fields.
 pub struct ElicitCard {
     asked: crate::state::thread::Elicitation,
-    fields: Vec<(String, String, Entity<InputState>)>,
+    fields: Vec<ElicitField>,
     workspace: gpui_kit::WeakEntity<Workspace>,
+}
+
+struct ElicitField {
+    key: String,
+    label: String,
+    required: bool,
+    input: FieldInput,
+}
+
+enum FieldInput {
+    Text(Entity<InputState>),
+    Flag(bool),
+    /// The value picked, and the choices as (value, label).
+    Choice(Option<String>, Vec<(String, String)>),
 }
 
 /// A form's defaults as its answer: each property's `default`, else empty.
@@ -75,43 +89,83 @@ pub fn elicit_defaults(schema: &Value) -> Value {
     Value::Object(out)
 }
 
+/// A property's choices, if it's a choice: `enum` (with `enumNames`), or `oneOf` of `const`s.
+fn choices(p: &Value) -> Option<Vec<(String, String)>> {
+    let text = |v: &Value| v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string());
+    if let Some(values) = p["enum"].as_array() {
+        let names = p["enumNames"].as_array();
+        return Some(values.iter().enumerate().map(|(i, v)| (text(v), names.and_then(|n| n.get(i)).map(text).unwrap_or_else(|| text(v)))).collect());
+    }
+    let one_of = p["oneOf"].as_array().or(p["anyOf"].as_array())?;
+    let list: Vec<(String, String)> = one_of.iter().filter(|o| !o["const"].is_null()).map(|o| (text(&o["const"]), o["title"].as_str().map(str::to_string).unwrap_or_else(|| text(&o["const"])))).collect();
+    (!list.is_empty()).then_some(list)
+}
+
 impl ElicitCard {
     fn new(asked: crate::state::thread::Elicitation, workspace: gpui_kit::WeakEntity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut fields = vec![];
+        let required: Vec<&str> = asked.schema["required"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
         if let Some(props) = asked.schema["properties"].as_object() {
             for (k, p) in props {
                 let label = p["title"].as_str().or(p["description"].as_str()).unwrap_or(k).to_string();
-                let default = match &p["default"] {
-                    Value::String(s) => s.clone(),
-                    Value::Null => String::new(),
-                    other => other.to_string(),
+                let input = if p["type"].as_str() == Some("boolean") {
+                    FieldInput::Flag(p["default"].as_bool().unwrap_or(false))
+                } else if let Some(list) = choices(p) {
+                    let picked = p["default"].as_str().map(str::to_string).filter(|d| list.iter().any(|(v, _)| v == d));
+                    FieldInput::Choice(picked, list)
+                } else {
+                    let default = match &p["default"] {
+                        Value::String(s) => s.clone(),
+                        Value::Null => String::new(),
+                        other => other.to_string(),
+                    };
+                    let hint = p["description"].as_str().unwrap_or("").to_string();
+                    FieldInput::Text(cx.new(|cx| InputState::new(window, cx).placeholder(hint).default_value(default)))
                 };
-                fields.push((k.clone(), label, cx.new(|cx| InputState::new(window, cx).default_value(default))));
+                fields.push(ElicitField { key: k.clone(), label, required: required.contains(&k.as_str()), input });
             }
         }
         ElicitCard { asked, fields, workspace }
     }
 
-    /// The fields as the schema's types: numbers and booleans parsed, the rest text.
-    fn content(&self, cx: &App) -> Value {
+    /// The fields as the schema's types: numbers parsed, yes/no and choices as they are, the
+    /// rest text; None while a required one is empty or a number isn't one.
+    fn content(&self, cx: &App) -> Option<Value> {
         let mut out = serde_json::Map::new();
-        for (k, _, input) in &self.fields {
-            let text = input.read(cx).value().to_string();
-            let kind = self.asked.schema["properties"][k]["type"].as_str().unwrap_or("string");
-            let v = match kind {
-                "number" | "integer" => text.trim().parse::<f64>().map(Value::from).unwrap_or(Value::Null),
-                "boolean" => Value::Bool(matches!(text.trim(), "true" | "yes" | "1")),
-                _ => Value::String(text),
+        for f in &self.fields {
+            let v = match &f.input {
+                FieldInput::Flag(on) => Value::Bool(*on),
+                FieldInput::Choice(picked, _) => picked.clone().map(Value::from).unwrap_or(Value::Null),
+                FieldInput::Text(input) => {
+                    let text = input.read(cx).value().to_string();
+                    match self.asked.schema["properties"][&f.key]["type"].as_str().unwrap_or("string") {
+                        "number" | "integer" if text.trim().is_empty() => Value::Null,
+                        "number" | "integer" => Value::from(text.trim().parse::<f64>().ok()?),
+                        _ if text.is_empty() => Value::Null,
+                        _ => Value::String(text),
+                    }
+                }
             };
-            if !v.is_null() {
-                out.insert(k.clone(), v);
+            if v.is_null() {
+                if f.required {
+                    return None;
+                }
+                continue;
             }
+            out.insert(f.key.clone(), v);
         }
-        Value::Object(out)
+        Some(Value::Object(out))
     }
 
     fn answer(&self, action: &str, cx: &mut Context<Self>) {
-        let content = (action == "accept" && self.asked.mode == "form").then(|| self.content(cx));
+        let content = if action == "accept" && self.asked.mode == "form" {
+            match self.content(cx) {
+                Some(c) => Some(c),
+                None => return,
+            }
+        } else {
+            None
+        };
         let action = action.to_string();
         if let Some(ws) = self.workspace.upgrade() {
             if let Some(t) = ws.read(cx).selected_thread() {
@@ -127,10 +181,59 @@ impl Render for ElicitCard {
         let mut card = card_frame(&theme)
             .child(card_title(icons::plug(), format!("{} asks", self.asked.server), &theme))
             .child(div().text_size(px(text::BODY)).whitespace_normal().child(self.asked.message.clone()));
-        for (_, label, input) in &self.fields {
-            card = card.child(div().flex().flex_col().gap(px(space::XS)).child(div().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child(label.clone())).child(Input::new(input).small()));
+        for (i, f) in self.fields.iter().enumerate() {
+            let label = format!("{}{}", f.label, if f.required { "" } else { " (optional)" });
+            let field: gpui_kit::AnyElement = match &f.input {
+                FieldInput::Text(input) => Input::new(input).small().into_any_element(),
+                FieldInput::Flag(on) => gpui_kit::component::switch::Switch::new(SharedString::from(format!("elicit-flag-{i}")))
+                    .checked(*on)
+                    .on_click(cx.listener(move |this, on: &bool, _, cx| {
+                        if let Some(FieldInput::Flag(v)) = this.fields.get_mut(i).map(|f| &mut f.input) {
+                            *v = *on;
+                        }
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+                FieldInput::Choice(picked, list) => {
+                    let shown = picked.as_ref().and_then(|p| list.iter().find(|(v, _)| v == p)).map(|(_, l)| l.clone()).unwrap_or_else(|| "—".into());
+                    let (list, entity, optional) = (list.clone(), cx.entity().downgrade(), !f.required);
+                    Button::new(SharedString::from(format!("elicit-choice-{i}")))
+                        .small()
+                        .outline()
+                        .label(shown)
+                        .dropdown_caret(true)
+                        .dropdown_menu(move |mut menu, _, _| {
+                            let pick = |value: Option<String>| {
+                                let entity = entity.clone();
+                                move |_: &gpui_kit::ClickEvent, _: &mut Window, cx: &mut App| {
+                                    let value = value.clone();
+                                    let _ = entity.update(cx, |this, cx| {
+                                        if let Some(FieldInput::Choice(p, _)) = this.fields.get_mut(i).map(|f| &mut f.input) {
+                                            *p = value;
+                                        }
+                                        cx.notify();
+                                    });
+                                }
+                            };
+                            if optional {
+                                menu = menu.item(PopupMenuItem::new("—").on_click(pick(None)));
+                            }
+                            for (value, label) in &list {
+                                menu = menu.item(PopupMenuItem::new(label.clone()).on_click(pick(Some(value.clone()))));
+                            }
+                            menu
+                        })
+                        .into_any_element()
+                }
+            };
+            card = card.child(if matches!(f.input, FieldInput::Flag(_)) {
+                div().flex().items_center().gap(px(space::S)).child(field).child(div().text_size(px(text::FOOTNOTE)).child(f.label.clone())).into_any_element()
+            } else {
+                div().flex().flex_col().gap(px(space::XS)).child(div().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child(label)).child(div().flex().child(field)).into_any_element()
+            });
         }
         let url = self.asked.url.clone();
+        let ready = self.asked.mode != "form" || self.content(cx).is_some();
         card.child(
             card_buttons()
                 .when_some(url, |d, url| {
@@ -143,10 +246,11 @@ impl Render for ElicitCard {
                     }))
                 })
                 .child(Button::new("elicit-decline").small().outline().label("Decline").on_click(cx.listener(|this, _, _, cx| this.answer("decline", cx))))
-                .child(Button::new("elicit-accept").small().primary().label(if self.asked.mode == "url" { "Done" } else { "Send" }).on_click(cx.listener(|this, _, _, cx| this.answer("accept", cx)))),
+                .child(Button::new("elicit-accept").small().primary().label(if self.asked.mode == "url" { "Done" } else { "Send" }).disabled(!ready).on_click(cx.listener(|this, _, _, cx| this.answer("accept", cx)))),
         )
     }
 }
+
 
 enum Card {
     Question(Entity<QuestionCard>),
@@ -859,6 +963,15 @@ impl Render for Composer {
                             .gap(px(space::S))
                             .child(Icon::new(IconName::Globe).size(px(14.)).text_color(theme.secondary))
                             .child(div().flex_1().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child("Waiting for you to finish in your browser…"))
+                            .child({
+                                // The page is known once the browser's been sent to it: looked up on the click.
+                                let server = ask.server.clone();
+                                Button::new("sign-in-again").small().outline().label("Open Again").on_click(move |_, _, cx| {
+                                    if let Some(page) = crate::ui::mcp::sign_in_page(&server) {
+                                        crate::ui::mcp::open_sign_in_page(&page, cx);
+                                    }
+                                })
+                            })
                             .child(Button::new("sign-in-cancel").small().outline().label("Cancel").on_click(move |_, _, cx| {
                                 cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
                                 t3.update(cx, |_, cx| cx.notify());
