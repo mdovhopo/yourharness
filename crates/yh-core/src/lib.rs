@@ -24,6 +24,7 @@ pub mod library;
 pub mod recovery;
 pub mod shell_env;
 pub mod subagent_record;
+pub mod turn_changes;
 pub mod titles;
 pub mod markdown;
 pub mod links;

@@ -180,11 +180,17 @@ fn turn_details(state: &ThreadState, work: &TurnWork) -> String {
             if EDIT_TOOLS.contains(&name) {
                 let input: serde_json::Value = serde_json::from_str(b.data.tool_input.as_deref().unwrap_or("{}")).unwrap_or_default();
                 if let Some(path) = input["file_path"].as_str().or(input["notebook_path"].as_str()) {
-                    files.insert(path.to_string());
+                    // As git names it, symlinks resolved (`/tmp` is `/private/tmp`), so a file
+                    // isn't counted twice.
+                    let p = std::path::Path::new(path);
+                    let real = p.parent().and_then(|d| std::fs::canonicalize(d).ok()).zip(p.file_name()).map(|(d, n)| d.join(n).to_string_lossy().into_owned());
+                    files.insert(real.unwrap_or_else(|| path.to_string()));
                 }
             }
         }
     }
+    // What git saw change in the turn: shell commands' and scripts' edits too.
+    files.extend(work.changed.iter().cloned());
     let plural = |n: usize, one: &str, many: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {many}") };
     let mut parts = vec![];
     if tools > 0 {

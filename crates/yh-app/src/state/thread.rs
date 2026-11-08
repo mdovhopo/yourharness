@@ -200,6 +200,8 @@ impl Entry {
             attachments: (!self.data.attachments.is_empty()).then(|| serde_json::to_string(&self.data.attachments).unwrap_or_default()),
             notice_style: (self.data.kind == Kind::Notice && self.data.is_error).then(|| "error".into()),
             subagent: self.sub.as_ref().map(|s| s.record(self.data.tool_input.as_deref()).encode()),
+            // As `JSONEncoder` writes `[String]`: slashes escaped.
+            changed_files: self.data.changed_files.as_ref().map(|f| serde_json::to_string(f).unwrap_or_default().replace('/', "\\/")),
             ..Default::default()
         }
     }
@@ -277,6 +279,8 @@ pub struct TurnWork {
     pub ended: Option<f64>,
     /// Its details, worked out the first time the row is drawn.
     pub details: RefCell<Option<String>>,
+    /// The files git saw change in it (shell commands too), once known.
+    pub changed: Vec<String>,
 }
 
 /// Whether your message starts a turn: one that joined Claude's turn (steered) doesn't.
@@ -830,6 +834,33 @@ impl ThreadState {
         !rows.is_empty()
     }
 
+    /// The files git saw a turn change, on the message that started it (by its id): saved, and
+    /// its summary says them.
+    pub fn set_changed_files(&mut self, message: &str, files: Vec<String>) {
+        let found = self.items.iter().flat_map(|i| i.entries.iter()).find(|e| e.borrow().data.id == message).cloned();
+        let Some(e) = found else { return };
+        {
+            let mut b = e.borrow_mut();
+            b.data.changed_files = Some(files);
+            self.dirty.insert(b.seq);
+        }
+        // Its turn's summary counts them: worked out again.
+        let summaries: Vec<i64> = self.turns.iter().map(|t| t.items[0]).collect();
+        self.turns.clear();
+        self.refresh_folds();
+        for pos in summaries {
+            self.touch_pos(pos);
+        }
+    }
+
+    /// The message that started the turn going now, and its tool calls' inputs so far.
+    pub fn turn_start_and_inputs(&self) -> Option<(String, String)> {
+        let start = self.items.iter().rposition(|i| i.ty == ItemType::User && starts_turn(&i.entries[0].borrow()))?;
+        let id = self.items[start].entries[0].borrow().data.id.clone();
+        let inputs: Vec<String> = self.items[start..].iter().flat_map(|i| i.entries.iter()).filter_map(|e| e.borrow().data.tool_input.clone()).collect();
+        Some((id, inputs.join("\n")))
+    }
+
     /// A notice in the error colour (saved as such: `notice_style` "error").
     pub fn error_notice(&mut self, text: &str) {
         self.next_note += 1;
@@ -899,19 +930,19 @@ impl ThreadState {
                 folds[ix] = if open { Fold::Open } else { Fold::Hidden };
             }
             folds[first] = Fold::Summary { turn: self.turns.len(), open };
-            let (started, mut ended) = match user {
+            let (started, mut ended, changed) = match user {
                 Some(u) => {
                     let b = self.items[u].entries[0].borrow();
-                    (b.date, b.data.turn_ended_at)
+                    (b.date, b.data.turn_ended_at, b.data.changed_files.clone().unwrap_or_default())
                 }
-                None => (None, None),
+                None => (None, None, vec![]),
             };
             if ended.is_none() {
                 ended = self.items[s..e].iter().filter_map(|i| i.entries.last().and_then(|x| x.borrow().date)).reduce(f64::max);
             }
             let items: Vec<i64> = folded.iter().map(|&ix| self.items[ix].pos).collect();
             let details = old_details.remove(&(first_pos, items.len())).flatten();
-            self.turns.push(TurnWork { items, started, ended, details: RefCell::new(details) });
+            self.turns.push(TurnWork { items, started, ended, details: RefCell::new(details), changed });
         }
         for (ix, fold) in folds.iter().enumerate() {
             if old.get(&self.items[ix].pos).is_some_and(|was| was != fold) {

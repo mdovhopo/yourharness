@@ -198,6 +198,31 @@ pub struct Workspace {
     stacks_installed: Option<bool>,
     /// Projects whose commands were read with a throwaway `claude` this launch.
     command_loads: std::collections::HashSet<String>,
+    /// Where each thread's working folder stood when its turn began, for what git sees change
+    /// in the turn (`turn_changes`), by thread.
+    turn_baselines: HashMap<String, TurnBaseline>,
+}
+
+/// A turn's start, for the files it changed.
+struct TurnBaseline {
+    /// The message that started it.
+    message: String,
+    folder: String,
+    /// When (ms since 1970).
+    started: f64,
+    /// Another thread was working in an overlapping folder then.
+    shared: bool,
+    /// The folder's snapshot, taken aside.
+    snapshot: flume::Receiver<Option<yh_core::turn_changes::Snapshot>>,
+}
+
+/// Whether two folders are the same, or one is inside the other.
+fn overlaps(a: &str, b: &str) -> bool {
+    a == b || a.starts_with(&format!("{b}/")) || b.starts_with(&format!("{a}/"))
+}
+
+fn real_path(folder: &str) -> String {
+    std::fs::canonicalize(folder).map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| folder.to_string())
 }
 
 impl EventEmitter<WorkspaceEvent> for Workspace {}
@@ -262,6 +287,7 @@ impl Workspace {
             title_error: None,
             stacks_installed: None,
             command_loads: Default::default(),
+            turn_baselines: HashMap::new(),
         };
         // Is `gh stack` there? Looked aside, so the first thread's agent knows how stacks are made.
         cx.spawn(async move |this, cx| {
@@ -924,6 +950,70 @@ impl Workspace {
         self.update_title_for_agent(&id, messages, sent, None, cx);
     }
 
+    /// Other threads working in a folder overlapping `folder` now, or active there since `since`.
+    fn others_working_in(&self, id: &str, folder: &str, since: Option<f64>, cx: &App) -> bool {
+        self.threads.iter().any(|t| {
+            let t = t.read(cx);
+            // The cheap checks first: a folder is looked up only for threads that worked lately.
+            t.id() != id && (t.running || since.is_some_and(|s| t.meta.updated_at > s)) && overlaps(&real_path(&self.folder_of(t)), folder)
+        })
+    }
+
+    /// A turn begins: its folder as it stands, read aside while Claude reads the message.
+    fn begin_turn_changes(&mut self, thread: &Entity<ThreadState>, message: &str, cx: &mut Context<Self>) {
+        let id = thread.read(cx).id().to_string();
+        if id.starts_with(SIDE) || id.starts_with(MEMORY_AGENT) || id.starts_with(SETTINGS) {
+            return;
+        }
+        let folder = real_path(&self.folder_of(thread.read(cx)));
+        let shared = self.others_working_in(&id, &folder, None, cx);
+        let (tx, rx) = flume::bounded(1);
+        let (f, path) = (folder.clone(), std::env::var("YH_PATH").ok());
+        cx.background_executor()
+            .spawn(async move {
+                let _ = tx.send(yh_core::turn_changes::snapshot(std::path::Path::new(&f), path.as_deref()));
+            })
+            .detach();
+        self.turn_baselines.insert(id, TurnBaseline { message: message.to_string(), folder, started: yh_core::library::now_ms(), shared, snapshot: rx });
+    }
+
+    /// The turn is over: the files git saw change since it began go on its message. With another
+    /// thread working in the same folder meanwhile, only those this turn's tool calls name.
+    fn finish_turn_changes(&mut self, thread: &Entity<ThreadState>, cx: &mut Context<Self>) {
+        let id = thread.read(cx).id().to_string();
+        let Some(base) = self.turn_baselines.remove(&id) else { return };
+        let shared = base.shared || self.others_working_in(&id, &base.folder, Some(base.started), cx);
+        let named = shared.then(|| thread.read(cx).turn_start_and_inputs().map(|(_, inputs)| inputs).unwrap_or_default());
+        let weak = thread.downgrade();
+        cx.spawn(async move |this, cx| {
+            let Ok(Some(start)) = base.snapshot.recv_async().await else { return };
+            let path = std::env::var("YH_PATH").ok();
+            let changed = cx
+                .background_executor()
+                .spawn(async move {
+                    let changed = yh_core::turn_changes::changes(&start, path.as_deref())?;
+                    Some(match named {
+                        Some(named) => yh_core::turn_changes::named_only(changed, &start.top, &named),
+                        None => changed,
+                    })
+                })
+                .await;
+            let Some(changed) = changed else { return };
+            if std::env::var("YH_DATA_DIR").is_ok() {
+                eprintln!("TURN changed {} files (shared: {shared}): {changed:?}", changed.len());
+            }
+            let _ = this.update(cx, |ws, cx| {
+                let Some(thread) = weak.upgrade() else { return };
+                thread.update(cx, |t, cx| {
+                    t.set_changed_files(&base.message, changed);
+                    cx.notify();
+                });
+                ws.save_rows(&thread, cx);
+            });
+        })
+        .detach();
+    }
+
     /// Keep Awake follows whether Claude works anywhere; its one timer is for a deadline.
     pub fn note_working(&mut self, cx: &mut Context<Self>) {
         let working = self.threads.iter().any(|t| t.read(cx).running) || self.by_id.values().any(|t| t.read(cx).running);
@@ -1369,6 +1459,10 @@ impl Workspace {
             self.turn_ended(thread, cx);
             return;
         }
+        // A new turn: where its folder stands, for the files it changes.
+        if !running {
+            self.begin_turn_changes(thread, &message_id, cx);
+        }
         let project = thread.read(cx).meta.project_id.clone();
         let for_agent = if id.starts_with(SIDE) { text.clone() } else { self.message_for_agent(&text, &project) };
         if let Some(rt) = self.runtimes.get_mut(&id) {
@@ -1751,6 +1845,7 @@ impl Workspace {
     fn turn_ended(&mut self, thread: &Entity<ThreadState>, cx: &mut Context<Self>) {
         let id = thread.read(cx).id().to_string();
         thread.update(cx, |t, _| t.running = false);
+        self.finish_turn_changes(thread, cx);
         self.note_working(cx);
         let selected = self.selected.as_deref() == Some(id.strip_prefix(SIDE).unwrap_or(&id));
         // Waiting on jobs it started, Claude isn't done: it's back when they report. Stopped by
