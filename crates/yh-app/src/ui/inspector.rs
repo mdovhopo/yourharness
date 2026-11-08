@@ -2527,7 +2527,7 @@ pub(crate) fn tab_close(id: SharedString, theme: &Theme) -> gpui_kit::Stateful<g
 }
 
 impl Render for Inspector {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::get(cx);
         let panel = self.workspace.read(cx).panel;
         if panel == Panel::SideChat {
