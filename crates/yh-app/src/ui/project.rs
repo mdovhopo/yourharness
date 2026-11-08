@@ -352,7 +352,8 @@ impl ProjectPage {
             format!("Squash and merge {} pull requests into {}?", request.pulls.len(), request.base)
         };
         let list: Vec<String> = request.pulls.iter().map(|(n, t)| format!("#{n} {t}")).collect();
-        let message = format!("{}\n\nGitHub merges them bottom up, each squashed into one commit. This can't be undone.", list.join("\n"));
+        let how = if request.pulls.len() == 1 { "GitHub squashes it into one commit." } else { "GitHub merges them bottom up, each squashed into one commit." };
+        let message = format!("{}\n\n{how} This can't be undone.", list.join("\n"));
         if logs() {
             eprintln!("PROJECT asks: {title} | {}", message.replace('\n', " / "));
         }

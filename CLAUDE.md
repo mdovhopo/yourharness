@@ -131,7 +131,7 @@ snapshots of hover states such as a sidebar row's Pin/Settle/… or a project's 
 `YH_REFRESH_LIMITS=1` (the footer's refresh at launch: a tiny Haiku request through `claude`, printing `LIMITS
 refreshed` or why not), `YH_THREAD_ACTIONS=<a>,<b>,…` (after `YH_DRAFT_DELAY`, a second apart, on the open thread: `settle`,
 `unsettle:<n>`, `delete`, `pin`, `unpin`, `undo` (⌘Z), `new` (⌘N), `memory` (⇧⌘M), `project`, `add:<folder>` (Add
-Project), `next`, `inspector`, `settings`, `close` (the close button's quit question); each printed as `ACTION <step>: <what's
+Project), `next`, `inspector`, `settings`, `close` (the close button's quit question), `key:<keystroke>` (typed through the window: `key:alt-cmd-down`; not `cmd-,`, commas split steps); each printed as `ACTION <step>: <what's
 open> · <counts> · order: <the sidebar's live threads>`), `YH_QUIT_ANSWER=quit|cancel` (the quit question answered,
 printed as `QUIT asked: …`; `YH_QUIT_AFTER=<s>` quits as ⌘Q, `YH_TERMINATE_AFTER=<s>` as Dock → Quit), `YH_MENU_LOG=1`
 (each menu bar rebuild), `YH_SNAPSHOT_WINDOW=<title>` (`YH_SNAPSHOT` draws that window instead: `Settings`),
