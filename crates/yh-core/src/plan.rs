@@ -1,6 +1,6 @@
 //! The checklist Claude keeps while it works, rebuilt from its task tool calls in order:
 //! `TaskCreate` and `TaskUpdate` (Claude Code's task tools), or `TodoWrite` (the older tool,
-//! which replaces the whole list each time). The port of the Swift app's `TaskPlan`.
+//! which replaces the whole list each time).
 
 use serde_json::Value;
 

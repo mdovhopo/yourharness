@@ -1,5 +1,5 @@
 //! What Claude Code spent: the usage it records with every reply in its session files, kept
-//! in an index of its own (`usage.sqlite` in the data folder, the Swift app's schema), so a
+//! in an index of its own (`usage.sqlite` in the data folder, 0.0.x's schema), so a
 //! year is summed in a moment and history stays after Claude Code deletes old sessions.
 //! Files are read once, then only from where they were left (Claude Code appends). A reply
 //! written more than once (a line per content block, copied into a fork) counts once, by
@@ -54,7 +54,7 @@ pub struct MessageUsage {
     pub fast: bool,
 }
 
-/// FNV-1a: the same on every launch (and as the Swift app's).
+/// FNV-1a: the same on every launch (and as 0.0.x's, which keyed the same index).
 pub fn stable_hash(text: &str) -> i64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for b in text.bytes() {
@@ -176,7 +176,7 @@ const fn p(input: f64, output: f64, write_5m: f64, write_1h: f64, read: f64) -> 
     Price { input, output, write_5m, write_1h, read }
 }
 
-/// Anthropic's API prices per million tokens (from the Swift app's table, checked
+/// Anthropic's API prices per million tokens (checked
 /// 2026-10-28 against platform.claude.com/docs/en/about-claude/pricing): (price, long-prompt
 /// price, fast-mode multiplier).
 fn entry(model: &str) -> Option<(Price, Option<Price>, Option<f64>)> {

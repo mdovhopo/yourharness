@@ -61,7 +61,7 @@ impl Decision {
     }
 }
 
-/// A slash command or skill, as the CLI's catalog lists it (saved in the Swift app's shape:
+/// A slash command or skill, as the CLI's catalog lists it (saved in 0.0.x's shape:
 /// `name`, `description`, `argumentHint`, `aliases`, `isBuiltin`, `mcpServer`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct SlashCommand {
@@ -92,7 +92,7 @@ fn mcp_prompt(listed: &str) -> Option<(String, String)> {
 impl SlashCommand {
     pub fn from_json(v: &Value) -> Option<SlashCommand> {
         let listed = v["name"].as_str().filter(|n| !n.is_empty())?;
-        // Saved by either app with its server; from the CLI as "server:prompt (MCP)", typed as
+        // Saved (by any version) with its server; from the CLI as "server:prompt (MCP)", typed as
         // /mcp__server__prompt.
         let (name, mcp_server) = match (v["mcpServer"].as_str(), mcp_prompt(listed)) {
             (Some(server), _) => (listed.to_string(), Some(server.to_string())),
@@ -104,7 +104,7 @@ impl SlashCommand {
             description: v["description"].as_str().unwrap_or("").to_string(),
             hint: v["argumentHint"].as_str().unwrap_or("").to_string(),
             aliases: v["aliases"].as_array().map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect()).unwrap_or_default(),
-            // The CLI says `builtin`, the Swift app saved `isBuiltin`.
+            // The CLI says `builtin`, the saved list `isBuiltin`.
             builtin: v["builtin"].as_bool().or(v["isBuiltin"].as_bool()).unwrap_or(false),
             mcp_server,
         })
@@ -123,7 +123,7 @@ impl SlashCommand {
         }
     }
 
-    /// As the Swift app saves it (`slashCommands`).
+    /// As it's saved (`slashCommands`, 0.0.x's shape).
     pub fn saved(&self) -> Value {
         let mut v = json!({ "name": self.name, "description": self.description, "argumentHint": self.hint, "aliases": self.aliases, "isBuiltin": self.builtin });
         if let Some(server) = &self.mcp_server {
@@ -255,7 +255,7 @@ impl ModelInfo {
         })
     }
 
-    /// The CLI's model list as the Swift app saves it (`claudeModels`, `[ClaudeModel]`), so
+    /// The CLI's model list as it's saved (`claudeModels`, 0.0.x's shape), so
     /// 0.0.16 reads it after a downgrade: `supportedEffortLevels` is required there, and a
     /// model without it (Haiku) cost the whole list.
     pub fn saved_list(models: &Value) -> Value {
@@ -414,7 +414,7 @@ pub fn set_chosen_claude(path: Option<std::path::PathBuf>) {
     *CHOSEN.lock().unwrap() = path;
 }
 
-/// What a thread says when there's no `claude` to run (the Swift app's `claudeNotFound`).
+/// What a thread says when there's no `claude` to run.
 pub const CLAUDE_NOT_FOUND: &str = "Couldn't find a working `claude` CLI. Check Settings → Agents.";
 
 /// The chosen `claude`, else the one on `YH_PATH` (as the app's test runs pass it), `PATH` and the usual places.
@@ -576,7 +576,7 @@ impl ClaudeProcess {
     /// Your message. `id` comes back in the CLI's message lifecycle; `priority` `now`
     /// interrupts the turn for it, none waits for the current step (steering).
     pub fn send(&self, text: &str, images: &[(String, String)], id: &str, priority: Option<&str>) {
-        // Images first, as the Swift app sends them: (media type, base64).
+        // Images first, then the text: (media type, base64).
         let mut content: Vec<Value> = images
             .iter()
             .map(|(media, data)| json!({ "type": "image", "source": { "type": "base64", "media_type": media, "data": data } }))
@@ -636,8 +636,8 @@ impl ClaudeProcess {
         self.control(json!({ "subtype": "interrupt" }));
     }
 
-    /// Stops a job Claude left running (a background command, a watch), as the Swift app's
-    /// Stop does; the CLI reports its end as for any other.
+    /// Stops a job Claude left running (a background command, a watch), as
+    /// its Stop button does; the CLI reports its end as for any other.
     pub fn stop_task(&mut self, task_id: &str) {
         self.control(json!({ "subtype": "stop_task", "task_id": task_id }));
     }
@@ -1003,7 +1003,7 @@ mod tests {
     /// A real capture (sanitized), on Haiku: a 20-second foreground command, then two in the
     /// background, one failing with exit code 3, Claude woken by each end in a turn of its own.
     const JOBS: &str = include_str!("../fixtures/background-jobs.jsonl");
-    /// The Swift app's capture: a background command, a Monitor watching it.
+    /// A real capture: a background command, a Monitor watching it.
     const MONITOR: &str = include_str!("../fixtures/background-job-monitor.jsonl");
 
     #[test]
@@ -1041,7 +1041,7 @@ mod tests {
         assert_eq!(events.iter().filter(|e| matches!(e, Event::Done { .. })).count(), 3);
     }
 
-    /// The Swift app's capture, on Haiku: a sub-agent in the background, the turn over before
+    /// A real capture, on Haiku: a sub-agent in the background, the turn over before
     /// it reports, Claude woken by its end.
     const BACKGROUND_AGENT: &str = include_str!("../fixtures/subagent-background.jsonl");
 
@@ -1269,7 +1269,7 @@ mod tests {
         assert_eq!(compact_tokens(512), "512");
     }
 
-    /// The Swift app's capture: a foreground sub-agent reading two files.
+    /// A real capture: a foreground sub-agent reading two files.
     const SUBAGENT: &str = include_str!("../fixtures/subagent-foreground.jsonl");
 
     #[test]

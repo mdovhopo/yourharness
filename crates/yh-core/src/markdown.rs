@@ -302,8 +302,8 @@ const KEYWORDS: &[&str] = &[
 
 /// What a line of code starts inside, carried over from the line before: a block comment or a
 /// string that runs on. A file's viewer colours line by line, so a `/* … */` or `"""…"""`
-/// over several lines is coloured whole, as the Swift app's highlighter (which sees the
-/// whole text) does.
+/// over several lines is coloured whole, as a highlighter that sees the
+/// whole text would.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Carry {
     #[default]

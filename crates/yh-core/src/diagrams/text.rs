@@ -91,7 +91,7 @@ impl fmt::Display for MermaidError {
 
 impl std::error::Error for MermaidError {}
 
-/// Spaces and tabs, not line breaks: what Swift's `.whitespaces` trims.
+/// Spaces and tabs, not line breaks.
 pub(crate) fn is_space(c: char) -> bool {
     c.is_whitespace() && c != '\n' && c != '\r'
 }

@@ -1,6 +1,6 @@
 //! The memory specialists: the importer turns memory from anywhere into a workspace's memory;
 //! the reconciler keeps it small and right. Each is a session of its own with read-only file
-//! tools and the specialist memory tools. The Swift app's prompts, verbatim.
+//! tools and the specialist memory tools.
 
 /// `importer` or `reconciler`.
 pub fn title(role: &str) -> &'static str {

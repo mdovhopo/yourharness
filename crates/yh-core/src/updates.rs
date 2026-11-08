@@ -1,4 +1,4 @@
-//! Keeping the app current from GitHub Releases, as the Swift app does: the latest release's
+//! Keeping the app current from GitHub Releases: the latest release's
 //! disk image downloaded when you ask, its checksum and signature checked, the new app put
 //! next to this one, and swapped in on Restart. Blocking steps for a background thread;
 //! `/usr/bin/curl`, `hdiutil`, `ditto` and `codesign` do the work.

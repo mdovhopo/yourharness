@@ -1,6 +1,6 @@
 //! A project's files for `@` mentions: what git sees in a repo (tracked and untracked, nothing
 //! ignored), or a walk of the folder elsewhere, ranked by name, then path, then letters in
-//! order. The port of the Swift app's `FileIndex`, simpler: listed in the background, cached by
+//! order. Listed in the background, cached by
 //! the app for 30 seconds.
 
 use std::path::Path;

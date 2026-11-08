@@ -1,6 +1,6 @@
 //! Thread titles: a one-shot, tool-less request through the official CLI on a small model
-//! (Haiku), in an empty temporary folder so it sees only the prompt. The prompt and rules are the
-//! Swift app's (`ThreadTitlePrompt`, ported from T3 Code), verbatim.
+//! (Haiku), in an empty temporary folder so it sees only the prompt. The prompt and rules come
+//! from T3 Code's.
 
 use serde_json::Value;
 use std::io::Write;

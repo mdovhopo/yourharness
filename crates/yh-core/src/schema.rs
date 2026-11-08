@@ -1,6 +1,5 @@
-//! The schema of `harness.sqlite`, step by step, copied verbatim from the Swift app
-//! (`legacy/Sources/HarnessCore/Storage/HarnessDatabase.swift`, `Schema.steps`), so both
-//! open the same database. Each step runs once, in order; `PRAGMA user_version` records how
+//! The schema of `harness.sqlite`, step by step, verbatim the steps 0.0.x runs, so
+//! both open the same database (0.0.16 still opens it after a downgrade). Each step runs once, in order; `PRAGMA user_version` records how
 //! far a database has got. Append, never edit.
 
 pub const STEPS: &[&str] = &[

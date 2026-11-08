@@ -1,14 +1,13 @@
 //! The JSON files the app kept before the database (0.0.6 and earlier): `state.json` and one
-//! `threads/<id>.json` per transcript. The port of the Swift app's `LegacyStore` and
-//! `importLegacyState` / `importLegacyTranscript` (legacy/Sources/HarnessCore/Storage), so a
-//! folder that never ran 0.0.7+ comes over exactly as the Swift app would have brought it:
+//! `threads/<id>.json` per transcript. A folder that never
+//! ran 0.0.7+ comes over exactly as 0.0.7 would have brought it:
 //!
 //! - `state.json` goes in when the database opens, once (`legacy_imports` name `state`); a file
 //!   that isn't JSON is left for a later launch to try.
 //! - Transcripts go in one at a time on a background thread, from 3 s after launch, each in a
 //!   transaction of its own, recorded under the thread's ID. A transcript read before its turn
 //!   comes in first (`Database::transcript_count` and `read_rows`).
-//! - Files are read the Swift app's way: `JSONDecoder` with ISO 8601 dates, an entry it can't
+//! - Files are read as 0.0.x read them: ISO 8601 dates, an entry it can't
 //!   decode costs that entry (`Lossy`), a file that isn't a JSON array of entries counts as
 //!   empty and is recorded all the same, so it never comes back. Rows written since are newer
 //!   than the file: a thread that has some keeps them.
@@ -31,7 +30,7 @@ pub struct LegacyStore {
 #[derive(Debug, Default)]
 pub struct LegacyTranscript {
     pub rows: Vec<Row>,
-    /// Entries in the file that didn't decode (skipped, as the Swift app skipped them).
+    /// Entries in the file that didn't decode (skipped, as 0.0.x skipped them).
     pub dropped: usize,
     /// Why the whole file didn't read, when it didn't: it counts as empty.
     pub unreadable: Option<String>,
@@ -69,7 +68,7 @@ impl LegacyStore {
         m.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs_f64())
     }
 
-    /// A transcript file read the way the Swift app read it.
+    /// A transcript file read the way 0.0.x read it.
     pub fn transcript(&self, id: &str) -> LegacyTranscript {
         let modified = self.modified(id);
         let data = match std::fs::read(self.transcript_path(id)) {
@@ -148,9 +147,9 @@ pub fn parse_transcript(data: &[u8]) -> LegacyTranscript {
     t
 }
 
-// MARK: - Decoding, by the Swift app's Codable rules
+// MARK: - Decoding, by the rules 0.0.x's decoder followed
 
-/// `EntrySnapshot`, as `JSONDecoder` would read it.
+/// An entry of the file (`EntrySnapshot`), as 0.0.x read it.
 #[derive(Clone, Debug, PartialEq)]
 struct Snapshot {
     id: String,
@@ -657,7 +656,7 @@ mod tests {
         assert_eq!(rows[0].kind, "user");
         assert_eq!(rows[0].date, parse_iso8601("2026-10-20T10:00:00Z"));
         assert_eq!(rows[0].turn_ended_at, parse_iso8601("2026-10-22T08:05:00Z"));
-        // The big result went to a blob, its head in the row, as the Swift app keeps it.
+        // The big result went to a blob, its head in the row, as 0.0.x keeps it.
         let big = rows.iter().find(|r| r.tool_result_ref.is_some()).expect("a big result");
         assert_eq!(big.tool_result.as_ref().unwrap().chars().count(), crate::db::RESULT_HEAD);
         assert!(db.blob_string(big.tool_result_ref.as_ref().unwrap()).unwrap().len() > crate::db::BLOB_THRESHOLD);

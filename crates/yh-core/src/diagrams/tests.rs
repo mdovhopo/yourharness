@@ -1,4 +1,4 @@
-//! Ported from the Swift app's `DiagramTests`, plus timing and malformed-input checks.
+//! Diagram parsing and layout, plus timing and malformed-input checks.
 
 use super::layered::{self, LayerDirection, LayoutEdge, LayoutNode, Options};
 use super::*;
@@ -170,7 +170,7 @@ fn labels_are_cleaned() {
         chart_of(r#"flowchart TD; A["Line one<br/>Line #quot;two#quot;"] --> B("**bold**")"#);
     assert_eq!(chart.nodes[0].label, "Line one\nLine \"two\"");
     assert_eq!(chart.nodes[1].label, "bold");
-    assert_eq!(text::clean("<b>x</b> <BR > <span class=\"a\">y</span> &amp; <bad> <p>"), "x \n y &  <p>"); // as Swift's regex: `<bad>` starts with `b`
+    assert_eq!(text::clean("<b>x</b> <BR > <span class=\"a\">y</span> &amp; <bad> <p>"), "x \n y &  <p>"); // `<bad>` starts with `b`
 }
 
 #[test]

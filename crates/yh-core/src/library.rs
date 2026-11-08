@@ -1,6 +1,6 @@
 //! Projects and threads: the app's own `harness.sqlite` (the user's data folder, or
-//! `YH_DATA_DIR`), through `db::Database`, in the Swift app's format. Records are kept as the
-//! JSON they were read as and changed field by field, so whatever the Swift app wrote stays.
+//! `YH_DATA_DIR`), through `db::Database`, in the format 0.0.x wrote. Records are kept as
+//! the JSON they were read as and changed field by field, so whatever another version wrote stays.
 //! With `YH_CLAUDE_HISTORY=1`, Claude Code's own sessions are listed too, read-only.
 
 use crate::history;
@@ -174,7 +174,7 @@ impl ThreadMeta {
         }
     }
 
-    /// From a thread's record as the Swift app writes it.
+    /// From a thread's record as it's saved (0.0.x's shape).
     pub fn from_record(id: String, project_id: String, updated_at: Option<f64>, session_id: Option<String>, o: &Map<String, Value>) -> ThreadMeta {
         let s = |k: &str| o.get(k).and_then(Value::as_str).map(str::to_string);
         let ms = |k: &str| o.get(k).and_then(Value::as_str).and_then(parse_iso).map(|t| t * 1000.0);
@@ -266,7 +266,7 @@ impl Library {
 
     /// After an import: someone else's Home folder isn't here. A development run's Home is its
     /// own `home` folder, whatever the file says; otherwise a Home whose folder is missing
-    /// goes back to your home folder (the Swift app's `importedState`). Returns where it runs.
+    /// goes back to your home folder. Returns where it runs.
     pub fn fix_imported_home(&mut self, data_folder: &Path, development: bool) -> Option<String> {
         let id = self.setting("homeProjectID").and_then(|v| v.as_str().map(str::to_string)).or_else(|| self.projects.first().map(|p| p.id.clone()))?;
         let current = self.projects.iter().find(|p| p.id == id)?.path.clone();
@@ -420,7 +420,7 @@ impl Library {
 
     // MARK: Changing
 
-    /// A new thread at the top of its project, saved. Its ID is a UUID, as the Swift app's are.
+    /// A new thread at the top of its project, saved. Its ID is a UUID, as 0.0.x's are.
     pub fn add_thread(&self, project_id: &str, title: &str) -> ThreadMeta {
         let id = new_uuid();
         let now = iso_now();
@@ -473,7 +473,7 @@ impl Library {
     }
 
     /// Takes a project out of the list (its threads are removed by the caller). Its ID is kept
-    /// by folder (`removedProjectIDs`, as the Swift app keeps it): adding the folder again gets
+    /// by folder (`removedProjectIDs`, as 0.0.x keeps it): adding the folder again gets
     /// it back, and with it its memory.
     pub fn remove_project(&self, id: &str) {
         let mut records = self.records.lock().unwrap();
@@ -655,7 +655,7 @@ pub fn now_ms() -> f64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64() * 1000.0).unwrap_or(0.0)
 }
 
-/// Settings that are `[String: Date]` in the Swift app (`claudeMemorySyncedAt`): ISO 8601
+/// Settings that are maps of dates (`claudeMemorySyncedAt`): ISO 8601
 /// strings in the database, as 0.0.16 reads them, and seconds since 1970 to the app.
 const DATE_MAPS: &[&str] = &["claudeMemorySyncedAt"];
 
@@ -719,7 +719,7 @@ pub fn new_uuid() -> String {
     format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32])
 }
 
-/// Now as the Swift app writes dates in its JSON (ISO 8601, seconds, `Z`).
+/// Now as dates are written in the saved JSON (ISO 8601, seconds, `Z`, as 0.0.x writes them).
 pub fn iso_now() -> String {
     iso(SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0))
 }

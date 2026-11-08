@@ -116,7 +116,7 @@ fn port_of(url: &str) -> Option<u16> {
     host_port.rsplit(':').next()?.parse().ok()
 }
 
-/// What a thread's browser offers when it has nothing open (the Swift app's `LocalServers`):
+/// What a thread's browser offers when it has nothing open:
 /// ports under its `claude`, then addresses its commands printed (newest output first), one per
 /// port, at most six.
 pub fn found(ports: &[u16], printed: &[String]) -> Vec<String> {

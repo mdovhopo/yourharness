@@ -1,12 +1,12 @@
-//! `harness.sqlite`, read and written in the Swift app's format (docs/storage.md), so the user's
-//! data carries over both ways until the switch. The port of `HarnessDatabase`:
+//! `harness.sqlite`, read and written in the format 0.0.x wrote (docs/storage.md), so the user's
+//! data carries over both ways: 0.0.16 still opens it after a downgrade.
 //!
 //! - **Writes go through one background thread**, in one transaction per batch. Saves that arrive
 //!   while one is being written collapse: the newest state wins, and a transcript's changed rows
 //!   merge.
 //! - **Reads use connections of their own** (WAL), so they never wait for a write. A read of a
 //!   transcript with writes still waiting flushes them first, so what's read has them.
-//! - **Rows keep every column the Swift app writes**, even the ones this app doesn't use yet, so
+//! - **Rows keep every column 0.0.x writes**, even the ones this app doesn't use yet, so
 //!   a row read and saved again comes back unchanged.
 
 use crate::legacy_import::{LegacyStore, LegacyTranscript};
@@ -47,7 +47,7 @@ pub struct Row {
     /// Seconds since 1970.
     pub date: Option<f64>,
     pub turn_ended_at: Option<f64>,
-    /// The sub-agent run as the Swift app's JSON (`SubagentSnapshot`).
+    /// The sub-agent run as JSON, the record 0.0.x wrote (`subagent_record`).
     pub subagent: Option<Vec<u8>>,
     /// JSON array of paths.
     pub changed_files: Option<String>,
@@ -185,8 +185,8 @@ impl Database {
             .name("harness.sqlite writer".into())
             .spawn(move || {
                 // Launch first: a few seconds in, with nothing written meanwhile, the index
-                // catches up on what's not in it yet (rows from before, an older app's), as the
-                // Swift app's `indexBatch` does at open; then after every write.
+                // catches up on what's not in it yet (rows from before, an older version's);
+                // then after every write.
                 let start = std::time::Duration::from_millis(INDEX_DELAY_MS.load(std::sync::atomic::Ordering::Relaxed));
                 let mut first_job = match inbox.recv_timeout(start) {
                     Ok(job) => Some(job),
@@ -797,7 +797,7 @@ impl Writer {
             if let Some(text) = &row.tool_result {
                 if text.len() > BLOB_THRESHOLD {
                     result_blob = Some(self.store_blob(text.as_bytes())?);
-                    // Characters as Swift counts them (`String.count`, `prefix`): graphemes.
+                    // Characters as 0.0.x counted them: graphemes.
                     result_length = Some(text.graphemes(true).count() as i64);
                     result = Some(text.graphemes(true).take(RESULT_HEAD).collect());
                 }
@@ -915,7 +915,7 @@ fn is_imported(c: &Connection, name: &str) -> rusqlite::Result<bool> {
 /// written by the writer between whatever else it has, so saves never wait behind them.
 fn spawn_legacy_import(legacy: LegacyStore, pending: Arc<Mutex<HashSet<String>>>, jobs: flume::Sender<Job>, delay: std::time::Duration) {
     let _ = std::thread::Builder::new().name("harness.sqlite legacy import".into()).spawn(move || {
-        // Background work, as the Swift app's `.utility` queue.
+        // Background work: utility QoS.
         unsafe { libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0) };
         std::thread::sleep(delay);
         let mut tried = HashSet::new();
@@ -936,8 +936,8 @@ fn spawn_legacy_import(legacy: LegacyStore, pending: Arc<Mutex<HashSet<String>>>
 }
 
 impl Writer {
-    /// `state.json`, the first time there is one, written over nothing (as the Swift app did:
-    /// what's in the database already stays).
+    /// `state.json`, the first time there is one, written over nothing (what's in
+    /// the database already stays).
     fn import_legacy_state(&mut self, legacy: &LegacyStore) -> Result<(), String> {
         if is_imported(&self.c, "state").map_err(|e| e.to_string())? {
             return Ok(());
@@ -1030,7 +1030,7 @@ fn sha256_hex(data: &[u8]) -> String {
 }
 
 /// Apple's libcompression, which `NSData.compressed(using: .lzfse)` is: the same bytes as the
-/// Swift app's blobs.
+/// blobs 0.0.x wrote.
 mod lzfse {
     const LZFSE: i32 = 0x801;
     #[link(name = "compression")]
@@ -1058,7 +1058,7 @@ mod lzfse {
     }
 }
 
-/// SHA-256 from CommonCrypto (the system's), as the Swift app's CryptoKit hashes blobs.
+/// SHA-256 from CommonCrypto (the system's), as 0.0.x hashes blobs.
 mod sha256 {
     #[link(name = "System")]
     unsafe extern "C" {
@@ -1273,7 +1273,7 @@ mod tests {
         assert!(n > 1000);
         let rows = db.read_rows(t, n - 160, 160);
         assert_eq!(rows.len(), 160);
-        // A blob the Swift app wrote (LZFSE) decodes to its full length.
+        // A blob 0.0.x wrote (LZFSE) decodes to its full length.
         let c = Connection::open(db.path()).unwrap();
         let (hash, size): (String, i64) = c
             .query_row("SELECT hash, size FROM blobs WHERE codec = 1 LIMIT 1", [], |r| Ok((r.get(0)?, r.get(1)?)))

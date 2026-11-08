@@ -1,9 +1,8 @@
 //! A workspace's memory as files: JSON that brings back everything (for backups and moving
 //! between Macs), or a Markdown folder in Claude Code's own memory format (a file a memory with
 //! frontmatter, and a `MEMORY.md` index) that people and other tools can read. Both come back in
-//! without an agent; anything else goes through the importer. The port of `MemoryArchive.swift`
-//! (and `ClaudeCodeMemory`), writing the same files byte for byte, so exports move between the
-//! Swift app and this one both ways.
+//! without an agent; anything else goes through the importer. The files are byte for
+//! byte the ones 0.0.x writes, so exports move between versions both ways.
 
 use crate::library::{iso, new_uuid, parse_iso};
 use crate::memory::{Actor, Memory, Step, Store};
@@ -14,7 +13,7 @@ use std::path::{Path, PathBuf};
 pub const FORMAT: &str = "yourharness-memory";
 pub const VERSION: i64 = 1;
 
-/// Memory kinds in the order Swift's `MemoryKind.allCases` has them.
+/// Memory kinds in the order the export lists them (as 0.0.x does).
 const KINDS: &[&str] = &["user", "feedback", "project", "reference", "task"];
 
 /// `MemoryKind.of`: an unknown kind (from a newer version, or an import) reads as a project memory.
@@ -47,15 +46,15 @@ fn now() -> f64 {
     crate::library::now_ms() / 1000.0
 }
 
-/// A date as Swift's `.iso8601` writes it: whole seconds (truncated), UTC, `Z`.
+/// A date as the export writes it (0.0.x's format): whole seconds (truncated), UTC, `Z`.
 fn date_string(t: f64) -> String {
     iso(t.floor() as i64)
 }
 
 // MARK: - JSON
 
-/// The JSON export, as Swift's `JSONEncoder` writes it (`.iso8601` dates, pretty printed,
-/// sorted keys, slashes not escaped).
+/// The JSON export, in 0.0.x's format: ISO 8601 dates, pretty printed (`" : "` between key and
+/// value), sorted keys, slashes not escaped.
 pub fn json(memories: &[Memory], workspace: &str, path: Option<&str>, now: f64) -> Vec<u8> {
     let items: Vec<Value> = memories
         .iter()
@@ -208,7 +207,7 @@ impl std::error::Error for ReadError {}
 /// The memories in an export, for `scope`.
 pub fn memories_from_json(data: &[u8], scope: &str) -> Result<Vec<Memory>, ReadError> {
     let document: Value = serde_json::from_slice(data).map_err(|_| ReadError::NotAnExport)?;
-    // What Swift's decoder needs: a format, a version, when it was exported and the list.
+    // What 0.0.x needs to read one: a format, a version, when it was exported and the list.
     let format = document["format"].as_str().ok_or(ReadError::NotAnExport)?;
     let version = document["version"].as_i64().ok_or(ReadError::NotAnExport)?;
     document["exportedAt"].as_str().and_then(parse_iso).ok_or(ReadError::NotAnExport)?;
@@ -263,7 +262,7 @@ pub fn memories_from_json(data: &[u8], scope: &str) -> Result<Vec<Memory>, ReadE
 
 // MARK: - Markdown
 
-/// Swift's `Character`s, near enough: a base scalar with the marks, joiners and selectors that
+/// Characters as people count them (grapheme clusters), near enough: a base scalar with the marks, joiners and selectors that
 /// go with it.
 fn graphemes(s: &str) -> Vec<&str> {
     fn extends(c: char) -> bool {

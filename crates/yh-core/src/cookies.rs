@@ -1,7 +1,7 @@
 //! Bringing sign-ins over from your other browsers into a project's browser: you pick the
 //! browser and the sites, and only those cookies are copied. Nothing is read until you pick
 //! a browser, and macOS asks first (Full Disk Access for Safari, the keychain for the key a
-//! Chromium browser encrypts its cookies with). The Swift app's readers, ported.
+//! Chromium browser encrypts its cookies with).
 
 use std::path::{Path, PathBuf};
 

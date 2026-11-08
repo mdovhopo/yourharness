@@ -1,6 +1,6 @@
 //! How a workspace's memory is doing: how much there is, how old, how linked, and whether
 //! agents actually use it. What the Insights tab draws and the reconciler starts from (its
-//! `stats` tool). The Swift app's `MemoryStats`, ported.
+//! `stats` tool).
 
 use crate::memory::{Memory, Store};
 use std::collections::{HashMap, HashSet};

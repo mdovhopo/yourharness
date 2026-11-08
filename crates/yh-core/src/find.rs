@@ -1,5 +1,5 @@
-//! Find in thread's matching: case- and accent-insensitive, as the Swift app's
-//! (`.caseInsensitive, .diacriticInsensitive`). "cafe" finds "Café", "É" finds "e".
+//! Find in thread's matching: case- and accent-insensitive.
+//! "cafe" finds "Café", "É" finds "e".
 
 use std::ops::Range;
 

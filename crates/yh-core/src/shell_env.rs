@@ -1,5 +1,5 @@
 //! The environment `claude` and the tools it runs get: the login shell's, as a fresh Terminal
-//! window has it (the Swift app's `ShellEnvironment`). An app opened from the Dock inherits only
+//! window has it. An app opened from the Dock inherits only
 //! launchd's minimal `PATH`, so without this `claude` and everything it runs (`npm`, `cargo`,
 //! `gh`…) would be missing. Read once, aside from the main thread, with a timeout, and kept.
 //!

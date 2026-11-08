@@ -1,6 +1,6 @@
 //! Everything the app keeps, as one file to hand over: for reproducing a bug with someone's
-//! exact state, or moving it to another Mac. The Swift app's `.yhstate` format, so either app
-//! reads the other's: a zip (made and opened with `ditto`, as Finder does) laid out as
+//! exact state, or moving it to another Mac. The `.yhstate` format 0.0.x writes, so
+//! either reads the other's: a zip (made and opened with `ditto`, as Finder does) laid out as
 //!
 //! ```text
 //! manifest.json   what made it, on what Mac, and what's inside
@@ -9,8 +9,8 @@
 //! ```
 //!
 //! and `browser-cookies.json` when sign-ins went with it: each project's browser cookies by its
-//! ID, as the Swift app writes them (`ImportedCookie`, dates in seconds since 2001). (The Swift
-//! app also wrote `defaults.plist`; read here it's left alone.) Importing replaces the app's items at the next launch, before the database
+//! ID, as 0.0.x writes them (`ImportedCookie`, dates in seconds since 2001). (0.0.x also
+//! wrote `defaults.plist`; read here it's left alone.) Importing replaces the app's items at the next launch, before the database
 //! opens: `stage` puts the file's contents in the data folder's `pending-import`, and
 //! `apply_pending` swaps them in, in steps that pick up where they stopped after a crash.
 
@@ -27,7 +27,7 @@ pub const PENDING: &str = "pending-import";
 /// browser takes them.
 const COOKIES: &str = "browser-cookies.json";
 const STAGED_COOKIES: &str = "imported-cookies.json";
-/// Swift's dates count from 2001.
+/// 0.0.x's dates count from 2001 (Apple's reference date).
 const SWIFT_EPOCH: f64 = 978_307_200.;
 
 fn cookie_to_swift(c: &crate::cookies::Cookie) -> Value {

@@ -1,4 +1,4 @@
-//! The agent CLIs Settings → Agents lists, the Swift app's `AgentCLI`: where each one is, whether it
+//! The agent CLIs Settings → Agents lists: where each one is, whether it
 //! answers `--version`, and for `claude` the account it's signed in with (`claude auth status
 //! --json`, the official binary's own answer; nothing of its credentials is read). `gh` and `glab`
 //! are probed the same way.

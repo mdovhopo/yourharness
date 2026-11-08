@@ -1,6 +1,6 @@
 //! `mcp__memory__*`: a workspace's memory as tools for its agents. Every call is recorded (what
 //! was searched and found, what was read), which is what the Memory page's activity shows. The
-//! port of the Swift app's `MemoryToolServer` (its agent tools), with its descriptions and replies.
+//! agent tools' descriptions and replies are the ones 0.0.x's agents were given.
 
 use crate::mcp::{schema, tool, ToolResult, ToolServer};
 use crate::memory::{day, problem, Actor, Memory, Step, Store, KINDS};

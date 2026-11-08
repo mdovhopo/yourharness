@@ -1,5 +1,5 @@
 //! Images you send: scaled to what the API takes (2000 px on the long side, under 5 MB) and
-//! kept in the data folder's `attachments/`, as the Swift app does; sent as base64 image blocks.
+//! kept in the data folder's `attachments/`; sent as base64 image blocks.
 //! Any other file or folder goes by its path (`FileAttachment`, `files_note`).
 
 use std::io::Cursor;
@@ -61,7 +61,7 @@ pub fn is_image_path(path: &Path) -> bool {
 
 /// A file or folder sent with a message (not an image Claude sees inline): Claude is told
 /// where it is. Files are copied into `attachments/` so the thread keeps them; folders and
-/// files over `MAX_COPY_BYTES` are referred to where they are, as the Swift app does.
+/// files over `MAX_COPY_BYTES` are referred to where they are.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FileAttachment {
     /// Where it was picked from.
@@ -93,7 +93,7 @@ impl FileAttachment {
         !self.is_dir && self.size.unwrap_or(0) <= MAX_COPY_BYTES
     }
 
-    /// Its name in the message's `attachments`, as the Swift app keeps it: a copy's path inside
+    /// Its name in the message's `attachments`, as 0.0.x keeps it: a copy's path inside
     /// `attachments/` (`<thread>-files/<uuid>/<name>`, deleted with the thread), else the
     /// absolute path (a folder's ending in `/`).
     pub fn stored_name(&self, thread: &str) -> String {

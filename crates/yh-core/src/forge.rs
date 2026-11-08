@@ -484,7 +484,7 @@ pub fn branch(folder: &Path) -> Option<String> {
 /// repo is one of the workspace's). The file is read again whenever it changes, so editing it
 /// (a PR merged, one gone) shows at the next refresh. Two shapes:
 ///
-/// - The Swift app's list, one entry per PR:
+/// - 0.0.x's list, one entry per PR:
 ///   `[{"repo": "github.com/acme/api", "number": 57, "title": "…", "head": "feature/login",
 ///   "base": "main", "draft": false, "review": "approved", "checks": "passing",
 ///   "state": "open", "author": "you", "mine": true}]`, optionally with `"reviewRequested"`,

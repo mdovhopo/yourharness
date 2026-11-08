@@ -1,7 +1,6 @@
 //! A turn cut off by a quit or crash (`turnInProgress` still set at launch): what Claude did
 //! until then is in its session file, which the CLI writes as it goes. Lined up with the saved
-//! rows, the rest is filled in and saved, with a note saying so. The port of the Swift app's
-//! `SessionBackfill` and the web rewrite's `Recovery`.
+//! rows, the rest is filled in and saved, with a note saying so.
 
 use crate::db::{Database, Row};
 use crate::history;

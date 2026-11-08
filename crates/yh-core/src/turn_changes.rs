@@ -1,5 +1,5 @@
 //! Which files a turn changed, as git sees them: whoever changed them, Claude's edit tools, a
-//! shell command, a script it ran, a commit (the Swift app's `TurnChanges`). Read without
+//! shell command, a script it ran, a commit. Read without
 //! touching the repo's index or files: tracked files go through a copy of the index into a tree
 //! object; untracked ones are compared by size and modification time rather than added (a big
 //! untracked file would be copied into the repo's objects on every turn). Blocking: aside.

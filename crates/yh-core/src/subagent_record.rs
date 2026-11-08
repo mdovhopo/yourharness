@@ -1,6 +1,6 @@
-//! A sub-agent's run as the `subagent` column keeps it: the Swift app's `SubagentSnapshot`
-//! through `JSONEncoder()` (keys in its order, nils left out, dates as seconds since 2001,
-//! slashes escaped), so either app reads what the other saved. Read back leniently: a run
+//! A sub-agent's run as the `subagent` column keeps it, the record 0.0.x wrote
+//! (`SubagentSnapshot`: keys in its order, nils left out, dates as seconds since 2001,
+//! slashes escaped), so either version reads what the other saved. Read back leniently: a run
 //! still `running` when saved ended with the process it ran in.
 
 use serde_json::Value;
@@ -128,7 +128,7 @@ impl Writer {
     }
 }
 
-/// The statuses the Swift app knows; anything else reads as stopped.
+/// The statuses 0.0.x knows; anything else reads as stopped.
 const STATUSES: &[&str] = &["running", "completed", "failed", "stopped"];
 
 impl SubagentRecord {

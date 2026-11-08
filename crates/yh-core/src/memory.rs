@@ -1,6 +1,6 @@
 //! Memory: what agents in a workspace keep across sessions, in `harness.sqlite`'s memory tables
-//! (the Swift app's, docs/memory.md). The port of `MemoryDatabase`, `MemoryPrompt` and the agent
-//! side of `MemoryToolServer`: every version kept, every read and search counted, tasks with steps.
+//! (the tables 0.0.x made, docs/memory.md), the prompt agents get and the agent side of
+//! the memory tools: every version kept, every read and search counted, tasks with steps.
 
 use crate::db::Database;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -310,7 +310,7 @@ impl Store {
     }
 
     /// Saves several memories in one transaction: every memory first, then their links, so
-    /// links between them have both ends (Swift's `saveMemories`).
+    /// links between them have both ends.
     pub fn save_all(&self, memories: Vec<Memory>, actor: &Actor) {
         let actor = actor.clone();
         let _ = self.db.write(move |c, rev| {
@@ -387,7 +387,7 @@ impl Store {
     }
 
     /// Puts a memory back as one of its versions said it (its kind, words, status and, for a
-    /// task, its progress): a new version, as the Swift app's `restoreMemoryVersion`.
+    /// task, its progress): a new version.
     pub fn restore_version(&self, id: &str, version: i64, actor: &Actor) {
         let (id, actor) = (id.to_string(), actor.clone());
         let _ = self.db.write(move |c, rev| {
@@ -762,8 +762,7 @@ pub fn contains_secret(text: &str) -> bool {
 
 /// Development (`YH_MEMORY_SEED=<n>`): n made-up memories of every kind, linked, some read and
 /// searched, plus tasks in every state (a dozen done, so Done has more than it shows), some
-/// of them read too. For looking at the Memory page and its speed at scale; the Swift app's
-/// `MemoryProbe.seed`, with more tasks.
+/// of them read too. For looking at the Memory page and its speed at scale.
 pub fn seed(store: &Store, scope: &str, count: usize) {
     const TOPICS: [&str; 12] = ["deploy", "release", "tests", "database", "auth", "billing", "design", "API", "CI", "docs", "iOS", "search"];
     const KINDS: [&str; 4] = ["user", "feedback", "project", "reference"];

@@ -1,5 +1,5 @@
 //! Claude's usage limits (the 5-hour and weekly windows) as the CLI reports them in a
-//! `rate_limit_event`, saved as the Swift app saved them (`rateLimit`, `rateLimitUpdatedAt`),
+//! `rate_limit_event`, saved as 0.0.x saved them (`rateLimit`, `rateLimitUpdatedAt`),
 //! read for the sidebar's meters, and refreshed on demand with the smallest request there is.
 
 use serde_json::{json, Value};
@@ -48,7 +48,7 @@ pub fn meters(info: Option<&Value>) -> Vec<(String, Option<Window>)> {
     out
 }
 
-/// As the Swift app's `RateLimitInfo` is saved: `{status, windows: [{name, utilization, resetsAt}]}`, dates ISO.
+/// As it's saved (0.0.x's shape): `{status, windows: [{name, utilization, resetsAt}]}`, dates ISO.
 pub fn to_saved(info: &Value) -> Value {
     let windows: Vec<Value> = windows(info)
         .into_iter()
@@ -72,7 +72,7 @@ pub fn from_saved(saved: &Value) -> Option<Value> {
         let mut o = json!({"utilization": w["utilization"].as_f64().unwrap_or(0.)});
         let at = match &w["resetsAt"] {
             Value::String(s) => crate::library::parse_iso(s),
-            // Swift's default date encoding: seconds since 2001.
+            // 0.0.x's older saves: seconds since 2001.
             Value::Number(n) => n.as_f64().map(|v| if v < 1_500_000_000. { v + 978_307_200. } else { v }),
             _ => None,
         };
@@ -219,7 +219,7 @@ mod tests {
         assert!(saved["windows"][2].get("resetsAt").is_none());
         let back = from_saved(&saved).unwrap();
         assert_eq!(windows(&back), windows(&info()));
-        // Swift's reference-date numbers too.
+        // Seconds since 2001, as 0.0.x saved them, too.
         let swift = json!({"status": "allowed", "windows": [{"name": "five_hour", "utilization": 0.5, "resetsAt": 815_000_000.0}]});
         assert_eq!(windows(&from_saved(&swift).unwrap())[0].resets_at, Some(815_000_000.0 + 978_307_200.));
     }
