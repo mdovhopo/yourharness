@@ -15,7 +15,7 @@ use gpui_kit::{
     div, prelude::*, px, uniform_list, App, Context, Entity, FontWeight, ScrollHandle, ScrollStrategy, SharedString, Subscription,
     UniformListScrollHandle, WeakEntity, Window,
 };
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 pub const WIDTH: f32 = 380.;
@@ -62,34 +62,24 @@ pub fn split_lines(link: &str) -> (String, Option<(usize, usize)>) {
 /// Biggest file shown; past it, its first part.
 const MAX_FILE: u64 = 8 * 1024 * 1024;
 
-/// A folder's files as a tree: each folder's children, folders first, by name.
+/// A folder's files as a tree, read a folder at a time as it's opened (as Finder and the
+/// Swift app do): each folder read so far, its entries folders first, by name. Everything on
+/// disk shows; what git ignores is dimmed rather than hidden.
+#[derive(Default)]
 struct Tree {
     children: HashMap<String, Vec<(String, bool)>>,
 }
 
-impl Tree {
-    fn build(files: &[String]) -> Tree {
-        let mut kids: HashMap<String, BTreeMap<(bool, String), ()>> = HashMap::new();
-        for path in files {
-            let mut parent = String::new();
-            let parts: Vec<&str> = path.split('/').collect();
-            for (i, part) in parts.iter().enumerate() {
-                let is_dir = i + 1 < parts.len();
-                kids.entry(parent.clone()).or_default().insert((!is_dir, part.to_string()), ());
-                if is_dir {
-                    parent = if parent.is_empty() { part.to_string() } else { format!("{parent}/{part}") };
-                }
-            }
-        }
-        Tree {
-            children: kids.into_iter().map(|(k, v)| (k, v.into_keys().map(|(file, name)| (name, !file)).collect())).collect(),
-        }
-    }
+/// A row of the tree: its path (relative), name, depth, whether it's a folder, and whether git
+/// ignores it.
+type TreeRow = (String, String, usize, bool, bool);
 
-    /// The rows shown with these folders open: (path, name, depth, is folder).
-    fn rows(&self, open: &HashSet<String>) -> Vec<(String, String, usize, bool)> {
+impl Tree {
+    /// The rows shown with these folders open (only folders read so far open). `included` is
+    /// what git sees, folders with a `/`: what isn't in it is ignored.
+    fn rows(&self, open: &HashSet<String>, included: Option<&HashSet<String>>) -> Vec<TreeRow> {
+        let ignored = |path: &str, dir: bool| included.is_some_and(|set| !set.contains(path) && !(dir && set.contains(&format!("{path}/"))));
         let mut rows = vec![];
-        let mut stack: Vec<(String, usize)> = vec![(String::new(), 0)];
         // Depth first, in order: push children reversed.
         let mut pending: Vec<(String, String, usize, bool)> = vec![];
         if let Some(top) = self.children.get("") {
@@ -97,7 +87,6 @@ impl Tree {
                 pending.push((name.clone(), name.clone(), 0, *dir));
             }
         }
-        stack.clear();
         while let Some((path, name, depth, dir)) = pending.pop() {
             if dir && open.contains(&path) {
                 if let Some(kids) = self.children.get(&path) {
@@ -106,10 +95,28 @@ impl Tree {
                     }
                 }
             }
-            rows.push((path, name, depth, dir));
+            let dim = ignored(&path, dir);
+            rows.push((path, name, depth, dir, dim));
         }
         rows
     }
+
+    /// Forgets a folder that's gone, and what was read inside it.
+    fn forget(&mut self, path: &str) {
+        let prefix = format!("{path}/");
+        self.children.retain(|k, _| k != path && !k.starts_with(&prefix));
+    }
+}
+
+/// Folders of a tree read again, off the main thread: (folder, its entries, or None if gone),
+/// and what git sees now when asked.
+type Reread = (Vec<(String, Option<Vec<(String, bool)>>)>, Option<Option<HashSet<String>>>);
+
+fn reread(root: &str, dirs: &[String], relist: bool) -> Reread {
+    let full = |d: &str| if d.is_empty() { std::path::PathBuf::from(root) } else { std::path::Path::new(root).join(d) };
+    let read = dirs.iter().map(|d| (d.clone(), full(d).is_dir().then(|| yh_core::files::list_dir(&full(d))))).collect();
+    let included = relist.then(|| yh_core::files::not_ignored(std::path::Path::new(root)));
+    (read, included)
 }
 
 /// What an opened file turned out to be.
@@ -139,12 +146,53 @@ struct OpenFile {
     /// Opened with a single click in the tree: the next one replaces it, until it's kept
     /// (double-click its tab, or Keep Open).
     preview: bool,
+    /// What each line starts inside (a comment or string from lines above), for colouring.
+    carries: std::sync::Arc<Vec<yh_core::markdown::Carry>>,
+    /// Its language, from its extension, for colouring.
+    lang: String,
 }
 
 impl OpenFile {
     fn lines(&self) -> Option<&std::sync::Arc<Vec<SharedString>>> {
         if let FileContent::Text(l) = &self.content { Some(l) } else { None }
     }
+
+    /// Takes in what a read found, keeping its place: a reload when it changed on disk.
+    fn take(&mut self, read: ViewerRead) {
+        self.content = read.content;
+        self.note = read.note;
+        self.cut_lines = read.cut_lines;
+        self.carries = read.carries;
+        // A wrapped list measures each line: made again for the new lines, at the same place.
+        if let (Some(old), FileContent::Text(lines)) = (self.wrapped.take(), &self.content) {
+            let state = gpui_kit::ListState::new(lines.len(), gpui_kit::ListAlignment::Top, px(400.));
+            let top = old.logical_scroll_top();
+            state.scroll_to(gpui_kit::ListOffset { item_ix: top.item_ix.min(lines.len().saturating_sub(1)), offset_in_item: top.offset_in_item });
+            self.wrapped = Some(state);
+        }
+    }
+}
+
+/// What reading a file for the viewer found.
+struct ViewerRead {
+    content: FileContent,
+    note: Option<String>,
+    cut_lines: bool,
+    carries: std::sync::Arc<Vec<yh_core::markdown::Carry>>,
+}
+
+fn extension(path: &str) -> String {
+    path.rsplit('/').next().and_then(|n| n.rsplit_once('.')).map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default()
+}
+
+/// `read_for_viewer`, with what each line starts inside worked out too.
+fn read_file(full: &str) -> ViewerRead {
+    let (content, note, cut_lines) = read_for_viewer(full);
+    let carries = match &content {
+        FileContent::Text(lines) => yh_core::markdown::line_carries(lines, &extension(full)),
+        _ => vec![],
+    };
+    ViewerRead { content, note, cut_lines, carries: std::sync::Arc::new(carries) }
 }
 
 /// Lines longer than this are cut, as the Swift app's viewer does.
@@ -207,11 +255,12 @@ fn size_text(bytes: u64) -> String {
     }
 }
 
-/// One line of code, coloured by `yh_core::markdown::highlight` (only lines on screen are).
-fn code_line(text: &SharedString, theme: &Theme) -> gpui_kit::StyledText {
+/// One line of code, coloured by `yh_core::markdown::highlight_line` from what it starts inside
+/// (only lines on screen are), with Find's matches on it marked (`current` the one Find is on).
+fn code_line(text: &SharedString, lang: &str, carry: yh_core::markdown::Carry, found: &[std::ops::Range<usize>], current: Option<usize>, theme: &Theme) -> gpui_kit::StyledText {
     use yh_core::markdown::Span;
-    let styled = yh_core::markdown::highlight(text, "");
-    let highlights: Vec<(std::ops::Range<usize>, gpui_kit::HighlightStyle)> = styled
+    let styled = yh_core::markdown::highlight_line(text, lang, carry).0;
+    let colours: Vec<(std::ops::Range<usize>, gpui_kit::Hsla)> = styled
         .spans
         .into_iter()
         .filter_map(|(r, span)| {
@@ -222,10 +271,36 @@ fn code_line(text: &SharedString, theme: &Theme) -> gpui_kit::StyledText {
                 Span::Comment => theme.comment,
                 _ => return None,
             };
-            Some((r, gpui_kit::HighlightStyle { color: Some(color), ..Default::default() }))
+            Some((r, color))
         })
         .collect();
-    gpui_kit::StyledText::new(text.clone()).with_highlights(highlights)
+    let style = |color: Option<gpui_kit::Hsla>, background: Option<gpui_kit::Hsla>| gpui_kit::HighlightStyle { color, background_color: background, ..Default::default() };
+    if found.is_empty() {
+        return gpui_kit::StyledText::new(text.clone()).with_highlights(colours.into_iter().map(|(r, c)| (r, style(Some(c), None))));
+    }
+    // GPUI takes runs in order, none overlapping: cut the text at every colour's and match's
+    // edges, and give each piece its colour and background.
+    let mut edges: Vec<usize> = vec![0, text.len()];
+    for (r, _) in &colours {
+        edges.extend([r.start, r.end]);
+    }
+    for r in found {
+        edges.extend([r.start, r.end]);
+    }
+    edges.retain(|e| *e <= text.len() && text.is_char_boundary(*e));
+    edges.sort_unstable();
+    edges.dedup();
+    let mut runs = vec![];
+    for w in edges.windows(2) {
+        let piece = w[0]..w[1];
+        let color = colours.iter().find(|(r, _)| r.start <= piece.start && piece.end <= r.end).map(|(_, c)| *c);
+        let hit = found.iter().position(|r| r.start <= piece.start && piece.end <= r.end);
+        let background = hit.map(|i| if Some(i) == current { theme.warning.opacity(0.55) } else { theme.warning.opacity(0.25) });
+        if color.is_some() || background.is_some() {
+            runs.push((piece, style(color, background)));
+        }
+    }
+    gpui_kit::StyledText::new(text.clone()).with_highlights(runs)
 }
 
 /// The longest a batch of a file's lines took to make, for `YH_FILES_PROBE` (µs).
@@ -234,14 +309,28 @@ static LINES_WORST_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU
 /// One folder's Files tab: what's open in the tree, the files in tabs.
 #[derive(Default)]
 struct Folder {
-    tree: Option<Rc<Tree>>,
-    rows: Rc<Vec<(String, String, usize, bool)>>,
+    tree: Option<Tree>,
+    rows: Rc<Vec<TreeRow>>,
     open_dirs: HashSet<String>,
+    /// What git doesn't ignore (folders with a `/`), when it's a repo: the rest is dimmed.
+    included: Option<HashSet<String>>,
     files: Vec<OpenFile>,
     current: usize,
     loading: bool,
     /// Hide Folder: only the open file shows.
     hides_tree: bool,
+    /// Watching the folder for changes, while it's the open thread's (with the task that
+    /// takes in what changed). Gone for the others, which are `stale` until shown again.
+    watch: Option<(crate::state::file_watch::FolderWatch, gpui_kit::Task<()>)>,
+    stale: bool,
+}
+
+impl Folder {
+    fn rebuild_rows(&mut self) {
+        if let Some(tree) = &self.tree {
+            self.rows = Rc::new(tree.rows(&self.open_dirs, self.included.as_ref()));
+        }
+    }
 }
 
 pub struct Inspector {
@@ -259,8 +348,9 @@ pub struct Inspector {
     side: Option<(Entity<ThreadState>, Entity<TranscriptView>, Subscription)>,
     question: Entity<InputState>,
     /// Each thread's pull requests as last looked up, and when.
-    pulls: HashMap<String, (Vec<crate::state::pulls::ThreadPull>, std::time::Instant)>,
-    pulls_loading: bool,
+    pulls: HashMap<String, (crate::state::pulls::ThreadPulls, std::time::Instant)>,
+    /// Threads whose PRs are being looked up now.
+    pulls_syncing: HashSet<String>,
     /// Looks again every 30 seconds while the PRs tab shows.
     _pulls_timer: Option<gpui_kit::Task<()>>,
     /// The open thread was working when last seen: its turn ending looks again.
@@ -275,12 +365,23 @@ pub struct Inspector {
     /// Whether `gh stack` is installed, asked once when the PRs tab first shows: Split into a
     /// Stack only shows with it.
     stacks_installed: Option<bool>,
+    /// Find in the open file (⌘F with the viewer focused): what's typed, the matches as
+    /// (line, bytes in it), in order, the one it's on, and the file they're for.
+    viewer_focus: gpui_kit::FocusHandle,
+    file_find: Entity<InputState>,
+    file_find_open: bool,
+    file_hits: Rc<Vec<(usize, std::ops::Range<usize>)>>,
+    file_hit: Option<usize>,
+    file_hits_for: Option<String>,
+    /// `YH_FILES_FIND=<words>`: typed in Find once a file opens (it needs the window).
+    file_find_pending: Option<String>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl Inspector {
     pub fn new(workspace: Entity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let goto = cx.new(|cx| InputState::new(window, cx).placeholder("Go to File"));
+        let file_find = cx.new(|cx| InputState::new(window, cx).placeholder("Find in file"));
         let question = cx.new(|cx| InputState::new(window, cx).placeholder("Ask on the side…"));
         let browser_panel = cx.new(|cx| crate::ui::browser_panel::BrowserPanel::new(workspace.clone(), false, window, cx));
         let subscriptions = vec![
@@ -299,8 +400,20 @@ impl Inspector {
                 }
                 _ => {}
             }),
+            cx.subscribe(&file_find, |this, _, e: &InputEvent, cx| match e {
+                InputEvent::Change => this.find_in_file(cx),
+                InputEvent::PressEnter { shift, .. } => this.step_in_file(!*shift, cx),
+                _ => {}
+            }),
         ];
         let mut inspector = Inspector {
+            viewer_focus: cx.focus_handle(),
+            file_find,
+            file_find_open: false,
+            file_hits: Rc::new(vec![]),
+            file_hit: None,
+            file_hits_for: None,
+            file_find_pending: None,
             workspace,
             thread: None,
             seen_subagents: 0,
@@ -318,12 +431,13 @@ impl Inspector {
             wraps: std::env::var("YH_FILES_WRAP").as_deref() == Ok("1"),
             stacks_installed: None,
             pulls: HashMap::new(),
-            pulls_loading: false,
+            pulls_syncing: HashSet::new(),
             _pulls_timer: None,
             was_running: false,
             _subscriptions: subscriptions,
         };
         inspector.follow_selection(cx);
+        Self::watch_pull_activity(cx);
         if std::env::var("YH_FILES_PROBE").is_ok() {
             inspector.files_probe(cx);
         }
@@ -360,7 +474,8 @@ impl Inspector {
         cx.notify();
     }
 
-    /// The PRs tab looks its thread's PRs up when it shows, then every 30 seconds.
+    /// The PRs tab looks its thread's PRs up when it shows, then every 15 seconds while it
+    /// shows (and its project's repos again, every 30 s at most, for the PRs of its branches).
     fn ensure_pulls(&mut self, cx: &mut Context<Self>) {
         if self.workspace.read(cx).panel != Panel::PullRequests {
             self._pulls_timer = None;
@@ -379,12 +494,12 @@ impl Inspector {
             .detach();
         }
         let Some(id) = self.thread.as_ref().map(|t| t.read(cx).id().to_string()) else { return };
-        if self.pulls.get(&id).is_none_or(|(_, at)| at.elapsed().as_secs() > 25) {
+        if self.pulls.get(&id).is_none_or(|(_, at)| at.elapsed().as_secs() >= 10) {
             self.refresh_pulls(cx);
         }
         if self._pulls_timer.is_none() {
             self._pulls_timer = Some(cx.spawn(async move |this, cx| loop {
-                cx.background_executor().timer(std::time::Duration::from_secs(30)).await;
+                cx.background_executor().timer(std::time::Duration::from_secs(15)).await;
                 let Ok(showing) = this.update(cx, |this, cx| this.workspace.read(cx).panel == Panel::PullRequests && this.workspace.read(cx).shows_inspector) else { break };
                 if showing {
                     let _ = this.update(cx, |this, cx| this.refresh_pulls(cx));
@@ -394,28 +509,105 @@ impl Inspector {
     }
 
     fn refresh_pulls(&mut self, cx: &mut Context<Self>) {
-        let Some(thread) = self.thread.clone() else { return };
-        let ws = self.workspace.read(cx);
-        let Some(db) = ws.library.db.clone() else { return };
-        let id = thread.read(cx).id().to_string();
-        let folder = ws.folder_of(thread.read(cx));
+        if let Some(thread) = self.thread.clone() {
+            self.refresh_pulls_of(thread, cx);
+        }
+    }
+
+    /// Looks a thread's PRs up again, aside: those its tool calls named, the open ones of the
+    /// branches it wrote to (from its project's scan), and those its record keeps. PRs found
+    /// through its branches are saved with it, so they stay after merging.
+    fn refresh_pulls_of(&mut self, thread: Entity<ThreadState>, cx: &mut Context<Self>) {
+        let (db, id, folder, project, branches, saved) = {
+            let ws = self.workspace.read(cx);
+            let Some(db) = ws.library.db.clone() else { return };
+            let t = thread.read(cx);
+            let id = t.id().to_string();
+            let branches = ws
+                .scans
+                .get(&t.meta.project_id)
+                .map(|scan| {
+                    let folders = yh_core::workspace::ThreadFolders {
+                        id: t.id(),
+                        footprint: &t.meta.footprint,
+                        written: &t.meta.written_footprint,
+                        working_directory: t.meta.working_directory.as_deref(),
+                        last_active: t.meta.updated_at,
+                    };
+                    crate::state::pulls::branch_pulls(scan, &folders)
+                })
+                .unwrap_or_default();
+            let strings = |key: &str| -> Vec<String> {
+                ws.library.thread_field(&id, key).and_then(|v| v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())).unwrap_or_default()
+            };
+            let saved = (strings("workedPullRequests"), strings("pullRequests"));
+            (db, id.clone(), ws.folder_of(t), t.meta.project_id.clone(), branches, saved)
+        };
+        if !self.pulls_syncing.insert(id.clone()) {
+            return;
+        }
+        // Its project's repos and their open PRs, read again now and then: where its branches are.
+        self.workspace.update(cx, |ws, cx| ws.scan_project(&project, cx));
         let path = std::env::var("YH_PATH").ok();
-        self.pulls_loading = true;
+        let new_links: Vec<String> = branches.pulls.iter().map(|p| p.link.url.clone()).filter(|u| !saved.0.contains(u)).collect();
         cx.notify();
         cx.spawn(async move |this, cx| {
             let key = id.clone();
+            let local = branches.local.clone();
             let found = cx
                 .background_executor()
                 .spawn(async move {
-                    let links = crate::state::pulls::links(&db, &id, &folder, path.as_deref());
-                    crate::state::pulls::look_up(links, path)
+                    let links = crate::state::pulls::links(&db, &id, &folder, path.as_deref(), &branches.pulls, (&saved.0, &saved.1));
+                    crate::state::pulls::look_up(links, path, &branches.open)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.pulls_loading = false;
-                this.pulls.insert(key, (found, std::time::Instant::now()));
+                this.pulls_syncing.remove(&key);
+                if !new_links.is_empty() {
+                    this.workspace.read(cx).library.update_thread(&key, |r| {
+                        for field in ["workedPullRequests", "pullRequests"] {
+                            let mut list: Vec<serde_json::Value> = r.get(field).and_then(|v| v.as_array().cloned()).unwrap_or_default();
+                            for url in &new_links {
+                                if !list.iter().any(|v| v.as_str() == Some(url.as_str())) {
+                                    list.push(url.clone().into());
+                                }
+                            }
+                            r.insert(field.into(), serde_json::Value::Array(list));
+                        }
+                    });
+                }
+                this.pulls.insert(key, (crate::state::pulls::ThreadPulls { pulls: found, local }, std::time::Instant::now()));
                 cx.notify();
             });
+        })
+        .detach();
+    }
+
+    /// Claude touched a thread's PRs (`gh pr merge`, a push): look again 3 seconds later, and
+    /// 12 after that, for checks and merges that take a little while.
+    fn watch_pull_activity(cx: &mut Context<Self>) {
+        let feed = crate::state::pulls::activity_feed();
+        cx.spawn(async move |this, cx| {
+            while let Ok(thread_id) = feed.recv_async().await {
+                let later = this.clone();
+                cx.spawn(async move |cx| {
+                    for delay in [3, 12] {
+                        cx.background_executor().timer(std::time::Duration::from_secs(delay)).await;
+                        let looked = later.update(cx, |this, cx| {
+                            let Some(t) = this.workspace.read(cx).thread(&thread_id) else { return false };
+                            if std::env::var("YH_PR_PANEL_LOG").is_ok() {
+                                eprintln!("PRS looking again at {thread_id} ({delay} s on)");
+                            }
+                            this.refresh_pulls_of(t, cx);
+                            true
+                        });
+                        if !looked.unwrap_or(false) {
+                            break;
+                        }
+                    }
+                })
+                .detach();
+            }
         })
         .detach();
     }
@@ -459,30 +651,133 @@ impl Inspector {
         Some(self.workspace.read(cx).folder_of(t.read(cx)))
     }
 
-    /// The Files tab's tree for the thread's folder, made off the main thread.
+    /// The Files tab's tree for the thread's folder, read off the main thread, and watched:
+    /// files made, removed or renamed show in it, and an open file that changes reloads. Only
+    /// the open thread's folder is watched; another's catches up when it shows again.
     fn ensure_tree(&mut self, cx: &mut Context<Self>) {
         if self.workspace.read(cx).panel != Panel::Files {
             return;
         }
         let Some(folder) = self.folder(cx) else { return };
+        for (other, state) in self.folders.iter_mut() {
+            if *other != folder && state.watch.take().is_some() {
+                state.stale = true;
+            }
+        }
         let state = self.folders.entry(folder.clone()).or_default();
+        if state.watch.is_none() {
+            state.watch = start_watch(&folder, cx);
+        }
+        if state.stale {
+            // Back to a folder that wasn't watched meanwhile: everything read, read again.
+            state.stale = false;
+            let dirs: Vec<String> = state.tree.as_ref().map(|t| t.children.keys().cloned().collect()).unwrap_or_default();
+            let files: Vec<String> = state.files.iter().map(|f| f.path.clone()).collect();
+            self.reread(folder.clone(), dirs, true, cx);
+            self.reload_files(&folder, files, cx);
+            return;
+        }
         if state.tree.is_some() || state.loading {
             return;
         }
         state.loading = true;
-        let files = self.workspace.update(cx, |ws, cx| ws.folder_files(folder.clone(), cx));
+        // The top, and the folders left open (a link opened inside them).
+        let mut dirs: Vec<String> = vec![String::new()];
+        dirs.extend(state.open_dirs.iter().cloned());
+        self.reread(folder, dirs, true, cx);
+    }
+
+    /// Reads folders of the tree again aside (and asks git what it ignores, with `relist`),
+    /// then shows them, all at once.
+    fn reread(&mut self, folder: String, dirs: Vec<String>, relist: bool, cx: &mut Context<Self>) {
+        if dirs.is_empty() && !relist {
+            return;
+        }
+        let root = folder.clone();
         cx.spawn(async move |this, cx| {
-            let files = files.await;
-            let tree = cx.background_executor().spawn(async move { Tree::build(&files) }).await;
+            let (read, included) = cx.background_executor().spawn(async move { reread(&root, &dirs, relist) }).await;
             let _ = this.update(cx, |this, cx| {
                 let state = this.folders.entry(folder).or_default();
+                let tree = state.tree.get_or_insert_with(Tree::default);
+                let mut changed = vec![];
+                for (dir, entries) in read {
+                    match entries {
+                        Some(e) => {
+                            if tree.children.get(&dir) != Some(&e) {
+                                changed.push(dir.clone());
+                                tree.children.insert(dir, e);
+                            }
+                        }
+                        None => {
+                            changed.push(dir.clone());
+                            tree.forget(&dir);
+                            state.open_dirs.remove(&dir);
+                        }
+                    }
+                }
+                let included_changed = included.as_ref().is_some_and(|i| *i != state.included);
+                if let Some(i) = included {
+                    state.included = i;
+                }
                 state.loading = false;
-                state.rows = Rc::new(tree.rows(&state.open_dirs));
-                state.tree = Some(Rc::new(tree));
+                if changed.is_empty() && !included_changed && !state.rows.is_empty() {
+                    return;
+                }
+                if std::env::var("YH_FILES_LOG").is_ok() {
+                    eprintln!("FILES tree read {changed:?}{}", if included_changed { ", what git ignores again" } else { "" });
+                }
+                state.rebuild_rows();
                 cx.notify();
             });
         })
         .detach();
+    }
+
+    /// Paths that changed on disk in the watched folder: folders read so far that hold them
+    /// are read again, and open files among them reload, keeping their place.
+    fn changed_on_disk(&mut self, folder: &str, paths: Vec<String>, cx: &mut Context<Self>) {
+        let Some(state) = self.folders.get(folder) else { return };
+        let Some(tree) = &state.tree else { return };
+        let mut dirs: Vec<String> = vec![];
+        for p in &paths {
+            for d in [crate::state::file_watch::parent_of(p), p.clone()] {
+                if tree.children.contains_key(&d) && !dirs.contains(&d) {
+                    dirs.push(d);
+                }
+            }
+        }
+        let files: Vec<String> = state.files.iter().filter(|f| paths.contains(&f.path)).map(|f| f.path.clone()).collect();
+        // A file made, removed or renamed may change what git ignores; one saved doesn't.
+        let relist = !dirs.is_empty();
+        self.reread(folder.to_string(), dirs, relist, cx);
+        self.reload_files(folder, files, cx);
+    }
+
+    /// Reads open files again, each keeping its place in the viewer.
+    fn reload_files(&mut self, folder: &str, files: Vec<String>, cx: &mut Context<Self>) {
+        for path in files {
+            let full = if path.starts_with('/') { path.clone() } else { format!("{}/{path}", folder.trim_end_matches('/')) };
+            let folder = folder.to_string();
+            cx.spawn(async move |this, cx| {
+                let read = cx.background_executor().spawn(async move { read_file(&full) }).await;
+                let _ = this.update(cx, |this, cx| {
+                    let Some(f) = this.folders.get_mut(&folder).and_then(|s| s.files.iter_mut().find(|f| f.path == path)) else { return };
+                    if std::env::var("YH_FILES_LOG").is_ok() {
+                        let n = if let FileContent::Text(l) = &read.content { l.len() } else { 0 };
+                        let top = f.scroll.0.borrow().base_handle.offset().y;
+                        eprintln!("FILES reloaded {path} ({n} lines), scrolled at {:.0}", f32::from(top));
+                    }
+                    f.take(read);
+                    // Find's matches were for the old text.
+                    if this.file_hits_for.as_deref() == Some(path.as_str()) {
+                        this.file_hits_for = None;
+                        this.find_in_file(cx);
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
     }
 
     fn toggle_dir(&mut self, path: &str, cx: &mut Context<Self>) {
@@ -490,10 +785,13 @@ impl Inspector {
         let Some(state) = self.folders.get_mut(&folder) else { return };
         if !state.open_dirs.remove(path) {
             state.open_dirs.insert(path.to_string());
+            // Read first, then open: a folder never shows empty.
+            if !state.tree.as_ref().is_some_and(|t| t.children.contains_key(path)) {
+                self.reread(folder, vec![path.to_string()], false, cx);
+                return;
+            }
         }
-        if let Some(tree) = &state.tree {
-            state.rows = Rc::new(tree.rows(&state.open_dirs));
-        }
+        state.rebuild_rows();
         cx.notify();
     }
 
@@ -552,7 +850,7 @@ impl Inspector {
         let full = if relative.starts_with('/') { relative.clone() } else { format!("{}/{relative}", folder.trim_end_matches('/')) };
         let started = std::time::Instant::now();
         cx.spawn(async move |this, cx| {
-            let (content, note, cut_lines) = cx.background_executor().spawn(async move { read_for_viewer(&full) }).await;
+            let ViewerRead { content, note, cut_lines, carries } = cx.background_executor().spawn(async move { read_file(&full) }).await;
             let _ = this.update(cx, |this, cx| {
                 let state = this.folders.entry(folder).or_default();
                 let scroll = UniformListScrollHandle::new();
@@ -563,7 +861,8 @@ impl Inspector {
                     let n = if let FileContent::Text(l) = &content { l.len() } else { 0 };
                     eprintln!("FILES opened {relative} ({n} lines) in {} ms", started.elapsed().as_millis());
                 }
-                let file = OpenFile { path: relative, content, note, cut_lines, scroll, wrapped: None, lines_picked: lines, preview };
+                let lang = extension(&relative);
+                let file = OpenFile { path: relative, content, note, cut_lines, scroll, wrapped: None, lines_picked: lines, preview, carries, lang };
                 // A preview takes the last preview's place.
                 match state.files.iter().position(|f| f.preview).filter(|_| preview) {
                     Some(i) => {
@@ -576,6 +875,12 @@ impl Inspector {
                     }
                 }
                 this.ensure_wrapped();
+                static FIND_ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                if let Ok(words) = std::env::var("YH_FILES_FIND") {
+                    if !FIND_ONCE.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                        this.file_find_pending = Some(words);
+                    }
+                }
                 cx.notify();
             });
         })
@@ -654,6 +959,115 @@ impl Inspector {
             eprintln!("FILES scroll: longest lines step {ms:.2} ms {}", if ms < 50. { "PASS" } else { "FAIL" });
         })
         .detach();
+    }
+
+    /// ⌘F with the viewer focused: Find in the open file.
+    fn show_file_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.file_find_open = true;
+        self.file_find.update(cx, |i, cx| {
+            i.focus(window, cx);
+            i.select_all(window, cx);
+        });
+        self.find_in_file(cx);
+        cx.notify();
+    }
+
+    fn close_file_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.file_find_open = false;
+        self.file_hits = Rc::new(vec![]);
+        self.file_hit = None;
+        self.file_hits_for = None;
+        window.focus(&self.viewer_focus, cx);
+        cx.notify();
+    }
+
+    /// The open file's lines matching what's typed (letters in any case), found aside; Find
+    /// then goes to the first at or below where you are.
+    fn find_in_file(&mut self, cx: &mut Context<Self>) {
+        let query = self.file_find.read(cx).value().to_string();
+        let Some(folder) = self.folder(cx) else { return };
+        let Some(f) = self.folders.get(&folder).and_then(|s| s.files.get(s.current)) else { return };
+        let (Some(lines), path) = (f.lines().cloned(), f.path.clone()) else { return };
+        if query.is_empty() || !self.file_find_open {
+            self.file_hits = Rc::new(vec![]);
+            self.file_hit = None;
+            self.file_hits_for = Some(path);
+            cx.notify();
+            return;
+        }
+        // The line at the top of the viewer: each is `CODE_LINE` tall unwrapped.
+        let from = Some(match &f.wrapped {
+            Some(w) if self.wraps => w.logical_scroll_top().item_ix,
+            _ => (-f32::from(f.scroll.0.borrow().base_handle.offset().y) / text::CODE_LINE).max(0.) as usize,
+        });
+        cx.spawn(async move |this, cx| {
+            let q = query.clone();
+            let hits = cx
+                .background_executor()
+                .spawn(async move {
+                    // Byte offsets stay put with ASCII case folded only.
+                    let needle = q.to_ascii_lowercase();
+                    let mut hits = vec![];
+                    for (i, line) in lines.iter().enumerate() {
+                        let hay = line.to_ascii_lowercase();
+                        let mut at = 0;
+                        while let Some(p) = hay[at..].find(&needle) {
+                            hits.push((i, at + p..at + p + needle.len()));
+                            at += p + needle.len().max(1);
+                            if hits.len() >= 10_000 || at >= hay.len() {
+                                break;
+                            }
+                        }
+                        if hits.len() >= 10_000 {
+                            break;
+                        }
+                    }
+                    hits
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.file_find.read(cx).value() != query.as_str() {
+                    return;
+                }
+                let first = from.map_or(0, |top| hits.iter().position(|(l, _)| *l >= top).unwrap_or(0));
+                this.file_hit = (!hits.is_empty()).then_some(first);
+                this.file_hits = Rc::new(hits);
+                this.file_hits_for = Some(path);
+                if std::env::var("YH_FILES_LOG").is_ok() {
+                    eprintln!("FILES find {query:?}: {} found", this.file_hits.len());
+                }
+                this.reveal_hit(cx);
+            });
+        })
+        .detach();
+    }
+
+    /// ↩ the next match, ⇧↩ the one before (⌘G, ⇧⌘G too).
+    fn step_in_file(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let n = self.file_hits.len();
+        if n == 0 {
+            return;
+        }
+        self.file_hit = Some(match self.file_hit {
+            Some(i) if forward => (i + 1) % n,
+            Some(i) => (i + n - 1) % n,
+            None => 0,
+        });
+        self.reveal_hit(cx);
+    }
+
+    fn reveal_hit(&mut self, cx: &mut Context<Self>) {
+        let Some((line, _)) = self.file_hit.and_then(|i| self.file_hits.get(i)).cloned() else {
+            cx.notify();
+            return;
+        };
+        if let Some(f) = self.folder(cx).and_then(|folder| self.folders.get(&folder)).and_then(|s| s.files.get(s.current)) {
+            f.scroll.scroll_to_item(line, ScrollStrategy::Center);
+            if let Some(w) = &f.wrapped {
+                w.scroll_to(gpui_kit::ListOffset { item_ix: line.saturating_sub(3), offset_in_item: px(0.) });
+            }
+        }
+        cx.notify();
     }
 
     fn close_file(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -1036,18 +1450,21 @@ impl Inspector {
             let this = cx.entity().downgrade();
             let theme2 = *theme;
             let open_path = current.clone();
+            let root = folder.clone();
             let tree = uniform_list("file-tree", rows.len(), move |range, _, _| {
                 range
                     .map(|i| {
-                        let (path, name, depth, dir) = rows[i].clone();
+                        let (path, name, depth, dir, ignored) = rows[i].clone();
                         let this: WeakEntity<Inspector> = this.clone();
                         let on = open_path.as_deref() == Some(path.as_str());
                         let expanded = dir && open_dirs.contains(&path);
+                        // What git ignores recedes, icon and all.
                         let icon = if dir {
-                            Icon::new(if expanded { IconName::FolderOpen } else { IconName::FolderClosed }).text_color(theme2.accent.opacity(0.85))
+                            Icon::new(if expanded { IconName::FolderOpen } else { IconName::FolderClosed }).text_color(if ignored { theme2.tertiary.opacity(0.7) } else { theme2.accent.opacity(0.85) })
                         } else {
-                            file_icon(&name).text_color(theme2.tertiary)
+                            file_icon(&name).text_color(if ignored { theme2.tertiary.opacity(0.7) } else { theme2.tertiary })
                         };
+                        let (menu_this, menu_root, menu_path) = (this.clone(), root.clone(), path.clone());
                         div()
                             .id(i)
                             .h(px(24.))
@@ -1064,11 +1481,23 @@ impl Inspector {
                             .when(!on, |d| d.hover(|s| s.bg(theme2.hover)))
                             .child(div().flex_none().w(px(12.)).when(dir, |d| d.child(Icon::new(if expanded { IconName::ChevronDown } else { IconName::ChevronRight }).size(px(11.)).text_color(theme2.tertiary))))
                             .child(div().flex_none().child(icon.size(px(14.))))
-                            .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(name))
+                            .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().when(ignored, |d| d.text_color(theme2.tertiary)).child(name))
                             .on_click(move |e, _, cx| {
                                 // One click opens a preview; a double click keeps it.
                                 let keep = e.click_count() >= 2;
                                 let _ = this.update(cx, |this, cx| if dir { this.toggle_dir(&path, cx) } else { this.open_tab(&path, None, !keep, cx) });
+                            })
+                            // Open in Tab, Open in Default App, Show in Finder, Copy Path…
+                            .context_menu(move |menu, _, _| {
+                                let menu = if dir {
+                                    menu
+                                } else {
+                                    let (t, p) = (menu_this.clone(), menu_path.clone());
+                                    menu.item(PopupMenuItem::new("Open in Tab").on_click(move |_, _, cx| {
+                                        let _ = t.update(cx, |this, cx| this.open_tab(&p, None, false, cx));
+                                    }))
+                                };
+                                file_menu(menu, &menu_root, &menu_path)
                             })
                     })
                     .collect()
@@ -1192,8 +1621,16 @@ impl Inspector {
                 let digits = lines.len().to_string().len();
                 let theme3 = *theme;
                 let gutter = digits as f32 * 7.5 + 20.;
+                let (carries, lang) = (file.carries.clone(), file.lang.clone());
+                // Find's matches, when they're for this file.
+                let hits = if self.file_find_open && self.file_hits_for.as_deref() == Some(file.path.as_str()) { self.file_hits.clone() } else { Rc::new(vec![]) };
+                let hit = self.file_hit;
                 let row = move |i: usize, wrap: bool| {
                     let on = picked.is_some_and(|(a, b)| i + 1 >= a && i + 1 <= b.max(a));
+                    let first = hits.partition_point(|(l, _)| *l < i);
+                    let found: Vec<std::ops::Range<usize>> = hits[first..].iter().take_while(|(l, _)| *l == i).map(|(_, r)| r.clone()).collect();
+                    let current = hit.and_then(|h| h.checked_sub(first)).filter(|c| *c < found.len());
+                    let carry = carries.get(i).copied().unwrap_or_default();
                     div()
                         .when(!wrap, |d| d.h(px(text::CODE_LINE)).min_w_full())
                         .when(wrap, |d| d.w_full())
@@ -1204,7 +1641,7 @@ impl Inspector {
                         .when(!wrap, |d| d.whitespace_nowrap())
                         .when(on, |d| d.bg(theme3.warning.opacity(0.16)))
                         .child(div().flex_none().w(px(gutter)).pr(px(space::S + 2.)).text_right().text_color(if on { theme3.secondary } else { theme3.tertiary }).child(format!("{}", i + 1)))
-                        .child(div().when(!wrap, |d| d.flex_none()).when(wrap, |d| d.flex_1().min_w_0().overflow_hidden().whitespace_normal()).child(code_line(&lines[i], &theme3)))
+                        .child(div().when(!wrap, |d| d.flex_none()).when(wrap, |d| d.flex_1().min_w_0().overflow_hidden().whitespace_normal()).child(code_line(&lines[i], &lang, carry, &found, current, &theme3)))
                 };
                 if let Some(state) = file.wrapped.clone().filter(|_| wraps) {
                     gpui_kit::list(state, move |i, _, _| {
@@ -1234,8 +1671,87 @@ impl Inspector {
                 }
             }
         };
-        column.child(body).into_any_element()
+        let is_text = file.lines().is_some();
+        let bar = (self.file_find_open && is_text).then(|| self.file_find_bar(theme, cx));
+        // ⌘F finds in the file when it's the one you're in (its bar too); the thread's own
+        // Find otherwise.
+        column
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .track_focus(&self.viewer_focus)
+                    .key_context("FileViewer")
+                    .when(is_text, |d| {
+                        d.on_action(cx.listener(|this, _: &crate::ui::root::Find, window, cx| this.show_file_find(window, cx)))
+                            .on_action(cx.listener(|this, _: &crate::ui::root::FindNext, _, cx| this.step_in_file(true, cx)))
+                            .on_action(cx.listener(|this, _: &crate::ui::root::FindPrevious, _, cx| this.step_in_file(false, cx)))
+                    })
+                    .children(bar)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .flex()
+                            .flex_col()
+                            .on_mouse_down(gpui_kit::MouseButton::Left, cx.listener(|this, _, window, cx| window.focus(&this.viewer_focus, cx)))
+                            .child(body),
+                    ),
+            )
+            .into_any_element()
     }
+
+    /// Find in the open file: what's typed, how many it found and which, ↑ ↓, Done.
+    fn file_find_bar(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let n = self.file_hits.len();
+        let typed = !self.file_find.read(cx).value().is_empty();
+        let count = match (typed, self.file_hit) {
+            (false, _) => String::new(),
+            (true, Some(i)) if n > 0 => format!("{} of {n}{}", i + 1, if n >= 10_000 { "+" } else { "" }),
+            _ => "Not found".into(),
+        };
+        div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(space::XS))
+            .px(px(space::M))
+            .py(px(space::XS))
+            .border_b_1()
+            .border_color(theme.separator)
+            .on_key_down(cx.listener(|this, e: &gpui_kit::KeyDownEvent, window, cx| {
+                if e.keystroke.key == "escape" {
+                    this.close_file_find(window, cx);
+                }
+            }))
+            .child(div().flex_1().min_w_0().child(Input::new(&self.file_find).small().prefix(Icon::new(IconName::Search).size(px(13.)).text_color(theme.tertiary))))
+            .child(div().flex_none().text_size(px(text::CAPTION)).text_color(if count == "Not found" { theme.error } else { theme.secondary }).child(count))
+            .child(tool_button("file-find-previous", Icon::new(IconName::ChevronUp), "Previous (⇧↩)", theme).disabled(n == 0).on_click(cx.listener(|this, _, _, cx| this.step_in_file(false, cx))))
+            .child(tool_button("file-find-next", Icon::new(IconName::ChevronDown), "Next (↩)", theme).disabled(n == 0).on_click(cx.listener(|this, _, _, cx| this.step_in_file(true, cx))))
+            .child(Button::new("file-find-done").small().ghost().label("Done").on_click(cx.listener(|this, _, window, cx| this.close_file_find(window, cx))))
+            .into_any_element()
+    }
+}
+
+/// Starts watching a folder for the Files tab; what changes goes to `changed_on_disk`.
+fn start_watch(folder: &str, cx: &mut Context<Inspector>) -> Option<(crate::state::file_watch::FolderWatch, gpui_kit::Task<()>)> {
+    let root = std::fs::canonicalize(folder).ok()?;
+    let (watch, changes) = crate::state::file_watch::FolderWatch::start(&root)?;
+    let folder = folder.to_string();
+    let task = cx.spawn(async move |this, cx| {
+        while let Ok(batch) = changes.recv_async().await {
+            let paths: Vec<String> = batch.iter().filter_map(|p| crate::state::file_watch::relative(&root, p)).collect();
+            if paths.is_empty() {
+                continue;
+            }
+            if this.update(cx, |this, cx| this.changed_on_disk(&folder, paths, cx)).is_err() {
+                break;
+            }
+        }
+    });
+    Some((watch, task))
 }
 
 fn lines_len(content: &FileContent) -> usize {
@@ -1303,14 +1819,18 @@ impl Inspector {
     }
 
     fn pull_requests(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        use crate::state::pulls::ThreadPull;
         let Some(thread) = &self.thread else { return empty("No thread open.", theme) };
         let id = thread.read(cx).id().to_string();
         let column = div().size_full().flex().flex_col();
-        let Some((pulls, at)) = self.pulls.get(&id) else {
+        let Some((found, at)) = self.pulls.get(&id) else {
             return column.child(panel_header("Pull Requests", None, theme)).child(div().flex_1().min_h_0().child(empty("Looking for this thread's pull requests…", theme))).into_any_element();
         };
-        let refresh = tool_button("pulls-refresh", Icon::new(IconName::RefreshCw), "Refresh", theme).loading(self.pulls_loading).on_click(cx.listener(|this, _, _, cx| this.refresh_pulls(cx)));
-        if pulls.is_empty() {
+        let pulls = &found.pulls;
+        let refresh = tool_button("pulls-refresh", Icon::new(IconName::RefreshCw), "Check the PRs now", theme)
+            .loading(self.pulls_syncing.contains(&id))
+            .on_click(cx.listener(|this, _, _, cx| this.refresh_pulls(cx)));
+        if pulls.is_empty() && found.local.is_empty() {
             return column
                 .child(panel_header("Pull Requests", None, theme).child(refresh))
                 .child(
@@ -1326,38 +1846,75 @@ impl Inspector {
                         .child(empty_state(
                             icons::pull_request(),
                             "No Pull Requests",
-                            "When Claude opens, merges or comments on one in this thread, or one's linked here, it shows here and stays current.",
+                            "PRs show up here once this thread works on a branch that has one, or a PR link comes up in it, such as Claude running gh pr create.",
                             theme,
                         ))
                         .when_some(self.split_button(false, cx), |d, b| d.child(b)),
                 )
                 .into_any_element();
         }
-        let state = |p: &crate::state::pulls::ThreadPull| p.pull.as_ref().map(|p| p.state.clone()).ok();
-        // Open ones (and ones whose state isn't known) first; then merged and closed, newest first.
-        let open: Vec<&crate::state::pulls::ThreadPull> = pulls.iter().filter(|p| p.worked && state(p).is_none_or(|s| s == "open")).collect();
-        let mut done: Vec<&crate::state::pulls::ThreadPull> = pulls.iter().filter(|p| p.worked && state(p).is_some_and(|s| s != "open")).collect();
-        let when = |p: &crate::state::pulls::ThreadPull| p.pull.as_ref().ok().and_then(|p| p.merged_at.clone().or(p.updated_at.clone())).unwrap_or_default();
+        let worked: Vec<&ThreadPull> = pulls.iter().filter(|p| p.worked).collect();
+        let known: Vec<&yh_core::forge::PullRequest> = worked.iter().filter_map(|p| p.pull.as_ref().ok()).collect();
+        // A GitHub stack still going keeps its merged layers, to show how far along it is.
+        let live: HashSet<String> = known.iter().filter(|p| p.is_open()).filter_map(|p| p.stack.map(|s| format!("{}#{}", p.link.path.to_lowercase(), s.number))).collect();
+        let in_live = |p: &yh_core::forge::PullRequest| p.stack.is_some_and(|s| live.contains(&format!("{}#{}", p.link.path.to_lowercase(), s.number)));
+        let open: Vec<yh_core::forge::PullRequest> = known.iter().filter(|p| p.is_open() || in_live(p)).map(|p| (*p).clone()).collect();
+        let mut done: Vec<&ThreadPull> = worked.iter().copied().filter(|t| t.pull.as_ref().is_ok_and(|p| !p.is_open() && !in_live(p))).collect();
+        let when = |p: &ThreadPull| p.pull.as_ref().ok().and_then(|p| p.merged_at.clone().or(p.updated_at.clone())).unwrap_or_default();
         done.sort_by_key(|p| std::cmp::Reverse(when(p)));
-        let mentioned: Vec<&crate::state::pulls::ThreadPull> = pulls.iter().filter(|p| !p.worked).collect();
-        let open_count = open.iter().filter(|p| state(p).is_some()).count();
-        let subtitle = format!("{open_count} open · updated {}", if at.elapsed().as_secs() < 5 { "just now".to_string() } else { format!("{} s ago", at.elapsed().as_secs()) });
+        let unknown: Vec<&ThreadPull> = worked.iter().copied().filter(|t| t.pull.is_err()).collect();
+        let mentioned: Vec<&ThreadPull> = pulls.iter().filter(|p| !p.worked).collect();
+        let open_count = open.iter().filter(|p| p.is_open()).count();
+        let ago = at.elapsed().as_secs();
+        let subtitle = format!(
+            "{} · updated {}",
+            match open_count {
+                0 => "None open".to_string(),
+                1 => "1 open".to_string(),
+                n => format!("{n} open"),
+            },
+            if ago < 5 { "just now".to_string() } else if ago < 60 { format!("{ago} s ago") } else { format!("{} min ago", ago / 60) }
+        );
         let header = panel_header("Pull Requests", Some(subtitle), theme).when_some(self.split_button(true, cx), |d, b| d.child(b)).child(refresh);
-        let mut list = div().id("pulls").flex_1().min_h_0().overflow_y_scroll().px(px(space::M)).pb(px(space::M)).flex().flex_col().gap(px(space::S));
-        for p in open {
-            list = list.child(pull_card(p, theme));
+        let mut list = div().id("pulls").flex_1().min_h_0().overflow_y_scroll().px(px(space::M)).pb(px(space::M)).flex().flex_col().gap(px(space::S + 2.));
+        // Open ones as stacks (a single PR is a stack of one), bottom of each stack first.
+        for stack in yh_core::stacks::PullRequestStack::build(&open) {
+            list = list.child(stack_card(&stack, theme));
         }
-        let section = |t: &str| div().pt(px(space::S)).px(px(space::XS)).text_size(px(text::FOOTNOTE)).font_weight(FontWeight::SEMIBOLD).text_color(theme.secondary).child(t.to_string());
-        if !done.is_empty() {
-            list = list.child(section("Merged and Closed"));
-            for p in done {
-                list = list.child(pull_card(p, theme));
+        for (repo, local) in &found.local {
+            list = list.child(local_stack_card(repo, local, theme));
+        }
+        let section = |t: &str| div().pt(px(space::XS)).px(px(space::XS)).text_size(px(text::CAPTION)).font_weight(FontWeight::SEMIBOLD).text_color(theme.secondary).child(t.to_string());
+        let rows_card = |items: &[&ThreadPull]| {
+            let mut card = div().flex().flex_col().rounded(px(radius::LARGE)).overflow_hidden().border_1().border_color(theme.separator).bg(theme.card);
+            for (i, p) in items.iter().enumerate() {
+                card = card.child(pull_row(p, None, i > 0, theme));
             }
+            card
+        };
+        if !done.is_empty() {
+            list = list.child(section("Merged and Closed")).child(rows_card(&done));
+        }
+        for p in &unknown {
+            list = list.child(rows_card(&[*p]));
         }
         if !mentioned.is_empty() {
-            list = list.child(section("Mentioned"));
-            for p in mentioned {
-                list = list.child(pull_card(p, theme));
+            list = list.child(section("Mentioned")).child(rows_card(&mentioned));
+        }
+        if std::env::var("YH_PR_PANEL_LOG").is_ok() {
+            let names = |v: Vec<String>| v.join(", ");
+            let shown = format!(
+                "open [{}] local [{}] done [{}] mentioned [{}]",
+                names(open.iter().map(|p| format!("#{}{}", p.number(), p.stack.map(|s| format!(" (stack {} {}/{})", s.number, s.position, s.size)).unwrap_or_default())).collect()),
+                names(found.local.iter().map(|(r, s)| format!("{r}: {}", s.layers.iter().map(|l| l.branch.clone()).collect::<Vec<_>>().join(" ← "))).collect()),
+                names(done.iter().map(|p| format!("#{}", p.link.number)).collect()),
+                names(mentioned.iter().map(|p| format!("#{}", p.link.number)).collect()),
+            );
+            static LAST: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+            let mut last = LAST.lock().unwrap();
+            if *last != shown {
+                eprintln!("PRS panel {shown}");
+                *last = shown;
             }
         }
         column.child(header).child(list).into_any_element()
@@ -1421,28 +1978,116 @@ impl Inspector {
     }
 }
 
-/// A PR in the narrow sidebar: what it is, where it's going, what stands in its way.
-fn pull_card(p: &crate::state::pulls::ThreadPull, theme: &Theme) -> impl IntoElement {
+fn purple() -> gpui_kit::Hsla {
+    gpui_kit::rgb(0xaf52de).into()
+}
+
+/// A PR's state as a colour: open green, draft grey, merged or merging purple, closed red.
+fn pull_tint(pr: &yh_core::forge::PullRequest, theme: &Theme) -> gpui_kit::Hsla {
+    match pr.state.as_str() {
+        "merged" => purple(),
+        "closed" => theme.error,
+        _ if pr.draft => theme.secondary,
+        _ if pr.auto_merge || pr.in_merge_queue => purple(),
+        _ => theme.success,
+    }
+}
+
+/// Lane spacing and the dot's size and place in a stack's tree, as the Swift app's `GraphCell`.
+const LANE: f32 = 18.;
+const DOT: f32 = 16.;
+const DOT_Y: f32 = 17.;
+
+/// A row's slice of a stack's tree: the lines through it, and its PR's dot (with its layer)
+/// in its lane, level with the title. Rows stack up into one unbroken drawing.
+fn graph_cell(row: &yh_core::stacks::GraphRow, lanes: usize, theme: &Theme) -> gpui_kit::AnyElement {
+    use yh_core::stacks::Segment;
+    let segments: Vec<Segment> = row.segments.iter().copied().collect();
+    let line = theme.secondary.opacity(0.35);
+    let tint = pull_tint(&row.pull_request, theme);
+    let layer = row.pull_request.stack.map(|s| s.position as usize).unwrap_or(row.layer);
+    let lane = row.lane;
+    let width = (lanes.max(1) - 1) as f32 * LANE + DOT;
+    div()
+        .relative()
+        .flex_none()
+        .w(px(width))
+        .child(
+            gpui_kit::canvas(
+                |_, _, _| {},
+                move |b, _, window, _| {
+                    let x = |l: usize| f32::from(b.origin.x) + l as f32 * LANE + DOT / 2.;
+                    let top = f32::from(b.origin.y);
+                    let (dot, bottom) = (top + DOT_Y, top + f32::from(b.size.height));
+                    let mut seg = |points: &[(f32, f32)]| {
+                        let mut p = gpui_kit::PathBuilder::stroke(px(2.));
+                        p.move_to(gpui_kit::point(px(points[0].0), px(points[0].1)));
+                        for (x, y) in &points[1..] {
+                            p.line_to(gpui_kit::point(px(*x), px(*y)));
+                        }
+                        if let Ok(p) = p.build() {
+                            window.paint_path(p, line);
+                        }
+                    };
+                    for s in &segments {
+                        match *s {
+                            Segment::Through(l) => seg(&[(x(l), top), (x(l), bottom)]),
+                            Segment::FromAbove(l) => seg(&[(x(l), top), (x(l), dot)]),
+                            Segment::ToBelow(l) => seg(&[(x(l), dot), (x(l), bottom)]),
+                            // Down the parent's lane, round the corner, across into the dot.
+                            Segment::Branch { from, to } => {
+                                let r = 8f32.min((x(to) - x(from)) / 2.);
+                                seg(&[(x(from), top), (x(from), dot - r), (x(from) + r * 0.3, dot - r * 0.3), (x(from) + r, dot), (x(to), dot)]);
+                            }
+                        }
+                    }
+                },
+            )
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full(),
+        )
+        .child(
+            div()
+                .absolute()
+                .top(px(DOT_Y - DOT / 2.))
+                .left(px(lane as f32 * LANE))
+                .size(px(DOT))
+                .rounded_full()
+                .border(px(1.5))
+                .border_color(tint.opacity(0.8))
+                .bg(theme.card)
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(9.))
+                .font_weight(FontWeight::BOLD)
+                .text_color(tint)
+                .child(layer.to_string()),
+        )
+        .into_any_element()
+}
+
+/// A PR in the narrow sidebar, as a row of a card: what it is, where it's going, what stands
+/// in its way. In a stack the tree runs down its left and the dot carries the state; on its
+/// own, a small icon does.
+fn pull_row(p: &crate::state::pulls::ThreadPull, graph: Option<(&yh_core::stacks::GraphRow, usize)>, divider: bool, theme: &Theme) -> gpui_kit::AnyElement {
     let url = p.link.url.clone();
-    let purple: gpui_kit::Hsla = gpui_kit::rgb(0xaf52de).into();
-    let card = div()
+    let mut row = div()
         .id(SharedString::from(format!("pull-{}", p.link.id())))
-        .px(px(space::M))
-        .py(px(space::S + 2.))
-        .rounded(px(radius::LARGE))
-        .border_1()
-        .border_color(theme.separator)
-        .bg(theme.card)
-        .cursor_pointer()
-        .hover(|s| s.bg(theme.selected))
         .flex()
-        .flex_col()
-        .gap(px(space::XS + 1.))
+        .gap(px(space::S))
+        .px(px(space::M))
+        .when(graph.is_none(), |d| d.py(px(space::S)))
+        .when(divider, |d| d.border_t_1().border_color(theme.separator))
+        .cursor_pointer()
+        .hover(|s| s.bg(theme.hover))
         .on_click(move |_, _, cx| cx.open_url(&url));
     // Open in Browser, Copy Link, Copy Branch Name.
     let (u1, u2) = (p.link.url.clone(), p.link.url.clone());
     let head = p.pull.as_ref().ok().map(|pr| pr.head.clone());
-    let mut card = card.context_menu(move |menu, _, _| {
+    let menu = move |menu: gpui_kit::component::menu::PopupMenu, _: &mut Window, _: &mut gpui_kit::Context<gpui_kit::component::menu::PopupMenu>| {
         let (u1, u2) = (u1.clone(), u2.clone());
         let menu = menu
             .item(PopupMenuItem::new("Open in Browser").icon(IconName::ExternalLink).on_click(move |_, _, cx| cx.open_url(&u1)))
@@ -1451,96 +2096,203 @@ fn pull_card(p: &crate::state::pulls::ThreadPull, theme: &Theme) -> impl IntoEle
             Some(h) => menu.item(PopupMenuItem::new("Copy Branch Name").on_click(move |_, _, cx| cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(h.clone())))),
             None => menu,
         }
-    });
+    };
     let fact = |icon: Icon, label: &str, color: gpui_kit::Hsla| div().flex().items_center().gap(px(3.)).text_color(color).child(icon.size(px(11.)).text_color(color)).child(label.to_string());
-    match &p.pull {
-        Ok(pr) => {
-            let (icon, tint, chip): (Icon, gpui_kit::Hsla, Option<&str>) = match pr.state.as_str() {
-                "merged" => (icons::merged(), purple, Some("Merged")),
-                "closed" => (icons::pull_request_closed(), theme.error, Some("Closed")),
-                _ if pr.draft => (icons::pull_request_draft(), theme.secondary, Some("Draft")),
-                _ if pr.auto_merge => (icons::pull_request(), purple, Some("Auto-merge")),
-                _ => (icons::pull_request(), theme.success, None),
-            };
-            let blocker = match pr.merge_status.as_deref().filter(|_| pr.state == "open") {
-                Some("DIRTY") => Some("Conflicts"),
-                Some("BEHIND") => Some("Behind base"),
-                Some("BLOCKED") => Some("Blocked"),
-                _ => None,
-            };
-            let review = match pr.review.as_str() {
-                "approved" => Some((Icon::new(IconName::Check), "Approved", theme.success)),
-                "changesRequested" => Some((Icon::new(IconName::CircleAlert), "Changes requested", theme.error)),
-                "required" => Some((Icon::new(IconName::Eye), "Review required", theme.secondary)),
-                _ => None,
-            };
-            let checks = match pr.checks.as_str() {
-                "passing" => Some((Icon::new(IconName::CircleCheck), "Checks pass", theme.success)),
-                "failing" => Some((Icon::new(IconName::CircleX), "Checks fail", theme.error)),
-                "pending" => Some((icons::circle_dashed(), "Checks running", theme.warning)),
-                _ => None,
-            };
-            card = card
-                .child(
-                    div()
-                        .flex()
-                        .items_start()
-                        .gap(px(space::S))
-                        .child(div().flex_none().pt(px(2.)).child(icon.size(px(14.)).text_color(tint)))
-                        .child(div().flex_1().min_w_0().font_weight(FontWeight::MEDIUM).line_clamp(2).child(pr.title.clone()))
-                        .when_some(chip, |d, c| {
-                            d.child(
-                                div()
-                                    .flex_none()
-                                    .mt(px(1.))
-                                    .px(px(space::XS + 2.))
-                                    .rounded(px(radius::SMALL))
-                                    .bg(tint.opacity(0.14))
-                                    .text_size(px(text::CAPTION))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(tint)
-                                    .child(c),
-                            )
-                        }),
-                )
-                .child(
-                    div()
-                        .pl(px(22.))
-                        .flex()
-                        .gap(px(space::XS + 2.))
-                        .text_size(px(text::CAPTION))
-                        .text_color(theme.secondary)
-                        .child(div().flex_none().child(format!("{} #{}", p.link.path, p.link.number)))
-                        .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_family(MONO).text_color(theme.tertiary).child(format!("{} → {}", pr.head, pr.base))),
-                )
-                .when(blocker.is_some() || review.is_some() || checks.is_some(), |d| {
-                    d.child(
-                        div()
-                            .pl(px(22.))
-                            .flex()
-                            .flex_wrap()
-                            .gap(px(space::S + 2.))
-                            .text_size(px(text::CAPTION))
-                            .when_some(blocker, |d, b| d.child(fact(Icon::new(IconName::TriangleAlert), b, theme.warning)))
-                            .when_some(review, |d, (i, t, c)| d.child(fact(i, t, c)))
-                            .when_some(checks, |d, (i, t, c)| d.child(fact(i, t, c))),
-                    )
-                });
-        }
-        Err(e) => {
-            card = card
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(space::S))
-                        .child(icons::pull_request().size(px(14.)).text_color(theme.tertiary))
-                        .child(div().font_weight(FontWeight::MEDIUM).child(format!("{} #{}", p.link.path, p.link.number))),
-                )
-                .child(div().pl(px(22.)).text_size(px(text::CAPTION)).text_color(theme.secondary).line_clamp(2).child(format!("Couldn't look it up: {}", e.lines().next().unwrap_or(""))));
-        }
+    let Ok(pr) = &p.pull else {
+        let why = p.pull.as_ref().err().map(|e| e.lines().next().unwrap_or("").to_string()).unwrap_or_default();
+        return row
+            .child(div().flex_none().pt(px(2.)).child(icons::pull_request().size(px(14.)).text_color(theme.tertiary)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .child(div().font_weight(FontWeight::MEDIUM).child(format!("{} #{}", p.link.path, p.link.number)))
+                    .child(div().text_size(px(text::CAPTION)).text_color(theme.secondary).line_clamp(2).child(format!("Couldn't look it up: {why}"))),
+            )
+            .context_menu(menu)
+            .into_any_element();
+    };
+    let tint = pull_tint(pr, theme);
+    let (icon, chip): (Icon, Option<&str>) = match pr.state.as_str() {
+        "merged" => (icons::merged(), Some("Merged")),
+        "closed" => (icons::pull_request_closed(), Some("Closed")),
+        _ if pr.draft => (icons::pull_request_draft(), Some("Draft")),
+        _ if pr.in_merge_queue => (icons::pull_request(), Some("In merge queue")),
+        _ if pr.auto_merge => (icons::pull_request(), Some("Auto-merge")),
+        _ => (icons::pull_request(), None),
+    };
+    let blocker = match pr.merge_status.as_deref().filter(|_| pr.state == "open") {
+        Some("DIRTY") => Some("Conflicts"),
+        Some("BEHIND") => Some("Behind base"),
+        Some("BLOCKED") => Some("Blocked"),
+        _ => None,
+    };
+    let review = match pr.review.as_str() {
+        "approved" => Some((Icon::new(IconName::Check), "Approved", theme.success)),
+        "changesRequested" => Some((Icon::new(IconName::CircleAlert), "Changes requested", theme.error)),
+        "required" => Some((Icon::new(IconName::Eye), "Review required", theme.secondary)),
+        _ => None,
+    };
+    let checks = match pr.checks.as_str() {
+        "passing" => Some((Icon::new(IconName::CircleCheck), "Checks pass", theme.success)),
+        "failing" => Some((Icon::new(IconName::CircleX), "Checks fail", theme.error)),
+        "pending" => Some((icons::circle_dashed(), "Checks running", theme.warning)),
+        _ => None,
+    };
+    let finished = pr.state != "open";
+    let details = div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .gap(px(2.))
+        // In a stack the tree runs the row's whole height, so the text keeps the space.
+        .when(graph.is_some(), |d| d.py(px(space::S)))
+        .child(
+            div()
+                .flex()
+                .items_start()
+                .gap(px(space::S))
+                .child(div().flex_1().min_w_0().font_weight(FontWeight::MEDIUM).when(finished, |d| d.text_color(theme.secondary)).line_clamp(2).child(pr.title.clone()))
+                .when_some(chip, |d, c| {
+                    d.child(div().flex_none().mt(px(1.)).px(px(space::XS + 2.)).rounded(px(radius::SMALL)).bg(tint.opacity(0.14)).text_size(px(text::CAPTION)).font_weight(FontWeight::MEDIUM).text_color(tint).child(c))
+                }),
+        )
+        .child(
+            div()
+                .flex()
+                .gap(px(space::XS + 2.))
+                .text_size(px(text::CAPTION))
+                .text_color(theme.secondary)
+                .child(div().flex_none().child(format!("{} #{}", p.link.path.rsplit('/').next().unwrap_or(&p.link.path), p.link.number)))
+                .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_family(MONO).text_color(theme.tertiary).child(format!("{} → {}", pr.head, pr.base))),
+        )
+        .when(!finished && (blocker.is_some() || review.is_some() || checks.is_some()), |d| {
+            d.child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(space::S + 2.))
+                    .text_size(px(text::CAPTION))
+                    .when_some(blocker, |d, b| d.child(fact(Icon::new(IconName::TriangleAlert), b, theme.warning)))
+                    .when_some(review, |d, (i, t, c)| d.child(fact(i, t, c)))
+                    .when_some(checks, |d, (i, t, c)| d.child(fact(i, t, c))),
+            )
+        });
+    row = match graph {
+        Some((g, lanes)) => row.child(graph_cell(g, lanes, theme)),
+        None => row.child(div().flex_none().pt(px(2.)).child(icon.size(px(14.)).text_color(tint))),
+    };
+    row.child(details).context_menu(menu).into_any_element()
+}
+
+/// One stack (or a single PR) in a card, drawn as a tree: bottom of the stack first, a line
+/// of PRs in one lane, each fork opening a lane to its right.
+fn stack_card(stack: &yh_core::stacks::PullRequestStack, theme: &Theme) -> gpui_kit::AnyElement {
+    use yh_core::stacks::{Lanes, StackGraph};
+    let graph = StackGraph::layout(stack, Lanes::Compact);
+    let is_stack = stack.is_stacked() || stack.number().is_some();
+    let mut card = div().flex().flex_col().rounded(px(radius::LARGE)).overflow_hidden().border_1().border_color(theme.separator).bg(theme.card).when(is_stack, |d| d.pb(px(3.)));
+    if is_stack {
+        let all = stack.all();
+        let open = all.iter().filter(|p| p.is_open()).count();
+        let title = match stack.number() {
+            Some(n) => format!("Stack #{n}"),
+            None => "Stack".to_string(),
+        };
+        let size = stack.pull_request.stack.map(|s| s.size as usize).unwrap_or(all.len());
+        let detail = if open == all.len() { format!("{size} PRs") } else { format!("{open} of {size} open") };
+        card = card.child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(space::XS + 2.))
+                .px(px(space::M))
+                .pt(px(space::S + 1.))
+                .pb(px(2.))
+                .text_size(px(text::CAPTION))
+                .child(icons::layers().size(px(12.)).text_color(theme.secondary))
+                .child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme.secondary).child(title))
+                .child(div().text_color(theme.tertiary).child(format!("· {detail} · into {}", stack.pull_request.base))),
+        );
     }
-    card
+    let lanes = graph.lane_count;
+    for row in &graph.rows {
+        let p = crate::state::pulls::ThreadPull { link: row.pull_request.link.clone(), worked: true, pull: Ok(row.pull_request.clone()) };
+        card = card.child(pull_row(&p, is_stack.then_some((row, lanes)), false, theme));
+    }
+    card.into_any_element()
+}
+
+/// A stack made with `gh stack` that isn't on GitHub yet: its branches, bottom first, each
+/// waiting for `gh stack submit`.
+fn local_stack_card(repo: &str, stack: &yh_core::github::LocalStack, theme: &Theme) -> gpui_kit::AnyElement {
+    let mut card = div().flex().flex_col().pb(px(3.)).rounded(px(radius::LARGE)).overflow_hidden().border_1().border_dashed().border_color(theme.separator).bg(theme.card);
+    card = card.child(
+        div()
+            .flex()
+            .items_center()
+            .gap(px(space::XS + 2.))
+            .px(px(space::M))
+            .pt(px(space::S + 1.))
+            .pb(px(2.))
+            .text_size(px(text::CAPTION))
+            .child(icons::layers().size(px(12.)).text_color(theme.secondary))
+            .child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme.secondary).child("Stack, not submitted"))
+            .child(div().min_w_0().truncate().text_color(theme.tertiary).child(format!("· {repo} · into {}", stack.trunk))),
+    );
+    let n = stack.layers.len();
+    for (i, layer) in stack.layers.iter().enumerate() {
+        let submitted = layer.pull_request_number;
+        card = card.child(
+            div()
+                .relative()
+                .flex()
+                .items_center()
+                .gap(px(space::S))
+                .px(px(space::M))
+                .h(px(30.))
+                // The line up the stack, through every dot.
+                .child(
+                    div()
+                        .relative()
+                        .flex_none()
+                        .w(px(DOT))
+                        .h_full()
+                        .when(n > 1, |d| {
+                            d.child(div().absolute().left(px(DOT / 2. - 1.)).w(px(2.)).top(px(if i == 0 { 15. } else { 0. })).bottom(px(if i + 1 == n { 15. } else { 0. })).bg(theme.secondary.opacity(0.35)))
+                        })
+                        .child(
+                            div()
+                                .absolute()
+                                .top(px(7.))
+                                .left_0()
+                                .size(px(DOT))
+                                .rounded_full()
+                                .border(px(1.5))
+                                .border_dashed()
+                                .border_color(theme.secondary)
+                                .bg(theme.card)
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_size(px(9.))
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(theme.secondary)
+                                .child((i + 1).to_string()),
+                        ),
+                )
+                .child(div().flex_1().min_w_0().truncate().font_family(MONO).text_size(px(text::CAPTION)).child(layer.branch.clone()))
+                .child(div().flex_none().px(px(space::XS + 2.)).rounded(px(radius::SMALL)).bg(theme.selected).text_size(px(text::CAPTION)).text_color(theme.secondary).child(match submitted {
+                    Some(n) => format!("#{n}"),
+                    None => "Not submitted".to_string(),
+                })),
+        );
+    }
+    card.into_any_element()
 }
 
 fn run_label(e: &crate::state::thread::Entry) -> (String, String) {
@@ -1722,6 +2474,10 @@ impl Render for Inspector {
         let panel = self.workspace.read(cx).panel;
         if panel == Panel::SideChat {
             self.ensure_side(cx);
+        }
+        if let Some(words) = self.file_find_pending.take() {
+            self.file_find.update(cx, |i, cx| i.set_value(words, window, cx));
+            self.show_file_find(window, cx);
         }
         if panel == Panel::PullRequests && self._pulls_timer.is_none() {
             self.ensure_pulls(cx);

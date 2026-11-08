@@ -12,21 +12,31 @@ const LIMIT: usize = 50_000;
 
 /// Paths relative to `folder`, folders included (with a trailing `/`).
 pub fn list(folder: &Path) -> Vec<String> {
-    let git = Command::new("/usr/bin/git")
-        .args(["ls-files", "--cached", "--others", "--exclude-standard", "-z"])
-        .current_dir(folder)
-        .output();
-    let mut files: Vec<String> = match git {
-        // A folder git ignores (inside a repo) lists nothing: walk it instead.
-        Ok(out) if out.status.success() && !out.stdout.is_empty() => out
-            .stdout
-            .split(|b| *b == 0)
-            .filter(|p| !p.is_empty())
-            .take(LIMIT)
-            .map(|p| String::from_utf8_lossy(p).into_owned())
-            .collect(),
-        _ => walk(folder),
-    };
+    let mut files = git_files(folder).unwrap_or_else(|| walk(folder));
+    with_folders(&mut files);
+    files
+}
+
+/// What git sees in a repo (tracked and untracked, nothing ignored), None outside one (or in
+/// a folder git ignores whole, which lists nothing).
+fn git_files(folder: &Path) -> Option<Vec<String>> {
+    let out = Command::new("/usr/bin/git").args(["ls-files", "--cached", "--others", "--exclude-standard", "-z"]).current_dir(folder).output().ok()?;
+    (out.status.success() && !out.stdout.is_empty())
+        .then(|| out.stdout.split(|b| *b == 0).filter(|p| !p.is_empty()).take(LIMIT).map(|p| String::from_utf8_lossy(p).into_owned()).collect())
+}
+
+/// What git doesn't ignore in a repo, folders included (with a `/`), for dimming the rest in
+/// the Files tab. None outside a repo, or when there are too many files to tell.
+pub fn not_ignored(folder: &Path) -> Option<std::collections::HashSet<String>> {
+    let mut files = git_files(folder)?;
+    if files.len() >= LIMIT {
+        return None;
+    }
+    with_folders(&mut files);
+    Some(files.into_iter().collect())
+}
+
+fn with_folders(files: &mut Vec<String>) {
     // The folders the files are in, to mention a folder too.
     let mut folders: Vec<String> = files
         .iter()
@@ -38,7 +48,64 @@ pub fn list(folder: &Path) -> Vec<String> {
     folders.sort();
     folders.dedup();
     files.extend(folders);
-    files
+}
+
+/// One folder of the Files tab's tree, as it is on disk: every file and folder in it (ignored
+/// ones too, which the tree dims), but `.git` and `.DS_Store`; folders first, then by name
+/// as Finder sorts them. `(name, is folder)`.
+pub fn list_dir(folder: &Path) -> Vec<(String, bool)> {
+    let Ok(entries) = std::fs::read_dir(folder) else { return vec![] };
+    let mut out: Vec<(String, bool)> = entries
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name == ".git" || name == ".DS_Store" {
+                return None;
+            }
+            // A link to a folder opens as one.
+            let dir = e.file_type().ok().is_some_and(|t| t.is_dir() || t.is_symlink() && e.path().is_dir());
+            Some((name, dir))
+        })
+        .collect();
+    out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| finder_order(&a.0, &b.0)));
+    out
+}
+
+/// Finder's order: letters without case, numbers by value (`file2` before `file10`).
+pub fn finder_order(a: &str, b: &str) -> std::cmp::Ordering {
+    let (mut x, mut y) = (a.chars().peekable(), b.chars().peekable());
+    loop {
+        match (x.peek().copied(), y.peek().copied()) {
+            (None, None) => return a.cmp(b),
+            (None, _) => return std::cmp::Ordering::Less,
+            (_, None) => return std::cmp::Ordering::Greater,
+            (Some(c), Some(d)) if c.is_ascii_digit() && d.is_ascii_digit() => {
+                let mut n = String::new();
+                while let Some(c) = x.peek().copied().filter(char::is_ascii_digit) {
+                    n.push(c);
+                    x.next();
+                }
+                let mut m = String::new();
+                while let Some(d) = y.peek().copied().filter(char::is_ascii_digit) {
+                    m.push(d);
+                    y.next();
+                }
+                let (n, m) = (n.trim_start_matches('0'), m.trim_start_matches('0'));
+                let order = n.len().cmp(&m.len()).then_with(|| n.cmp(m));
+                if order != std::cmp::Ordering::Equal {
+                    return order;
+                }
+            }
+            (Some(c), Some(d)) => {
+                let order = c.to_lowercase().cmp(d.to_lowercase());
+                if order != std::cmp::Ordering::Equal {
+                    return order;
+                }
+                x.next();
+                y.next();
+            }
+        }
+    }
 }
 
 fn walk(folder: &Path) -> Vec<String> {
@@ -115,6 +182,21 @@ mod tests {
         assert!(m.contains(&"docs/apple.md".to_string()));
         assert!(!m.contains(&"README.md".to_string()));
         assert_eq!(matches(&files, "rdm", 10), vec!["README.md".to_string()]);
+    }
+
+    #[test]
+    fn lists_one_folder_as_finder_does() {
+        let dir = std::env::temp_dir().join(format!("yh-files-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("zeta")).unwrap();
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        for f in ["file10.txt", "File2.txt", "a.rs", ".env", ".DS_Store"] {
+            std::fs::write(dir.join(f), "x").unwrap();
+        }
+        let names: Vec<(String, bool)> = list_dir(&dir);
+        let names: Vec<&str> = names.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["zeta", ".env", "a.rs", "File2.txt", "file10.txt"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -278,31 +278,167 @@ const KEYWORDS: &[&str] = &[
     "protocol", "extension", "private", "public", "final", "override", "new", "break", "continue", "do", "from", "as",
 ];
 
+/// What a line of code starts inside, carried over from the line before: a block comment or a
+/// string that runs on. A file's viewer colours line by line, so a `/* … */` or `"""…"""`
+/// over several lines is coloured whole, as the Swift app's highlighter (which sees the
+/// whole text) does.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Carry {
+    #[default]
+    None,
+    /// Inside `/* … */` (or `<!-- … -->` in markup).
+    Comment,
+    /// Inside a string that can span lines: its quote, and whether it's tripled.
+    Str(u8, bool),
+}
+
+/// What a language's code can carry from one line to the next.
+#[derive(Clone, Copy, Default)]
+struct Multiline {
+    /// `/* … */`.
+    block_comments: bool,
+    /// `<!-- … -->`.
+    markup_comments: bool,
+    /// `"""…"""` and `'''…'''`.
+    triple_quotes: bool,
+    /// `` `…` `` over lines (JavaScript, Go).
+    backticks: bool,
+    /// `"…"` over lines (Rust, C's continued lines aside).
+    double_quotes: bool,
+}
+
+fn multiline(lang: &str) -> Multiline {
+    let name = lang.split(|c: char| c == ' ' || c == '{' || c == ',').next().unwrap_or("").to_ascii_lowercase();
+    let c_like = |m: Multiline| Multiline { block_comments: true, ..m };
+    match name.as_str() {
+        "rs" | "rust" => c_like(Multiline { double_quotes: true, ..Default::default() }),
+        "swift" | "kt" | "kts" | "kotlin" => c_like(Multiline { triple_quotes: true, ..Default::default() }),
+        "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "mts" | "cts" | "javascript" | "typescript" | "go" | "golang" => c_like(Multiline { backticks: true, ..Default::default() }),
+        "c" | "h" | "cc" | "cpp" | "cxx" | "hpp" | "hh" | "m" | "mm" | "objc" | "java" | "cs" | "csharp" | "css" | "scss" | "less" | "php" | "scala" | "dart" | "sql" => {
+            c_like(Multiline::default())
+        }
+        "py" | "pyi" | "python" | "python3" | "toml" => Multiline { triple_quotes: true, ..Default::default() },
+        "html" | "htm" | "xml" | "svg" | "plist" | "vue" | "svelte" | "xhtml" | "md" | "markdown" => Multiline { markup_comments: true, ..Default::default() },
+        _ => Multiline::default(),
+    }
+}
+
 /// A light pass that colours keywords, strings, comments and numbers: enough to read code by.
-pub fn highlight(text: &str, _lang: &str) -> Styled {
+pub fn highlight(text: &str, lang: &str) -> Styled {
+    highlight_line(text, lang, Carry::None).0
+}
+
+/// What each line of `lines` starts inside, for colouring them one at a time with
+/// `highlight_line`. One pass over the text: run it off the main thread for a big file.
+pub fn line_carries<S: AsRef<str>>(lines: &[S], lang: &str) -> Vec<Carry> {
+    let mut out = Vec::with_capacity(lines.len());
+    let mut carry = Carry::None;
+    let m = multiline(lang);
+    for line in lines {
+        out.push(carry);
+        carry = scan(line.as_ref(), m, carry, &mut |_, _| {});
+    }
+    out
+}
+
+/// One line (or a whole text) coloured, starting inside `carry`, and what the next line starts in.
+pub fn highlight_line(text: &str, lang: &str, carry: Carry) -> (Styled, Carry) {
     let mut spans = vec![];
+    let end = scan(text, multiline(lang), carry, &mut |r, s| spans.push((r, s)));
+    // Ranges must fall on character boundaries.
+    spans.retain(|(r, _): &(Range<usize>, Span)| text.is_char_boundary(r.start) && text.is_char_boundary(r.end));
+    (Styled { text: text.to_string(), spans, links: vec![] }, end)
+}
+
+/// The scanner `highlight_line` and `line_carries` share: calls `span` for each coloured run.
+fn scan(text: &str, m: Multiline, carry: Carry, span: &mut dyn FnMut(Range<usize>, Span)) -> Carry {
     let bytes = text.as_bytes();
+    let find = |from: usize, needle: &[u8]| -> Option<usize> { bytes[from.min(bytes.len())..].windows(needle.len()).position(|w| w == needle).map(|p| from + p) };
+    // The end of a string opened with `quote` (tripled or not), from `from`: past its closing
+    // quote, or None when it runs past the text.
+    let string_end = |from: usize, quote: u8, triple: bool, lines: bool| -> Option<usize> {
+        let mut j = from;
+        while j < bytes.len() {
+            let b = bytes[j];
+            if b == b'\\' {
+                j += 2;
+                continue;
+            }
+            if b == quote && (!triple || bytes.get(j + 1) == Some(&quote) && bytes.get(j + 2) == Some(&quote)) {
+                return Some(j + if triple { 3 } else { 1 });
+            }
+            if b == b'\n' && !lines {
+                return Some(j);
+            }
+            j += 1;
+        }
+        None
+    };
     let mut i = 0;
+    match carry {
+        Carry::None => {}
+        Carry::Comment => {
+            let close: &[u8] = if m.markup_comments { b"-->" } else { b"*/" };
+            match find(0, close) {
+                Some(p) => {
+                    span(0..p + close.len(), Span::Comment);
+                    i = p + close.len();
+                }
+                None => {
+                    span(0..bytes.len(), Span::Comment);
+                    return Carry::Comment;
+                }
+            }
+        }
+        Carry::Str(q, triple) => match string_end(0, q, triple, true) {
+            Some(end) => {
+                span(0..end, Span::Str);
+                i = end;
+            }
+            None => {
+                span(0..bytes.len(), Span::Str);
+                return carry;
+            }
+        },
+    }
     while i < bytes.len() {
         let c = bytes[i];
-        if c == b'/' && bytes.get(i + 1) == Some(&b'/') || c == b'#' && (i == 0 || bytes[i - 1] == b'\n' || bytes[i - 1] == b' ') {
+        if m.block_comments && c == b'/' && bytes.get(i + 1) == Some(&b'*') || m.markup_comments && bytes[i..].starts_with(b"<!--") {
+            let (open, close): (usize, &[u8]) = if c == b'/' { (2, b"*/") } else { (4, b"-->") };
+            match find(i + open, close) {
+                Some(p) => {
+                    span(i..p + close.len(), Span::Comment);
+                    i = p + close.len();
+                }
+                None => {
+                    span(i..bytes.len(), Span::Comment);
+                    return Carry::Comment;
+                }
+            }
+        } else if c == b'/' && bytes.get(i + 1) == Some(&b'/') || c == b'#' && (i == 0 || bytes[i - 1] == b'\n' || bytes[i - 1] == b' ') {
             let end = text[i..].find('\n').map_or(text.len(), |n| i + n);
-            spans.push((i..end, Span::Comment));
+            span(i..end, Span::Comment);
             i = end;
         } else if c == b'"' || c == b'\'' || c == b'`' {
-            let mut j = i + 1;
-            while j < bytes.len() && bytes[j] != c && bytes[j] != b'\n' {
-                j += if bytes[j] == b'\\' { 2 } else { 1 };
+            let triple = m.triple_quotes && c != b'`' && bytes.get(i + 1) == Some(&c) && bytes.get(i + 2) == Some(&c);
+            let lines = triple || c == b'`' && m.backticks || c == b'"' && m.double_quotes;
+            match string_end(i + if triple { 3 } else { 1 }, c, triple, lines) {
+                Some(end) => {
+                    let end = end.min(bytes.len());
+                    span(i..end, Span::Str);
+                    i = end;
+                }
+                None => {
+                    span(i..bytes.len(), Span::Str);
+                    return if lines { Carry::Str(c, triple) } else { Carry::None };
+                }
             }
-            let end = (j + 1).min(bytes.len());
-            spans.push((i..end, Span::Str));
-            i = end;
         } else if c.is_ascii_digit() && (i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_')) {
             let mut j = i;
             while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'.' || bytes[j] == b'_') {
                 j += 1;
             }
-            spans.push((i..j, Span::Number));
+            span(i..j, Span::Number);
             i = j;
         } else if c.is_ascii_alphabetic() || c == b'_' {
             let mut j = i;
@@ -310,16 +446,14 @@ pub fn highlight(text: &str, _lang: &str) -> Styled {
                 j += 1;
             }
             if KEYWORDS.contains(&&text[i..j]) {
-                spans.push((i..j, Span::Keyword));
+                span(i..j, Span::Keyword);
             }
             i = j;
         } else {
             i += 1;
         }
     }
-    // Ranges must fall on character boundaries.
-    spans.retain(|(r, _): &(Range<usize>, Span)| text.is_char_boundary(r.start) && text.is_char_boundary(r.end));
-    Styled { text: text.to_string(), spans, links: vec![] }
+    Carry::None
 }
 
 #[cfg(test)]
@@ -331,6 +465,27 @@ mod tests {
         let md = parse("```mermaid\nflowchart TD\n  A --> B\n```\n\n    indented");
         assert!(matches!(&md.blocks[0], MdBlock::Code { lang, code } if lang == "mermaid" && code.text == "flowchart TD\n  A --> B"));
         assert!(matches!(&md.blocks[1], MdBlock::Code { lang, .. } if lang.is_empty()));
+    }
+
+    #[test]
+    fn comments_and_strings_over_lines_colour_every_line() {
+        let lines = ["let a = 1; /* one", "two", "three */ let b = 2;", "s = \"\"\"doc", "more\"\"\" + x"];
+        let carries = line_carries(&lines, "rs");
+        assert_eq!(carries[..3], [Carry::None, Carry::Comment, Carry::Comment]);
+        let (two, after) = highlight_line(lines[1], "rs", carries[1]);
+        assert_eq!(two.spans, vec![(0..3, Span::Comment)]);
+        assert_eq!(after, Carry::Comment);
+        let (three, after) = highlight_line(lines[2], "rs", carries[2]);
+        assert_eq!(three.spans[0], (0..8, Span::Comment));
+        assert!(three.spans.iter().any(|(r, s)| *s == Span::Keyword && &lines[2][r.clone()] == "let"));
+        assert_eq!(after, Carry::None);
+        // Python's triple quotes; Rust's don't run on as triples.
+        let py = line_carries(&lines[3..], "py");
+        assert_eq!(py[1], Carry::Str(b'"', true));
+        assert_eq!(highlight_line(lines[4], "py", py[1]).0.spans[0], (0..7, Span::Str));
+        // Unknown languages keep to one line, as before.
+        assert_eq!(line_carries(&lines, ""), vec![Carry::None; 5]);
+        assert_eq!(highlight("a /* b", "").spans, vec![]);
     }
 
     #[test]

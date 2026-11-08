@@ -450,6 +450,12 @@ impl Library {
         self.save();
     }
 
+    /// One field of a thread's record, as saved (`pullRequests`, `workedPullRequests`…).
+    pub fn thread_field(&self, id: &str, key: &str) -> Option<Value> {
+        let records = self.records.lock().unwrap();
+        records.threads.iter().find(|t| t.get("id").and_then(Value::as_str) == Some(id)).and_then(|t| t.get(key).cloned())
+    }
+
     /// Changes a thread's record (`title`, `sessionID`, `updatedAt`…) and saves.
     pub fn update_thread(&self, id: &str, change: impl FnOnce(&mut Map<String, Value>)) {
         let mut records = self.records.lock().unwrap();

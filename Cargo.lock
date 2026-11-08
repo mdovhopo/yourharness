@@ -8585,6 +8585,7 @@ dependencies = [
  "gpui-pre",
  "gpui-pre-platform",
  "libc",
+ "notify",
  "objc",
  "raw-window-handle",
  "resvg 0.46.0",

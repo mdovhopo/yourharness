@@ -1035,6 +1035,7 @@ impl ThreadState {
                 false
             }
             Event::ToolResults { parent, results } => {
+                crate::state::pulls::note_results(self, parent.as_deref(), &results, |id| self.tools.get(id).map(|(e, _)| e.clone()));
                 if let Some(parent) = parent {
                     self.subagent_log(&parent, |log| {
                         for r in results {
