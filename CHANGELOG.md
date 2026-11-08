@@ -40,9 +40,25 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 - A memory shows its text formatted, with Edit to change it; Link To and Unlink tie memories together both ways; History can restore an older version; More copies its ID; a merged memory links to where it went. Memory's Activity can show only changes, reads and searches, or sessions, and links to the thread each thing happened in.
 - `/mcp` asks before removing a server; while you sign in it can open the page again, copy its link, or take the address the browser ended on; a server that won't start has Ask Claude to Fix It. Add Server takes a URL (with headers and OAuth client details if its docs ask), a command with its environment, or JSON, and can import Claude Desktop's servers. Claude's sign-in card can open the page again, and a server's questions show yes/no as a switch and choices as a menu.
 - Search across threads finds old conversations a few seconds after launch, without waiting for something new to be written first.
+- Closing the window quits, as in 0.0.16, and every way of quitting (⌘Q, the close button, Dock → Quit, logging out, Restart to update) asks first while background jobs run.
+- The full menu bar: About YourHarness, Services, Hide, Close Window (⌘W), Enter Full Screen (⌃⌘F), a Window menu and Help; "Hide Usage" and "Hide Right Sidebar" say what they'll do, and items that can't do anything now are greyed out.
+- ⌘Z and Edit → Undo take back the last thread action (delete, pin, unpin, settle, un-settle), even with the composer focused when you haven't typed since.
+- Threads stay in the order they were made, pinned first, so rows don't jump as threads work. Settling or deleting the open thread opens the one next to it.
+- New Thread reuses an untouched blank thread in the project instead of making another; Add Project opens a new thread in the folder (an already-added one too), and its panel says what the folder is for. A project you removed and add again gets its memory back.
+- Settling a thread also unpins it and closes its browser; threads whose pull requests have all merged settle on their own.
+- The right sidebar resizes by dragging its edge (300–960 pt), and opening it on a narrow window widens the window within the screen, giving the width back when it closes. A window saved bigger than its screen comes back fitted to it.
+- Updates: What's New with the release's notes from GitHub, a Restart question that says which threads it stops, Cancel while downloading, Dismiss on a failed check, "X is the latest" after a check you asked for, "Updated to X" after an update, and the version in the sidebar opens a card with the build and the release notes. Settings → Releases lists every release, Installed and New tagged.
+- Settings is a window of its own (⌘, brings it forward) and its MCP tab lists your servers everywhere in place. Agents shows Git, who `gh` and `glab` are signed in as with a Get link when one is missing, how to sign `claude` in (`claude auth login`, Copy, Open Terminal) and the account's usage. Memory has Turn Off Everywhere… and the Importer and Reconciler's model and effort; Notifications has Open System Settings when they're off; Home has Reset; Thread Titles lists your models and says why the last title failed.
+- The project page: a "No Git Repositories" state, a filter for big workspaces, Expand All / Collapse All for worktrees, and a nudge when Claude Code keeps a memory of its own there. Workspaces of repos show a stack icon, here and in the sidebar.
+- Usage: Stacked or By Model, a per-day table paged Newer/Older, Refresh, Esc to close, input/output/cache read/cache write in the totals, and when the prices were checked.
+- Export State asks whether to include the browser's sign-ins and says when it's done, with Show in Finder; Import State compares what you have now with what's in the file and saves a copy of yours first.
+- Idle threads show a small grey dot; VoiceOver reads sidebar rows (title and what they're doing), project headers and the thread's title.
+- While Claude works, macOS doesn't nap the app in the background.
 
 ### Fixed
 - Claude's actions in the browser no longer take two seconds longer each while the browser isn't showing (you're reading the thread, or another one is open): its pages wait off screen where they keep drawing.
+- An imported state's Home runs in this Mac's folder (a development run's own `home`), not the exporter's, and an export names the app and build that made it.
+- Without `claude`, a thread says "Couldn't find a working `claude` CLI. Check Settings → Agents."
 - A message sent while a thread was still loading no longer shows twice.
 - A finished turn no longer sends its notification twice.
 

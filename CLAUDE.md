@@ -120,7 +120,18 @@ synthetic session file, never the real `~/.claude`), `YH_OPEN_TASKS=1` (the head
 `YH_HOVER=<x,y>` (the pointer moved there in window points after `YH_DRAFT_DELAY`, through the window as a real move:
 snapshots of hover states such as a sidebar row's Pin/Settle/… or a project's Memory button),
 `YH_REFRESH_LIMITS=1` (the footer's refresh at launch: a tiny Haiku request through `claude`, printing `LIMITS
-refreshed` or why not), `YH_NOTIFICATION_CLICK=<seconds>` (a click on the last notification posted, which
+refreshed` or why not), `YH_THREAD_ACTIONS=<a>,<b>,…` (after `YH_DRAFT_DELAY`, a second apart, on the open thread: `settle`,
+`unsettle:<n>`, `delete`, `pin`, `unpin`, `undo` (⌘Z), `new` (⌘N), `memory` (⇧⌘M), `project`, `add:<folder>` (Add
+Project), `next`, `inspector`, `settings`, `close` (the close button's quit question); each printed as `ACTION <step>: <what's
+open> · <counts> · order: <the sidebar's live threads>`), `YH_QUIT_ANSWER=quit|cancel` (the quit question answered,
+printed as `QUIT asked: …`; `YH_QUIT_AFTER=<s>` quits as ⌘Q, `YH_TERMINATE_AFTER=<s>` as Dock → Quit), `YH_MENU_LOG=1`
+(each menu bar rebuild), `YH_SNAPSHOT_WINDOW=<title>` (`YH_SNAPSHOT` draws that window instead: `Settings`),
+`YH_UPDATE_FEED` with `YH_RESTART_ANSWER=restart|later` (Restart's question answered and printed) and `YH_OPEN_VERSION=1` (the
+sidebar's version card open), `YH_SETTLE_MERGED_AFTER=<s>` (when threads whose PRs merged first settle, 20; with
+`YH_MOCK_PULLS`, printing `SETTLED merged <id>`), `YH_USAGE_SPLIT=1` (By Model), `YH_USAGE_DAY_PAGE=<n>`,
+`YH_PROJECT_FILTER=<words>` (the project page's filter), `YH_MEMORY_OFF_ANSWER=ok|cancel` (Turn Off Everywhere's question),
+`YH_STATE_EXPORT_SIGNINS=1`, `YH_STATE_DONE_ANSWER=ok` (Export's done alert printed, not shown), `YH_STATE_IMPORT_ASK=<file>`
+(Import State's sheet; `YH_STATE_IMPORT_CONFIRM=1` then replaces, keeping a copy, and restarts), `YH_NOTIFICATION_CLICK=<seconds>` (a click on the last notification posted, which
 `YH_NOTIFICATIONS=log` only printed as `NOTIFY <kind>: title · project · body`: it opens that thread, printing `NOTIFY
 clicked`; real notifications go through a `UNUserNotificationCenter` delegate, never from a test).
 `YH_MEMORY_TAB=memories|tasks|activity`, after `YH_DRAFT_DELAY`), `YH_SPOTLIGHT=<words>` (⌘K typed;
