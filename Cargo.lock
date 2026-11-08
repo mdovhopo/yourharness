@@ -8580,6 +8580,7 @@ dependencies = [
  "gpui-kit",
  "gpui-pre",
  "gpui-pre-platform",
+ "imagesize 0.14.0",
  "libc",
  "notify",
  "objc",

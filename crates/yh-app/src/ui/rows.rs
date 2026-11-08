@@ -427,6 +427,23 @@ fn video_tile(tile: gpui_kit::Stateful<gpui_kit::Div>, video: &str, w: f32, h: f
 }
 
 /// Where sent images are kept.
+/// A picture's size in points, fitted into `max_w` × `max_h` and never enlarged. Read from the
+/// file's header once (cached by path), so the row has its height before the picture loads: an
+/// image whose size isn't known yet laid out at nothing and then drew over the rows below.
+fn fitted(path: &str, max_w: f32, max_h: f32) -> (f32, f32) {
+    thread_local! {
+        static SIZES: std::cell::RefCell<std::collections::HashMap<String, Option<(f32, f32)>>> = Default::default();
+    }
+    let size = SIZES.with(|s| {
+        *s.borrow_mut().entry(path.to_string()).or_insert_with(|| imagesize::size(path).ok().map(|d| (d.width as f32, d.height as f32)))
+    });
+    let Some((w, h)) = size.filter(|(w, h)| *w > 0. && *h > 0.) else { return (max_w, max_h * 0.75) };
+    // Pictures from a Retina screen are twice their size in points.
+    let (w, h) = if path.ends_with(".png") && w > 1200. { (w / 2., h / 2.) } else { (w, h) };
+    let scale = (max_w / w).min(max_h / h).min(1.);
+    ((w * scale).round(), (h * scale).round())
+}
+
 fn attachments_dir() -> &'static std::path::Path {
     static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
     DIR.get_or_init(|| yh_core::library::data_directory().join("attachments"))
@@ -673,7 +690,10 @@ fn user_row(item: &Item, ctx: &RowContext, theme: &Theme, window: &Window) -> An
                         }
                     });
                 let tile = match kind {
-                    Some(MediaKind::Image) => tile.child(gpui_kit::img(std::path::PathBuf::from(&path)).max_w(px(240.)).max_h(px(180.)).rounded(px(radius::LARGE))),
+                    Some(MediaKind::Image) => {
+                        let (w, h) = fitted(&path, 240., 180.);
+                        tile.child(gpui_kit::img(std::path::PathBuf::from(&path)).w(px(w)).h(px(h)).object_fit(gpui_kit::ObjectFit::Contain).rounded(px(radius::LARGE)))
+                    }
                     Some(MediaKind::Video) => video_tile(tile.rounded(px(radius::LARGE)), &path, 220., 124., None),
                     None => tile.child(file_chip(name, theme)),
                 };
@@ -818,7 +838,10 @@ fn media_row(e: &EntryRef, ctx: &RowContext, theme: &Theme) -> AnyElement {
                 .border_color(theme.separator)
                 .on_click(move |_, _, _| crate::platform::quick_look(all.clone(), n));
             match kind {
-                MediaKind::Image => tile.child(gpui_kit::img(std::path::PathBuf::from(&stored)).max_w(px(max_w)).max_h(px(max_h))),
+                MediaKind::Image => {
+                    let (w, h) = fitted(&stored, max_w, max_h);
+                    tile.child(gpui_kit::img(std::path::PathBuf::from(&stored)).w(px(w)).h(px(h)).object_fit(gpui_kit::ObjectFit::Contain))
+                }
                 // Its first frame with a play mark and its name; Quick Look plays it.
                 MediaKind::Video => video_tile(tile, &stored, max_w.min(360.), max_h.min(200.), Some(yh_core::library::last_component(&original).to_string())),
             }

@@ -10,6 +10,7 @@ name = "YourHarness"
 path = "src/main.rs"
 
 [dependencies]
+imagesize = "0.14"
 yh-core.workspace = true
 gpui-kit = "=0.9.0"
 serde_json.workspace = true
