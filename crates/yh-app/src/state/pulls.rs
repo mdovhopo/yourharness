@@ -57,6 +57,13 @@ pub fn branch_pulls(scan: &yh_core::workspace::Workspace, thread: &yh_core::work
             }
         }
     }
+    // A branch's PR in a GitHub stack brings the rest of its stack: the card shows it whole.
+    let stacks: Vec<(String, u64)> = out.pulls.iter().filter_map(|p| p.stack.map(|s| (p.link.path.to_lowercase(), s.number))).collect();
+    for p in scan.pull_requests() {
+        if p.stack.is_some_and(|s| stacks.contains(&(p.link.path.to_lowercase(), s.number))) && !out.pulls.iter().any(|x| x.id() == p.id()) {
+            out.pulls.push(p.clone());
+        }
+    }
     let mut seen = std::collections::HashSet::new();
     for checkout in scan.checkouts_for(thread) {
         let Some(branch) = scan.branch_of(&checkout) else { continue };

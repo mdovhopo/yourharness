@@ -307,6 +307,23 @@ impl MemoryPage {
                 page.graph = graph;
                 page.loaded = true;
                 page.after_reload(cx);
+                // `YH_MEMORY_PROBE=1`: links the first memory to the second, then renames the first
+                // and restores its first version, once, printing what each left.
+                static PROBED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                if std::env::var("YH_MEMORY_PROBE").is_ok() && page.memories.len() >= 2 && !PROBED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    let (a, b) = (page.memories[0].clone(), page.memories[1].id.clone());
+                    page.link(&a.id, &b, cx);
+                    if let Some(store) = page.store.clone() {
+                        let mut renamed = a.clone();
+                        renamed.title = format!("{} (renamed)", a.title);
+                        store.save(renamed, &user(), None, None);
+                        store.restore_version(&a.id, 1, &user());
+                        store.db.flush();
+                        let back = store.memory(&a.id).map(|m| (m.title, m.links.len())).unwrap_or_default();
+                        eprintln!("MEMORY probe: {:?} after restoring v1, {} link(s), {} versions", back.0, back.1, store.versions(&a.id).len());
+                    }
+                    page.written(cx);
+                }
                 // `YH_MEMORY_ADD_STEP=<text>`: opens the first task and adds a step to it, once.
                 static ADDED_STEP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
                 if let Ok(text) = std::env::var("YH_MEMORY_ADD_STEP") {
