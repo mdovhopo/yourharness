@@ -1076,3 +1076,15 @@ pub fn first_responder_class(w: id) -> String {
         std::ffi::CStr::from_ptr(utf8).to_string_lossy().into_owned()
     }
 }
+
+/// The scroll bars macOS asks for: always shown (System Settings → Appearance → Show scroll
+/// bars: Always, or a mouse with Automatically), or only while scrolling.
+pub fn scroll_bar_mode() -> gpui_kit::base::ScrollbarMode {
+    // `YH_SCROLL_BARS=always`, for test snapshots (an overlay bar shows only while scrolling).
+    if std::env::var("YH_SCROLL_BARS").as_deref() == Ok("always") {
+        return gpui_kit::base::ScrollbarMode::Always;
+    }
+    let style: isize = unsafe { msg_send![class!(NSScroller), preferredScrollerStyle] };
+    // NSScrollerStyleLegacy = 0: always there; NSScrollerStyleOverlay = 1: while scrolling.
+    if style == 0 { gpui_kit::base::ScrollbarMode::Always } else { gpui_kit::base::ScrollbarMode::Scrolling }
+}

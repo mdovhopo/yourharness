@@ -1454,7 +1454,19 @@ impl Inspector {
                     .child(div().text_size(px(text::BODY)).line_height(px(text::BODY_LINE)).child(crate::ui::rows::markdown_view(&yh_core::markdown::parse(&report), theme))),
             );
         }
-        column.child(detail).into_any_element()
+        // The detail scrolls with a scroll bar over its right edge, as the transcript does.
+        column
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .relative()
+                    .flex()
+                    .flex_col()
+                    .child(detail)
+                    .child(gpui_kit::base::Scrollbar::vertical(&self.sub_scroll).mode(crate::platform::scroll_bar_mode())),
+            )
+            .into_any_element()
     }
 
     /// The Files tab: Show/Hide Folder, Go to File, Wrap Lines and More on top; the folder's

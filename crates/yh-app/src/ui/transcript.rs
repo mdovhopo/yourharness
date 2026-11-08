@@ -308,6 +308,8 @@ impl Render for TranscriptView {
         // view, `ui::working`, so its clock never redraws the list).
         let bottom = if t.running { 40. } else { 16. };
         root.child(list(t.list.clone(), move |ix, window, cx| rows::render_item(&thread, ix, window, cx)).size_full().pb(px(bottom)))
+            // As macOS shows one: over the list's right edge while it scrolls or is hovered.
+            .child(gpui_kit::base::Scrollbar::vertical(&t.list).mode(crate::platform::scroll_bar_mode()))
             .into_any_element()
     }
 }
