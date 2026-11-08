@@ -46,6 +46,8 @@ pub struct Composer {
     attached: HashMap<String, Vec<Attached>>,
     /// Queued messages you asked to remove, until the CLI lets go of them.
     pub withdrawing: HashSet<String>,
+    /// The placeholder says how to steer (Claude works in the open thread).
+    steering: bool,
     _mentions: Option<gpui_kit::Task<()>>,
     /// An MCP server's question, as a card.
     elicit: Option<(String, Entity<ElicitCard>)>,
@@ -425,6 +427,7 @@ impl Composer {
             _mentions: None,
             elicit: None,
             empty: true,
+            steering: false,
             _subscriptions: subscriptions,
         }
     }
@@ -445,7 +448,8 @@ impl Composer {
         self.sync_card(window, cx);
     }
 
-    fn save_draft(&mut self, cx: &mut Context<Self>) {
+    /// Kept with the thread: on leaving the field, switching threads and quitting.
+    pub fn save_draft(&mut self, cx: &mut Context<Self>) {
         let Some(id) = self.current.clone() else { return };
         let text = self.input.read(cx).value().to_string();
         self.workspace.update(cx, |ws, cx| ws.save_draft(&id, &text, cx));
@@ -928,6 +932,15 @@ impl Render for Composer {
             let t = thread.read(cx);
             (t.running, t.permission().cloned(), t.permissions.len())
         };
+        // While Claude works, what typing does: it steers, or with ⌘↩ goes now.
+        if running != self.steering {
+            self.steering = running;
+            let input = self.input.clone();
+            cx.defer_in(window, move |_, window, cx| {
+                let text = if running { "Steer Claude… ↩ after its current step, ⌘↩ right now" } else { "Ask Claude…" };
+                input.update(cx, |i, cx| i.set_placeholder(text, window, cx));
+            });
+        }
         let w = self.workspace.downgrade();
         let mut inner = div().w_full().max_w(px(828.)).flex().flex_col();
         if let Some((_, card)) = &self.elicit {
@@ -986,8 +999,9 @@ impl Render for Composer {
                 Card::Tool => permission_card(p, &thread, w.clone(), waiting.saturating_sub(1), &theme).into_any_element(),
             });
         }
+        // Only while Claude works on it: a finished plan, or one left behind, is in the transcript.
         let plan = thread.read(cx).plan.clone();
-        if !plan.items.is_empty() {
+        if thread.read(cx).running && !plan.items.is_empty() && !plan.is_finished() {
             inner = inner.child(self.plan_strip(&plan, &theme, cx));
         }
         if let Some(menu) = self.suggestions(&theme, cx) {
@@ -1053,6 +1067,17 @@ impl Render for Composer {
                             let removing = this.withdrawing.clone();
                             let _ = w.update(cx, |ws, cx| ws.stop(&stop_thread, &removing, cx));
                         })))
+                    })
+                    // Something to send while Claude works: stop it and send this now (⌘↩).
+                    .when(running && has_text, |d| {
+                        d.child(
+                            Button::new("interrupt-send")
+                                .small()
+                                .ghost()
+                                .icon(icons::zap().size(px(15.)).text_color(theme.text))
+                                .tooltip("Interrupt and Send: stop Claude and send this now (⌘↩)")
+                                .on_click(cx.listener(|this, _, window, cx| this.submit(true, window, cx))),
+                        )
                     })
                     .child(if running {
                         // While Claude works, ↩ steers: the message joins the turn after the current step.

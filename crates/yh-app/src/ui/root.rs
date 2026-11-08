@@ -217,6 +217,12 @@ impl RootView {
         }
         self.composer.update(cx, |c, cx| c.switch_to(id, window, cx));
         self.jobs.update(cx, |j, cx| j.switch_to(id, cx));
+        // The keyboard goes to the composer (⌘N, a click in the sidebar, a notification), unless
+        // you're going through the sidebar with the arrow keys or renaming there.
+        if !self.sidebar.read(cx).focus.contains_focused(window, cx) {
+            let input = self.composer.read(cx).input.clone();
+            input.update(cx, |i, cx| i.focus(window, cx));
+        }
         cx.notify();
     }
 
@@ -970,7 +976,7 @@ impl Render for RootView {
                                 .min_h_0()
                                 .relative()
                                 .child(AnyView::from(view).cached(StyleRefinement::default().size_full()))
-                                .child(div().absolute().bottom(px(6.)).right(px(28.)).child(self.working.clone()))
+                                .child(div().absolute().bottom(px(4.)).left_0().right_0().child(self.working.clone()))
                                 .into_any_element(),
                             None => div().flex_1().into_any_element(),
                         })

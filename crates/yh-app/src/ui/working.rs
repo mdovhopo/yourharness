@@ -8,7 +8,7 @@ use crate::state::thread::{ItemType, ThreadState};
 use crate::state::workspace::Workspace;
 use crate::theme::{space, text as ts, Theme};
 use gpui_kit::component::{Icon, IconName};
-use gpui_kit::{div, prelude::*, px, Action, App, Context, Entity, FontWeight, Global, WeakEntity, Window};
+use gpui_kit::{div, prelude::*, px, Action, App, Context, Entity, Global, WeakEntity, Window};
 use std::time::Duration;
 
 /// Where the open transcript can go: (top, previous message, next message and the end).
@@ -69,7 +69,7 @@ pub fn scrolled(cx: &mut App) {
 pub struct WorkingTimer {
     workspace: Entity<Workspace>,
     /// What it last drew, so a tick that changes nothing draws nothing.
-    shown: Option<String>,
+    shown: Option<(String, Option<String>)>,
     shown_jumps: Jumps,
 }
 
@@ -92,19 +92,21 @@ impl WorkingTimer {
         WorkingTimer { workspace, shown: None, shown_jumps: Jumps::default() }
     }
 
-    /// "Working 0:12" while the open thread's turn goes on.
-    fn text(&self, cx: &App) -> Option<String> {
+    /// "Working…" (or what the CLI says it's doing: "Compacting the conversation…") and how long
+    /// the turn has gone, while the open thread's turn goes on and nothing waits for you.
+    fn text(&self, cx: &App) -> Option<(String, Option<String>)> {
         let ws = self.workspace.read(cx);
         if ws.page.is_some() {
             return None;
         }
         let thread = ws.selected_thread()?;
         let t = thread.read(cx);
-        if !t.running {
+        if !t.running || t.waiting_for_you() || t.elicitation().is_some() {
             return None;
         }
-        let since = t.turn_started_at()?;
-        Some(format!("Working {}", yh_core::clock::elapsed(yh_core::library::now_ms() / 1000.0 - since)))
+        let label = t.activity.clone().unwrap_or_else(|| "Working…".into());
+        let elapsed = t.turn_started_at().map(|since| yh_core::clock::elapsed(yh_core::library::now_ms() / 1000.0 - since));
+        Some((label, elapsed))
     }
 
     fn jumps(&self, cx: &App) -> Jumps {
@@ -144,7 +146,21 @@ impl Render for WorkingTimer {
         self.shown_jumps = self.jumps(cx);
         let j = self.shown_jumps;
         use crate::ui::root::{EndOfThread, NextMessage, PreviousMessage, TopOfThread};
-        div()
+        // At the end of the transcript, where Claude's next words go, as the Swift app's typing
+        // row: a still mark (an animation would draw every frame), what it's doing, the clock.
+        // Laid over the list's bottom padding, so it never moves the rows.
+        let indicator = self.shown.clone().map(|(label, elapsed)| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(space::S))
+                .h(px(22.))
+                .text_size(px(ts::FOOTNOTE))
+                .child(crate::ui::icons::sparkles().size(px(14.)).text_color(theme.accent))
+                .child(div().text_color(theme.secondary).child(label))
+                .when_some(elapsed, |d, e| d.child(div().text_color(theme.tertiary).child(e)))
+        });
+        let buttons = div()
             .flex()
             .flex_col()
             .items_end()
@@ -162,24 +178,17 @@ impl Render for WorkingTimer {
                                 .child(jump_button("jump-end", IconName::ArrowDown, "The end of the thread (⇧⌘])", Box::new(EndOfThread), &theme))
                         }),
                 )
-            })
-            .when_some(self.shown.clone(), |d, text| {
-                d.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(space::XS + 2.))
-                        .h(px(24.))
-                        .px(px(10.))
-                        .rounded_full()
-                        .bg(theme.canvas)
-                        .border_1()
-                        .border_color(theme.separator)
-                        .text_size(px(ts::CAPTION))
-                        .text_color(theme.secondary)
-                        .child(div().w(px(6.)).h(px(6.)).rounded_full().bg(theme.accent))
-                        .child(div().font_weight(FontWeight::MEDIUM).child(text)),
-                )
-            })
+            });
+        // The row spans the transcript: the indicator in the rows' column, the buttons at the
+        // right edge above it.
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .items_end()
+            .gap(px(8.))
+            .pr(px(28.))
+            .child(buttons)
+            .child(div().w_full().h(px(22.)).flex().justify_center().pl(px(28.)).child(div().w_full().max_w(px(764.)).px(px(6.)).children(indicator)))
     }
 }

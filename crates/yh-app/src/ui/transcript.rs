@@ -270,7 +270,10 @@ impl Render for TranscriptView {
         if probe::enabled() {
             root = root.child(probe::tracker("transcript".into()));
         }
-        root.child(list(t.list.clone(), move |ix, window, cx| rows::render_item(&thread, ix, window, cx)).size_full().pb(px(16.)))
+        // While Claude works, room at the end for the working indicator laid over it (its own
+        // view, `ui::working`, so its clock never redraws the list).
+        let bottom = if t.running { 40. } else { 16. };
+        root.child(list(t.list.clone(), move |ix, window, cx| rows::render_item(&thread, ix, window, cx)).size_full().pb(px(bottom)))
             .into_any_element()
     }
 }
