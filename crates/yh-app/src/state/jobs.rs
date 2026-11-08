@@ -1,5 +1,6 @@
 //! What Claude left running in a thread: a command in the background (a build, a dev server),
-//! a foreground one that's taking a while, or a watch (Monitor). Lives with the `claude`
+//! a foreground one that's taking a while, a watch (Monitor), or a sub-agent started in the
+//! background (`run_in_background`), which goes on after the turn. Lives with the `claude`
 //! process, never saved. The thread holds them; the strip above the composer shows them and
 //! reads their output itself, once a second, so nothing here changes while they just run.
 
@@ -23,6 +24,9 @@ pub struct Job {
     pub background: bool,
     /// A Monitor watch, which wakes Claude with what it sees, rather than a command.
     pub watch: bool,
+    /// A sub-agent in the background: `tool_id` is its Agent call, `last_line` what it's
+    /// doing now (`task_progress`). Its output file is its transcript: never read.
+    pub agent: bool,
     /// Your message it started under: while that's the latest, Claude is waiting on it.
     pub turn: Option<String>,
     pub started: Instant,
@@ -48,7 +52,9 @@ impl Job {
     }
 
     fn kind(&self) -> &'static str {
-        if self.watch {
+        if self.agent {
+            "Sub-agent"
+        } else if self.watch {
             "Watch"
         } else {
             "Background command"
@@ -115,6 +121,9 @@ pub fn clock(seconds: u64) -> String {
 pub struct Jobs {
     /// Still running, oldest first.
     pub running: Vec<Job>,
+    /// Sub-agents running in the background, oldest first: apart from the commands, so the
+    /// transcript's job steps never see them.
+    pub agents: Vec<Job>,
     pub version: u64,
     /// Where this session's jobs write their output, once one has said.
     pub folder: Option<String>,
@@ -136,6 +145,7 @@ impl Jobs {
             description,
             background,
             watch: tool_name == Some("Monitor"),
+            agent: false,
             turn: self.turn.clone(),
             started: Instant::now(),
             status: JobStatus::Running,
@@ -167,6 +177,76 @@ impl Jobs {
         let note = job.background.then(|| (job.end_note(), job.status == JobStatus::Failed));
         self.keep_ended(job);
         note
+    }
+
+    /// A sub-agent started in the background (`task_started` with `is_backgrounded`).
+    pub fn start_agent(&mut self, task_id: Option<String>, tool_id: String, description: String) {
+        if self.agents.iter().any(|j| j.tool_id.as_deref() == Some(tool_id.as_str())) {
+            return;
+        }
+        self.agents.push(Job {
+            id: task_id.unwrap_or_default(),
+            tool_id: Some(tool_id),
+            description,
+            background: true,
+            watch: false,
+            agent: true,
+            turn: self.turn.clone(),
+            started: Instant::now(),
+            status: JobStatus::Running,
+            ended: None,
+            exit_code: None,
+            output_file: None,
+            last_line: None,
+        });
+        self.version += 1;
+    }
+
+    /// What a background sub-agent is doing now ("Reading a.txt"), by its Agent call.
+    pub fn agent_activity(&mut self, tool_id: &str, activity: &str) {
+        if let Some(job) = self.agents.iter_mut().find(|j| j.tool_id.as_deref() == Some(tool_id)) {
+            if job.last_line.as_deref() != Some(activity) {
+                job.last_line = Some(activity.to_string());
+                self.version += 1;
+            }
+        }
+    }
+
+    /// A background sub-agent's end (`task_notification`): its call shows its report, so no
+    /// note. True when it was one.
+    pub fn finish_agent(&mut self, tool_id: &str) -> bool {
+        let Some(ix) = self.agents.iter().position(|j| j.tool_id.as_deref() == Some(tool_id)) else { return false };
+        self.agents.remove(ix);
+        self.version += 1;
+        true
+    }
+
+    /// Every background sub-agent still running, by the CLI's list: the ones not on it ended
+    /// without word. Their Agent calls, and a note for each.
+    pub fn keep_agents(&mut self, running: &[String]) -> Vec<(String, String)> {
+        // One whose start didn't say its task can't be looked up: it stays.
+        let (gone, kept): (Vec<Job>, Vec<Job>) = std::mem::take(&mut self.agents).into_iter().partition(|j| !j.id.is_empty() && !running.contains(&j.id));
+        self.agents = kept;
+        if gone.is_empty() {
+            return vec![];
+        }
+        self.version += 1;
+        gone.into_iter()
+            .map(|mut j| {
+                j.end(JobStatus::Stopped);
+                (j.tool_id.clone().unwrap_or_default(), j.end_note())
+            })
+            .collect()
+    }
+
+    /// Background sub-agents running, for the strip, the sidebar and the quit question.
+    pub fn agents_running(&self) -> usize {
+        self.agents.len()
+    }
+
+    /// Anything running: a command, a watch or a sub-agent. Its `claude` must stay while so.
+    pub fn any_running(&self) -> bool {
+        !self.running.is_empty() || !self.agents.is_empty()
     }
 
     /// What a watch saw: its last line.
@@ -216,11 +296,14 @@ impl Jobs {
 
     /// The process they ran in is going: they go with it. Notes for the background ones.
     pub fn cut_off(&mut self, outcome: &str) -> Vec<String> {
-        if self.running.is_empty() {
+        if !self.any_running() {
             return vec![];
         }
         self.version += 1;
         let mut notes = vec![];
+        for j in std::mem::take(&mut self.agents) {
+            notes.push(format!("{} “{}” {outcome}", j.kind(), j.description));
+        }
         for mut j in std::mem::take(&mut self.running) {
             if j.background {
                 notes.push(format!("{} “{}” {outcome}", j.kind(), j.description));
@@ -362,6 +445,40 @@ mod tests {
         jobs.saw("w", "sample 1: 2.58\nsample 2: 2.69\n");
         assert_eq!(jobs.running[0].last_line.as_deref(), Some("sample 2: 2.69"));
         assert_eq!(jobs.finish("w", "completed", None, None).map(|(n, failed)| n.starts_with("Watch “Load” ended after") && !failed), Some(true));
+    }
+
+    #[test]
+    fn a_background_sub_agent_runs_until_it_reports() {
+        let mut jobs = jobs();
+        jobs.start_agent(Some("a1".into()), "t9".into(), "Count lines".into());
+        jobs.start_agent(Some("a1".into()), "t9".into(), "Count lines".into());
+        assert_eq!(jobs.agents_running(), 1);
+        // Never among the commands: the transcript's job steps don't see it.
+        assert!(jobs.for_tool("t9").is_none());
+        assert_eq!(jobs.waiting(), 1);
+        let v = jobs.version;
+        jobs.agent_activity("t9", "Reading a.txt");
+        jobs.agent_activity("t9", "Reading a.txt");
+        assert_eq!((jobs.agents[0].last_line.as_deref(), jobs.version), (Some("Reading a.txt"), v + 1));
+        // On the CLI's list: still running.
+        assert!(jobs.keep_agents(&["a1".into()]).is_empty());
+        assert!(jobs.finish_agent("t9"));
+        assert!(!jobs.finish_agent("t9"));
+        assert_eq!(jobs.agents_running(), 0);
+    }
+
+    #[test]
+    fn sub_agents_ended_without_word_and_cut_off() {
+        let mut jobs = Jobs::default();
+        jobs.start_agent(Some("a1".into()), "t1".into(), "Survey".into());
+        jobs.start_agent(None, "t2".into(), "Early".into());
+        let gone = jobs.keep_agents(&[]);
+        assert_eq!(gone.len(), 1);
+        assert_eq!(gone[0].0, "t1");
+        assert!(gone[0].1.starts_with("Sub-agent “Survey” was stopped"), "{}", gone[0].1);
+        assert!(jobs.any_running());
+        assert_eq!(jobs.cut_off("stopped when YourHarness quit"), ["Sub-agent “Early” stopped when YourHarness quit"]);
+        assert!(!jobs.any_running());
     }
 
     #[test]

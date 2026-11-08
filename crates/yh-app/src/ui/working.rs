@@ -93,7 +93,8 @@ impl WorkingTimer {
     }
 
     /// "Working…" (or what the CLI says it's doing: "Compacting the conversation…") and how long
-    /// the turn has gone, while the open thread's turn goes on and nothing waits for you.
+    /// the turn has gone, while the open thread's turn goes on and nothing waits for you; after
+    /// it, "2 sub-agents working…" while ones it started in the background run.
     fn text(&self, cx: &App) -> Option<(String, Option<String>)> {
         let ws = self.workspace.read(cx);
         if ws.page.is_some() {
@@ -101,8 +102,18 @@ impl WorkingTimer {
         }
         let thread = ws.selected_thread()?;
         let t = thread.read(cx);
-        if !t.running || t.waiting_for_you() || t.elicitation().is_some() {
+        if t.waiting_for_you() || t.elicitation().is_some() {
             return None;
+        }
+        // The turn is over but sub-agents it started in the background still work: not done.
+        // How long the oldest has gone.
+        if !t.running {
+            let oldest = t.jobs.agents.first()?;
+            let label = match t.jobs.agents.len() {
+                1 => "A sub-agent is working…".to_string(),
+                n => format!("{n} sub-agents working…"),
+            };
+            return Some((label, Some(crate::state::jobs::clock(oldest.started.elapsed().as_secs()))));
         }
         let label = t.activity.clone().unwrap_or_else(|| "Working…".into());
         let elapsed = t.turn_started_at().map(|since| yh_core::clock::elapsed(yh_core::library::now_ms() / 1000.0 - since));

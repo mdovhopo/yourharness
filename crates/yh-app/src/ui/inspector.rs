@@ -337,6 +337,8 @@ pub struct Inspector {
     workspace: Entity<Workspace>,
     thread: Option<Entity<ThreadState>>,
     seen_subagents: u64,
+    /// Background sub-agents running in the thread when last drawn: the Sub-agents tab's badge.
+    seen_agents: usize,
     thread_watch: Option<Subscription>,
     prompt_open: bool,
     sub_scroll: ScrollHandle,
@@ -420,6 +422,7 @@ impl Inspector {
             workspace,
             thread: None,
             seen_subagents: 0,
+            seen_agents: 0,
             thread_watch: None,
             prompt_open: false,
             sub_scroll: ScrollHandle::new(),
@@ -485,6 +488,7 @@ impl Inspector {
             self.thread = selected.clone();
             self.prompt_open = false;
             self.seen_subagents = selected.as_ref().map_or(0, |t| t.read(cx).subagents_version);
+            self.seen_agents = selected.as_ref().map_or(0, |t| t.read(cx).jobs.agents_running());
             self.thread_watch = selected.map(|t| {
                 cx.observe(&t, |this, t, cx| {
                     let running = t.read(cx).running;
@@ -496,6 +500,12 @@ impl Inspector {
                     if version != this.seen_subagents && this.workspace.read(cx).panel == Panel::Subagents {
                         this.seen_subagents = version;
                         this.sub_scroll.scroll_to_bottom();
+                        cx.notify();
+                    }
+                    // The tab's badge follows how many run, whichever tab shows.
+                    let agents = t.read(cx).jobs.agents_running();
+                    if agents != this.seen_agents {
+                        this.seen_agents = agents;
                         cx.notify();
                     }
                 })
@@ -1138,16 +1148,39 @@ impl Inspector {
         // The chosen segment stands up from the track, as in Settings.
         let raised = if theme.canvas.l < 0.5 { theme.bubble } else { theme.canvas };
         let mut track = div().flex_1().flex().items_center().gap(px(2.)).p(px(2.)).rounded(px(radius::MEDIUM + 1.)).bg(theme.selected);
+        // Sub-agents still working in the background: a count on their tab.
+        let agents = self.thread.as_ref().map_or(0, |t| t.read(cx).jobs.agents_running());
         for p in Panel::ALL {
             let ws = self.workspace.clone();
             let on = p == panel;
-            let (icon, tip): (Icon, &'static str) = match p {
-                Panel::PullRequests => (crate::ui::icons::pull_request(), "Pull Requests"),
-                Panel::SideChat => (crate::ui::icons::message_square(), "Side Chat"),
-                Panel::Subagents => (crate::ui::icons::bot(), "Sub-agents"),
-                Panel::Files => (crate::ui::icons::files(), "Files"),
-                Panel::Browser => (Icon::new(IconName::Globe), "Browser"),
+            let (icon, tip): (Icon, SharedString) = match p {
+                Panel::PullRequests => (crate::ui::icons::pull_request(), "Pull Requests".into()),
+                Panel::SideChat => (crate::ui::icons::message_square(), "Side Chat".into()),
+                Panel::Subagents if agents == 1 => (crate::ui::icons::bot(), "Sub-agents: 1 running".into()),
+                Panel::Subagents if agents > 1 => (crate::ui::icons::bot(), format!("Sub-agents: {agents} running").into()),
+                Panel::Subagents => (crate::ui::icons::bot(), "Sub-agents".into()),
+                Panel::Files => (crate::ui::icons::files(), "Files".into()),
+                Panel::Browser => (Icon::new(IconName::Globe), "Browser".into()),
             };
+            let badge = (p == Panel::Subagents && agents > 0).then(|| {
+                div()
+                    .absolute()
+                    .top(px(1.))
+                    .right(px(3.))
+                    .min_w(px(14.))
+                    .h(px(14.))
+                    .px(px(3.))
+                    .rounded_full()
+                    .bg(theme.accent)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(text::CAPTION))
+                    .line_height(px(14.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(gpui_kit::white())
+                    .child(agents.to_string())
+            });
             track = track.child(
                 div()
                     .id(SharedString::from(format!("panel-{}", p.label())))
@@ -1159,8 +1192,10 @@ impl Inspector {
                     .rounded(px(radius::MEDIUM - 1.))
                     .when(on, |d| d.bg(raised).border_1().border_color(theme.separator))
                     .when(!on, |d| d.hover(|s| s.bg(theme.hover)))
+                    .relative()
                     .child(icon.size(px(15.)).text_color(if on { theme.accent } else { theme.secondary }))
-                    .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip).build(window, cx))
+                    .children(badge)
+                    .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         ws.update(cx, |ws, cx| ws.show_panel(p, cx));
                         this.ensure_tree(cx);
@@ -1192,6 +1227,8 @@ impl Inspector {
             (n, w) => format!("{n} runs · {w} working"),
         };
         let picked = thread.read(cx).inspected_subagent.clone();
+        // Running in the background now (this `claude`'s, not a stale saved status).
+        let live: std::collections::HashSet<String> = thread.read(cx).jobs.agents.iter().filter_map(|j| j.tool_id.clone()).collect();
         let selected = picked
             .and_then(|id| runs.iter().find(|(r, _)| *r == id).cloned())
             .or_else(|| runs.iter().rev().find(|(_, e)| e.borrow().sub.as_ref().is_some_and(|s| s.status == "running")).cloned())
@@ -1219,8 +1256,15 @@ impl Inspector {
                         .child(status_icon(&status, theme))
                         .child(div().flex_1().overflow_hidden().whitespace_nowrap().text_ellipsis().child(description))
                         .when_some(
-                            b.data.tool_input.as_deref().and_then(|i| serde_json::from_str::<serde_json::Value>(i).ok()).and_then(|v| v["subagent_type"].as_str().map(str::to_string)),
-                            |d, kind| d.child(div().flex_none().max_w(px(120.)).truncate().text_size(px(text::CAPTION)).text_color(theme.secondary).child(kind)),
+                            if live.contains(id) {
+                                Some("In background".to_string())
+                            } else {
+                                b.data.tool_input.as_deref().and_then(|i| serde_json::from_str::<serde_json::Value>(i).ok()).and_then(|v| v["subagent_type"].as_str().map(str::to_string))
+                            },
+                            |d, kind| {
+                                let color = if live.contains(id) { theme.accent } else { theme.secondary };
+                                d.child(div().flex_none().max_w(px(120.)).truncate().text_size(px(text::CAPTION)).text_color(color).child(kind))
+                            },
                         )
                         .on_click(move |_, _, cx| {
                             t.update(cx, |t, cx| {
@@ -2376,7 +2420,7 @@ fn local_stack_card(repo: &str, stack: &yh_core::github::LocalStack, theme: &The
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .text_size(px(9.))
+                                .text_size(px(text::CAPTION))
                                 .font_weight(FontWeight::BOLD)
                                 .text_color(theme.secondary)
                                 .child((i + 1).to_string()),

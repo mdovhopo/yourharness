@@ -1056,7 +1056,8 @@ impl Workspace {
 
     /// Keep Awake follows whether Claude works anywhere; its one timer is for a deadline.
     pub fn note_working(&mut self, cx: &mut Context<Self>) {
-        let working = self.threads.iter().any(|t| t.read(cx).running) || self.by_id.values().any(|t| t.read(cx).running);
+        let busy = |t: &ThreadState| t.running || t.jobs.agents_running() > 0;
+        let working = self.threads.iter().any(|t| busy(t.read(cx))) || self.by_id.values().any(|t| busy(t.read(cx)));
         self.keep_awake.set_working(working);
         // App Nap held off while Claude works (test runs hold it off for good, `hold_off_app_nap`).
         crate::platform::set_working_activity(working);
@@ -1389,7 +1390,7 @@ impl Workspace {
         // next message starting it with the new effort.
         let Some(thread) = self.thread(id) else { return };
         let effort = self.effort_of(thread.read(cx));
-        let busy = thread.read(cx).running || !thread.read(cx).jobs.running.is_empty();
+        let busy = thread.read(cx).running || thread.read(cx).jobs.any_running();
         if let Some(rt) = self.runtimes.get_mut(id).filter(|rt| rt.effort != effort) {
             if busy {
                 rt.restart_when_idle = true;
@@ -1848,6 +1849,7 @@ impl Workspace {
                         }
                     }
                 });
+                let agents_before = thread.read_with(cx, |t, _| t.jobs.agents_running());
                 let chrome = thread.update(cx, |t, cx| {
                     let mut chrome = false;
                     for event in batch {
@@ -1867,6 +1869,10 @@ impl Workspace {
                     }
                     if exited {
                         ws.runtimes.remove(&id2);
+                    }
+                    // Sub-agents came or went: Keep Awake follows them as it follows turns.
+                    if thread2.read(cx).jobs.agents_running() != agents_before {
+                        ws.note_working(cx);
                     }
                     // A message sent now (after a stop) starts its own turn right after the stop's end.
                     let restarted = !exited && thread2.read(cx).running;
@@ -1947,7 +1953,7 @@ impl Workspace {
             .detach();
         }
         // Effort changed mid-turn: the process starts over now, unless jobs it left run on.
-        let restart = self.runtimes.get(&id).is_some_and(|rt| rt.restart_when_idle) && thread.read(cx).jobs.running.is_empty() && !waiting_on_jobs;
+        let restart = self.runtimes.get(&id).is_some_and(|rt| rt.restart_when_idle) && !thread.read(cx).jobs.any_running() && !waiting_on_jobs;
         if restart {
             runtime_log(format!("{id}: turn over, its claude ends for the new effort"));
             self.end_runtime(&id, cx);
@@ -1961,8 +1967,8 @@ impl Workspace {
                 cx.background_executor().timer(IDLE_LIMIT).await;
                 let again = this
                     .update(cx, |ws, cx| {
-                        // Jobs it left running end with its `claude`: kept while they run, looked at again later.
-                        if weak.upgrade().is_some_and(|t| !t.read(cx).jobs.running.is_empty()) {
+                        // Jobs and sub-agents it left running end with its `claude`: kept while they run, looked at again later.
+                        if weak.upgrade().is_some_and(|t| t.read(cx).jobs.any_running()) {
                             return true;
                         }
                         let waiting = weak.upgrade().is_some_and(|t| t.read(cx).running || t.read(cx).waiting_for_you());
@@ -2818,27 +2824,39 @@ impl Workspace {
 
     /// Its `claude` is going: the jobs it ran go with it, and the thread says which.
     fn cut_off_jobs(&mut self, thread: &Entity<ThreadState>, outcome: &str, cx: &mut Context<Self>) {
-        if thread.read(cx).jobs.running.is_empty() {
+        if !thread.read(cx).jobs.any_running() {
             return;
         }
         thread.update(cx, |t, cx| {
-            for note in t.jobs.cut_off(outcome) {
-                t.notice(&note);
-            }
+            t.cut_off_jobs(outcome);
             cx.notify();
         });
         self.save_rows(thread, cx);
         cx.notify();
     }
 
-    /// Background jobs running in every thread, for asking before quitting: (title, detail),
-    /// as the Swift app words it.
+    /// Background jobs and sub-agents running in every thread, for asking before quitting:
+    /// (title, detail), as the Swift app words it.
     pub fn quit_question(&self, cx: &App) -> Option<(String, String)> {
         let jobs: Vec<String> = self.threads.iter().flat_map(|t| t.read(cx).jobs.background().map(|j| j.description.clone()).collect::<Vec<_>>()).collect();
-        match jobs.len() {
-            0 => None,
-            1 => Some(("A background job is running".into(), format!("“{}” stops if you quit YourHarness.", jobs[0]))),
-            n => Some((format!("{n} background jobs are running"), "They stop if you quit YourHarness.".into())),
+        let agents: Vec<String> = self.threads.iter().flat_map(|t| t.read(cx).jobs.agents.iter().map(|j| j.description.clone()).collect::<Vec<_>>()).collect();
+        quit_words(&jobs, &agents)
+    }
+}
+
+/// "2 sub-agents are running" / "“Build” stops if you quit YourHarness.", for the quit question.
+fn quit_words(jobs: &[String], agents: &[String]) -> Option<(String, String)> {
+    let they = || "They stop if you quit YourHarness.".to_string();
+    match (jobs, agents) {
+        ([], []) => None,
+        ([job], []) => Some(("A background job is running".into(), format!("“{job}” stops if you quit YourHarness."))),
+        ([], [agent]) => Some(("A sub-agent is running".into(), format!("“{agent}” stops if you quit YourHarness."))),
+        (jobs, []) => Some((format!("{} background jobs are running", jobs.len()), they())),
+        ([], agents) => Some((format!("{} sub-agents are running", agents.len()), they())),
+        (jobs, agents) => {
+            let j = if jobs.len() == 1 { "A background job".to_string() } else { format!("{} background jobs", jobs.len()) };
+            let a = if agents.len() == 1 { "a sub-agent".to_string() } else { format!("{} sub-agents", agents.len()) };
+            Some((format!("{j} and {a} are running"), they()))
         }
     }
 }
@@ -3325,4 +3343,20 @@ pub fn mcp_needing_you(servers: &[(String, String, String)]) -> Vec<(String, boo
         })
         .map(|(name, status, _)| (name.clone(), status == "failed"))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::quit_words;
+
+    #[test]
+    fn the_quit_question_counts_sub_agents_with_commands() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(quit_words(&[], &[]), None);
+        assert_eq!(quit_words(&s(&["Build"]), &[]).unwrap().0, "A background job is running");
+        assert_eq!(quit_words(&[], &s(&["Survey"])).unwrap(), ("A sub-agent is running".into(), "“Survey” stops if you quit YourHarness.".into()));
+        assert_eq!(quit_words(&[], &s(&["a", "b"])).unwrap().0, "2 sub-agents are running");
+        assert_eq!(quit_words(&s(&["x"]), &s(&["a", "b"])).unwrap().0, "A background job and 2 sub-agents are running");
+        assert_eq!(quit_words(&s(&["x", "y"]), &s(&["a"])).unwrap().0, "2 background jobs and a sub-agent are running");
+    }
 }

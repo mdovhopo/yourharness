@@ -1,7 +1,8 @@
 //! Above the composer while Claude has jobs running: what each is, how long it's been going
 //! and the last thing it printed, so it's clear whether Claude is waiting on something or
 //! done. Claude is woken when one ends; you can type meanwhile. Open a job for its live
-//! output; Stop ends it (`stop_task`, as the Swift app's Stop).
+//! output; Stop ends it (`stop_task`, as the Swift app's Stop). Sub-agents in the background
+//! are listed too, with what each is doing now; one opens in the right sidebar's Sub-agents.
 //!
 //! A view of its own: its clock and the output it reads (off the main thread, once a second,
 //! only while jobs run) redraw it alone, never the transcript. Also asks before quitting
@@ -74,7 +75,7 @@ impl JobsStrip {
                 self.expanded.extend(t.read(cx).jobs.running.iter().map(|j| j.id.clone()));
             }
         }
-        let running = self.thread.as_ref().is_some_and(|t| !t.read(cx).jobs.running.is_empty());
+        let running = self.thread.as_ref().is_some_and(|t| t.read(cx).jobs.any_running());
         if !running {
             self.ticker = None;
             return;
@@ -125,7 +126,8 @@ impl JobsStrip {
     /// (task id, its output file, opened) for the running jobs; `None` once there are none.
     fn output_files(&self, cx: &App) -> Option<Vec<(String, String, bool)>> {
         let thread = self.thread.as_ref()?.read(cx);
-        if thread.jobs.running.is_empty() {
+        // Sub-agents alone: nothing to read, but their clocks tick.
+        if !thread.jobs.any_running() {
             return None;
         }
         // A foreground command's file is never told: where the session's others go.
@@ -141,6 +143,81 @@ impl JobsStrip {
                 })
                 .collect(),
         )
+    }
+
+    /// A sub-agent in the background: "Agent: Survey the parser", what it's doing now, how
+    /// long it's been going; a click follows it in the right sidebar, Stop ends it.
+    fn agent_row(&self, job: &Job, thread: &Entity<ThreadState>, theme: &Theme) -> impl IntoElement {
+        let elapsed = jobs::clock(job.started.elapsed().as_secs());
+        let description = if job.description.is_empty() { "Sub-agent".to_string() } else { job.description.clone() };
+        let doing = job.last_line.clone().unwrap_or_else(|| "Working…".into());
+        let (ws, t) = (self.workspace.clone(), thread.clone());
+        let tool = job.tool_id.clone().unwrap_or_default();
+        let (stop_ws, stop_thread, task) = (self.workspace.clone(), thread.clone(), job.id.clone());
+        div()
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .px(px(space::M))
+            .py(px(space::XS))
+            .child(
+                div()
+                    .id(SharedString::from(format!("agent-{tool}")))
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .cursor_pointer()
+                    .child(div().flex_none().w(px(16.)).flex().justify_center().child(crate::ui::icons::bot().size(px(14.)).text_color(theme.secondary)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .flex()
+                                    .min_w_0()
+                                    .gap(px(4.))
+                                    .child(div().flex_none().text_color(theme.secondary).child("Agent:"))
+                                    .child(div().flex_1().min_w_0().font_weight(FontWeight::MEDIUM).overflow_hidden().whitespace_nowrap().text_ellipsis().child(description)),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(ts::CAPTION))
+                                    .line_height(px(15.))
+                                    .text_color(theme.tertiary)
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .child(doing),
+                            ),
+                    )
+                    .child(div().flex_none().text_size(px(ts::CAPTION)).text_color(theme.secondary).child(elapsed))
+                    .child(Icon::new(IconName::ChevronRight).size(px(12.)).text_color(theme.tertiary))
+                    .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Follow it in the right sidebar").build(window, cx))
+                    .on_click(move |_, _, cx| {
+                        t.update(cx, |t, cx| {
+                            t.inspected_subagent = Some(tool.clone());
+                            t.subagents_version += 1;
+                            cx.notify();
+                        });
+                        ws.update(cx, |ws, cx| ws.show_panel(crate::state::workspace::Panel::Subagents, cx));
+                    }),
+            )
+            // Its task ID comes with its start; without one there's nothing to stop.
+            .when(!task.is_empty(), |d| {
+                d.child(
+                    Button::new(SharedString::from(format!("agent-stop-{task}")))
+                        .ghost()
+                        .xsmall()
+                        .label("Stop")
+                        .tooltip("Stop this sub-agent. The thread carries on.")
+                        .on_click(move |_, _, cx| stop_ws.update(cx, |ws, cx| ws.stop_job(&stop_thread, &task, cx))),
+                )
+            })
     }
 
     fn job_row(&self, job: &Job, thread: &Entity<ThreadState>, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
@@ -248,17 +325,20 @@ impl Render for JobsStrip {
         let Some(thread) = self.thread.clone() else { return div() };
         let theme = Theme::get(cx);
         let t = thread.read(cx);
-        if t.jobs.running.is_empty() {
+        if !t.jobs.any_running() {
             return div();
         }
-        let header = if t.jobs.waiting() > 0 && !t.running {
+        // Sub-agents started since your latest message report back to Claude, as the jobs do.
+        let agents_waiting = t.jobs.agents.iter().any(|j| j.turn == t.jobs.turn);
+        let header = if (t.jobs.waiting() > 0 || agents_waiting) && !t.running {
             "Claude is waiting on"
-        } else if t.jobs.background().next().is_some() {
+        } else if t.jobs.background().next().is_some() || !t.jobs.agents.is_empty() {
             "Running in the background"
         } else {
             "Running"
         };
         let jobs: Vec<Job> = t.jobs.running.clone();
+        let agents: Vec<Job> = t.jobs.agents.clone();
         let mut strip = div()
             .w_full()
             .max_w(px(828.))
@@ -272,6 +352,9 @@ impl Render for JobsStrip {
             .flex()
             .flex_col()
             .child(div().px(px(space::M)).pt(px(space::S)).pb(px(2.)).text_size(px(ts::CAPTION)).font_weight(FontWeight::MEDIUM).text_color(theme.secondary).child(header));
+        for job in &agents {
+            strip = strip.child(self.agent_row(job, &thread, &theme));
+        }
         for job in &jobs {
             strip = strip.child(self.job_row(job, &thread, &theme, cx));
         }

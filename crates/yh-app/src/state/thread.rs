@@ -1092,6 +1092,9 @@ impl ThreadState {
                 changed
             }
             Event::SubagentProgress { tool_id, activity, usage } => {
+                if let Some(a) = &activity {
+                    self.jobs.agent_activity(&tool_id, a);
+                }
                 if let Some((e, pos)) = self.tools.get(&tool_id).cloned() {
                     {
                         let mut b = e.borrow_mut();
@@ -1334,7 +1337,11 @@ impl ThreadState {
                 }
                 self.jobs.running.len() != jobs_before
             }
-            Event::SubagentStarted { tool_id, description, task_id } => {
+            Event::SubagentStarted { tool_id, description, task_id, background } => {
+                // In the background it goes on after the turn: the thread isn't done.
+                if background {
+                    self.jobs.start_agent(task_id.clone(), tool_id.clone(), description.clone());
+                }
                 if let Some((e, pos)) = self.tools.get(&tool_id).cloned() {
                     {
                         let mut b = e.borrow_mut();
@@ -1350,9 +1357,10 @@ impl ThreadState {
                     e.borrow_mut().version += 1;
                     self.touch_pos(pos);
                 }
-                false
+                background
             }
             Event::SubagentFinished { tool_id, status, summary, usage } => {
+                let was_background = self.jobs.finish_agent(&tool_id);
                 if let Some((e, pos)) = self.tools.get(&tool_id).cloned() {
                     {
                         let mut b = e.borrow_mut();
@@ -1368,7 +1376,7 @@ impl ThreadState {
                     }
                     self.touch_pos(pos);
                 }
-                false
+                was_background
             }
             Event::Elicitation { request_id, server, message, mode, schema, url, elicitation_id } => {
                 // Several servers (or calls) can ask at once: each waits its turn.
@@ -1437,10 +1445,16 @@ impl ThreadState {
                 }
                 !notes.is_empty()
             }
-            Event::Exit { code, tail } => {
-                for note in self.jobs.cut_off("stopped when Claude exited") {
-                    self.notice(&note);
+            Event::AgentsRunning(ids) => {
+                let gone = self.jobs.keep_agents(&ids);
+                for (tool, note) in &gone {
+                    self.agent_stopped(tool);
+                    self.notice(note);
                 }
+                !gone.is_empty()
+            }
+            Event::Exit { code, tail } => {
+                self.cut_off_jobs("stopped when Claude exited");
                 self.end_turn();
                 // Whatever still waited never reached Claude: back to the composer.
                 self.restore_queued();
@@ -1461,6 +1475,35 @@ impl ThreadState {
                 true
             }
         }
+    }
+
+    /// Its `claude` is going: the jobs it ran go with it, the thread says which, and the
+    /// sub-agents among them show as stopped. True when there were any.
+    pub fn cut_off_jobs(&mut self, outcome: &str) -> bool {
+        let agents: Vec<String> = self.jobs.agents.iter().filter_map(|j| j.tool_id.clone()).collect();
+        let notes = self.jobs.cut_off(outcome);
+        for tool in &agents {
+            self.agent_stopped(tool);
+        }
+        for note in &notes {
+            self.notice(note);
+        }
+        !notes.is_empty() || !agents.is_empty()
+    }
+
+    /// A background sub-agent that ended without word: its call says it stopped.
+    fn agent_stopped(&mut self, tool_id: &str) {
+        let Some((e, pos)) = self.tools.get(tool_id).cloned() else { return };
+        {
+            let mut b = e.borrow_mut();
+            let Some(sub) = b.sub.as_mut().filter(|s| s.status == "running") else { return };
+            sub.status = "stopped".into();
+            sub.activity = None;
+            b.version += 1;
+            self.dirty.insert(b.seq);
+        }
+        self.subagents_version += 1;
+        self.touch_pos(pos);
     }
 
     fn subagent_step(&mut self, parent: &str) {

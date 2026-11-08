@@ -310,8 +310,9 @@ pub enum Event {
     Delta { message: String, index: u64, parent: Option<String>, kind: DeltaKind, text: String },
     Assistant { message: String, parent: Option<String>, blocks: Vec<Block> },
     ToolResults { parent: Option<String>, results: Vec<ToolResult> },
-    /// `task_id` is what `stop_task` takes to stop it.
-    SubagentStarted { tool_id: String, description: String, task_id: Option<String> },
+    /// `task_id` is what `stop_task` takes to stop it; `background`: started with
+    /// `run_in_background`, it outlives the turn that started it.
+    SubagentStarted { tool_id: String, description: String, task_id: Option<String>, background: bool },
     /// What a sub-agent is doing now ("Reading a.txt") and what it has used so far.
     SubagentProgress { tool_id: String, activity: Option<String>, usage: SubagentUsage },
     /// A sub-agent's end, with its summary (a background one's report comes only here).
@@ -327,6 +328,8 @@ pub enum Event {
     JobOutput { task_id: String, text: String },
     /// Every job still running, sent whenever that changes: the list to trust over the ends.
     JobsRunning(Vec<String>),
+    /// Every background sub-agent still running (their task IDs), sent with `JobsRunning`.
+    AgentsRunning(Vec<String>),
     Permission { request_id: String, tool: String, description: String, input: String },
     /// An MCP server asks something mid-call: a form (`schema`) or a page to visit (`url`).
     Elicitation { request_id: String, server: String, message: String, mode: String, schema: Value, url: Option<String>, elicitation_id: Option<String> },
@@ -738,6 +741,7 @@ impl Parser {
                     tool_id: object["tool_use_id"].as_str().unwrap_or("").into(),
                     description: object["description"].as_str().unwrap_or("Sub-agent").into(),
                     task_id: object["task_id"].as_str().map(str::to_string),
+                    background: object["is_backgrounded"] == true,
                 }],
                 "task_notification" if object["task_id"].as_str().is_some_and(|id| self.jobs.remove(id)) => vec![Event::JobFinished {
                     task_id: object["task_id"].as_str().unwrap_or("").into(),
@@ -746,9 +750,12 @@ impl Parser {
                     output_file: object["output_file"].as_str().filter(|f| !f.is_empty()).map(str::to_string),
                 }],
                 "background_tasks_changed" => match object["tasks"].as_array() {
-                    Some(tasks) => vec![Event::JobsRunning(
-                        tasks.iter().filter(|t| t["task_type"] != "local_agent").filter_map(|t| t["task_id"].as_str().map(str::to_string)).collect(),
-                    )],
+                    Some(tasks) => {
+                        let ids = |agents: bool| {
+                            tasks.iter().filter(|t| (t["task_type"] == "local_agent") == agents).filter_map(|t| t["task_id"].as_str().map(str::to_string)).collect()
+                        };
+                        vec![Event::JobsRunning(ids(false)), Event::AgentsRunning(ids(true))]
+                    }
                     None => vec![],
                 },
                 "task_notification" => vec![Event::SubagentFinished {
@@ -1028,6 +1035,32 @@ mod tests {
         assert!(!events.iter().any(|e| matches!(e, Event::SubagentStarted { .. } | Event::SubagentFinished { .. })));
         // Woken by each end: three turns, the first one yours.
         assert_eq!(events.iter().filter(|e| matches!(e, Event::Done { .. })).count(), 3);
+    }
+
+    /// The Swift app's capture, on Haiku: a sub-agent in the background, the turn over before
+    /// it reports, Claude woken by its end.
+    const BACKGROUND_AGENT: &str = include_str!("../fixtures/subagent-background.jsonl");
+
+    #[test]
+    fn a_background_sub_agent_is_known_from_start_to_end() {
+        let events = events(BACKGROUND_AGENT);
+        let starts: Vec<(&str, Option<&str>, bool)> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::SubagentStarted { tool_id, task_id, background, .. } => Some((tool_id.as_str(), task_id.as_deref(), *background)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(starts, [("toolu_012pyhNsq5VtNVxpEfvbwiHz", Some("a36269b96faba4efe"), true)]);
+        let lists: Vec<Vec<String>> = events.iter().filter_map(|e| if let Event::AgentsRunning(ids) = e { Some(ids.clone()) } else { None }).collect();
+        assert_eq!(lists, [vec!["a36269b96faba4efe".to_string()], vec![]]);
+        // Never a job.
+        assert!(events.iter().all(|e| !matches!(e, Event::JobStarted { .. } | Event::JobFinished { .. })));
+        assert!(events.iter().all(|e| !matches!(e, Event::JobsRunning(ids) if !ids.is_empty())));
+        // The turn ends first; its end comes after.
+        let done = events.iter().position(|e| matches!(e, Event::Done { .. })).unwrap();
+        let end = events.iter().position(|e| matches!(e, Event::SubagentFinished { .. })).unwrap();
+        assert!(done < end);
     }
 
     #[test]

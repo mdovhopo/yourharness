@@ -40,6 +40,22 @@ const COLLAPSED: &str = "collapsedProjectIDs";
 const SHELVES: &str = "expandedShelves";
 const SHOW_ALL: &str = "sidebarShowAll";
 
+/// An idle thread with sub-agents in the background still working: it isn't done, so it
+/// shows as working, and its tooltip says why ("2 sub-agents running").
+fn agents_marker(t: &ThreadState) -> Option<SharedString> {
+    let agents = t.jobs.agents_running();
+    if agents == 0 {
+        return None;
+    }
+    let mut said = if agents == 1 { "1 sub-agent running".to_string() } else { format!("{agents} sub-agents running") };
+    match t.jobs.background().count() {
+        0 => {}
+        1 => said += " · a background job",
+        n => said += &format!(" · {n} background jobs"),
+    }
+    Some(said.into())
+}
+
 /// An idle thread with background jobs running: what its hourglass says, as the Swift app.
 fn jobs_marker(t: &ThreadState, busy: bool) -> Option<SharedString> {
     let count = t.jobs.background().count();
@@ -445,7 +461,7 @@ impl Sidebar {
         let threads: Vec<&Entity<ThreadState>> = ws.threads.iter().filter(|t| t.read(cx).meta.project_id == project.id && t.read(cx).meta.settled_at.is_none()).collect();
         let activity = threads.iter().any(|t| {
             let t = t.read(cx);
-            t.running || t.unread || t.waiting_for_you()
+            t.running || t.unread || t.waiting_for_you() || t.jobs.agents_running() > 0
         });
         let count = threads.len();
         let selected = ws.page == Some(Page::Project(project.id.clone()));
@@ -640,7 +656,9 @@ impl Sidebar {
         }
         let ws = self.workspace.read(cx);
         let waiting = t.waiting_for_you();
-        let running = t.running && !waiting;
+        // Sub-agents in the background after the turn: still working.
+        let agents = (!t.running && !waiting).then(|| agents_marker(t)).flatten();
+        let running = (t.running || agents.is_some()) && !waiting;
         let unread = t.unread && !is_selected;
         let pinned = t.meta.pinned;
         let settled = t.meta.settled_at.is_some();
@@ -672,7 +690,7 @@ impl Sidebar {
             // Idle: a small grey dot, as the Swift app's.
             (div().w(px(6.)).h(px(6.)).rounded_full().bg(theme.tertiary.opacity(0.6)).into_any_element(), "")
         };
-        let status_tip: SharedString = jobs.clone().unwrap_or_else(|| status_tip.into());
+        let status_tip: SharedString = agents.clone().or_else(|| jobs.clone()).unwrap_or_else(|| status_tip.into());
         let group: SharedString = format!("thread-row-{id}").into();
         let ws_click = self.workspace.clone();
         let click_id = id.clone();
@@ -756,6 +774,8 @@ impl Sidebar {
             }
             if waiting {
                 parts.push("Waiting for your approval".into());
+            } else if let Some(agents) = &agents {
+                parts.push(agents.to_string());
             } else if running {
                 parts.push("Working".into());
             } else if unread {
