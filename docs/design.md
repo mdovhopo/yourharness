@@ -1,8 +1,8 @@
 # Design
 
-How the app should look, for the design pass after parity. The aim: as close to a good native
-Mac app as GPUI lets us get, without paying for it in frames. We don't copy the Swift app 1:1
-(no Liquid Glass here); we take its calm and its hierarchy.
+How the app should look. The aim: as close to a good native Mac app as GPUI lets us get,
+without paying for it in frames: no Liquid Glass or native controls, but a Mac app's calm and
+hierarchy.
 
 ## Principles
 
@@ -57,4 +57,4 @@ Mac app as GPUI lets us get, without paying for it in frames. We don't copy the 
 
 Shadows, blurs and animations cost frames. No animated spinners in cached views (a still icon),
 no shadows on rows, at most one shadow per popover. Check `scripts/perf-run.sh` stays where it
-was (docs/performance.md) after the pass.
+was (docs/performance.md) after design changes.

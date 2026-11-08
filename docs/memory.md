@@ -4,8 +4,10 @@ Each project (workspace) has its own memory, kept by the app in its database, no
 an agent writes. Every thread in the project starts with it, agents use it through tools the
 app serves, and you can see and change all of it in the Memory view.
 
-The code: `Sources/HarnessCore/Memory/` (no UI imports, all tested in `MemoryTests`) and the
-app's `Model/AppModel+Memory.swift` and `Views/Memory*.swift`.
+The code: in `crates/yh-core`, `memory.rs` (the store in `harness.sqlite`'s memory tables,
+the tables 0.0.x made, and the prompt), `memory_tools.rs` (the agents' tools), `memory_stats.rs`
+(Insights), `memory_archive.rs` (import and export) and `memory_agents.rs` (the specialists);
+in the app, `ui/memory.rs` (the Memory page) and the sessions in `state/workspace.rs`.
 
 ## Tasks
 
@@ -33,11 +35,11 @@ by folder, so adding the folder again brings its memory back.
 
 ## How agents get it
 
-- **The index**, appended to the system prompt at every launch (`MemoryPrompt`): how to use
+- **The index**, appended to the system prompt at every launch (`memory::prompt`): how to use
   memory, then one line a memory (`- 1a2b3c4d Title — description`), grouped by kind, most read
   and most recent first, under 8 KB (about 2,000 tokens); pinned ones in full, under 4 KB more.
   What doesn't fit is a search away, and the prompt says so.
-- **Tools**, `mcp__memory__*` (`MemoryToolServer`), served inside the app over the CLI's control
+- **Tools**, `mcp__memory__*` (`memory_tools::MemoryTools`), served inside the app over the CLI's control
   channel like the browser's, and pre-approved since they only touch the app's database:
   `search`, `read`, `save`, `update`, `forget` (archives), `link`. The side chat gets `search`
   and `read`. IDs are the first eight characters; any unique prefix works. `save` refuses a
@@ -61,7 +63,7 @@ by folder, so adding the folder again brings its memory back.
 Every save, read, search (what was asked, what it found), session start (how many memories, how
 many bytes), archive, merge, link, pin, import and export is a row in `memory_events`, with who
 did it (`agent`, `user`, `importer`, `reconciler`) and in which thread. That's what the Memory
-view's Insights and Activity are made of (`MemoryStats`): size and token cost per session, the
+view's Insights and Activity are made of (`memory_stats.rs`): size and token cost per session, the
 share of memories read in the last 30 days, the search hit rate and the searches that found
 nothing, memories never read, likely duplicates (titles sharing most words), memories with no
 links, growth and activity by day, kinds and ages. The log keeps a year.
@@ -98,7 +100,7 @@ change applies from the next message), or the default for both in Settings → G
 memory is worth a strong model. Two agents with their own windows, one conversation per project each, that outlive the window
 until New Session. They run Claude Code with only Read, Glob, Grep, AskUserQuestion and the full
 memory tools (also `list`, `stats`, `merge`, `unlink`, `restore`, `pin`), no MCP servers of
-yours, nothing saved to Claude Code's history (`MemoryPrompt.specialist` has their instructions).
+yours, nothing saved to Claude Code's history (`memory_agents::prompt` has their instructions).
 A column on the right shows what the session has changed so far; each change opens the memory.
 - **The Importer** reads what you give it (Claude Code's memory, instruction files it finds in
   the project, files and folders you pick, pasted text) with those folders added to the session
@@ -119,22 +121,22 @@ the thread with Find on the matched word. With nothing typed it lists recent thr
 
 ## Checking it
 
-- `swift test --filter MemoryTests`: the schema upgrade, versions, links, merges, counts, the
-  index budget, every tool, both file formats, Claude Code's folder names.
+- `cargo test -p yh-core -- memory`: versions, links, merges, counts, the index budget, every
+  tool, both file formats, Claude Code's folder names.
 - `scripts/preset.sh memory <dir>` makes a project with Claude Code-format memory files and a
   ChatGPT export to import. Make it outside this repo (the scratchpad, `/tmp`): a project inside
-  it reads the repo's CLAUDE.md too. Then `scripts/dev-run.sh <dir>` with:
-  - `YH_SEND_MESSAGE="Remember that …"`: a real turn that should save; a second launch with a
-    question should read it (`sqlite3 <dir>/harness.sqlite "select * from memory_events"`).
+  it reads the repo's CLAUDE.md too. Then run a development build with `YH_DATA_DIR=<dir>` (as
+  CLAUDE.md says) and:
+  - `YH_SEND="Remember that …" YH_MODEL=haiku`: a real turn that should save; a second launch
+    with a question should read it (`sqlite3 <dir>/harness.sqlite "select * from memory_events"`).
   - `YH_MEMORY_IMPORT=<dir>/sources/claude-memory`: a direct import.
   - `YH_MEMORY_AGENT=importer YH_MEMORY_AGENT_START=1 YH_MEMORY_IMPORT_SOURCES=<file> YH_MEMORY_AGENT_MODEL=haiku`,
     or `YH_MEMORY_AGENT=reconciler YH_MEMORY_AGENT_START=1 YH_MEMORY_AGENT_NOTE="apply directly"`.
-  - `YH_SEND_MESSAGE="Plan X in steps, do only the first"`: the agent should `track` a task;
+  - `YH_SEND="Plan X in steps, do only the first"`: the agent should `track` a task;
     a second launch with "continue X" should read it and move it along.
   - `YH_SPOTLIGHT=<words>` opens ⌘K with them typed.
-  - `CLAUDE_CONFIG_DIR=<scratch> YH_MEMORY_USE_ONE=1`: a scratch Claude Code config with memory
-    files under `projects/<folder as a name>/memory`; prints what it found, imports what's
-    missing and turns Claude Code's memory off for the folder.
-  - `YH_OPEN_MEMORY=1 YH_MEMORY_TAB=insights` (or `tasks`), `YH_MEMORY_SEED=2000` (made-up memories and
-    activity), `YH_MEMORY_EXPORT=<folder>`, with `YH_SNAPSHOT` (and `YH_SNAPSHOT_WINDOW=Memory
-    Importer` for a specialist's window).
+  - `YH_OPEN_MEMORY=1 YH_MEMORY_TAB=insights` (or `memories`, `tasks`, `activity`, `graph`),
+    `YH_MEMORY_SEED=2000` (made-up memories and activity, scratch data only),
+    `YH_MEMORY_EXPORT=<folder>`, with `YH_SNAPSHOT`. With a scratch `CLAUDE_CONFIG_DIR`
+    holding memory files under `projects/<folder as a name>/memory`, the Memory page shows Use
+    One Memory.

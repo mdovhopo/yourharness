@@ -31,7 +31,7 @@ We keep the shape: a panel per thread, a typed tool set, refs from snapshots, sh
 - It's already on every Mac: no download, no second browser to keep updated, and it's Safari's engine, which your users have.
 - Each tab costs one WebContent process (tens of MB, outside the app's footprint), not a Chromium instance.
 - The trade-off is that Chrome-only bugs aren't caught. "Open in Default Browser" is always one click away, and driving the user's Chrome over CDP can come later as a second engine behind the same tools.
-- `CLAUDE.md` says "no web views". That rule is about the app's own UI, which stays native. A page under test is web content by definition. The panel around it (URL bar, console, network, controls) is SwiftUI and Liquid Glass.
+- The app's own UI is drawn by GPUI, never a web view. A page under test is web content by definition, so it's the one native view laid over the GPUI window (`webview.rs`): GPUI keeps its spot empty and draws the panel around it (URL bar, console, network, controls).
 
 ### Transport: in-process MCP over the CLI's control channel
 
@@ -46,7 +46,7 @@ That means no port, no token and no `--mcp-config`. Nothing on the machine but t
 
 ### Tools are pre-approved
 
-The browser is sandboxed to the app: its own cookie store, and nothing it does touches your files. So `mcp__browser__*` goes in `--allowedTools`, as T3 does. There's a Settings toggle, "Let Claude use the browser" (on), with a per-project override later.
+The browser is sandboxed to the app: its own cookie store, and nothing it does touches your files. So `mcp__browser__*` goes in `--allowedTools`, as T3 does. There's a Settings toggle, "Let Claude use the browser" (on).
 
 When it's off:
 - the server isn't registered;
@@ -58,24 +58,24 @@ Clicks and keys are sent to the `WKWebView` as `NSEvent`s at the element's posit
 
 ## What you see
 
-The right sidebar gets a third tab: **Browser**, next to Side Chat and Sub-agents.
+The right sidebar has a **Browser** tab, beside Side Chat, Sub-agents, Files and PRs, and a thread's browser can also go in a window of its own (`ui/browser_window.rs`; closing it puts the pages back).
 
-- **Address bar** (a glass bar at the top of the panel; the window toolbar holds the sidebar's tabs):
+- **Address bar** at the top of the panel:
   - back/forward and reload;
   - the URL field;
   - device size;
-  - the element picker;
+  - the element picker (Pick);
   - Take Control / Give Back;
-  - a More menu: Open in Default Browser, Web Inspector, Clear Browsing Data, light/dark page.
+  - a More menu: the window, the tab, page size and appearance, the Web Inspector, Clear Browsing Data, Import Sign-ins.
 - **Tabs:** a thin tab strip appears only when the thread has more than one tab.
 - **Page:** fills the panel. When the agent acts, a ring briefly marks the element it clicked or typed into, so you can follow along.
 - **Console and Network** (T3 has neither):
-  - a drawer under the page with two lists;
+  - a strip under the page with two panes, which folds away;
   - console messages and uncaught errors, with level filters;
   - requests with method, status, type and time, failed ones in red.
-  - Both lists are native, searchable and capped, the same buffers the agent reads.
+  - Both lists are capped, the same buffers the agent reads.
 - **Empty state:** "Claude opens pages here when it tests your app." It lists recent URLs and the local servers this thread started (see Local servers below).
-- **Opening:** when the agent opens a page in the thread you're looking at, the sidebar opens on Browser. A setting covers this, "Show the browser when Claude opens it" (on).
+- **Opening:** when the agent opens a page in the thread you're looking at, the sidebar opens on Browser. A setting covers this, "Show the browser when Claude opens a page" (on).
 - **Taking over:** you can click and type in the page at any time. Take Control makes it explicit: the agent's actions fail with "The user has taken control of the browser", while its reads still work.
 - **Element picker:** pick an element to put it in the composer as a chip with:
   - its role, name and a CSS selector;
@@ -142,7 +142,7 @@ What it gives you:
 ## Lifecycle and memory
 
 - **Created on demand:** a thread's browser exists only once the agent calls `open`, or you type a URL.
-- **Cookies:** one persistent `WKWebsiteDataStore(forIdentifier:)` per project, so logins survive and stay out of Safari and other projects. Clear Browsing Data resets it. A private tab uses a non-persistent store.
+- **Cookies:** one persistent `WKWebsiteDataStore` per project (`dataStoreForIdentifier:`, keyed by the project's UUID as 0.0.x keyed them, so sign-ins carry over), so logins survive and stay out of Safari and other projects. Clear Browsing Data resets it. A private tab uses a non-persistent store.
 - **Idle teardown:** tabs of threads you aren't looking at are closed after 30 minutes idle. The URL and history are kept, so the next `open`/`status` or your visit brings them back.
 - **Ending:** settling or deleting a thread closes its tabs. Quitting closes all of them.
 - **Limits:** at most 8 tabs per thread. Popups become tabs.
@@ -150,16 +150,14 @@ What it gives you:
 
 ## Architecture
 
-- **HarnessCore** (no WebKit):
-  - `MCPToolServer`: tool definitions and JSON-RPC handling (`initialize`, `tools/list`, `tools/call`), pure and fixture-tested.
-  - `ClaudeSession` registers servers in `initialize` and answers `mcp_message` control requests by calling them.
-  - The tool calls themselves go through a `Sendable` protocol, so the core never sees a browser.
-- **App:**
-  - `BrowserSession`, one per thread: tabs, control state, console and network buffers.
-  - `BrowserTab`: one `WKWebView`, its delegates and injected scripts.
-  - `BrowserTools`: implements the tool set on the main actor.
-  - Scripts (snapshot, refs, console/network hooks, picker) live as bundled `.js` resources.
-  - `Views/BrowserPanel.swift`: the sidebar tab. A transcript row type for browser calls.
+- **yh-core** (no WebKit):
+  - `mcp.rs`: the `ToolServer` trait, tool definitions and JSON-RPC handling (`initialize`, `tools/list`, `tools/call`), pure and tested.
+  - `claude.rs`: the process registers the app's servers in `initialize` and answers `mcp_message` control requests by calling them, each call on a thread of its own.
+- **yh-app:**
+  - `browser/mod.rs`: `Browsers` on the main thread, one session per thread (tabs, control state, console and network buffers), and the tool set; a tool call sends the main thread jobs and waits on their replies, so waiting for a page never holds up the window.
+  - `webview.rs`: one `WKWebView` per tab, laid over the spot GPUI keeps for it, its delegates and injected scripts, and the parking panel.
+  - Scripts (snapshot, refs, console/network hooks, picker) are `browser/helpers.js` and `browser/hooks.js`, built into the binary.
+  - `ui/browser_panel.rs`, `ui/browser_window.rs`: the sidebar tab and the window. Browser calls read as their own steps in the transcript (`ui/steps.rs`).
 - **Instructions:** one paragraph in `--append-system-prompt` when enabled. It says:
   - the browser is in the app and the user sees it;
   - prefer it over Playwright or curl for checking UI;
@@ -169,7 +167,7 @@ What it gives you:
 
 ## What the spikes found
 
-1. In-process MCP over the control channel works with the installed CLI, with no wait between `initialize` and the first message (integration test `MCPIntegrationTests`), and `--allowedTools mcp__browser` keeps the tools from asking.
+1. In-process MCP over the control channel works with the installed CLI, with no wait between `initialize` and the first message, and `--allowedTools mcp__browser` keeps the tools from asking.
 2. Image results reach the model.
 3. **Input.** `NSEvent`s sent straight to the web view arrive as trusted events, in a key window or not, on screen or off. Two catches, both handled:
    - WebKit makes the web view the window's first responder when it's clicked, which would pull the keyboard out of your composer. `_setShouldSuppressFirstResponderChanges:` stops that for the agent's own events (turned off again after a round trip, so your clicks focus the page as usual).
@@ -185,10 +183,10 @@ What it gives you:
 
 ## How it's tested
 
-`YH_BROWSER_PROBE=<steps.json>` runs tool calls at launch and prints the results (see CLAUDE.md). The MCP plumbing has unit tests and an integration test against the real CLI.
+`YH_BROWSER_PROBE=<steps.json>` runs tool calls at launch and prints the results (see CLAUDE.md). `scripts/browser-fidelity/run.sh` checks the page, screenshots and input against a plain WKWebView. The MCP plumbing has unit tests (`cargo test -p yh-core -- mcp::`).
 
 ## Decided
 
 - A thread's tabs reopen at their last URLs when its browser is next used; the agent's next `open` takes over a reopened tab.
 - The side chat gets the read-only tools (`status`, `snapshot`, `screenshot`, `wait_for`, `console`, `network`) on the thread's browser.
-- Cookie import from Safari and Chrome is wanted. Built as Import Cookies… in the More menu: you pick a browser and profile, then the sites; nothing is read until you pick, and nothing is selected by default. Safari's file needs Full Disk Access; Chromium values are decrypted with PBKDF2/AES-128-CBC from the browser's Safe Storage keychain item (macOS asks you), dropping the domain hash newer databases prefix. The readers are tested on synthetic files in `CookieImportTests`.
+- Cookie import from Safari and Chrome: Import Sign-ins… (`yh-core/src/cookies.rs`): you pick a browser and profile, then the sites; nothing is read until you pick, and nothing is selected by default. Safari's file needs Full Disk Access; Chromium values are decrypted with PBKDF2/AES-128-CBC from the browser's Safe Storage keychain item (macOS asks you), dropping the domain hash newer databases prefix. The readers are tested on synthetic files (`cargo test -p yh-core -- cookies::`).
