@@ -696,7 +696,7 @@ impl SettingsView {
                             .child(Button::new("data-reveal").small().ghost().label("Show in Finder").on_click(move |_, _, cx| cx.reveal_path(&data_dir)))
                             .child(Button::new("state-export").small().outline().label("Export State…").on_click({
                                 let ws = self.workspace.clone();
-                                move |_, _, cx| crate::ui::state_transfer::export(ws.clone(), cx)
+                                move |_, window, cx| crate::ui::state_transfer::export(ws.clone(), window, cx)
                             }))
                             .child(Button::new("state-import").small().outline().label("Import State…").on_click({
                                 let ws = self.workspace.clone();

@@ -372,12 +372,6 @@ fn ns_string(s: &str) -> id {
     }
 }
 
-/// A notification from the app (`YH_NOTIFICATIONS=log` prints it instead, so a test run never
-/// asks for permission). The first one asks macOS for permission.
-pub fn notify(title: &str, body: &str) {
-    post(title, "", body, None);
-}
-
 /// Threads' notifications, clicked: their thread IDs, for the workspace to open.
 fn clicks() -> &'static (flume::Sender<String>, flume::Receiver<String>) {
     static CLICKS: std::sync::OnceLock<(flume::Sender<String>, flume::Receiver<String>)> = std::sync::OnceLock::new();

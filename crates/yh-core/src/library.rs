@@ -258,6 +258,36 @@ impl Library {
         library
     }
 
+    /// After an import: someone else's Home folder isn't here. A development run's Home is its
+    /// own `home` folder, whatever the file says; otherwise a Home whose folder is missing
+    /// goes back to your home folder (the Swift app's `importedState`). Returns where it runs.
+    pub fn fix_imported_home(&mut self, data_folder: &Path, development: bool) -> Option<String> {
+        let id = self.setting("homeProjectID").and_then(|v| v.as_str().map(str::to_string)).or_else(|| self.projects.first().map(|p| p.id.clone()))?;
+        let current = self.projects.iter().find(|p| p.id == id)?.path.clone();
+        let (path, name) = if development {
+            let home = data_folder.join("home");
+            let _ = std::fs::create_dir_all(&home);
+            (home.to_string_lossy().into_owned(), None)
+        } else if !Path::new(&current).is_dir() {
+            (env("HOME").unwrap_or_default(), Some("Home".to_string()))
+        } else {
+            return Some(current);
+        };
+        self.update_project(&id, |p| {
+            p.insert("path".into(), path.clone().into());
+            if let Some(n) = &name {
+                p.insert("name".into(), n.clone().into());
+            }
+        });
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == id) {
+            p.path = path.clone();
+            if let Some(n) = name {
+                p.name = n;
+            }
+        }
+        Some(path)
+    }
+
     pub fn project_path(&self, id: &str) -> Option<String> {
         self.projects.iter().find(|p| p.id == id).map(|p| p.path.clone())
     }

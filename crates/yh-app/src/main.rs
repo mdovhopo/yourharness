@@ -20,6 +20,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use ui::root::*;
 
+/// A state was imported at this launch: its Home is fixed up and its sign-ins go to the browser.
+static IMPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// The main window: closing it quits.
 struct MainWindow(gpui_kit::WindowId);
 
@@ -50,9 +53,15 @@ fn main() {
         }
         if let Some(manifest) = yh_core::state_archive::apply_pending(&dir) {
             eprintln!("STATE imported: {}", ui::state_transfer::summary(&manifest["contents"]));
+            IMPORTED.store(true, std::sync::atomic::Ordering::SeqCst);
         }
     }
-    let library = Arc::new(yh_core::library::Library::open());
+    let mut library = yh_core::library::Library::open();
+    if IMPORTED.load(std::sync::atomic::Ordering::SeqCst) {
+        let home = library.fix_imported_home(&yh_core::library::data_directory(), env("YH_DATA_DIR").is_some());
+        eprintln!("STATE Home runs in {}", home.unwrap_or_default());
+    }
+    let library = Arc::new(library);
     theme::set_chosen_appearance(library.setting("appearance").and_then(|v| v.as_str().map(str::to_string)));
 
     let application = gpui_kit::application().with_assets(gpui_kit::assets::Assets);
@@ -233,6 +242,21 @@ fn main() {
             });
         }
 
+        // `YH_STATE_IMPORT_ASK=<file>`: Import State's question for it, after `YH_DRAFT_DELAY`
+        // (`YH_STATE_IMPORT_CONFIRM=1` then says yes, keeping a copy, and restarts).
+        if let Some(file) = env("YH_STATE_IMPORT_ASK") {
+            let delay: f64 = env("YH_DRAFT_DELAY").and_then(|v| v.parse().ok()).unwrap_or(1.0);
+            let workspace = workspace.clone();
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(Duration::from_secs_f64(delay)).await;
+                let _ = window.update(cx, |_, window, cx| ui::state_transfer::ask_import(workspace.clone(), std::path::PathBuf::from(&file), window, cx));
+            })
+            .detach();
+        }
+        // An import's sign-ins: each of its projects' browser gets exactly the file's.
+        if let Some(cookies) = yh_core::state_archive::take_cookies(&yh_core::library::data_directory()) {
+            ui::state_transfer::apply_cookies(&workspace, cookies, cx);
+        }
         ui::jobs::guard_quit(workspace.clone(), window.into(), cx);
         cx.on_app_quit({
             let workspace = workspace.clone();
@@ -776,7 +800,7 @@ fn main() {
         }
         // `YH_STATE_EXPORT=<file.yhstate>`: the whole state exported at launch, its manifest printed.
         if let Some(file) = env("YH_STATE_EXPORT") {
-            ui::state_transfer::export_to(&workspace, std::path::PathBuf::from(file), cx);
+            ui::state_transfer::export_to(&workspace, std::path::PathBuf::from(file), env("YH_STATE_EXPORT_SIGNINS").as_deref() == Some("1"), None, cx);
         }
         // `YH_IMPORT_COOKIES=<Cookies.binarycookies>`: a Safari-format file's cookies imported into the
         // selected thread's project's browser at launch (a synthetic file: never read your real

@@ -812,7 +812,7 @@ impl Render for RootView {
             .on_action(cx.listener(|this, _: &EndOfThread, _, cx| this.jump(i64::MAX, cx)))
             .on_action(cx.listener(|this, _: &AddProject, _, cx| this.sidebar.update(cx, |s, cx| s.add_project(cx))))
             .on_action(cx.listener(|this, _: &ResumeSession, window, cx| this.resume.update(cx, |s, cx| s.show(window, cx))))
-            .on_action(cx.listener(|this, _: &ExportState, _, cx| crate::ui::state_transfer::export(this.workspace.clone(), cx)))
+            .on_action(cx.listener(|this, _: &ExportState, window, cx| crate::ui::state_transfer::export(this.workspace.clone(), window, cx)))
             .on_action(cx.listener(|this, _: &ImportState, window, cx| crate::ui::state_transfer::import(this.workspace.clone(), window, cx)))
             .on_action(cx.listener(|_, _: &CheckForUpdates, _, cx| {
                 if let Some(links) = cx.try_global::<crate::ui::settings::SettingsLinks>() {

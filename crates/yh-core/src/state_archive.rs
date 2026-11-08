@@ -8,8 +8,9 @@
 //!                 (snapshots), attachments/, …
 //! ```
 //!
-//! (The Swift app also wrote `defaults.plist` and `browser-cookies.json`; read here they're
-//! left alone.) Importing replaces the app's items at the next launch, before the database
+//! and `browser-cookies.json` when sign-ins went with it: each project's browser cookies by its
+//! ID, as the Swift app writes them (`ImportedCookie`, dates in seconds since 2001). (The Swift
+//! app also wrote `defaults.plist`; read here it's left alone.) Importing replaces the app's items at the next launch, before the database
 //! opens: `stage` puts the file's contents in the data folder's `pending-import`, and
 //! `apply_pending` swaps them in, in steps that pick up where they stopped after a crash.
 
@@ -22,6 +23,42 @@ use std::process::{Command, Stdio};
 pub const FORMAT: &str = "yourharness-state";
 pub const FORMAT_VERSION: i64 = 1;
 pub const PENDING: &str = "pending-import";
+/// Each project's browser cookies in a state file, and where an import keeps them until the
+/// browser takes them.
+const COOKIES: &str = "browser-cookies.json";
+const STAGED_COOKIES: &str = "imported-cookies.json";
+/// Swift's dates count from 2001.
+const SWIFT_EPOCH: f64 = 978_307_200.;
+
+fn cookie_to_swift(c: &crate::cookies::Cookie) -> Value {
+    json!({
+        "domain": c.domain, "name": c.name, "value": c.value, "path": c.path,
+        "expires": c.expires.map(|e| e - SWIFT_EPOCH),
+        "isSecure": c.secure, "isHTTPOnly": c.http_only, "sameSite": c.same_site,
+    })
+}
+
+fn cookie_from_swift(v: &Value) -> Option<crate::cookies::Cookie> {
+    Some(crate::cookies::Cookie {
+        domain: v["domain"].as_str()?.to_string(),
+        name: v["name"].as_str()?.to_string(),
+        value: v["value"].as_str().unwrap_or("").to_string(),
+        path: v["path"].as_str().unwrap_or("/").to_string(),
+        expires: v["expires"].as_f64().map(|e| e + SWIFT_EPOCH),
+        secure: v["isSecure"].as_bool().unwrap_or(false),
+        http_only: v["isHTTPOnly"].as_bool().unwrap_or(false),
+        same_site: v["sameSite"].as_str().map(str::to_string),
+    })
+}
+
+/// After an import with sign-ins: each project's cookies from the file, taken once.
+pub fn take_cookies(data_folder: &Path) -> Option<std::collections::BTreeMap<String, Vec<crate::cookies::Cookie>>> {
+    let file = data_folder.join(STAGED_COOKIES);
+    let data = std::fs::read(&file).ok()?;
+    let _ = std::fs::remove_file(&file);
+    let v: Value = serde_json::from_slice(&data).ok()?;
+    Some(v.as_object()?.iter().map(|(p, list)| (p.clone(), list.as_array().map(|a| a.iter().filter_map(cookie_from_swift).collect()).unwrap_or_default())).collect())
+}
 
 /// What the app keeps in its data folder: what an export takes and an import replaces.
 pub const ITEMS: &[&str] = &["harness.sqlite", "usage.sqlite", "attachments", "memory-imports", "state.json", "threads"];
@@ -89,7 +126,7 @@ fn size(path: &Path) -> u64 {
 
 /// Writes what the app keeps, the databases as of now, to `file`; returns the manifest.
 /// Blocks: off the main thread.
-pub fn export(db: &Database, data_folder: &Path, app: Value, file: &Path) -> Result<Value, String> {
+pub fn export(db: &Database, data_folder: &Path, app: Value, cookies: Option<&std::collections::BTreeMap<String, Vec<crate::cookies::Cookie>>>, file: &Path) -> Result<Value, String> {
     let work = temp("yourharness-export");
     let data = work.join("data");
     let result = (|| {
@@ -136,6 +173,12 @@ pub fn export(db: &Database, data_folder: &Path, app: Value, file: &Path) -> Res
             "dataFolder": data_folder.to_string_lossy(),
             "contents": contents(&data),
         });
+        let mut manifest = manifest;
+        if let Some(cookies) = cookies {
+            let file: serde_json::Map<String, Value> = cookies.iter().map(|(p, list)| (p.clone(), Value::Array(list.iter().map(cookie_to_swift).collect()))).collect();
+            std::fs::write(work.join(COOKIES), serde_json::to_vec(&Value::Object(file)).unwrap_or_default()).map_err(|e| e.to_string())?;
+            manifest["contents"]["browserCookies"] = Value::from(cookies.values().map(Vec::len).sum::<usize>());
+        }
         std::fs::write(work.join("manifest.json"), serde_json::to_vec_pretty(&manifest).unwrap_or_default()).map_err(|e| e.to_string())?;
         let zip = temp("yourharness-export").with_extension("zip");
         ditto(&["-c", "-k", "--norsrc", "--noextattr", "--noqtn", &work.to_string_lossy(), &zip.to_string_lossy()], "Couldn't write the file")?;
@@ -201,6 +244,13 @@ fn read_manifest(folder: &Path) -> Result<Value, String> {
 pub fn stage(opened: Opened, data_folder: &Path) -> Result<(), String> {
     let pending = data_folder.join(PENDING);
     std::fs::create_dir_all(data_folder).map_err(|e| e.to_string())?;
+    // The file's sign-ins wait beside it, for the browser once the app is back (`take_cookies`);
+    // a file without them leaves the browser as it is.
+    let _ = std::fs::remove_file(data_folder.join(STAGED_COOKIES));
+    let cookies = opened.folder.join(COOKIES);
+    if cookies.exists() {
+        let _ = std::fs::rename(&cookies, data_folder.join(STAGED_COOKIES));
+    }
     let _ = std::fs::remove_dir_all(&pending);
     if std::fs::rename(&opened.folder, &pending).is_err() {
         // Across volumes: copy, then let go of the original.
@@ -288,8 +338,11 @@ mod tests {
         let db = Database::open(&a).unwrap();
         db.flush();
         let file = root.join("s.yhstate");
-        let manifest = export(&db, &a, json!({ "name": "test" }), &file).unwrap();
+        let cookie = crate::cookies::Cookie { domain: ".example.com".into(), name: "sid".into(), value: "1".into(), path: "/".into(), expires: Some(1_800_000_000.), secure: true, http_only: true, same_site: Some("lax".into()) };
+        let cookies: std::collections::BTreeMap<String, Vec<crate::cookies::Cookie>> = [("P1".to_string(), vec![cookie.clone()])].into();
+        let manifest = export(&db, &a, json!({ "name": "test" }), Some(&cookies), &file).unwrap();
         assert_eq!(manifest["contents"]["attachments"], 1);
+        assert_eq!(manifest["contents"]["browserCookies"], 1);
         // Into another folder that has a state of its own: replaced at "launch".
         std::fs::create_dir_all(b.join("attachments")).unwrap();
         std::fs::write(b.join("attachments/old.png"), b"old").unwrap();
@@ -301,6 +354,9 @@ mod tests {
         assert!(!b.join("attachments/old.png").exists());
         assert!(b.join("harness.sqlite").exists());
         assert!(!b.join(PENDING).exists());
+        // The sign-ins wait for the browser, once.
+        assert_eq!(take_cookies(&b).unwrap()["P1"], vec![cookie]);
+        assert!(take_cookies(&b).is_none());
         let _ = std::fs::remove_dir_all(&root);
     }
 }

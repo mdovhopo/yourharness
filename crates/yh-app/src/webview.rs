@@ -287,6 +287,50 @@ pub fn clear_store(project: &str) {
     }
 }
 
+/// Every cookie in a project's browser data store (by its UUID), for Export State's sign-ins.
+pub fn read_cookies(project: &str, reply: flume::Sender<Vec<yh_core::cookies::Cookie>>) {
+    unsafe {
+        let identifier: id = msg_send![class!(NSUUID), alloc];
+        let identifier: id = msg_send![identifier, initWithUUIDString: ns_string(project)];
+        if identifier == nil {
+            let _ = reply.send(vec![]);
+            return;
+        }
+        let data: id = msg_send![class!(WKWebsiteDataStore), dataStoreForIdentifier: identifier];
+        let _: id = msg_send![data, retain];
+        let store: id = msg_send![data, httpCookieStore];
+        let data_ptr = data as usize;
+        let done = ConcreteBlock::new(move |cookies: id| {
+            let mut out = vec![];
+            let count: usize = if cookies == nil { 0 } else { msg_send![cookies, count] };
+            for i in 0..count {
+                let c: id = msg_send![cookies, objectAtIndex: i];
+                let (domain, name, value, path): (id, id, id, id) = (msg_send![c, domain], msg_send![c, name], msg_send![c, value], msg_send![c, path]);
+                let expires: id = msg_send![c, expiresDate];
+                let expires = if expires == nil { None } else { Some(msg_send![expires, timeIntervalSince1970]) };
+                let secure: bool = msg_send![c, isSecure];
+                let http_only: bool = msg_send![c, isHTTPOnly];
+                let same: id = msg_send![c, sameSitePolicy];
+                out.push(yh_core::cookies::Cookie {
+                    domain: rust_string(domain).unwrap_or_default(),
+                    name: rust_string(name).unwrap_or_default(),
+                    value: rust_string(value).unwrap_or_default(),
+                    path: rust_string(path).unwrap_or_else(|| "/".into()),
+                    expires,
+                    secure,
+                    http_only,
+                    same_site: rust_string(same).map(|s| s.to_lowercase()),
+                });
+            }
+            let _: () = msg_send![data_ptr as id, release];
+            let _ = reply.send(out);
+        })
+        .copy();
+        let _: () = msg_send![store, getAllCookies: &*done];
+        let _: () = msg_send![identifier, release];
+    }
+}
+
 /// Puts cookies in a project's browser data store (by its UUID); replies with how many went in.
 pub fn store_cookies(project: &str, cookies: Vec<yh_core::cookies::Cookie>, reply: flume::Sender<usize>) {
     unsafe {
