@@ -449,17 +449,14 @@ fn user_row(item: &Item, ctx: &RowContext, theme: &Theme, window: &Window) -> An
     let text = e.data.text.clone();
     let images = e.data.attachments.clone();
     let date = e.date;
-    // Sent while Claude worked: waiting for the current step, or how it got in.
-    let note = if e.queued {
-        Some("Queued")
-    } else {
-        match e.delivery.as_deref() {
-            Some("steered") => Some("Steered"),
-            Some("interrupted") => Some("Interrupted and sent"),
-            _ => None,
-        }
+    // Sent while Claude worked: how it got in, under the bubble (queued ones wait above the
+    // composer, not here).
+    let note = match e.delivery.as_deref() {
+        Some("steered") => Some((crate::ui::icons::corner_down_right(), "Steered · Claude read this after its step")),
+        Some("interrupted") => Some((crate::ui::icons::zap(), "Interrupted Claude to send this")),
+        _ => None,
     };
-    let queued = e.queued;
+
     drop(e);
     // Pictures and videos open in Quick Look, the arrow keys going through the message's others.
     // An image in a folder of its own couldn't go inline: it's a file.
@@ -475,7 +472,6 @@ fn user_row(item: &Item, ctx: &RowContext, theme: &Theme, window: &Window) -> An
         .pt(px(space::S))
         .pb(px(space::XS))
         .group("user-message")
-        .when_some(note, |d, n| d.child(div().text_size(px(ts::CAPTION)).text_color(theme.secondary).child(n)))
         .when(!images.is_empty(), |d| {
             d.child(div().flex().flex_wrap().justify_end().gap(px(6.)).mb(px(2.)).children(images.iter().enumerate().map(|(n, name)| {
                 let path = attachments_dir().join(name).to_string_lossy().into_owned();
@@ -488,7 +484,6 @@ fn user_row(item: &Item, ctx: &RowContext, theme: &Theme, window: &Window) -> An
                 let tile = div()
                     .id(("user-image", ((pos as u64) << 8 | n as u64) as usize))
                     .cursor_pointer()
-                    .when(queued, |d| d.opacity(0.6))
                     .on_click(move |_, _, _| match index {
                         Some(at) => crate::platform::quick_look(all.clone(), at),
                         None => {
@@ -519,9 +514,11 @@ fn user_row(item: &Item, ctx: &RowContext, theme: &Theme, window: &Window) -> An
                     .px(px(14.))
                     .py(px(space::S))
                     .rounded(px(radius::LARGE))
-                    .when(queued, |d| d.opacity(0.6))
                     .child(user_text(&text, ctx, theme, window)),
             )
+        })
+        .when_some(note, |d, (mark, n)| {
+            d.child(div().flex().items_center().gap(px(space::XS)).text_size(px(ts::CAPTION)).text_color(theme.secondary).child(mark.size(px(11.)).text_color(theme.secondary)).child(n))
         })
         // Copy and when it was sent, small under it. Copy's room is always kept: hovering
         // mustn't change the row's height.
@@ -1513,6 +1510,10 @@ fn step(state: &ThreadState, ctx: &RowContext, pos: i64, n: usize, e: &EntryRef,
         return div().into_any_element();
     }
     if let Some(plan) = state.plan_steps.get(&id) {
+        // A plan with nothing in it yet (the first TaskCreate before its result): nothing to show.
+        if plan.items.is_empty() {
+            return div().into_any_element();
+        }
         return plan_step(plan, state.latest_plan_step.as_deref() == Some(id.as_str()), theme);
     }
     let name = b.data.tool_name.clone().unwrap_or_else(|| "Tool".into());

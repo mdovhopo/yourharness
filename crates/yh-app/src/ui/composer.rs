@@ -1818,7 +1818,16 @@ impl QuestionCard {
                     q["multiSelect"].as_bool().unwrap_or(false),
                     q["options"]
                         .as_array()
-                        .map(|o| o.iter().filter_map(|o| Some((o["label"].as_str()?.to_string(), o["description"].as_str().map(str::to_string)))).collect())
+                        // A description that only says the label again (or nothing) isn't shown.
+                        .map(|o| {
+                            o.iter()
+                                .filter_map(|o| {
+                                    let label = o["label"].as_str()?.to_string();
+                                    let description = o["description"].as_str().map(|d| d.trim().to_string()).filter(|d| !d.is_empty() && !d.eq_ignore_ascii_case(label.trim()));
+                                    Some((label, description))
+                                })
+                                .collect()
+                        })
                         .unwrap_or_default(),
                 ))
             })

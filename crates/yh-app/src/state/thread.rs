@@ -28,6 +28,9 @@ pub struct Subagent {
     /// Tokens it has used so far, and its tool calls, as the CLI counts them.
     pub tokens: Option<u64>,
     pub tool_uses: Option<u64>,
+    /// When it started (seconds since 1970), and how long it ran, as the CLI counts it.
+    pub started_at: f64,
+    pub duration_ms: Option<u64>,
 }
 
 /// One thing a sub-agent did: a message (`tool` None) or a tool call with its result.
@@ -44,12 +47,87 @@ const SUBAGENT_LOG: usize = 200;
 
 impl Subagent {
     fn new(description: String) -> Subagent {
-        Subagent { description, status: "running".into(), steps: 0, report: None, log: vec![], task_id: None, activity: None, tokens: None, tool_uses: None }
+        Subagent {
+            description,
+            status: "running".into(),
+            steps: 0,
+            report: None,
+            log: vec![],
+            task_id: None,
+            activity: None,
+            tokens: None,
+            tool_uses: None,
+            started_at: yh_core::library::now_ms() / 1000.0,
+            duration_ms: None,
+        }
+    }
+
+    /// As saved (the Swift app's `SubagentSnapshot`): with what it was asked, from its call.
+    fn record(&self, input: Option<&str>) -> yh_core::subagent_record::SubagentRecord {
+        use yh_core::subagent_record::{SubagentEntry, SubagentRecord};
+        let input: serde_json::Value = input.and_then(|i| serde_json::from_str(i).ok()).unwrap_or_default();
+        SubagentRecord {
+            description: self.description.clone(),
+            agent_type: input["subagent_type"].as_str().map(str::to_string),
+            prompt: input["prompt"].as_str().unwrap_or("").to_string(),
+            is_background: input["run_in_background"] == true,
+            status: self.status.clone(),
+            tool_uses: self.tool_uses.or_else(|| (self.steps > 0).then_some(self.steps as u64)),
+            tokens: self.tokens,
+            duration_ms: self.duration_ms,
+            report: self.report.clone(),
+            started_at: self.started_at,
+            entries: self
+                .log
+                .iter()
+                .enumerate()
+                .map(|(n, step)| match &step.tool {
+                    Some(tool) => SubagentEntry {
+                        id: step.id.clone(),
+                        kind: "tool".into(),
+                        text: String::new(),
+                        tool_name: Some(tool.clone()),
+                        tool_input: Some(step.text.clone()),
+                        tool_result: step.result.clone(),
+                        tool_is_error: step.result.is_some().then_some(step.is_error),
+                    },
+                    None => SubagentEntry { id: format!("s{n}"), kind: "assistant".into(), text: step.text.clone(), ..Default::default() },
+                })
+                .collect(),
+        }
+    }
+
+    /// What was saved, back into a run (one still running when saved has stopped).
+    fn from_record(r: yh_core::subagent_record::SubagentRecord) -> Subagent {
+        let log: Vec<SubStep> = r
+            .entries
+            .into_iter()
+            .filter_map(|e| match e.kind.as_str() {
+                "tool" => Some(SubStep { tool: e.tool_name.or(Some("Tool".into())), id: e.id, text: e.tool_input.unwrap_or_default(), result: e.tool_result, is_error: e.tool_is_error == Some(true) }),
+                "assistant" if !e.text.is_empty() => Some(SubStep { tool: None, id: String::new(), text: e.text, result: None, is_error: false }),
+                _ => None,
+            })
+            .collect();
+        let steps = log.iter().filter(|s| s.tool.is_some()).count();
+        Subagent {
+            description: r.description,
+            status: r.status,
+            steps: r.tool_uses.map_or(steps, |n| n as usize),
+            report: r.report,
+            log,
+            task_id: None,
+            activity: None,
+            tokens: r.tokens,
+            tool_uses: r.tool_uses,
+            started_at: r.started_at,
+            duration_ms: r.duration_ms,
+        }
     }
 
     fn apply(&mut self, usage: yh_core::claude::SubagentUsage) {
         self.tokens = usage.tokens.or(self.tokens);
         self.tool_uses = usage.tool_uses.or(self.tool_uses);
+        self.duration_ms = usage.duration_ms.or(self.duration_ms);
     }
 }
 
@@ -68,26 +146,28 @@ pub struct Entry {
     pub seq: usize,
     /// When it was written (seconds since 1970), for rows made here.
     pub date: Option<f64>,
-    /// Your message, sent while Claude works, waiting for the current step to end.
-    pub queued: bool,
+
+
     /// How your message reached Claude: `steered` (joined the turn), `interrupted` (stopped it).
     pub delivery: Option<String>,
 }
 
 pub type EntryRef = Rc<RefCell<Entry>>;
 
-fn entry(data: EntryData, seq: usize) -> EntryRef {
+fn entry(mut data: EntryData, seq: usize) -> EntryRef {
     let date = data.date;
+    // A sub-agent's call read from history: its run as it was saved.
+    let sub = data.subagent.take().and_then(|b| yh_core::subagent_record::SubagentRecord::decode(&b)).map(Subagent::from_record);
     Rc::new(RefCell::new(Entry {
         data,
         live: false,
-        sub: None,
+        sub,
         version: 0,
         open: false,
         markdown: None,
         seq,
         date,
-        queued: false,
+
         delivery: None,
     }))
 }
@@ -119,6 +199,7 @@ impl Entry {
             delivery: self.delivery.clone(),
             attachments: (!self.data.attachments.is_empty()).then(|| serde_json::to_string(&self.data.attachments).unwrap_or_default()),
             notice_style: (self.data.kind == Kind::Notice && self.data.is_error).then(|| "error".into()),
+            subagent: self.sub.as_ref().map(|s| s.record(self.data.tool_input.as_deref()).encode()),
             ..Default::default()
         }
     }
@@ -209,6 +290,15 @@ fn expand_all() -> bool {
     *EXPAND.get_or_init(|| std::env::var("YH_EXPAND_WORK").as_deref() == Ok("1"))
 }
 
+/// Your message sent while Claude works, waiting for its current step.
+#[derive(Clone, Debug)]
+pub struct Queued {
+    pub id: String,
+    pub text: String,
+    /// Images (names in `attachments/`), then files.
+    pub attachments: Vec<String>,
+}
+
 /// Claude asks you to sign in to an MCP server (`mcp__harness__sign_in_to_mcp_server`).
 #[derive(Clone, Debug)]
 pub struct SignInAsk {
@@ -257,14 +347,11 @@ impl ThreadState {
         self.elicitations.first()
     }
 
-    /// Your queued messages go back into the composer, and their rows become notes: for a
-    /// stop, and when `claude` is gone with them unread.
+    /// Your queued messages go back into the composer: when `claude` is gone with them unread.
     pub fn restore_queued(&mut self) {
-        let queued: Vec<EntryRef> = self.items.iter().rev().take(40).flat_map(|i| i.entries.iter()).filter(|e| e.borrow().queued).cloned().collect();
-        for e in queued.into_iter().rev() {
-            let id = e.borrow().data.id.clone();
-            self.composer.restore_on_withdraw.insert(id);
-            self.withdrawn(&e);
+        for q in std::mem::take(&mut self.queue) {
+            self.composer.restore_on_withdraw.remove(&q.id);
+            self.composer.restored.push((q.id, q.text, q.attachments));
         }
     }
 
@@ -292,6 +379,9 @@ pub struct ThreadState {
     /// Requests waiting for you, oldest first: parallel sub-agents can each ask at once. The
     /// composer shows the first; each is answered by its own request id.
     pub permissions: Vec<Permission>,
+    /// Your messages sent while Claude works, oldest first, until it picks them up: shown above
+    /// the composer, not in the transcript.
+    pub queue: Vec<Queued>,
     /// MCP servers' questions mid-call, oldest first: the composer shows the first.
     pub elicitations: Vec<Elicitation>,
     pub sign_in: Option<SignInAsk>,
@@ -387,6 +477,7 @@ impl ThreadState {
             find_query: None,
             permissions: vec![],
             elicitations: vec![],
+            queue: vec![],
             sign_in: None,
             interrupt_requested: false,
             stopped_by_you: false,
@@ -607,90 +698,58 @@ impl ThreadState {
         self.touch_pos(pos);
     }
 
-    /// Your message, as sent: `id` is what the CLI's lifecycle events name it by.
+    /// Your message, as sent: `id` is what the CLI's lifecycle events name it by. Sent while
+    /// Claude works (`queued`), it waits above the composer and joins the transcript where
+    /// Claude picks it up, as in the Swift app: never in both places.
     pub fn add_user(&mut self, text: &str, images: &[String], id: &str, queued: bool, delivery: Option<&str>) {
+        if queued {
+            self.queue.push(Queued { id: id.to_string(), text: text.to_string(), attachments: images.to_vec() });
+            return;
+        }
         let mut data = EntryData::new(id, Kind::User, text);
         data.attachments = images.to_vec();
         let e = self.append(data);
-        {
-            let mut b = e.borrow_mut();
-            b.queued = queued;
-            b.delivery = delivery.map(str::to_string);
-        }
+        e.borrow_mut().delivery = delivery.map(str::to_string);
         self.refresh_folds();
         // Jobs started from here on are what Claude waits on.
         self.jobs.turn = Some(id.to_string());
     }
 
     /// The CLI says where your message is. True when the composer has to show it (a queued
-    /// message taken back).
+    /// message picked up or taken back).
     fn lifecycle(&mut self, id: &str, state: &str) -> bool {
-        let found = self.items.iter().rev().take(40).flat_map(|i| i.entries.iter()).find(|e| e.borrow().data.id == id).cloned();
-        let Some(e) = found else { return false };
-        // Only a queued message is taken back; the one a stop cut short ends `cancelled` too.
-        if state == "cancelled" {
-            return e.borrow().queued && self.withdrawn(&e);
+        let Some(at) = self.queue.iter().position(|q| q.id == id) else { return false };
+        match state {
+            "started" | "completed" => {
+                // Claude has it now: into the transcript, where it entered the conversation.
+                let q = self.queue.remove(at);
+                let delivery = if self.composer.sending_now.remove(id) {
+                    Some("interrupted")
+                } else if self.running {
+                    Some("steered")
+                } else {
+                    // Picked up after the turn ended or was stopped for it: a turn of its own.
+                    None
+                };
+                self.running = true;
+                self.add_user(&q.text, &q.attachments, &q.id, false, delivery);
+                true
+            }
+            "cancelled" => {
+                let q = self.queue.remove(at);
+                self.composer.sending_now.remove(id);
+                if self.composer.restore_on_withdraw.remove(id) {
+                    self.composer.restored.push((q.id, q.text, q.attachments));
+                }
+                true
+            }
+            _ => false,
         }
-        let queued = state == "queued";
-        let was_queued = e.borrow().queued;
-        if was_queued == queued {
-            return false;
-        }
-        e.borrow_mut().queued = queued;
-        if !queued && self.composer.sending_now.remove(id) {
-            e.borrow_mut().delivery = Some("interrupted".into());
-        }
-        self.touch(&e);
-        // Picked up after the turn was stopped for it: a turn of its own.
-        if was_queued && state == "started" && !self.running {
-            self.running = true;
-        }
-        // It left the queue above the composer.
-        was_queued
     }
 
     /// Queued messages still waiting for Claude, oldest first: (id, text, attachments).
     pub fn queued_messages(&self) -> Vec<(String, String, usize)> {
-        let mut out: Vec<(String, String, usize)> = self
-            .items
-            .iter()
-            .rev()
-            .take(40)
-            .flat_map(|i| i.entries.iter())
-            .filter(|e| e.borrow().queued)
-            .map(|e| {
-                let b = e.borrow();
-                (b.data.id.clone(), b.data.text.clone(), b.data.attachments.len())
-            })
-            .collect();
-        out.reverse();
-        out
-    }
-
-    /// A queued message the CLI let go of: its row becomes a note, and its text goes back into
-    /// the composer when you asked for that.
-    fn withdrawn(&mut self, e: &EntryRef) -> bool {
-        let (id, text, attachments) = {
-            let b = e.borrow();
-            (b.data.id.clone(), b.data.text.clone(), b.data.attachments.clone())
-        };
-        let restore = self.composer.restore_on_withdraw.remove(&id);
-        {
-            let mut b = e.borrow_mut();
-            b.queued = false;
-            b.delivery = None;
-            b.data.kind = Kind::Notice;
-            b.data.text = if restore { "Taken back into the composer before Claude read it.".into() } else { "Withdrawn before Claude read it.".into() };
-            b.data.attachments.clear();
-        }
-        if let Some(item) = self.items.iter_mut().rev().take(40).find(|i| i.entries.iter().any(|x| Rc::ptr_eq(x, e))) {
-            item.ty = ItemType::Notice;
-        }
-        self.touch(e);
-        if restore {
-            self.composer.restored.push((id, text, attachments));
-        }
-        true
+        self.queue.iter().map(|q| (q.id.clone(), q.text.clone(), q.attachments.len())).collect()
     }
 
     pub fn notice(&mut self, text: &str) {
@@ -1218,6 +1277,7 @@ impl ThreadState {
                             sub.report = summary;
                         }
                         b.version += 1;
+                        self.dirty.insert(b.seq);
                     }
                     self.touch_pos(pos);
                 }
@@ -1331,6 +1391,8 @@ impl ThreadState {
     /// Changes what a sub-agent did (its log), and tells whoever follows it.
     fn subagent_log(&mut self, parent: &str, change: impl FnOnce(&mut Vec<SubStep>)) {
         let Some((e, pos)) = self.tools.get(parent).cloned() else { return };
+        // Saved with its call (the `subagent` column).
+        self.dirty.insert(e.borrow().seq);
         {
             let mut b = e.borrow_mut();
             let sub = b.sub.get_or_insert_with(|| Subagent::new("Sub-agent".into()));

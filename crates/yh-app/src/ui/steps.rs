@@ -64,9 +64,25 @@ pub fn present(name: &str, input: &Value, result: Option<&str>) -> Presentation 
         "ExitPlanMode" => p(IconName::Map, "Plan ready", String::new()),
         "AskUserQuestion" => p(IconName::Info, "Ask", input["questions"][0]["question"].as_str().map(|q| first_line(q, 200)).unwrap_or_default()),
         // Claude Code loads MCP tools when they're first needed.
-        "ToolSearch" if query.starts_with("select:") && query.contains(BROWSER_PREFIX) => p(IconName::Globe, "Load browser tools", String::new()),
-        "ToolSearch" if query.starts_with("select:") && query.contains(MEMORY_PREFIX) => p(IconName::MemoryStick, "Load memory tools", String::new()),
-        "ToolSearch" if query.starts_with("select:") => p(IconName::Settings2, "Load tools", query.trim_start_matches("select:").replace(',', ", ")),
+        // Named by what it loads: all browser tools, all memory tools, else each one.
+        "ToolSearch" if query.starts_with("select:") => {
+            let names: Vec<&str> = query.trim_start_matches("select:").split(',').map(str::trim).filter(|n| !n.is_empty()).collect();
+            let all = |prefix: &str| !names.is_empty() && names.iter().all(|n| n.starts_with(prefix));
+            if all(BROWSER_PREFIX) {
+                p(IconName::Globe, "Load browser tools", String::new())
+            } else if all(MEMORY_PREFIX) {
+                p(IconName::MemoryStick, "Load memory tools", String::new())
+            } else {
+                let readable: Vec<String> = names
+                    .iter()
+                    .map(|n| match n.strip_prefix("mcp__").and_then(|rest| rest.split_once("__")) {
+                        Some((server, tool)) => format!("{server}: {}", tool.replace('_', " ")),
+                        None => n.to_string(),
+                    })
+                    .collect();
+                p(IconName::Settings2, "Load tools", readable.join(", "))
+            }
+        }
         "ToolSearch" => p(IconName::Search, "Find tools", query),
         _ if name.starts_with(MEMORY_PREFIX) => memory(&name[MEMORY_PREFIX.len()..], input),
         _ if name.starts_with(BROWSER_PREFIX) => browser(&name[BROWSER_PREFIX.len()..], input, result),
@@ -263,6 +279,9 @@ mod tests {
         assert_eq!((p.verb.as_str(), p.detail.as_str()), ("Run command", "cargo test"));
         let p = present("ToolSearch", &json!({"query": "select:mcp__browser__open,mcp__browser__click"}), None);
         assert_eq!(p.verb, "Load browser tools");
+        let p = present("ToolSearch", &json!({"query": "select:TodoWrite,mcp__memory__track"}), None);
+        assert_eq!((p.verb.as_str(), p.detail.as_str()), ("Load tools", "TodoWrite, memory: track"));
+        assert_eq!(present("ToolSearch", &json!({"query": "select:mcp__memory__save,mcp__memory__read"}), None).verb, "Load memory tools");
         let p = present("mcp__browser__click", &json!({"ref": "e3"}), Some("Clicked button \"Sign in\".\nmore"));
         assert_eq!((p.verb.as_str(), p.detail.as_str()), ("Click", "button \"Sign in\""));
         let p = present("mcp__memory__save", &json!({"title": "Use pnpm"}), None);

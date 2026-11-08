@@ -56,6 +56,8 @@ pub struct EntryData {
     pub date: Option<f64>,
     /// On a message of yours that started a turn: when that turn ended (seconds since 1970).
     pub turn_ended_at: Option<f64>,
+    /// On a sub-agent's call: its run as saved (`subagent_record`), read into the row when held.
+    pub subagent: Option<Vec<u8>>,
 }
 
 impl EntryData {
@@ -72,6 +74,7 @@ impl EntryData {
             attachments: vec![],
             date: None,
             turn_ended_at: None,
+            subagent: None,
         }
     }
 }
@@ -654,6 +657,7 @@ impl EntryData {
         entry.tool_result = row.tool_result.map(|s| head(&s, TOOL_TEXT_LIMIT));
         entry.date = row.date;
         entry.turn_ended_at = row.turn_ended_at;
+        entry.subagent = row.subagent;
         entry.attachments = row.attachments.as_deref().and_then(|a| serde_json::from_str(a).ok()).unwrap_or_default();
         // A notice in the error style reads as one.
         entry.is_error = row.tool_is_error == Some(true) || row.notice_style.as_deref() == Some("error");
