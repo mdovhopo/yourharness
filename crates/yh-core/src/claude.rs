@@ -1270,7 +1270,7 @@ mod tests {
     }
 
     /// The Swift app's capture: a foreground sub-agent reading two files.
-    const SUBAGENT: &str = include_str!("../../../legacy/Tests/HarnessCoreTests/Fixtures/subagent-foreground.jsonl");
+    const SUBAGENT: &str = include_str!("../fixtures/subagent-foreground.jsonl");
 
     #[test]
     fn reads_sub_agent_progress_and_status() {
