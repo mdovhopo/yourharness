@@ -66,6 +66,8 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 - Code blocks scroll sideways rather than wrap, and long tool input and output scroll inside their box, the wheel moving on to the thread at their ends.
 
 ### Fixed
+- Opened work no longer has an empty "Thought" line between steps where Claude Code keeps the thinking to itself, and a refused tool call reads without its `<tool_use_error>` tags.
+- `/compact` no longer shows the output of `/context` and other built-in commands a second time.
 - Claude's actions in the browser no longer take two seconds longer each while the browser isn't showing (you're reading the thread, or another one is open): its pages wait off screen where they keep drawing.
 - An imported state's Home runs in this Mac's folder (a development run's own `home`), not the exporter's, and an export names the app and build that made it.
 - Without `claude`, a thread says "Couldn't find a working `claude` CLI. Check Settings → Agents."

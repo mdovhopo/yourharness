@@ -259,10 +259,22 @@ pub fn subagent_report(result: &str) -> String {
     lines.join("\n").trim().to_string()
 }
 
+/// A failed call's reason without the `<tool_use_error>` tags Claude Code puts round it.
+pub fn unwrap_error(result: &str) -> &str {
+    let t = result.trim();
+    t.strip_prefix("<tool_use_error>").and_then(|r| r.strip_suffix("</tool_use_error>")).map(str::trim).unwrap_or(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn error_without_its_tags() {
+        assert_eq!(unwrap_error("<tool_use_error>Blocked: sleep 30.</tool_use_error>"), "Blocked: sleep 30.");
+        assert_eq!(unwrap_error("Exit code 1\nboom"), "Exit code 1\nboom");
+    }
 
     #[test]
     fn subagent_report_without_its_frame() {

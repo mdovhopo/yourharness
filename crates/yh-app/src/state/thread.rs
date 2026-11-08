@@ -1118,9 +1118,19 @@ impl ThreadState {
             // Answered for you by the workspace (it holds the process), which takes it off the list.
             Event::ElicitationComplete { .. } => false,
             Event::Lifecycle { id, state } => self.lifecycle(&id, &state),
-            Event::CommandOutput(text) => {
-                self.next_note += 1;
-                let id = format!("c{}", self.next_note);
+            Event::CommandOutput { text, id } => {
+                // After `/compact` the CLI sends the outputs it kept again, same `uuid`: shown once.
+                let seen = id.as_deref().is_some_and(|id| self.items.iter().rev().flat_map(|i| i.entries.iter()).any(|e| {
+                    let b = e.borrow();
+                    b.data.kind == Kind::Command && b.data.id == id
+                }));
+                if seen {
+                    return false;
+                }
+                let id = id.unwrap_or_else(|| {
+                    self.next_note += 1;
+                    format!("c{}", self.next_note)
+                });
                 self.append(EntryData::new(id, Kind::Command, &text));
                 false
             }

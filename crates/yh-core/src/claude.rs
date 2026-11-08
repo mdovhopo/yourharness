@@ -336,7 +336,8 @@ pub enum Event {
     Status(String),
     Notice(String),
     /// What a built-in command printed (`/context`, `/usage`): markdown, not a reply.
-    CommandOutput(String),
+    /// `id` is the message's `uuid`: after a `/compact` the CLI sends kept ones again.
+    CommandOutput { text: String, id: Option<String> },
     /// Tokens in the context after Claude's latest message (everything it saw plus what it wrote).
     ContextUsage(u64),
     /// Each model's context window, from a turn's result.
@@ -841,7 +842,7 @@ impl Parser {
                 if !object["local_command_source"].is_null() {
                     let text: Vec<&str> = message["content"].as_array().into_iter().flatten().filter_map(|b| b["text"].as_str()).collect();
                     let text = strip_command_tags(&text.join("\n"));
-                    return if text.is_empty() { vec![] } else { vec![Event::CommandOutput(text)] };
+                    return if text.is_empty() { vec![] } else { vec![Event::CommandOutput { text, id: object["uuid"].as_str().map(str::to_string) }] };
                 }
                 let blocks = message["content"]
                     .as_array()
@@ -1147,7 +1148,10 @@ mod tests {
     #[test]
     fn reads_what_built_in_commands_say() {
         let out = parse(r#"{"type":"assistant","local_command_source":"x","message":{"id":"m","model":"<synthetic>","content":[{"type":"text","text":"<local-command-stdout>## Context Usage</local-command-stdout>"}]}}"#);
-        assert!(matches!(&out[..], [Event::CommandOutput(t)] if t == "## Context Usage"));
+        assert!(matches!(&out[..], [Event::CommandOutput { text: t, .. }] if t == "## Context Usage"));
+        // Its uuid comes along, so the copy sent again after `/compact` is known.
+        let out = parse(r#"{"type":"assistant","uuid":"e8ec","local_command_source":"x","message":{"content":[{"type":"text","text":"Session renamed to: Zed"}]}}"#);
+        assert!(matches!(&out[..], [Event::CommandOutput { id: Some(id), .. }] if id == "e8ec"));
         assert!(matches!(&parse(r#"{"type":"conversation_reset","trigger":"clear"}"#)[..], [Event::ConversationReset]));
         assert!(matches!(&parse(r#"{"type":"system","subtype":"session_title_changed","title":"T"}"#)[..], [Event::TitleChanged(t)] if t == "T"));
         let compacted = parse(r#"{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"manual","pre_tokens":26823,"post_tokens":8253}}"#);

@@ -1556,6 +1556,15 @@ fn work_row(state: &ThreadState, ctx: &RowContext, item: &Item, theme: &Theme) -
     if open {
         let mut body = div().flex().flex_col().gap(px(2.)).pl(px(space::M)).pt(px(2.)).pb(px(space::XS));
         for (n, e) in item.entries.iter().enumerate() {
+            // Thinking Claude Code kept from view says nothing once it's over: a "Thought" line
+            // with nothing to open between every step (0.0.16 left them out too).
+            let blank = {
+                let b = e.borrow();
+                b.data.kind == Kind::Thinking && !b.live && b.data.text.trim().is_empty()
+            };
+            if blank {
+                continue;
+            }
             body = body.child(step(state, ctx, pos, n, e, theme));
         }
         row = row.child(body);
@@ -1911,7 +1920,9 @@ fn step(state: &ThreadState, ctx: &RowContext, pos: i64, n: usize, e: &EntryRef,
             details = details.child(mono_box(output, None, theme));
         } else if let Some(result) = b.data.tool_result.as_ref().filter(|r| !r.is_empty()) {
             let more = b.data.result_len.saturating_sub(result.len());
-            let text = if more > 0 { format!("{result}\n… {more} more characters") } else { result.clone() };
+            // Claude Code wraps a refused or failed call's reason in a tag of its own.
+            let result = if failed { steps::unwrap_error(result) } else { result.as_str() };
+            let text = if more > 0 { format!("{result}\n… {more} more characters") } else { result.to_string() };
             details = details.child(mono_box(text, failed.then_some(theme.error), theme));
         }
         if let Some(shot) = shot {
