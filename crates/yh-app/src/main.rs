@@ -99,6 +99,7 @@ fn main() {
             KeyBinding::new("alt-cmd-h", ui::root::HideOthers, None),
             KeyBinding::new("cmd-m", ui::root::Minimize, None),
             KeyBinding::new("ctrl-cmd-f", ui::root::ToggleFullScreen, None),
+            KeyBinding::new("escape", ui::usage::CloseUsage, Some("UsagePage")),
         ]);
         // Asks first while background jobs run (`ui::jobs::guard_quit`).
         cx.on_action(|_: &Quit, cx| cx.defer(ui::jobs::quit));

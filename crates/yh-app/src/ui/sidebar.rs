@@ -484,7 +484,10 @@ impl Sidebar {
             }
         };
         let name = project.name.clone();
-        let icon = if home { icons::house() } else { Icon::new(IconName::Folder) };
+        // A workspace of repos (a folder or shell holding them) is a stack, the rest a folder, as
+        // the Swift app's `ProjectIcon`; known once the project's been read.
+        let stacked = self.workspace.read(cx).scans.get(&project.id).and_then(|w| w.layout.as_ref()).is_some_and(|l| matches!(l.kind, yh_core::workspace::LayoutKind::Folder | yh_core::workspace::LayoutKind::Shell));
+        let icon = if home { icons::house() } else if stacked { icons::layers() } else { Icon::new(IconName::Folder) };
         let chevron_key = pid.clone();
         let (open_ws, open_id) = (self.workspace.clone(), pid.clone());
         let (mem_ws, mem_id) = (self.workspace.clone(), pid.clone());
@@ -654,7 +657,8 @@ impl Sidebar {
         } else if unread {
             (div().w(px(7.)).h(px(7.)).rounded_full().bg(theme.accent).into_any_element(), "New reply")
         } else {
-            (div().into_any_element(), "")
+            // Idle: a small grey dot, as the Swift app's.
+            (div().w(px(6.)).h(px(6.)).rounded_full().bg(theme.tertiary.opacity(0.6)).into_any_element(), "")
         };
         let status_tip: SharedString = jobs.clone().unwrap_or_else(|| status_tip.into());
         let group: SharedString = format!("thread-row-{id}").into();

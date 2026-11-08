@@ -44,6 +44,10 @@ pub struct ProjectPage {
     /// The threads working in each checkout (by its path), newest first: worked out when the
     /// repos were read, not on every draw.
     threads_here: HashMap<String, Vec<String>>,
+    /// Big workspaces: repos, worktrees and threads filtered by name.
+    filter: Entity<InputState>,
+    /// Claude Code's own memory here: (on, its files), read aside, for the nudge.
+    claude_memory: Option<(bool, usize)>,
     show_others: bool,
     show_uncloned: bool,
     /// `YH_PROJECT_PROBE`: what to do once the repos have been read (see `run_probe`).
@@ -102,8 +106,13 @@ struct MergeRequest {
 }
 
 impl ProjectPage {
-    pub fn new(workspace: Entity<Workspace>, project: String, _window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(workspace: Entity<Workspace>, project: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let tools = Arc::new(WorkspaceTools::find(std::env::var("YH_PATH").ok().as_deref()));
+        let filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter repos, worktrees, threads"));
+        cx.subscribe(&filter, |_, _, _: &gpui_kit::component::input::InputEvent, cx| cx.notify()).detach();
+        if let Ok(words) = std::env::var("YH_PROJECT_FILTER") {
+            filter.update(cx, |f, cx| f.set_value(words, window, cx));
+        }
         let mut page = ProjectPage {
             workspace,
             project,
@@ -116,6 +125,8 @@ impl ProjectPage {
             stacks_installed: None,
             installing: false,
             threads_here: Default::default(),
+            filter,
+            claude_memory: None,
             show_others: false,
             show_uncloned: false,
             probe: std::env::var("YH_PROJECT_PROBE").ok(),
@@ -127,6 +138,7 @@ impl ProjectPage {
         };
         page.refresh(true, cx);
         page.check_stacks(cx);
+        page.read_claude_memory(cx);
         page._poll = Some(cx.spawn(async move |this, cx| loop {
             cx.background_executor().timer(Duration::from_secs(60)).await;
             if this.update(cx, |p, cx| p.refresh(false, cx)).is_err() {
@@ -134,6 +146,88 @@ impl ProjectPage {
             }
         }));
         page
+    }
+
+    /// Whether Claude Code keeps its own memory here too, read aside (the nudge's question).
+    fn read_claude_memory(&mut self, cx: &mut Context<Self>) {
+        let ws = self.workspace.read(cx);
+        let on = ws.library.setting("memoryEnabled").and_then(|v| v.as_bool()).unwrap_or(true);
+        let dismissed = ws.library.setting("claudeMemoryNudgeDismissed").and_then(|v| v.as_array().map(|a| a.iter().any(|x| x.as_str() == Some(self.project.as_str())))).unwrap_or(false);
+        let Some(folder) = ws.project(&self.project).map(|p| p.path.clone()) else { return };
+        if !on || dismissed {
+            self.claude_memory = None;
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            let found = cx
+                .background_executor()
+                .spawn(async move {
+                    let config = yh_core::history::config_directory();
+                    let setting = yh_core::memory_archive::claude_code::setting(&folder, &config);
+                    (!setting.is_off(), yh_core::memory_archive::claude_code::files(&folder, &config).len())
+                })
+                .await;
+            let _ = this.update(cx, |p, cx| {
+                p.claude_memory = Some(found);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// "Claude Code keeps its own memory here": compact, with the way to one memory on the
+    /// Memory page, as the Swift app's `ClaudeMemoryNudge(compact: true)`.
+    fn claude_memory_nudge(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
+        let (on, files) = self.claude_memory?;
+        if !on && files == 0 {
+            return None;
+        }
+        let text = match (on, files) {
+            (true, 0) => "Claude Code also keeps its own memory when you run claude here outside YourHarness, so two memories would drift apart.".to_string(),
+            (_, n) => format!("Claude Code keeps its own memory for this folder too ({} file{}): bring it in and keep one.", n, if n == 1 { "" } else { "s" }),
+        };
+        let (ws, project) = (self.workspace.clone(), self.project.clone());
+        let (ws2, project2) = (self.workspace.clone(), self.project.clone());
+        Some(
+            div()
+                .mb(px(20.))
+                .px(px(space::M + 2.))
+                .py(px(space::S + 2.))
+                .rounded(px(radius::LARGE))
+                .bg(theme.warning.opacity(0.07))
+                .border_1()
+                .border_color(theme.warning.opacity(0.28))
+                .flex()
+                .items_center()
+                .gap(px(space::M))
+                .child(crate::ui::icons::layers().size(px(15.)).text_color(theme.warning))
+                .child(div().flex_1().min_w_0().text_size(px(text::FOOTNOTE)).child(text))
+                .child(Button::new("claude-memory-open").small().outline().label("Use One Memory…").on_click(move |_, _, cx| ws.update(cx, |ws, cx| ws.open_memory(&project, cx))))
+                .child(
+                    icon_button("claude-memory-dismiss", Icon::new(IconName::Close), "Not now", theme).on_click(cx.listener(move |p, _, _, cx| {
+                        let lib = ws2.read(cx).library.clone();
+                        let mut list = lib.setting("claudeMemoryNudgeDismissed").and_then(|v| v.as_array().cloned()).unwrap_or_default();
+                        list.push(serde_json::Value::from(project2.clone()));
+                        lib.set_setting("claudeMemoryNudgeDismissed", &serde_json::Value::Array(list));
+                        p.claude_memory = None;
+                        cx.notify();
+                    })),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// The filter's words, lowercased; empty when there's no filter.
+    fn filter_words(&self, cx: &App) -> String {
+        self.filter.read(cx).value().trim().to_lowercase()
+    }
+
+    /// Whether a worktree matches the filter: its folder, its branch, or a thread working there.
+    fn worktree_matches(&self, wt: &Worktree, words: &str, cx: &App) -> bool {
+        words.is_empty()
+            || wt.path.to_lowercase().contains(words)
+            || wt.branch.as_deref().is_some_and(|b| b.to_lowercase().contains(words))
+            || self.threads_here.get(&wt.path).is_some_and(|ids| ids.iter().any(|id| self.workspace.read(cx).thread(id).is_some_and(|t| t.read(cx).title.to_lowercase().contains(words))))
     }
 
     fn root(&self, cx: &App) -> Option<PathBuf> {
@@ -719,7 +813,8 @@ impl ProjectPage {
             .child(icon_button("project-finder", Icon::new(IconName::FolderOpen), "Show in Finder", theme).on_click(move |_, _, cx| cx.reveal_path(Path::new(&p2))))
             .child(div().ml(px(space::XS)).child(Button::new("project-new-thread").small().primary().label("New Thread").icon(IconName::Plus).on_click(cx.listener(|p, _, _, cx| p.new_thread_in(None, cx)))))
             .into_any_element();
-        let icon = if workspace_kind { gpui_kit::component::Icon::new(IconName::LayoutDashboard) } else { icons::folder_git_2() };
+        // The Swift app's `ProjectIcon`: a stack for a workspace of repos, a folder otherwise.
+        let icon = if workspace_kind { crate::ui::icons::layers() } else { gpui_kit::component::Icon::new(IconName::Folder) };
         div()
             .id("project-header")
             .context_menu(move |menu, _, _| {
@@ -1247,9 +1342,58 @@ impl ProjectPage {
         let shell = core.layout.as_ref().is_some_and(|l| l.kind == LayoutKind::Shell);
         let usage = |r: &WorkspaceRepo| self.threads_here.get(&r.real_path()).map_or(0, Vec::len) + core.worktrees_of(r).iter().map(|w| self.threads_here.get(&w.path).map_or(0, Vec::len)).sum::<usize>();
         repos.sort_by_key(|r| (!(shell && r.is_root()), std::cmp::Reverse(usage(r)), r.name().to_lowercase()));
-        let mut column = div().flex().flex_col().gap(px(6.)).child(section_title("Repositories", repos.len(), theme));
+        let total_worktrees: usize = repos.iter().map(|r| core.worktrees_of(r).iter().filter(|w| !w.is_main).count()).sum();
+        let filterable = repos.len() > 6 || total_worktrees > 8;
+        let words = if filterable { self.filter_words(cx) } else { String::new() };
+        let shown: Vec<&WorkspaceRepo> = repos
+            .iter()
+            .copied()
+            .filter(|r| {
+                words.is_empty()
+                    || r.name().to_lowercase().contains(&words)
+                    || self.threads_here.get(&r.real_path()).is_some_and(|ids| ids.iter().any(|id| self.workspace.read(cx).thread(id).is_some_and(|t| t.read(cx).title.to_lowercase().contains(&words))))
+                    || core.worktrees_of(r).iter().any(|w| !w.is_main && self.worktree_matches(w, &words, cx))
+            })
+            .collect();
+        // Expand All / Collapse All: every repo with worktrees, open or folded.
+        let with_worktrees: Vec<(String, usize)> = repos.iter().map(|r| (r.id().to_string(), core.worktrees_of(r).iter().filter(|w| !w.is_main).count())).filter(|(_, n)| *n > 0).collect();
+        let is_open = |id: &str, n: usize| (n <= 3) != self.toggled_repos.contains(id);
+        let any_open = with_worktrees.iter().any(|(id, n)| is_open(id, *n));
+        let title_row = div()
+            .flex()
+            .items_center()
+            .gap(px(space::M))
+            .child(div().flex_1().child(section_title("Repositories", repos.len(), theme)))
+            .when(filterable, |d| d.child(div().w(px(220.)).child(Input::new(&self.filter).small().cleanable(true))))
+            .when(!with_worktrees.is_empty(), |d| {
+                let list = with_worktrees.clone();
+                d.child(
+                    Button::new("repos-expand-all")
+                        .small()
+                        .ghost()
+                        .label(if any_open { "Collapse All" } else { "Expand All" })
+                        .tooltip(if any_open { "Fold every repo's worktrees" } else { "Show every repo's worktrees" })
+                        .on_click(cx.listener(move |p, _, _, cx| {
+                            for (id, n) in &list {
+                                // Open is (n <= 3) != toggled; make it !any_open for each.
+                                let want_open = !any_open;
+                                let toggled = (*n <= 3) != want_open;
+                                if toggled {
+                                    p.toggled_repos.insert(id.clone());
+                                } else {
+                                    p.toggled_repos.remove(id);
+                                }
+                            }
+                            cx.notify();
+                        })),
+                )
+            });
+        let mut column = div().flex().flex_col().gap(px(6.)).child(title_row);
+        if shown.is_empty() && !words.is_empty() {
+            column = column.child(div().py(px(space::S)).text_color(theme.secondary).child(format!("Nothing matches “{}”.", self.filter.read(cx).value().trim())));
+        }
         let page = cx.entity().downgrade();
-        for repo in repos {
+        for repo in shown {
             column = column.child(self.repo_card(repo, &page, theme, cx));
         }
         let uncloned = core.uncloned_repos();
@@ -1287,8 +1431,11 @@ impl ProjectPage {
         let id = repo.id().to_string();
         let status = core.status.statuses.get(&id);
         let remote = core.remotes.get(&id).cloned();
-        let worktrees: Vec<Worktree> = core.worktrees_of(repo).iter().filter(|w| !w.is_main).cloned().collect();
-        let open = (worktrees.len() <= 3) != self.toggled_repos.contains(&id);
+        let words = self.filter_words(cx);
+        let all_worktrees: Vec<Worktree> = core.worktrees_of(repo).iter().filter(|w| !w.is_main).cloned().collect();
+        // Filtering: the repo's name matching shows all of them, else only those that match.
+        let worktrees: Vec<Worktree> = if words.is_empty() || repo.name().to_lowercase().contains(&words) { all_worktrees } else { all_worktrees.into_iter().filter(|w| self.worktree_matches(w, &words, cx)).collect() };
+        let open = (worktrees.len() <= 3) != self.toggled_repos.contains(&id) || !words.is_empty();
         let prs = core.pull_requests_for(repo).len();
         let unreachable = remote.as_ref().is_some_and(|r| core.pulls.unreachable.contains(r));
         let forge_name = remote.as_ref().map(|r| r.forge.map_or(r.host.clone(), |f| f.display_name().to_string()));
@@ -1629,18 +1776,28 @@ impl Render for ProjectPage {
         let theme = Theme::get(cx);
         let plain = self.core.as_ref().and_then(|c| c.layout.as_ref()).is_some_and(|l| l.kind == LayoutKind::Plain);
         let body = if plain {
-            div().p(px(40.)).text_center().text_color(theme.secondary).child("No Git repositories. Repos and pull requests show up here once this folder, or folders inside it, are git repositories.").into_any_element()
+            div()
+                .pt(px(40.))
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(space::S))
+                .child(Icon::new(IconName::Folder).size(px(36.)).text_color(theme.tertiary))
+                .child(div().mt(px(space::S)).text_size(px(text::TITLE)).font_weight(FontWeight::SEMIBOLD).child("No Git Repositories"))
+                .child(div().max_w(px(380.)).text_center().text_color(theme.secondary).child("Repos and pull requests show up here once this folder, or folders inside it, are git repositories."))
+                .into_any_element()
         } else {
             div().flex().flex_col().child(self.pulls_section(&theme, cx)).child(self.repos_section(&theme, cx)).into_any_element()
         };
         let pad = if self.narrow { space::L } else { 32. };
+        let nudge = self.claude_memory_nudge(&theme, cx);
         div()
             .size_full()
             .relative()
             .flex()
             .flex_col()
             .child(self.header(&theme, cx))
-            .child(div().id("project-body").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.scroll).child(div().max_w(px(880.)).w_full().mx_auto().px(px(pad)).py(px(20.)).child(body)))
+            .child(div().id("project-body").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.scroll).child(div().max_w(px(880.)).w_full().mx_auto().px(px(pad)).py(px(20.)).children(nudge).child(body)))
             .child(self.width.probe(cx.entity().downgrade()))
     }
 }

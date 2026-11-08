@@ -228,9 +228,16 @@ impl RootView {
             return;
         }
         let Some(crate::state::workspace::Page::Memory(project)) = self.workspace.read(cx).page.clone() else {
-            if self.workspace.read(cx).page == Some(crate::state::workspace::Page::Usage) && self.usage.is_none() {
-                let ws = self.workspace.clone();
-                self.usage = Some(cx.new(|cx| crate::ui::usage::UsagePage::new(ws, window, cx)));
+            if self.workspace.read(cx).page == Some(crate::state::workspace::Page::Usage) {
+                if self.usage.is_none() {
+                    let ws = self.workspace.clone();
+                    self.usage = Some(cx.new(|cx| crate::ui::usage::UsagePage::new(ws, window, cx)));
+                }
+                // Esc closes it: it takes the keyboard.
+                if let Some(u) = &self.usage {
+                    let focus = u.read(cx).focus.clone();
+                    window.focus(&focus, cx);
+                }
             }
             cx.notify();
             return;

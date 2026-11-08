@@ -8,6 +8,7 @@ use crate::state::workspace::Workspace;
 use crate::theme::{space, text, Theme};
 use crate::ui::page_icons as icons;
 use crate::ui::page_kit::{self, Segment};
+use gpui_kit::component::{button::ButtonVariants, Disableable, Sizable};
 use gpui_kit::{
     canvas, div, fill, point, prelude::*, px, rgb, size, Bounds, Context, Entity, FontWeight, Hsla, Pixels, SharedString, Window,
 };
@@ -40,7 +41,21 @@ pub struct UsagePage {
     probe_started: bool,
     /// The page's own width, measured where it's painted.
     width: page_kit::PageWidth,
+    /// "By model": a small chart per model instead of one stacked chart.
+    split: bool,
+    /// The per-day table's page (0 the newest).
+    day_page: usize,
+    refreshing: bool,
+    pub focus: gpui_kit::FocusHandle,
 }
+
+gpui_kit::actions!(usage, [CloseUsage]);
+
+/// Rows a page of the per-day table holds, as the Swift app's.
+const DAYS_PER_PAGE: usize = 14;
+/// When the price table was last checked against Anthropic's page (`yh_core::usage::entry`).
+const PRICES_CHECKED: &str = "2026-10-28";
+const PRICES_SOURCE: &str = "https://platform.claude.com/docs/en/about-claude/pricing";
 
 impl UsagePage {
     pub fn new(workspace: Entity<Workspace>, _window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -63,6 +78,10 @@ impl UsagePage {
             chart: Rc::new(Cell::new(Bounds::default())),
             probe_started: false,
             width: Default::default(),
+            split: std::env::var("YH_USAGE_SPLIT").as_deref() == Ok("1"),
+            day_page: std::env::var("YH_USAGE_DAY_PAGE").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
+            refreshing: true,
+            focus: cx.focus_handle(),
         };
         page.refresh(cx);
         page
@@ -81,6 +100,7 @@ impl UsagePage {
             let _ = this.update(cx, |page, cx| {
                 page.report = Some(report);
                 page.reading = None;
+                page.refreshing = false;
                 cx.notify();
             });
         })
@@ -90,6 +110,7 @@ impl UsagePage {
     fn set_range(&mut self, days: usize, cx: &mut Context<Self>) {
         self.days = days;
         self.hovered = None;
+        self.day_page = 0;
         let store = self.store.clone();
         cx.spawn(async move |this, cx| {
             let report = cx.background_executor().spawn(async move { store.report(days) }).await;
@@ -153,6 +174,15 @@ impl UsagePage {
             eprintln!("USAGE PROBE {} {steps} steps, longest main-thread stall {ms} ms", if ms < 100 { "PASS" } else { "FAIL" });
         })
         .detach();
+    }
+
+    /// Esc: back to the thread.
+    fn close(&mut self, cx: &mut Context<Self>) {
+        self.workspace.update(cx, |ws, cx| {
+            if ws.page == Some(crate::state::workspace::Page::Usage) {
+                ws.toggle_usage(cx);
+            }
+        });
     }
 
     fn value(&self, s: &yh_core::usage::Spend) -> f64 {
@@ -260,7 +290,17 @@ impl Render for UsagePage {
             .child(page_kit::segmented(vec![metric("metric-tokens", "Tokens", false, icons::hash()), metric("metric-cost", "Cost", true, icons::coins())], &theme))
             .into_any_element();
         let subtitle = div().truncate().child(self.reading.clone().unwrap_or_else(|| "Every Claude Code session, here or in a terminal".into())).into_any_element();
-        let header = page_kit::page_header(icons::chart_column(), "Usage", subtitle, div().into_any_element(), Some(tabs), &theme);
+        let refreshing = self.refreshing;
+        let toolbar = crate::ui::thread_toolbar::icon_button("usage-refresh", gpui_kit::component::Icon::new(gpui_kit::component::IconName::RefreshCw), "Read Claude Code's history again", &theme)
+            .loading(refreshing)
+            .disabled(refreshing)
+            .on_click(cx.listener(|p, _, _, cx| {
+                p.refreshing = true;
+                p.refresh(cx);
+                cx.notify();
+            }))
+            .into_any_element();
+        let header = page_kit::page_header(icons::chart_column(), "Usage", subtitle, toolbar, Some(tabs), &theme);
         if self.report.is_some() {
             self.start_probe(window, cx);
         }
@@ -268,6 +308,9 @@ impl Render for UsagePage {
             return div()
                 .size_full()
                 .relative()
+                .track_focus(&self.focus)
+                .key_context("UsagePage")
+                .on_action(cx.listener(|p, _: &CloseUsage, _, cx| p.close(cx)))
                 .flex()
                 .flex_col()
                 .child(header)
@@ -302,6 +345,8 @@ impl Render for UsagePage {
                 by.into_iter().enumerate().filter(|(_, v)| *v > 0.).collect()
             })
             .collect();
+        // The split charts read the days too; the stacked chart's painter takes its own copy.
+        let split_stacks = stacks.clone();
         let peak = stacks.iter().map(|s| s.iter().map(|(_, v)| v).sum::<f64>()).fold(0., f64::max);
         // The chart's top: a round number over the busiest day, so the grid reads cleanly.
         let max = nice_ceil(peak).max(1e-9);
@@ -373,15 +418,18 @@ impl Render for UsagePage {
         let tick = |f: f32, v: f64| div().absolute().right(px(space::S)).top(px((PLOT_H - 1.) * f - 7.)).text_size(px(text::CAPTION)).text_color(theme.tertiary).child(self.tick(v));
         let gutter = div().relative().flex_none().w(px(GUTTER)).h(px(PLOT_H)).child(tick(0., max)).child(tick(0.5, max / 2.)).child(tick(1., 0.));
         let first = report.first_day;
-        let axis = div()
-            .pl(px(GUTTER))
-            .flex()
-            .justify_between()
-            .text_size(px(text::CAPTION))
-            .text_color(theme.tertiary)
-            .child(day_label(first))
-            .child(day_label(first + n as i64 / 2))
-            .child(day_label(first + n as i64 - 1));
+        let axis_color = theme.tertiary;
+        let axis = move |pad: f32| {
+            div()
+                .pl(px(pad))
+                .flex()
+                .justify_between()
+                .text_size(px(text::CAPTION))
+                .text_color(axis_color)
+                .child(day_label(first))
+                .child(day_label(first + n as i64 / 2))
+                .child(day_label(first + n as i64 - 1))
+        };
         let legend = div().pl(px(GUTTER)).flex().flex_wrap().gap(px(space::M)).text_size(px(text::CAPTION)).text_color(theme.secondary).children(
             series.iter().map(|(_, name, c)| div().flex().items_center().gap(px(5.)).child(div().w(px(8.)).h(px(8.)).rounded(px(2.)).bg(*c)).child(name.clone())),
         );
@@ -404,6 +452,58 @@ impl Render for UsagePage {
             None => (format!("Last {} days", report.days.len()), self.value(&report.total), rows_of(report.models.iter().map(|(m, s)| (m, s)).collect())),
         };
         let metric_name = if self.cost { "Cost at API prices" } else { "Tokens" };
+        // By model: a row per series, its own scale, the days' columns in its colour.
+        let split_charts = if !self.split {
+            div()
+        } else {
+            let mut col = div().flex().flex_col().gap(px(space::M));
+            for (k, (_, name, c)) in series.iter().enumerate() {
+                let values: Vec<f64> = split_stacks.iter().map(|st| st.iter().filter(|(i, _)| *i == k).map(|(_, v)| *v).sum()).collect();
+                let top = values.iter().cloned().fold(0., f64::max);
+                if top <= 0. {
+                    continue;
+                }
+                let sum: f64 = values.iter().sum();
+                let (c, grid) = (*c, theme.separator);
+                let n = values.len();
+                let mini = canvas(
+                    |_, _, _| (),
+                    move |bounds, _, window, _| {
+                        let w = f32::from(bounds.size.width) / n.max(1) as f32;
+                        let h = f32::from(bounds.size.height);
+                        window.paint_quad(fill(Bounds::new(point(bounds.origin.x, bounds.origin.y + px(h - 1.)), size(bounds.size.width, px(1.))), grid));
+                        let bar = (w - if w > 6. { 3. } else { 0.5 }).clamp(0.5, 24.);
+                        for (i, v) in values.iter().enumerate() {
+                            let seg = (*v / top) as f32 * (h - 1.);
+                            if seg < 0.5 {
+                                continue;
+                            }
+                            let x = bounds.origin.x + px(i as f32 * w + (w - bar) / 2.);
+                            window.paint_quad(fill(Bounds::new(point(x, bounds.origin.y + px(h - 1. - seg)), size(px(bar), px(seg))), c));
+                        }
+                    },
+                )
+                .size_full();
+                col = col.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .text_size(px(text::FOOTNOTE))
+                                .child(div().w(px(8.)).h(px(8.)).rounded(px(2.)).bg(c))
+                                .child(div().flex_1().child(name.clone()))
+                                .child(div().text_color(theme.secondary).child(format!("peak {} · {}", self.format(top), self.format(sum)))),
+                        )
+                        .child(div().h(px(56.)).child(mini)),
+                );
+            }
+            col.child(axis(0.))
+        };
         let chart_card = page_kit::card(&theme)
             .px(px(space::L))
             .pt(px(space::M + 2.))
@@ -419,11 +519,33 @@ impl Render for UsagePage {
                     .child(page_kit::section_title(format!("{metric_name} by day"), None, &theme))
                     .child(div().flex_1())
                     .child(div().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child(format!("{title} · ")))
-                    .child(div().text_size(px(text::FOOTNOTE)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(self.format(total))),
+                    .child(div().text_size(px(text::FOOTNOTE)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(self.format(total)))
+                    .child(div().ml(px(space::S)).child(page_kit::segmented(
+                        vec![
+                            {
+                                let page = page.clone();
+                                Segment::new("layout-stacked", "Stacked", !self.split, move |_, _, cx| {
+                                    let _ = page.update(cx, |p, cx| {
+                                        p.split = false;
+                                        cx.notify();
+                                    });
+                                })
+                            },
+                            {
+                                let page = page.clone();
+                                Segment::new("layout-split", "By Model", self.split, move |_, _, cx| {
+                                    let _ = page.update(cx, |p, cx| {
+                                        p.split = true;
+                                        cx.notify();
+                                    });
+                                })
+                            },
+                        ],
+                        &theme,
+                    ))),
             )
-            .child(div().pt(px(space::XS)).flex().child(gutter).child(chart_box))
-            .child(axis)
-            .child(legend);
+            .when(!self.split, |d| d.child(div().pt(px(space::XS)).flex().child(gutter).child(chart_box)).child(axis(GUTTER)).child(legend))
+            .when(self.split, |d| d.child(split_charts));
         let share_total = rows.iter().map(|r| r.2).sum::<f64>().max(1e-9);
         let mut table = page_kit::card(&theme).px(px(space::L)).py(px(space::M)).flex().flex_col().child(
             div()
@@ -498,12 +620,127 @@ impl Render for UsagePage {
             .flex()
             .flex_wrap()
             .gap(px(space::M))
-            .child(page_kit::stat_tile("Tokens", tokens(t.tokens.total() as f64), Some(format!("{} out · {} cache reads", tokens(t.tokens.output as f64), tokens(t.tokens.cache_read as f64))), &theme))
+            .child(page_kit::stat_tile(
+                "Tokens",
+                tokens(t.tokens.total() as f64),
+                Some(format!(
+                    "Input {} · Output {} · Cache read {} · Cache write {}",
+                    tokens(t.tokens.input as f64),
+                    tokens(t.tokens.output as f64),
+                    tokens(t.tokens.cache_read as f64),
+                    tokens((t.tokens.cache_5m + t.tokens.cache_1h) as f64)
+                )),
+                &theme,
+            ))
             .child(page_kit::stat_tile("At API prices", format!("${:.2}", t.cost), Some(if t.unpriced > 0 { format!("{} tokens of unpriced models", tokens(t.unpriced as f64)) } else { "What the tokens would cost on the API, not what you pay".into() }), &theme))
             .child(page_kit::stat_tile("Replies", t.messages.to_string(), Some(format!("{} a day on days used", self.format(self.value(t) / active_days as f64))), &theme));
+        // By day: days with usage, the newest first, a page at a time.
+        let used_days: Vec<(usize, &yh_core::usage::Day)> = report.days.iter().enumerate().filter(|(_, d)| d.total.messages > 0).rev().collect();
+        let pages = used_days.len().div_ceil(DAYS_PER_PAGE).max(1);
+        let day_page = self.day_page.min(pages - 1);
+        let shown: Vec<(usize, &yh_core::usage::Day)> = used_days.iter().skip(day_page * DAYS_PER_PAGE).take(DAYS_PER_PAGE).cloned().collect();
+        let wide = !narrow;
+        let cell = |t: String, w: f32| div().w(px(w)).flex_none().text_right().child(t);
+        let mut by_day = page_kit::card(&theme).px(px(space::L)).py(px(space::M)).flex().flex_col().child(
+            div()
+                .pb(px(6.))
+                .flex()
+                .items_center()
+                .gap(px(space::S))
+                .child(div().flex().flex_col().child(page_kit::section_title("By day".to_string(), None, &theme)).child(div().text_size(px(text::CAPTION)).text_color(theme.secondary).child(format!("{} day{} with usage, the newest first", used_days.len(), if used_days.len() == 1 { "" } else { "s" }))))
+                .child(div().flex_1())
+                .when(pages > 1, |d| {
+                    let (p1, p2) = (page.clone(), page.clone());
+                    d.child(div().text_size(px(text::CAPTION)).text_color(theme.secondary).child(format!("{}–{} of {}", day_page * DAYS_PER_PAGE + 1, day_page * DAYS_PER_PAGE + shown.len(), used_days.len())))
+                        .child(gpui_kit::component::button::Button::new("days-newer").xsmall().ghost().icon(gpui_kit::component::IconName::ChevronLeft).tooltip("Newer").disabled(day_page == 0).on_click(move |_, _, cx| {
+                            let _ = p1.update(cx, |p, cx| {
+                                p.day_page = day_page.saturating_sub(1);
+                                cx.notify();
+                            });
+                        }))
+                        .child(gpui_kit::component::button::Button::new("days-older").xsmall().ghost().icon(gpui_kit::component::IconName::ChevronRight).tooltip("Older").disabled(day_page + 1 >= pages).on_click(move |_, _, cx| {
+                            let _ = p2.update(cx, |p, cx| {
+                                p.day_page = day_page + 1;
+                                cx.notify();
+                            });
+                        }))
+                }),
+        );
+        if shown.is_empty() {
+            by_day = by_day.child(div().py(px(space::S)).text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child("No usage in this range."));
+        } else {
+            by_day = by_day.child(
+                div()
+                    .flex()
+                    .gap(px(space::M))
+                    .pb(px(6.))
+                    .text_size(px(text::CAPTION))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.secondary)
+                    .child(div().w(px(110.)).flex_none().child("Day"))
+                    .child(cell("Tokens".into(), 64.))
+                    .when(wide, |d| d.child(cell("Input".into(), 60.)).child(cell("Output".into(), 60.)).child(cell("Cache read".into(), 76.)).child(cell("Cache write".into(), 76.)))
+                    .child(cell("Cost".into(), 64.))
+                    .child(div().flex_1().pl(px(space::S)).child("Top model")),
+            );
+            for (i, d) in &shown {
+                let tk = &d.total.tokens;
+                let top = d.models.iter().max_by(|a, b| self.value(a.1).total_cmp(&self.value(b.1))).map(|(m, _)| m.clone());
+                let more = d.models.len().saturating_sub(1);
+                let top_color = top.as_ref().map(|m| series.get(key_of(m)).map(|s| s.2).unwrap_or(theme.tertiary));
+                by_day = by_day.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(space::M))
+                        .py(px(6.))
+                        .border_t_1()
+                        .border_color(theme.separator)
+                        .text_size(px(text::FOOTNOTE))
+                        .child(div().w(px(110.)).flex_none().child(day_label(first + *i as i64)))
+                        .child(cell(tokens(tk.total() as f64), 64.))
+                        .when(wide, |row| {
+                            row.child(cell(tokens(tk.input as f64), 60.).text_color(theme.secondary))
+                                .child(cell(tokens(tk.output as f64), 60.).text_color(theme.secondary))
+                                .child(cell(tokens(tk.cache_read as f64), 76.).text_color(theme.secondary))
+                                .child(cell(tokens((tk.cache_5m + tk.cache_1h) as f64), 76.).text_color(theme.secondary))
+                        })
+                        .child(cell(format!("${:.2}", d.total.cost), 64.))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .pl(px(space::S))
+                                .flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .when_some(top_color, |r, c| r.child(div().w(px(7.)).h(px(7.)).rounded_full().bg(c)))
+                                .child(div().truncate().child(top.as_deref().map(display_name).unwrap_or_else(|| "–".into())))
+                                .when(more > 0, |r| r.child(div().text_color(theme.tertiary).child(format!("+{more}")))),
+                        ),
+                );
+            }
+        }
+        let footnote = div()
+            .flex()
+            .flex_col()
+            .gap(px(3.))
+            .text_size(px(text::CAPTION))
+            .text_color(theme.tertiary)
+            .child("Costs are what the same tokens would cost on Anthropic's API, not what your plan charges. From Claude Code's session files and this app's side chats and memory agents.")
+            .child(
+                div()
+                    .flex()
+                    .gap(px(4.))
+                    .child(format!("Prices checked {PRICES_CHECKED}:"))
+                    .child(div().id("usage-prices").text_color(theme.accent).child("Anthropic API pricing").on_click(|_, _, cx| cx.open_url(PRICES_SOURCE))),
+            );
         div()
             .size_full()
             .relative()
+            .track_focus(&self.focus)
+            .key_context("UsagePage")
+            .on_action(cx.listener(|p, _: &CloseUsage, _, cx| p.close(cx)))
             .flex()
             .flex_col()
             .child(header)
@@ -523,7 +760,9 @@ impl Render for UsagePage {
                         .when(any_limit, |d| d.child(limit_row))
                         .child(figures)
                         .child(chart_card)
-                        .child(table),
+                        .child(table)
+                        .child(by_day)
+                        .child(footnote),
                 ),
             )
             .into_any_element()
