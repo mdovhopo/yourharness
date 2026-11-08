@@ -322,7 +322,7 @@ impl Render for ImportSheet {
                 .child(div().flex_1().child(b))
         };
         let names: Vec<String> = file["projects"].as_array().map(|a| a.iter().filter_map(|p| p.as_str().map(str::to_string)).collect()).unwrap_or_default();
-        let note = |icon: IconName, t: String| div().flex().items_start().gap(px(6.)).text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child(div().mt(px(2.)).child(Icon::new(icon).size(px(13.)).text_color(theme.secondary))).child(div().flex_1().child(t));
+        let note = |icon: IconName, t: String| div().flex().items_start().gap(px(6.)).text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child(div().mt(px(2.)).child(Icon::new(icon).size(px(13.)).text_color(theme.secondary))).child(div().flex_1().min_w_0().child(t));
         let busy = self.busy;
         div()
             .flex()
@@ -336,12 +336,13 @@ impl Render for ImportSheet {
                     .child(
                         div()
                             .flex_1()
+                            .min_w_0()
                             .flex()
                             .flex_col()
                             .gap(px(6.))
                             .child(div().font_weight(FontWeight::SEMIBOLD).child("Replace everything with this state?"))
-                            .child(format!("Every project, thread, memory and setting you have now is replaced by the ones in “{}”. This is destructive and can't be undone.", self.name))
-                            .child(div().text_color(theme.secondary).child(origin)),
+                            .child(div().w_full().child(format!("Every project, thread, memory and setting you have now is replaced by the ones in “{}”. This is destructive and can't be undone.", self.name)))
+                            .child(div().w_full().text_color(theme.secondary).child(origin)),
                     ),
             )
             .child(

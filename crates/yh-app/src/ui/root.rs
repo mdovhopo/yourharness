@@ -142,6 +142,10 @@ impl RootView {
                 WorkspaceEvent::Selected(id) => this.show(id, window, cx),
                 WorkspaceEvent::Removed(id) => {
                     this.deck.retain(|(t, _)| t != id);
+                    // Nothing open any more: the keyboard stays with the window.
+                    if this.workspace.read(cx).selected.is_none() {
+                        window.focus(&this.focus, cx);
+                    }
                     cx.notify();
                 }
                 WorkspaceEvent::PageOpened => this.open_page(window, cx),
@@ -217,6 +221,9 @@ impl RootView {
     }
 
     fn open_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The composer goes with the thread: the keyboard comes here, so ⌘N, ⇧⌘M and the rest
+        // still reach the window's actions (with nothing focused GPUI asks only its root).
+        window.focus(&self.focus, cx);
         if let Some(crate::state::workspace::Page::Project(project)) = self.workspace.read(cx).page.clone() {
             if self.project.as_ref().is_none_or(|p| p.read(cx).project != project) {
                 let ws = self.workspace.clone();
@@ -345,6 +352,9 @@ impl RootView {
                     eprintln!("WINDOW widened by {need:.0} for the right sidebar");
                 }
             }
+        } else if self.workspace.read(cx).shows_inspector {
+            // Stepping aside for a page keeps the width, so going between pages doesn't make
+            // the window jump; only closing the sidebar gives it back.
         } else if let Some((before, after)) = self.widened.take() {
             let now = crate::platform::frame_of(window);
             if now.is_some_and(|n| n.iter().zip(after.iter()).all(|(a, b)| (a - b).abs() < 1.)) {
