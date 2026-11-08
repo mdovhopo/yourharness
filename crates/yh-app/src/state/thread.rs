@@ -423,7 +423,6 @@ pub struct ThreadState {
     pub subagents_version: u64,
     /// The sub-agent you picked in the right sidebar (its Agent tool call's id).
     pub inspected_subagent: Option<String>,
-    next_note: u64,
     /// Each held row's place in its turn, as `items`.
     pub folds: Vec<Fold>,
     /// The finished turns' work, as `Fold::Summary` numbers them.
@@ -503,7 +502,6 @@ impl ThreadState {
             tools: HashMap::new(),
             subagents_version: 0,
             inspected_subagent: None,
-            next_note: 0,
             folds: vec![],
             turns: vec![],
             open_turns: Default::default(),
@@ -760,8 +758,7 @@ impl ThreadState {
     }
 
     pub fn notice(&mut self, text: &str) {
-        self.next_note += 1;
-        let id = format!("n{}", self.next_note);
+        let id = yh_core::library::new_uuid();
         self.append(EntryData::new(id, Kind::Notice, text));
         self.refresh_folds();
     }
@@ -863,8 +860,7 @@ impl ThreadState {
 
     /// A notice in the error colour (saved as such: `notice_style` "error").
     pub fn error_notice(&mut self, text: &str) {
-        self.next_note += 1;
-        let id = format!("n{}", self.next_note);
+        let id = yh_core::library::new_uuid();
         let mut data = EntryData::new(id, Kind::Notice, text);
         data.is_error = true;
         self.append(data);
@@ -1127,10 +1123,7 @@ impl ThreadState {
                 if seen {
                     return false;
                 }
-                let id = id.unwrap_or_else(|| {
-                    self.next_note += 1;
-                    format!("c{}", self.next_note)
-                });
+                let id = id.unwrap_or_else(yh_core::library::new_uuid);
                 self.append(EntryData::new(id, Kind::Command, &text));
                 false
             }
