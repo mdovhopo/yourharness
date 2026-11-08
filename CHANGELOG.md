@@ -13,6 +13,9 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 - Tool calls in the transcript read as what they did ("Read …/README.md", "Run command"), each a compact line that opens into a card; failed ones are red. A finished turn's work folds into one quiet line.
 
 ### Added
+- Memory's Tasks tab is a board: To Do, In Progress, Blocked and Done side by side, each scrolling on its own, every card showing how far along the task is, its next step or note and when it last changed. Done shows the recent ones with Show All for the rest; in a narrow window the columns stack.
+- Pointing at a memory on Memory's Graph lights it, its links and its neighbours and dims the rest, names them, and shows the memory in a card; the pointer becomes a hand, and a click opens it.
+- Memory's Insights leave tasks out: they record work and are rarely read by design, so the memory count, how much gets read, never-read, most read, by-kind and the chart are about memories alone, with the task count noted beside them.
 - History from 0.0.6 and earlier, kept as `state.json` and `threads/`, moves into the database the first time, in the background, as 0.0.16 would have moved it; a damaged file is skipped and noted, never a crash. Going back to 0.0.16 afterwards reads everything this version wrote.
 - Select text anywhere in a reply, a tool's output or a thinking block, and copy part of it.
 - Code blocks have a header with the language and a Copy button; tables copy as tab-separated text; diagrams open large, and copy or save as PNG. Copy buttons say "Copied" for a moment after a click, and a diagram's actions are icons with tooltips.

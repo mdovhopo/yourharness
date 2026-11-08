@@ -50,6 +50,30 @@ fn state_icon(state: &str) -> gpui_kit::component::Icon {
     }
 }
 
+/// The task board's columns, in the order work moves through them.
+const TASK_COLUMNS: [(&str, &str); 4] = [("todo", "To Do"), ("active", "In Progress"), ("blocked", "Blocked"), ("done", "Done")];
+/// How many Done tasks the board shows before Show All.
+const DONE_SHOWN: usize = 8;
+
+/// A task's column: its state, a missing or unknown one counting as under way.
+fn board_state(m: &Memory) -> &'static str {
+    match m.task_state.as_deref() {
+        Some("todo") => "todo",
+        Some("blocked") => "blocked",
+        Some("done") => "done",
+        _ => "active",
+    }
+}
+
+/// A task's note for its card: its description, or else its body's first line.
+fn task_note(m: &Memory) -> Option<String> {
+    let d = m.description.trim();
+    if !d.is_empty() {
+        return Some(d.to_string());
+    }
+    m.body.lines().map(str::trim).find(|l| !l.is_empty()).map(|l| l.trim_start_matches(['#', '-', '*', ' ']).to_string())
+}
+
 fn user() -> Actor {
     Actor { kind: "user".into(), thread: None }
 }
@@ -137,6 +161,10 @@ pub struct MemoryPage {
     graph: Graph,
     /// The graph's place, from its last paint: which dot a click is on.
     graph_bounds: std::rc::Rc<std::cell::Cell<gpui_kit::Bounds<gpui_kit::Pixels>>>,
+    /// The dot under the pointer on the graph (an index into `graph.ids`).
+    graph_hover: Option<usize>,
+    /// The task board's Done column shows every task, not just the recent ones.
+    show_all_done: bool,
     /// Add a step, under a task's steps.
     new_step: Entity<InputState>,
     /// The page's own width, measured where it's painted.
@@ -229,6 +257,8 @@ impl MemoryPage {
             stats: None,
             graph: Graph::default(),
             graph_bounds: Default::default(),
+            graph_hover: None,
+            show_all_done: false,
             new_step,
             width: Default::default(),
             compact: false,
@@ -1354,114 +1384,174 @@ impl MemoryPage {
             .into_any_element()
     }
 
+    /// The tasks as a board: a column a state (To Do, In Progress, Blocked, Done), each
+    /// scrolling on its own, Done showing its recent ones. A narrow page stacks them instead,
+    /// the page scrolling. A card opens its task.
     fn tasks(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
-        let tasks: Vec<&Memory> = self.memories.iter().filter(|m| m.is_task() && m.status == "active").collect();
+        let mut tasks: Vec<&Memory> = self.memories.iter().filter(|m| m.is_task() && m.status == "active").collect();
         if tasks.is_empty() {
             return page_kit::empty_state(icons::list_checks(), "No Tasks", "When you ask an agent for work with more than one step, it tracks it here, so every session knows where it stands.", None, theme).into_any_element();
         }
-        let column = div().id("memory-tasks").size_full().overflow_y_scroll();
-        let mut inner = div().flex().flex_col().gap(px(space::S));
-        for (state, heading) in [("active", "In Progress"), ("blocked", "Blocked"), ("todo", "To Do"), ("done", "Done")] {
-            let group: Vec<&&Memory> = tasks.iter().filter(|m| m.task_state.as_deref().unwrap_or("active") == state).collect();
-            if group.is_empty() {
+        tasks.sort_by(|a, b| b.updated_at.total_cmp(&a.updated_at));
+        let stacked = self.compact;
+        let mut columns = vec![];
+        for (state, heading) in TASK_COLUMNS {
+            let group: Vec<&Memory> = tasks.iter().copied().filter(|m| board_state(m) == state).collect();
+            if stacked && group.is_empty() {
                 continue;
             }
+            let total = group.len();
+            let shown = if state == "done" && !self.show_all_done { total.min(DONE_SHOWN) } else { total };
             let color = state_color(state, theme);
-            inner = inner.child(
-                div()
-                    .pt(px(space::S))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .child(state_icon(state).size(px(14.)).text_color(color))
-                    .child(page_kit::section_title(heading, Some(group.len()), theme)),
-            );
-            let mut list = page_kit::card(theme).overflow_hidden().flex().flex_col();
-            for (n, m) in group.into_iter().enumerate() {
-                let id = m.id.clone();
-                let threads = self.threads_of(m, cx);
-                let (done, total) = (m.steps_done(), m.steps.len());
-                list = list.child(
+            let header = div()
+                .flex_none()
+                .px(px(2.))
+                .pb(px(space::S))
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .child(state_icon(state).size(px(14.)).text_color(color))
+                .child(page_kit::section_title(heading, Some(total), theme));
+            let mut cards = div().flex().flex_col().gap(px(space::S));
+            if group.is_empty() {
+                cards = cards.child(
                     div()
-                        .id(SharedString::from(format!("task-{id}")))
-                        .px(px(space::L))
-                        .py(px(space::S + 2.))
-                        .when(n > 0, |d| d.border_t_1().border_color(theme.separator))
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme.hover))
+                        .py(px(space::L))
+                        .rounded(px(radius::LARGE))
+                        .border_1()
+                        .border_color(theme.separator)
                         .flex()
-                        .flex_col()
-                        .gap(px(3.))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(space::S))
-                                .child(div().flex_1().min_w_0().truncate().font_weight(FontWeight::MEDIUM).text_color(if state == "done" { theme.secondary } else { theme.text }).child(m.title.clone()))
-                                .when(total > 0, |d| {
-                                    // How far along: a thin bar and the count.
-                                    let f = done as f32 / total as f32;
-                                    d.child(
-                                        div()
-                                            .flex_none()
-                                            .flex()
-                                            .items_center()
-                                            .gap(px(6.))
-                                            .child(div().w(px(48.)).h(px(4.)).rounded(px(2.)).bg(theme.selected).child(div().h_full().rounded(px(2.)).w(gpui_kit::relative(f)).bg(color)))
-                                            .child(div().w(px(36.)).text_size(px(text::CAPTION)).text_color(theme.secondary).child(format!("{done} of {total}"))),
-                                    )
-                                })
-                                .child(div().flex_none().w(px(84.)).text_right().text_size(px(text::CAPTION)).text_color(theme.tertiary).child(ago(m.updated_at))),
-                        )
-                        .when_some(m.next_step().filter(|_| state != "done").map(str::to_string), |d, next| {
-                            d.child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(5.))
-                                    .text_size(px(text::FOOTNOTE))
-                                    .text_color(theme.secondary)
-                                    .child(gpui_kit::component::Icon::new(IconName::ArrowRight).size(px(11.)).text_color(theme.tertiary))
-                                    .child(div().min_w_0().truncate().child(next)),
-                            )
-                        })
-                        .when(!threads.is_empty(), |d| {
-                            // The threads working on it: click one to open it.
-                            let mut row = div().flex().items_center().gap(px(space::S)).text_size(px(text::CAPTION));
-                            for (tid, title) in threads.iter().take(3) {
-                                let (ws, tid) = (self.workspace.clone(), tid.clone());
-                                row = row.child(
-                                    div()
-                                        .id(SharedString::from(format!("task-thread-{id}-{tid}")))
-                                        .flex()
-                                        .items_center()
-                                        .gap(px(4.))
-                                        .max_w(px(220.))
-                                        .text_color(theme.accent)
-                                        .cursor_pointer()
-                                        .child(icons::message_square().size(px(11.)).text_color(theme.tertiary))
-                                        .child(div().min_w_0().truncate().child(title.clone()))
-                                        .on_click(move |_, _, cx| {
-                                            cx.stop_propagation();
-                                            ws.update(cx, |ws, cx| ws.select(&tid, cx));
-                                        }),
-                                );
-                            }
-                            if threads.len() > 3 {
-                                row = row.child(div().text_color(theme.tertiary).child(format!("+{}", threads.len() - 3)));
-                            }
-                            d.child(row)
-                        })
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.tab = Tab::Memories;
-                            this.archived = false;
-                            this.select(&id, cx);
-                        })),
+                        .justify_center()
+                        .text_size(px(text::FOOTNOTE))
+                        .text_color(theme.tertiary)
+                        .child(match state {
+                            "todo" => "Nothing waiting",
+                            "blocked" => "Nothing blocked",
+                            "done" => "Nothing done yet",
+                            _ => "Nothing under way",
+                        }),
                 );
             }
-            inner = inner.child(list);
+            for m in group.iter().take(shown) {
+                cards = cards.child(self.task_card(m, state, stacked, theme, cx));
+            }
+            if state == "done" && total > DONE_SHOWN {
+                let label = if self.show_all_done { "Show Recent".to_string() } else { format!("Show All {total}") };
+                cards = cards.child(div().flex().justify_center().child(Button::new("tasks-done-all").small().ghost().label(label).on_click(cx.listener(|this, _, _, cx| {
+                    this.show_all_done = !this.show_all_done;
+                    cx.notify();
+                }))));
+            }
+            let column = if stacked {
+                div().flex().flex_col().child(header).child(cards)
+            } else {
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .child(header)
+                    .child(div().id(SharedString::from(format!("tasks-column-{state}"))).flex_1().min_h_0().overflow_y_scroll().child(cards.pb(px(space::L))))
+            };
+            columns.push(column);
         }
-        column.child(div().max_w(px(880.)).w_full().mx_auto().px(px(space::XL)).pt(px(space::M)).pb(px(space::XL)).child(inner)).into_any_element()
+        if stacked {
+            div()
+                .id("memory-tasks")
+                .size_full()
+                .overflow_y_scroll()
+                .child(div().max_w(px(880.)).w_full().mx_auto().px(px(space::XL)).pt(px(space::L)).pb(px(space::XL)).flex().flex_col().gap(px(space::L)).children(columns))
+                .into_any_element()
+        } else {
+            div().id("memory-tasks").size_full().px(px(space::XL)).pt(px(space::L)).flex().gap(px(space::M)).children(columns).into_any_element()
+        }
+    }
+
+    /// A task on the board: its title, how far along (a thin bar, "3 of 9"), the next step or
+    /// its note, the threads on it, when it last changed. Full width (`wide`), the time sits
+    /// beside the title, so the card doesn't spend a line on it.
+    fn task_card(&self, m: &Memory, state: &str, wide: bool, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let id = m.id.clone();
+        let threads = self.threads_of(m, cx);
+        let (done, total) = (m.steps_done(), m.steps.len());
+        let color = state_color(state, theme);
+        let next = m.next_step().filter(|_| state != "done").map(|s| (true, s.to_string())).or_else(|| task_note(m).map(|n| (false, n)));
+        page_kit::card(theme)
+            .id(SharedString::from(format!("task-{id}")))
+            .px(px(space::M))
+            .py(px(space::S + 2.))
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.hover))
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .child(
+                div()
+                    .flex()
+                    .items_start()
+                    .gap(px(space::S))
+                    .child(div().flex_1().min_w_0().line_clamp(2).text_ellipsis().whitespace_normal().font_weight(FontWeight::MEDIUM).text_color(if state == "done" { theme.secondary } else { theme.text }).child(m.title.clone()))
+                    .when(wide, |d| d.child(div().flex_none().mt(px(1.)).text_size(px(text::CAPTION)).text_color(theme.tertiary).child(ago(m.updated_at)))),
+            )
+            .when(total > 0, |d| {
+                let f = done as f32 / total as f32;
+                d.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(space::S))
+                        .when(wide, |d| d.max_w(px(360.)))
+                        .child(div().flex_1().h(px(4.)).rounded(px(2.)).bg(theme.selected).child(div().h_full().rounded(px(2.)).w(gpui_kit::relative(f)).bg(color)))
+                        .child(div().flex_none().text_size(px(text::CAPTION)).text_color(theme.secondary).child(format!("{done} of {total}"))),
+                )
+            })
+            .when_some(next, |d, (is_step, next)| {
+                d.child(
+                    div()
+                        .flex()
+                        .items_start()
+                        .gap(px(5.))
+                        .text_size(px(text::FOOTNOTE))
+                        .text_color(theme.secondary)
+                        .when(is_step, |d| d.child(div().flex_none().mt(px(3.)).child(gpui_kit::component::Icon::new(IconName::ArrowRight).size(px(11.)).text_color(theme.tertiary))))
+                        .child(div().flex_1().min_w_0().line_clamp(2).text_ellipsis().whitespace_normal().child(next)),
+                )
+            })
+            .when(!wide || !threads.is_empty(), |d| d.child({
+                // The threads on it (click one to open it), and when it last changed.
+                let mut row = div().flex().items_center().gap(px(space::S)).text_size(px(text::CAPTION));
+                if let Some((tid, title)) = threads.first() {
+                    let (ws, tid) = (self.workspace.clone(), tid.clone());
+                    row = row.child(
+                        div()
+                            .id(SharedString::from(format!("task-thread-{id}-{tid}")))
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .text_color(theme.accent)
+                            .cursor_pointer()
+                            .child(icons::message_square().size(px(11.)).text_color(theme.tertiary))
+                            .child(div().min_w_0().truncate().child(title.clone()))
+                            .when(threads.len() > 1, |d| d.child(div().flex_none().text_color(theme.tertiary).child(format!("+{}", threads.len() - 1))))
+                            .on_click(move |_, _, cx| {
+                                cx.stop_propagation();
+                                ws.update(cx, |ws, cx| ws.select(&tid, cx));
+                            }),
+                    );
+                } else {
+                    row = row.child(div().flex_1());
+                }
+                row.when(!wide, |r| r.child(div().flex_none().text_color(theme.tertiary).child(ago(m.updated_at))))
+            }))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.tab = Tab::Memories;
+                this.archived = false;
+                this.narrow_list = false;
+                this.select(&id, cx);
+            }))
     }
 
     /// How memory is doing, in sentences first and figures after.
@@ -1535,7 +1625,7 @@ impl MemoryPage {
             .flex()
             .flex_wrap()
             .gap(px(space::M))
-            .child(page_kit::stat_tile("Memories", st.active.to_string(), None, theme))
+            .child(page_kit::stat_tile("Memories", st.active.to_string(), (st.task_count > 0).then(|| format!("Tasks: {} (not counted here)", st.task_count)), theme))
             .child(page_kit::stat_tile("Index each session", format!("~{index_tokens}"), Some("tokens".into()), theme))
             .child(page_kit::stat_tile("Read, last 30 days", match st.recall_rate() { Some(r) => format!("{:.0}%", r * 100.), None => "—".into() }, Some("of memories in use".into()), theme))
             .child(page_kit::stat_tile("Searches that found something", match st.search_hit_rate() { Some(r) => format!("{:.0}%", r * 100.), None => "—".into() }, Some(if st.searches == 0 { "no searches yet".into() } else { format!("of {}", st.searches) }), theme));
@@ -1639,96 +1729,129 @@ impl MemoryPage {
     }
 
     /// The memory as a map: a dot a memory (its kind's color, bigger the more it's read), a
-    /// line a link. Click a dot to open it.
+    /// line a link. Pointing at a dot lights it, its links and its neighbours (the rest dim),
+    /// names them, and shows the memory in a card; click it to open it. Only the hovered dot
+    /// changing draws again, and only this tab.
     fn graph_view(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         if self.graph.ids.is_empty() {
             return page_kit::empty_state(icons::waypoints(), "Nothing to Map Yet", "Memories and the links between them show here as a map once agents save some.", None, theme).into_any_element();
         }
         let (points, edges) = (self.graph.points.clone(), self.graph.edges.clone());
-        let dots: Vec<(Hsla, f32, String)> = self
+        let dots: Vec<(Hsla, f32, String, bool)> = self
             .graph
             .ids
             .iter()
             .map(|id| {
                 let m = self.memories.iter().find(|m| &m.id == id);
                 let kind = m.map_or("project", |m| m.kind.as_str());
-                let reads = m.map_or(0, |m| m.recall_count) as f32;
-                (kind_color(kind, theme), 4. + reads.sqrt().min(8.) * 1.5, m.map(|m| m.title.clone()).unwrap_or_default())
+                (kind_color(kind, theme), graph_radius(m.map_or(0, |m| m.recall_count)), m.map(|m| m.title.clone()).unwrap_or_default(), m.is_some_and(|m| m.pinned))
             })
             .collect();
+        let dots_radii: Vec<f32> = dots.iter().map(|d| d.1).collect();
         let selected = self.selection.as_ref().and_then(|s| self.graph.ids.iter().position(|i| i == s));
-        let (line, label, ring, cell) = (theme.secondary.opacity(0.28), theme.secondary, theme.canvas, self.graph_bounds.clone());
-        let pad = 48.;
+        let hovered = self.graph_hover.filter(|&i| i < dots.len());
+        // The hovered dot's neighbours: what stays lit with it.
+        let neighbours: std::collections::HashSet<usize> = hovered.map_or_else(Default::default, |h| {
+            edges.iter().filter_map(|&(a, b)| if a == h { Some(b) } else if b == h { Some(a) } else { None }).collect()
+        });
+        let (line, line_lit, label, label_dim, hot, ring, pin, cell) =
+            (theme.secondary.opacity(0.28), theme.secondary.opacity(0.8), theme.secondary, theme.tertiary, theme.text, theme.canvas, theme.text.opacity(0.5), self.graph_bounds.clone());
         let canvas = gpui_kit::canvas(
             move |bounds, _, _| cell.set(bounds),
             move |bounds, _, window, cx| {
-                let (w, h) = (f32::from(bounds.size.width) - pad * 2., f32::from(bounds.size.height) - pad * 2.);
-                let side = graph_side(w, h, points.len());
-                let (ox, oy) = (f32::from(bounds.origin.x) + pad + (w - side) / 2., f32::from(bounds.origin.y) + pad + (h - side) / 2.);
+                let (ox, oy, side) = graph_frame(bounds, points.len());
+                let lit = |i: usize| hovered.is_none_or(|h| h == i || neighbours.contains(&i));
                 let at = |p: (f64, f64)| (ox + p.0 as f32 * side, oy + p.1 as f32 * side);
-                for &(a, b) in &edges {
+                // Links: the hovered dot's drawn over the rest, thicker and darker.
+                let mut lines: Vec<(usize, usize, bool)> = edges.iter().map(|&(a, b)| (a, b, hovered.is_some_and(|h| h == a || h == b))).collect();
+                lines.sort_by_key(|l| l.2);
+                for (a, b, on) in lines {
                     let (pa, pb) = (at(points[a]), at(points[b]));
-                    let mut path = gpui_kit::PathBuilder::stroke(px(1.));
+                    let mut path = gpui_kit::PathBuilder::stroke(px(if on { 2. } else { 1. }));
                     path.move_to(gpui_kit::point(px(pa.0), px(pa.1)));
                     path.line_to(gpui_kit::point(px(pb.0), px(pb.1)));
                     if let Ok(p) = path.build() {
-                        window.paint_path(p, line);
+                        window.paint_path(p, if on { line_lit } else if hovered.is_some() { line.opacity(0.6) } else { line });
                     }
                 }
-                for (i, (color, r, _)) in dots.iter().enumerate() {
+                let circle = |window: &mut Window, x: f32, y: f32, r: f32, color: Hsla| {
+                    window.paint_quad(gpui_kit::fill(gpui_kit::Bounds::new(gpui_kit::point(px(x - r), px(y - r)), gpui_kit::size(px(r * 2.), px(r * 2.))), color).corner_radii(px(r)));
+                };
+                for (i, (color, r, _, pinned)) in dots.iter().enumerate() {
                     let (x, y) = at(points[i]);
                     let picked = Some(i) == selected;
-                    let r = if picked { r + 3. } else { *r };
-                    // A ring in the canvas's colour keeps dots apart where they touch.
-                    let ring_r = r + 2.;
-                    window.paint_quad(gpui_kit::fill(gpui_kit::Bounds::new(gpui_kit::point(px(x - ring_r), px(y - ring_r)), gpui_kit::size(px(ring_r * 2.), px(ring_r * 2.))), if picked { *color } else { ring }).corner_radii(px(ring_r)));
-                    if picked {
-                        let inner = r + 0.5;
-                        window.paint_quad(gpui_kit::fill(gpui_kit::Bounds::new(gpui_kit::point(px(x - inner), px(y - inner)), gpui_kit::size(px(inner * 2.), px(inner * 2.))), ring).corner_radii(px(inner)));
+                    let color = if lit(i) { *color } else { color.opacity(0.25) };
+                    let r = if picked || Some(i) == hovered { r + 3. } else { *r };
+                    // A ring in the canvas's colour keeps dots apart where they touch; the
+                    // selected one's is in its colour, a pinned one has a thin outer ring.
+                    if *pinned {
+                        circle(window, x, y, r + 4., if lit(i) { pin } else { pin.opacity(0.3) });
+                        circle(window, x, y, r + 3., ring);
                     }
-                    window.paint_quad(gpui_kit::fill(gpui_kit::Bounds::new(gpui_kit::point(px(x - r + if picked { 2. } else { 0. }), px(y - r + if picked { 2. } else { 0. })), gpui_kit::size(px((r - if picked { 2. } else { 0. }) * 2.), px((r - if picked { 2. } else { 0. }) * 2.))), *color).corner_radii(px(r)));
+                    circle(window, x, y, r + 2., if picked { color } else { ring });
+                    if picked {
+                        circle(window, x, y, r + 0.5, ring);
+                        circle(window, x, y, r - 2., color);
+                    } else {
+                        circle(window, x, y, r, color);
+                    }
                 }
-                // Titles, small, beside their dots: the picked first, then the most read. Each
-                // takes the first side (right, left, below, above) where it covers no other
-                // title and no dot; where dots cluster, the rest are left out.
-                let mut order: Vec<usize> = (0..dots.len()).filter(|&i| Some(i) == selected || dots.len() <= 40).collect();
-                order.sort_by(|&a, &b| (Some(b) == selected).cmp(&(Some(a) == selected)).then(dots[b].1.total_cmp(&dots[a].1)));
-                let circles: Vec<(f32, f32, f32)> = dots.iter().enumerate().map(|(i, d)| {
-                    let (x, y) = at(points[i]);
-                    (x, y, d.1 + 2.)
-                }).collect();
+                // Titles, small, beside their dots. Pointing at one: it and its neighbours only.
+                // Otherwise the picked first, then the most read. Each takes the first side
+                // (right, left, below, above) where it covers no other title and no dot; where
+                // dots cluster, the rest are left out.
+                let mut order: Vec<usize> = (0..dots.len())
+                    .filter(|&i| match hovered {
+                        Some(h) => h == i || neighbours.contains(&i),
+                        None => Some(i) == selected || dots.len() <= 40,
+                    })
+                    .collect();
+                let first = hovered.or(selected);
+                order.sort_by(|&a, &b| (Some(b) == first).cmp(&(Some(a) == first)).then(dots[b].1.total_cmp(&dots[a].1)));
+                let circles: Vec<(f32, f32, f32)> = dots
+                    .iter()
+                    .enumerate()
+                    .map(|(i, d)| {
+                        let (x, y) = at(points[i]);
+                        (x, y, d.1 + 2.)
+                    })
+                    .collect();
                 let mut placed: Vec<gpui_kit::Bounds<gpui_kit::Pixels>> = vec![];
                 for i in order {
                     let (x, y) = at(points[i]);
-                    let r = if Some(i) == selected { dots[i].1 + 3. } else { dots[i].1 };
+                    let r = if Some(i) == selected || Some(i) == hovered { dots[i].1 + 3. } else { dots[i].1 };
                     let title = short_title(&dots[i].2);
                     if title.is_empty() {
                         continue;
                     }
-                    let run = gpui_kit::TextRun { len: title.len(), font: window.text_style().font(), color: label, background_color: None, underline: None, strikethrough: None };
+                    let color = if Some(i) == hovered { hot } else if lit(i) { label } else { label_dim };
+                    let run = gpui_kit::TextRun { len: title.len(), font: window.text_style().font(), color, background_color: None, underline: None, strikethrough: None };
                     let shaped = window.text_system().shape_line(title.into(), px(text::CAPTION), &[run], None);
                     let (tw, th) = (f32::from(shaped.width), 14.);
                     let candidates = [(x + r + 5., y - th / 2.), (x - r - 5. - tw, y - th / 2.), (x - tw / 2., y + r + 3.), (x - tw / 2., y - r - 3. - th)];
                     let fits = |rect: &gpui_kit::Bounds<gpui_kit::Pixels>| {
                         let inside = rect.left() >= bounds.left() && rect.right() <= bounds.right() && rect.top() >= bounds.top() && rect.bottom() <= bounds.bottom();
                         let (l, t, rr, b) = (f32::from(rect.left()), f32::from(rect.top()), f32::from(rect.right()), f32::from(rect.bottom()));
-                        let on_dot = circles.iter().enumerate().any(|(j, &(cx_, cy, cr))| {
-                            j != i && cx_ + cr > l && cx_ - cr < rr && cy + cr > t && cy - cr < b
-                        });
+                        // Pointing at a dot, the dimmed ones may be covered.
+                        let on_dot = circles.iter().enumerate().any(|(j, &(cx_, cy, cr))| j != i && lit(j) && cx_ + cr > l && cx_ - cr < rr && cy + cr > t && cy - cr < b);
                         inside && !on_dot && !placed.iter().any(|p| p.intersects(rect))
                     };
                     let rect_at = |(lx, ly): (f32, f32)| gpui_kit::Bounds::new(gpui_kit::point(px(lx), px(ly)), gpui_kit::size(px(tw), px(th)));
-                    let spot = candidates.iter().map(|&c| rect_at(c)).find(|rect| fits(rect)).or_else(|| (Some(i) == selected).then(|| rect_at(candidates[0])));
+                    let spot = candidates.iter().map(|&c| rect_at(c)).find(|rect| fits(rect)).or_else(|| (Some(i) == first).then(|| rect_at(candidates[0])));
                     if let Some(rect) = spot {
                         // A little room around each, so neighbours don't touch.
-                        placed.push(gpui_kit::Bounds::new(rect.origin - gpui_kit::point(px(3.), px(1.)), rect.size + gpui_kit::size(px(6.), px(2.))));
+                        let room = gpui_kit::Bounds::new(rect.origin - gpui_kit::point(px(3.), px(1.)), rect.size + gpui_kit::size(px(6.), px(2.)));
+                        placed.push(room);
+                        if hovered.is_some() {
+                            // On a backing of the canvas, so it reads over what's dimmed under it.
+                            window.paint_quad(gpui_kit::fill(room, ring.opacity(0.85)).corner_radii(px(4.)));
+                        }
                         let _ = shaped.paint(rect.origin, px(th), gpui_kit::TextAlign::Left, None, window, cx);
                     }
                 }
             },
         )
         .size_full();
-        let (cell, ids, pts) = (self.graph_bounds.clone(), self.graph.ids.clone(), self.graph.points.clone());
         let legend = div()
             .absolute()
             .top(px(space::L))
@@ -1738,36 +1861,79 @@ impl MemoryPage {
             .text_size(px(text::CAPTION))
             .text_color(theme.secondary)
             .children(KINDS.iter().map(|(k, l)| div().flex().items_center().gap(px(5.)).child(page_kit::dot(kind_color(k, theme), 7.)).child(*l)))
-            .child(div().text_color(theme.tertiary).child("Bigger: read more · Lines: links"));
+            .child(div().text_color(theme.tertiary).child("Bigger: read more · Ringed: pinned · Lines: links"));
+        // The hovered memory, in a card at the bottom right.
+        let card = hovered.and_then(|h| self.memories.iter().find(|m| m.id == self.graph.ids[h])).map(|m| {
+            page_kit::card(theme)
+                .absolute()
+                .bottom(px(space::L))
+                .right(px(space::L))
+                .w(px(300.))
+                .px(px(space::M + 2.))
+                .py(px(space::M))
+                .flex()
+                .flex_col()
+                .gap(px(5.))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .child(chip(kind_label(&m.kind), kind_color(&m.kind, theme)))
+                        .child(div().flex_1())
+                        .child(div().text_size(px(text::CAPTION)).text_color(theme.secondary).child(if m.recall_count == 1 { "Read once".to_string() } else { format!("Read {}×", m.recall_count) })),
+                )
+                .child(div().text_size(px(text::HEADLINE)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).line_clamp(2).text_ellipsis().whitespace_normal().child(m.title.clone()))
+                .when(!m.description.trim().is_empty(), |d| d.child(div().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).line_clamp(3).text_ellipsis().whitespace_normal().child(m.description.clone())))
+                .child(div().text_size(px(text::CAPTION)).text_color(theme.tertiary).child("Click to open"))
+        });
+        let (cell, ids) = (self.graph_bounds.clone(), self.graph.ids.clone());
+        let radii: Vec<f32> = dots_radii;
+        let (cell_move, pts_move, pts, radii_click) = (self.graph_bounds.clone(), self.graph.points.clone(), self.graph.points.clone(), radii.clone());
         div()
             .id("memory-graph")
             .relative()
             .size_full()
+            .when(hovered.is_some(), |d| d.cursor_pointer())
             .child(canvas)
             .child(legend)
+            .children(card)
+            .on_mouse_move(cx.listener(move |this, e: &gpui_kit::MouseMoveEvent, _, cx| {
+                let near = graph_dot_at(cell_move.get(), &pts_move, &radii, e.position);
+                if near != this.graph_hover {
+                    this.graph_hover = near;
+                    cx.notify();
+                }
+            }))
+            .on_hover(cx.listener(|this, over: &bool, _, cx| {
+                if !*over && this.graph_hover.is_some() {
+                    this.graph_hover = None;
+                    cx.notify();
+                }
+            }))
             .on_mouse_down(
                 gpui_kit::MouseButton::Left,
                 cx.listener(move |this, e: &gpui_kit::MouseDownEvent, _, cx| {
-                    let b = cell.get();
-                    let (w, h) = (f32::from(b.size.width) - pad * 2., f32::from(b.size.height) - pad * 2.);
-                    let side = graph_side(w, h, pts.len());
-                    let (ox, oy) = (f32::from(b.origin.x) + pad + (w - side) / 2., f32::from(b.origin.y) + pad + (h - side) / 2.);
-                    let (mx, my) = (f32::from(e.position.x), f32::from(e.position.y));
-                    let near = pts
-                        .iter()
-                        .enumerate()
-                        .map(|(i, p)| (i, (ox + p.0 as f32 * side - mx).powi(2) + (oy + p.1 as f32 * side - my).powi(2)))
-                        .min_by(|a, b| a.1.total_cmp(&b.1))
-                        .filter(|(_, d)| *d < 144.);
-                    if let Some((i, _)) = near {
+                    if let Some(i) = graph_dot_at(cell.get(), &pts, &radii_click, e.position) {
                         this.tab = Tab::Memories;
                         this.archived = false;
+                        this.graph_hover = None;
                         let id = ids[i].clone();
                         this.select(&id, cx);
                     }
                 }),
             )
             .into_any_element()
+    }
+
+    /// Where a memory's dot is on the graph, in window points, from its last paint: for
+    /// pointing at it from a launch hook (`YH_MEMORY_GRAPH_HOVER`). By index or title.
+    pub fn graph_dot(&self, which: &str) -> Option<(f32, f32)> {
+        let i = which.parse::<usize>().ok().filter(|&i| i < self.graph.ids.len()).or_else(|| {
+            self.graph.ids.iter().position(|id| self.memories.iter().any(|m| &m.id == id && m.title == which))
+        })?;
+        let (ox, oy, side) = graph_frame(self.graph_bounds.get(), self.graph.points.len());
+        let p = self.graph.points[i];
+        Some((ox + p.0 as f32 * side, oy + p.1 as f32 * side))
     }
 
     /// Everything that happened in the memory, newest first, as sentences: Show picks what
@@ -2426,4 +2592,30 @@ impl Render for SpecialistSetup {
 /// memories, so two of them aren't drawn at the page's far corners.
 fn graph_side(w: f32, h: f32, n: usize) -> f32 {
     w.min(h).min(140. * (n as f32).sqrt() + 120.).max(0.)
+}
+
+/// The graph's square in its bounds, as (left, top, side): what a point in 0…1 is scaled by.
+fn graph_frame(b: gpui_kit::Bounds<gpui_kit::Pixels>, n: usize) -> (f32, f32, f32) {
+    const PAD: f32 = 48.;
+    let (w, h) = (f32::from(b.size.width) - PAD * 2., f32::from(b.size.height) - PAD * 2.);
+    let side = graph_side(w, h, n);
+    (f32::from(b.origin.x) + PAD + (w - side) / 2., f32::from(b.origin.y) + PAD + (h - side) / 2., side)
+}
+
+/// A dot's radius on the graph: bigger the more it's been read.
+fn graph_radius(reads: i64) -> f32 {
+    4. + (reads as f32).sqrt().min(8.) * 1.5
+}
+
+/// The dot under a point (within a few points of its edge, the nearest where they crowd).
+fn graph_dot_at(b: gpui_kit::Bounds<gpui_kit::Pixels>, points: &[(f64, f64)], radii: &[f32], at: gpui_kit::Point<gpui_kit::Pixels>) -> Option<usize> {
+    let (ox, oy, side) = graph_frame(b, points.len());
+    let (mx, my) = (f32::from(at.x), f32::from(at.y));
+    points
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (i, ((ox + p.0 as f32 * side - mx).powi(2) + (oy + p.1 as f32 * side - my).powi(2)).sqrt()))
+        .filter(|&(i, d)| d <= radii.get(i).copied().unwrap_or(4.).max(8.) + 6.)
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(i, _)| i)
 }

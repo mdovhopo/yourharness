@@ -807,6 +807,14 @@ fn main() {
                         .map(|t| t.read(cx).meta.project_id.clone())
                         .or_else(|| workspace.read(cx).projects.first().map(|p| p.id.clone()));
                     if let Some(project) = project {
+                        // `YH_MEMORY_SEED=<n>`: n made-up memories and a board's worth of tasks
+                        // added to it first (scratch data only).
+                        if let (Some(n), Some(store)) = (env("YH_MEMORY_SEED").and_then(|v| v.parse::<usize>().ok()), workspace.read(cx).memory_store()) {
+                            let started = std::time::Instant::now();
+                            yh_core::memory::seed(&store, &yh_core::memory::scope_of(&project), n);
+                            eprintln!("memory: seeded {n} in {} ms", started.elapsed().as_millis());
+                            workspace.update(cx, |ws, cx| ws.memory_changed(cx));
+                        }
                         workspace.update(cx, |ws, cx| ws.open_memory(&project, cx));
                     }
                 });
@@ -846,6 +854,21 @@ fn main() {
                         });
                     }
                 });
+                // `YH_MEMORY_GRAPH_HOVER=<index or title>`: the pointer moved over that memory's dot
+                // on the Graph tab, through the window as a real move goes, once it's drawn.
+                if let Some(which) = env("YH_MEMORY_GRAPH_HOVER") {
+                    cx.background_executor().timer(Duration::from_millis(1500)).await;
+                    let at = cx.update(|cx| root.read(cx).memory_page(cx).and_then(|p| p.read(cx).graph_dot(&which)));
+                    match at {
+                        Some((x, y)) => {
+                            eprintln!("GRAPH hover {which} at {x:.0},{y:.0}");
+                            if let Ok(ns) = window.update(cx, |_, window, _| crate::platform::ns_window(window)) {
+                                crate::platform::mouse_move(ns, x, y);
+                            }
+                        }
+                        None => eprintln!("GRAPH hover {which}: no such dot drawn"),
+                    }
+                }
             })
             .detach();
         }

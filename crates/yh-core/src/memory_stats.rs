@@ -39,7 +39,11 @@ pub struct Stats {
     pub by_kind: Vec<(String, usize)>,
     pub by_origin: Vec<(String, usize)>,
     pub pinned: usize,
+    /// Active tasks by state. Tasks are memories, but they record work rather than knowledge
+    /// and are rarely read by design, so every other figure here leaves them out.
     pub tasks: Vec<(String, usize)>,
+    /// Active tasks, all states.
+    pub task_count: usize,
     pub links: usize,
     pub orphans: usize,
     pub recalls: i64,
@@ -110,24 +114,36 @@ pub fn compute(store: &Store, scope: &str, window: usize) -> Stats {
     let now = crate::library::now_ms() / 1000.;
     let memories = store.memories(Some(scope), None);
     let events = events_since(store, scope, now - window as f64 * 86_400.);
+    compute_from(&memories, &events, now, window)
+}
+
+/// What `compute` counts, from the memories and the window's events. Tasks are counted by
+/// state only: what agents did with them (reads, progress) and the tasks themselves are left
+/// out of every other figure, so a board of tasks doesn't drag the read rate down.
+fn compute_from(all: &[Memory], events: &[Event], now: f64, window: usize) -> Stats {
     let mut s = Stats { window, ..Default::default() };
-    let active: Vec<&Memory> = memories.iter().filter(|m| m.status == "active").collect();
+    let task_ids: HashSet<&str> = all.iter().filter(|m| m.is_task()).map(|m| m.id.as_str()).collect();
+    let about_task = |e: &Event| e.memory_id.as_deref().is_some_and(|id| task_ids.contains(id));
+    let events: Vec<&Event> = events.iter().filter(|e| !about_task(e)).collect();
+    let mut tasks: HashMap<String, usize> = HashMap::new();
+    for m in all.iter().filter(|m| m.is_task() && m.status == "active") {
+        *tasks.entry(m.task_state.clone().unwrap_or_else(|| "todo".into())).or_default() += 1;
+        s.task_count += 1;
+    }
+    s.tasks = sorted_counts(tasks);
+    let memories: Vec<&Memory> = all.iter().filter(|m| !m.is_task()).collect();
+    let active: Vec<&Memory> = memories.iter().copied().filter(|m| m.status == "active").collect();
     s.active = active.len();
     s.proposed = memories.iter().filter(|m| m.status == "proposed").count();
     s.archived = memories.iter().filter(|m| m.status == "archived").count();
     s.bytes = active.iter().map(|m| m.size()).sum();
     s.pinned = active.iter().filter(|m| m.pinned).count();
-    let mut tasks: HashMap<String, usize> = HashMap::new();
     let mut by_kind: HashMap<String, usize> = HashMap::new();
     let mut by_origin: HashMap<String, usize> = HashMap::new();
     for m in &active {
-        if m.is_task() {
-            *tasks.entry(m.task_state.clone().unwrap_or_else(|| "todo".into())).or_default() += 1;
-        }
         *by_kind.entry(m.kind.clone()).or_default() += 1;
         *by_origin.entry(m.origin.clone().unwrap_or_else(|| "agent".into())).or_default() += 1;
     }
-    s.tasks = sorted_counts(tasks);
     s.by_kind = sorted_counts(by_kind);
     s.by_origin = sorted_counts(by_origin);
     let mut largest = active.clone();
@@ -149,7 +165,7 @@ pub fn compute(store: &Store, scope: &str, window: usize) -> Stats {
     let mut top: Vec<&&Memory> = active.iter().filter(|m| m.recall_count > 0).collect();
     top.sort_by(|a, b| b.recall_count.cmp(&a.recall_count).then(b.last_recalled_at.unwrap_or(0.).total_cmp(&a.last_recalled_at.unwrap_or(0.))));
     s.top_recalled = top.iter().take(8).map(|m| summary(m)).collect();
-    let mut never: Vec<&&Memory> = active.iter().filter(|m| m.recall_count == 0 && m.created_at < now - 7. * 86_400. && !m.pinned && !m.is_task()).collect();
+    let mut never: Vec<&&Memory> = active.iter().filter(|m| m.recall_count == 0 && m.created_at < now - 7. * 86_400. && !m.pinned).collect();
     never.sort_by(|a, b| a.created_at.total_cmp(&b.created_at));
     s.never_recalled = never.iter().map(|m| summary(m)).collect();
     let mut recalled_ids: HashSet<String> = HashSet::new();
@@ -216,8 +232,7 @@ pub fn compute(store: &Store, scope: &str, window: usize) -> Stats {
         day.total = memories.iter().filter(|m| m.created_at < end && (m.status != "archived" || m.updated_at >= end)).count();
     }
     s.days = days;
-    let not_tasks: Vec<&Memory> = active.iter().copied().filter(|m| !m.is_task()).collect();
-    s.likely_duplicates = duplicates(&not_tasks).into_iter().map(|g| g.into_iter().map(summary).collect()).collect();
+    s.likely_duplicates = duplicates(&active).into_iter().map(|g| g.into_iter().map(summary).collect()).collect();
     s
 }
 
@@ -276,6 +291,11 @@ pub fn describe(s: &Stats, day: impl Fn(f64) -> String) -> String {
         format!("Size: {} bytes (about {} tokens), {} on average.", s.bytes, Stats::tokens(s.bytes), s.average_bytes()),
         format!("Kinds: {}.", { let mut k = s.by_kind.clone(); k.sort(); k.iter().map(|(n, c)| format!("{n} {c}")).collect::<Vec<_>>().join(", ") }),
         format!("Links: {}; memories with none: {}.", s.links, s.orphans),
+        format!(
+            "Tasks (not counted above): {}{}.",
+            s.task_count,
+            if s.tasks.is_empty() { String::new() } else { format!(" ({})", s.tasks.iter().map(|(st, c)| format!("{st} {c}")).collect::<Vec<_>>().join(", ")) }
+        ),
         format!(
             "Last {} days: {} sessions, {} reads of {} memories, {} searches ({} found something).",
             s.window, s.sessions, s.recalls_in_window, s.recalled_in_window, s.searches, s.searches_with_hits
@@ -364,4 +384,62 @@ pub fn graph_layout(ids: &[String], edges: &[(usize, usize)]) -> Vec<(f64, f64)>
     pos.iter()
         .map(|p| if n == 1 { (0.5, 0.5) } else { ((p.0 - min_x) / span + (1. - (max_x - min_x) / span) / 2., (p.1 - min_y) / span + (1. - (max_y - min_y) / span) / 2.) })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::memory::{Actor, Step};
+
+    #[test]
+    fn insights_leave_tasks_out() {
+        let dir = std::env::temp_dir().join(format!("yh-memory-stats-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Store { db: std::sync::Arc::new(crate::db::Database::open(&dir).unwrap()) };
+        let scope = "project:P";
+        let old = crate::library::now_ms() / 1000. - 30. * 86_400.;
+        let agent = Actor { kind: "agent".into(), thread: None };
+        // Four memories, two of them read; and five tasks, none read but one, which is read
+        // a lot (agents check tasks): the figures are about the four.
+        let mut memories = vec![];
+        for (i, kind) in ["user", "feedback", "project", "project"].into_iter().enumerate() {
+            let mut m = Memory::new(scope, kind, &format!("Memory {i}"), "what", "body", "agent");
+            m.created_at = old;
+            memories.push(m);
+        }
+        let mut tasks = vec![];
+        for (i, state) in ["todo", "active", "active", "blocked", "done"].into_iter().enumerate() {
+            let mut t = Memory::new(scope, "task", &format!("Task {i}"), "", "a long task body that would be the biggest memory by far if it counted", "agent");
+            t.task_state = Some(state.into());
+            t.steps = vec![Step { text: "one".into(), done: i > 2 }];
+            t.created_at = old;
+            tasks.push(t);
+        }
+        memories[1].links = vec![(tasks[0].id.clone(), None)];
+        let (m0, m1, t0) = (memories[0].id.clone(), memories[1].id.clone(), tasks[1].id.clone());
+        store.save_all(memories.into_iter().chain(tasks).collect(), &agent);
+        store.note_recall(vec![m0.clone(), m1.clone()], &agent);
+        for _ in 0..5 {
+            store.note_recall(vec![t0.clone()], &agent);
+        }
+        store.db.flush();
+        let s = compute(&store, scope, 30);
+        assert_eq!(s.active, 4);
+        assert_eq!(s.task_count, 5);
+        assert_eq!(s.tasks.iter().find(|(k, _)| k == "active").map(|(_, c)| *c), Some(2));
+        assert_eq!(s.recall_rate(), Some(0.5));
+        assert_eq!((s.recalls_in_window, s.recalled_in_window, s.recalls), (2, 2, 2));
+        assert_eq!(s.never_recalled.len(), 2);
+        assert!(s.never_recalled.iter().all(|m| m.kind != "task"));
+        assert!(s.top_recalled.iter().all(|m| m.kind != "task"));
+        assert!(s.largest.iter().all(|m| m.kind != "task"));
+        assert!(!s.by_kind.iter().any(|(k, _)| k == "task"));
+        assert_eq!(s.by_kind.iter().map(|(_, c)| c).sum::<usize>(), 4);
+        // A link to a task doesn't count: the memory linking to one is still an orphan.
+        assert_eq!((s.links, s.orphans), (0, 4));
+        assert_eq!(s.days.iter().map(|d| d.recalled).sum::<usize>(), 2);
+        assert_eq!(s.days.last().map(|d| d.total), Some(4));
+        assert!(describe(&s, |_| String::new()).contains("Tasks (not counted above): 5"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

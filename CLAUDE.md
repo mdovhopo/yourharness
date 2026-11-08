@@ -171,7 +171,7 @@ long after it shows, printing `SUBAGENT stop <task>`). Memory: `YH_MEMORY_SETUP=
 specialist's setup over the window, `YH_MEMORY_IMPORT_SOURCES=<a:b>` ticked, `YH_MEMORY_AGENT_NOTE`,
 `YH_MEMORY_AGENT_MODEL=haiku`; `YH_MEMORY_SETUP_START=1` presses Start: a real turn),
 `YH_MEMORY_ADD_STEP=<text>` (with `YH_OPEN_MEMORY=1`: the first task opened and the step added),
-`YH_MEMORY_PROBE=1` (links the first memory to the second, renames the first and restores its version 1, printing
+`YH_MEMORY_SEED=<n>` (with `YH_OPEN_MEMORY=1`: n made-up memories, linked and some read, plus 21 tasks in every state, added to the project first; scratch data only, it adds again each launch), `YH_MEMORY_GRAPH_HOVER=<index or title>` (with `YH_MEMORY_TAB=graph`: the pointer moved over that dot through the window, printing `GRAPH hover … at x,y`), `YH_MEMORY_PROBE=1` (links the first memory to the second, renames the first and restores its version 1, printing
 `MEMORY probe: …`). MCP: `YH_MCP_ADD_ENV=NAME=value` (with `YH_MCP_ADD_COMMAND`: an environment variable added),
 `YH_MCP_ADD_DESKTOP=1` (Import from Claude Desktop pressed; give it `YH_CLAUDE_DESKTOP_CONFIG=<scratch file>`, never
 the real one).

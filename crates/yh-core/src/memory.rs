@@ -760,6 +760,81 @@ pub fn contains_secret(text: &str) -> bool {
         || run(text, "AIza", 35, word)
 }
 
+/// Development (`YH_MEMORY_SEED=<n>`): n made-up memories of every kind, linked, some read and
+/// searched, plus tasks in every state (a dozen done, so Done has more than it shows), some
+/// of them read too. For looking at the Memory page and its speed at scale; the Swift app's
+/// `MemoryProbe.seed`, with more tasks.
+pub fn seed(store: &Store, scope: &str, count: usize) {
+    const TOPICS: [&str; 12] = ["deploy", "release", "tests", "database", "auth", "billing", "design", "API", "CI", "docs", "iOS", "search"];
+    const KINDS: [&str; 4] = ["user", "feedback", "project", "reference"];
+    let t = now();
+    let mut memories: Vec<Memory> = vec![];
+    for i in 0..count {
+        let topic = TOPICS[i % TOPICS.len()];
+        let age = ((i * 7919) % 90) as f64 * 86_400.;
+        let mut m = Memory::new(
+            scope,
+            KINDS[(i / 3) % KINDS.len()],
+            &format!("{}{} note {}", topic[..1].to_uppercase(), &topic[1..], i / TOPICS.len() + 1),
+            &format!("What to know about {topic} ({i})"),
+            &format!("A made-up memory about {topic}, number {i}.\n**Why:** seeded for testing.\n**How to apply:** ignore it."),
+            if i % 5 == 0 { "user" } else { "agent" },
+        );
+        m.created_at = t - age;
+        m.updated_at = t - age / 2.;
+        m.recall_count = if (i * 31) % 7 == 0 { 0 } else { ((i * 13) % 9) as i64 };
+        if i > 0 && i % 3 != 0 {
+            m.links = vec![(memories[(i * 17) % i].id.clone(), None)];
+        }
+        memories.push(m);
+    }
+    let tasks: [(&str, &str, &[(&str, bool)]); 21] = [
+        ("todo", "Write the API docs", &[("List the endpoints", false), ("Examples for each", false), ("Publish", false)]),
+        ("todo", "Add a dark app icon", &[]),
+        ("todo", "Move CI to the new runners", &[("Price the runners", true), ("Port the workflows", false), ("Switch over", false)]),
+        ("active", "Ship dark mode", &[("Plan it", true), ("Colours for every surface", true), ("Charts", true), ("Snapshots, light and dark", false), ("Changelog", false)]),
+        ("active", "Move billing to Stripe", &[("Plan", true), ("Customers", true), ("Subscriptions", true), ("Webhooks", false), ("Invoices", false), ("Refunds", false), ("Tax", false), ("Cut over", false), ("Turn off the old one", false)]),
+        ("active", "Search across threads", &[("Index", true), ("Query syntax", false)]),
+        ("active", "Speed up the transcript on long threads", &[]),
+        ("blocked", "Fix the login loop on Safari", &[("Reproduce", true), ("Wait for the SSO vendor's fix", false), ("Ship", false)]),
+        ("blocked", "Notarize the release builds", &[("Apple developer account", false), ("Sign in CI", false)]),
+        ("done", "Upgrade the database driver", &[("Bump", true), ("Fix the queries", true)]),
+        ("done", "Archive old memories automatically", &[("Rule", true), ("Undo", true), ("Tests", true)]),
+        ("done", "Crash on launch with no projects", &[]),
+        ("done", "Import Claude Code memory", &[("Read the files", true), ("Merge", true)]),
+        ("done", "Usage chart by model", &[("Split", true), ("Legend", true)]),
+        ("done", "Keyboard shortcuts for tabs", &[]),
+        ("done", "Export memory as Markdown", &[("Folder layout", true), ("Front matter", true)]),
+        ("done", "Settle merged threads", &[]),
+        ("done", "Browser cookie import", &[("Safari", true), ("Chrome", true)]),
+        ("done", "Pin threads", &[]),
+        ("done", "Side chat", &[("Panel", true), ("Session", true)]),
+        ("done", "Plan cards", &[]),
+    ];
+    let mut task_ids = vec![];
+    for (n, (state, title, steps)) in tasks.iter().enumerate() {
+        let mut m = Memory::new(scope, "task", title, if n % 3 == 0 { "" } else { "A made-up task, seeded for testing" }, "Seeded task. Ignore it.", "agent");
+        m.task_state = Some(state.to_string());
+        m.steps = steps.iter().map(|(s, done)| Step { text: s.to_string(), done: *done }).collect();
+        m.created_at = t - (n as f64 + 2.) * 86_400. * 3.;
+        m.updated_at = t - n as f64 * 3_600. * 7.;
+        task_ids.push(m.id.clone());
+        memories.push(m);
+    }
+    let ids: Vec<String> = memories.iter().map(|m| m.id.clone()).collect();
+    store.save_all(memories, &Actor { kind: "app".into(), thread: None });
+    let agent = Actor { kind: "agent".into(), thread: None };
+    for i in (0..count).step_by(4) {
+        store.note_recall(vec![ids[i].clone()], &agent);
+        store.note_search(scope, TOPICS[i % TOPICS.len()], vec![ids[i].clone()], &agent);
+    }
+    // Tasks get read too (agents check them): Insights leaves those out.
+    store.note_recall(task_ids.iter().take(6).cloned().collect(), &agent);
+    store.note_search(scope, "kubernetes staging", vec![], &agent);
+    store.note_injection(scope, count.min(120), 6_400, &agent);
+    store.db.flush();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
