@@ -42,6 +42,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 - Search across threads finds old conversations a few seconds after launch, without waiting for something new to be written first.
 
 ### Fixed
+- Claude's actions in the browser no longer take two seconds longer each while the browser isn't showing (you're reading the thread, or another one is open): its pages wait off screen where they keep drawing.
 - A message sent while a thread was still loading no longer shows twice.
 - A finished turn no longer sends its notification twice.
 
