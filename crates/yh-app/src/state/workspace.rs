@@ -1,7 +1,6 @@
 //! What the app knows and does, with no drawing: projects, threads, which one is open, each
 //! thread's `claude`, and every request the UI makes (send, stop, allow, pin, rename…). Views
 //! read it and call it; it tells them what changed with `WorkspaceEvent`s and `notify`.
-//! The port of the web rewrite's `Backend` and `ThreadRuntime` (legacy/Sources/HarnessBackend).
 
 use crate::probe;
 use crate::state::thread::ThreadState;
@@ -129,7 +128,7 @@ const STACKS_PROMPT: &str = "The user works with GitHub's stacked pull requests 
 pub enum Undo {
     Delete { entity: Entity<ThreadState>, record: serde_json::Map<String, Value>, index: usize, was_selected: bool },
     Unpin(String),
-    /// Pinning: ⌘Z unpins (no notice, as the Swift app).
+    /// Pinning: ⌘Z unpins (no notice).
     Pin(String),
     /// Settling: back as it was, its pin and the selection too.
     Settle { id: String, pinned: bool, was_selected: bool },
@@ -358,7 +357,7 @@ impl Workspace {
         workspace
     }
 
-    /// A data folder without a Home project gets one, as the Swift app makes it: your home
+    /// A data folder without a Home project gets one: your home
     /// folder, or in a development run (`YH_DATA_DIR`) a `home` folder inside the data folder, so a
     /// test never runs `claude` in your real home.
     fn ensure_home(&mut self, cx: &mut Context<Self>) {
@@ -423,7 +422,7 @@ impl Workspace {
 
     pub fn set_home_folder(&mut self, path: &str, cx: &mut Context<Self>) {
         let Some(id) = self.home_project() else { return };
-        // Named for its folder, as the Swift app does; "Home" for your home folder.
+        // Named for its folder; "Home" for your home folder.
         let name = if Some(path) == std::env::var("HOME").ok().as_deref() {
             "Home".to_string()
         } else {
@@ -485,7 +484,7 @@ impl Workspace {
     }
 
     /// Whether the thread's model can run in Auto (unknown models are given the benefit of the
-    /// doubt, as the Swift app does).
+    /// doubt).
     pub fn supports_auto_mode(&self, thread: &ThreadState) -> bool {
         let model = self.model_of(thread).unwrap_or_else(|| "default".into());
         self.models.iter().find(|m| m.value == model).is_none_or(|m| m.supports_auto_mode)
@@ -690,7 +689,7 @@ impl Workspace {
             return id;
         }
         self.new_count += 1;
-        // Saved in harness.sqlite right away, as the Swift app does; `new:` only without one.
+        // Saved in harness.sqlite right away; `new:` only without one.
         let meta = if self.library.db.is_some() && !project_id.starts_with("dir:") {
             self.library.add_thread(project_id, "New thread")
         } else {
@@ -736,7 +735,7 @@ impl Workspace {
     }
 
     /// Before the open thread goes (settled, deleted), the one below it opens, or above at the
-    /// end, as the Swift app does, so the window doesn't go blank.
+    /// end, so the window doesn't go blank.
     fn select_neighbour(&mut self, id: &str, cx: &mut Context<Self>) {
         if self.selected.as_deref() != Some(id) || self.page.is_some() {
             return;
@@ -1131,7 +1130,7 @@ impl Workspace {
         cx.notify();
     }
 
-    /// A tool call's folders join its thread's footprint (saved as the Swift app saves it).
+    /// A tool call's folders join its thread's footprint (saved as 0.0.x saved it).
     fn note_footprint(&mut self, thread: &Entity<ThreadState>, tool: &str, input: &str, cx: &mut Context<Self>) {
         let cwd = self.folder_of(thread.read(cx));
         let touched = yh_core::footprint::folders(tool, input, &cwd);
@@ -1238,12 +1237,12 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Your rules for generated titles (`titlePrompt`, the Swift app's key; `titleRules` before).
+    /// Your rules for generated titles (`titlePrompt`, 0.0.x's key; `titleRules` before).
     pub fn title_prompt(&self) -> Option<String> {
         ["titlePrompt", "titleRules"].iter().find_map(|k| self.library.setting(k).and_then(|r| r.as_str().map(str::to_string))).filter(|r| !r.trim().is_empty())
     }
 
-    /// Settles threads idle for `autoSettleDays` (3 by default; 0 never), the Swift app's way:
+    /// Settles threads idle for `autoSettleDays` (3 by default; 0 never):
     /// never while working or waiting on you, never the one on screen, never one opted out
     /// or brought back since its last message, never an untouched blank.
     pub fn settle_idle_threads(&mut self, cx: &mut Context<Self>) {
@@ -1279,8 +1278,8 @@ impl Workspace {
         }
     }
 
-    /// Settles threads whose PRs have all merged, with nothing new since (the work landed), as
-    /// the Swift app does a little after launch and every five minutes: the same exceptions as
+    /// Settles threads whose PRs have all merged, with nothing new since (the work landed), a
+    /// little after launch and every five minutes: the same exceptions as
     /// idle settling, and a PR closed without merging, or still open, keeps it. Each thread's PR
     /// links are read from its rows aside, again only when it has new rows (`merge_links`).
     pub fn settle_merged_threads(&mut self, cx: &mut Context<Self>) {
@@ -1435,7 +1434,7 @@ impl Workspace {
             m.effort = effort.clone();
             r.insert("effort".into(), effort.map(Value::from).unwrap_or(Value::Null));
         });
-        // As the Swift app's `restartSession`: a turn under way (or jobs it left running) is
+        // A turn under way (or jobs it left running) is
         // never ended for it, its `claude` starts over once it's over; an idle one ends now, the
         // next message starting it with the new effort.
         let Some(thread) = self.thread(id) else { return };
@@ -1520,7 +1519,7 @@ impl Workspace {
         let first_message = thread.read(cx).total == Some(0);
         let message_id = yh_core::library::new_uuid();
         let delivery = running.then_some(if now { "interrupted" } else { "steered" });
-        // Kept with the message as the Swift app keeps them: images by name, then files.
+        // Kept with the message as 0.0.x kept them: images by name, then files.
         let file_names: Vec<String> = files.iter().map(|f| f.stored_name(&id)).collect();
         let attachments: Vec<String> = images.iter().chain(&file_names).cloned().collect();
         // The title is written from this: it should know what came with it.
@@ -1557,7 +1556,7 @@ impl Workspace {
         }
         if let Err(error) = self.ensure_runtime(thread, running, cx) {
             thread.update(cx, |t, cx| {
-                // As the Swift app's `fail`: the reason itself, in error colour.
+                // The reason itself, in error colour.
                 t.error_notice(&error);
                 t.running = false;
                 cx.notify();
@@ -2393,8 +2392,8 @@ impl Workspace {
                     Some(Value::Object(m)) => m,
                     _ => serde_json::Map::new(),
                 };
-                // In the Swift app's shape (it decodes its own `SlashCommand`, MCP prompts by
-                // the name Claude Code takes, with their server).
+                // In the shape 0.0.x saved (its `SlashCommand`, MCP prompts by the name
+                // Claude Code takes, with their server).
                 let swift: Vec<Value> = self.commands[project_id].iter().map(SlashCommand::saved).collect();
                 all.insert(project_id.to_string(), Value::Array(swift));
                 self.library.set_setting("slashCommands", &Value::Object(all));
@@ -2863,7 +2862,7 @@ impl Workspace {
 // MARK: Background jobs
 
 impl Workspace {
-    /// Stops a job Claude left running, as the Swift app's Stop does (`stop_task`); its end
+    /// Stops a job Claude left running (`stop_task`); its end
     /// comes back as for any other.
     pub fn stop_job(&mut self, thread: &Entity<ThreadState>, task_id: &str, cx: &mut Context<Self>) {
         let id = thread.read(cx).id().to_string();
@@ -2886,7 +2885,7 @@ impl Workspace {
     }
 
     /// Background jobs and sub-agents running in every thread, for asking before quitting:
-    /// (title, detail), as the Swift app words it.
+    /// (title, detail).
     pub fn quit_question(&self, cx: &App) -> Option<(String, String)> {
         // Worded by who started what: a running sub-agent's commands count with it.
         let commands: Vec<String> =
@@ -2951,7 +2950,7 @@ pub fn session_id_in(text: &str) -> Option<String> {
     })
 }
 
-/// What agents are told about diagrams (the Swift app's `AgentInstructions.diagrams`).
+/// What agents are told about diagrams.
 pub const DIAGRAM_PROMPT: &str = "You are running inside YourHarness, a native macOS app that draws ```mermaid code blocks in your replies \
 as diagrams, right in the conversation, with zoom, copy and PNG export. When the user asks for a diagram, \
 chart, flow or visualization, or a picture would explain something better than prose, put ```mermaid \
@@ -3107,7 +3106,7 @@ impl Workspace {
     /// Commands the app does itself, so its own state stays true: `/btw` opens the side chat,
     /// `/mcp` the servers sheet, `/model` and `/effort` go through the pickers' own calls.
     /// `/rename` goes to Claude Code, whose new title comes back (`note_composer_event`); the
-    /// rest (`/clear`, `/compact`, `/context`, `/usage`…) are Claude Code's, as in the Swift app.
+    /// rest (`/clear`, `/compact`, `/context`, `/usage`…) are Claude Code's.
     fn handle_command(&mut self, thread: &Entity<ThreadState>, text: &str, cx: &mut Context<Self>) -> CommandHandling {
         let Some((name, args)) = yh_core::claude::parse_command(text) else { return CommandHandling::NotOurs };
         let id = thread.read(cx).id().to_string();
@@ -3262,7 +3261,7 @@ impl Workspace {
             Event::Skills(skills) => {
                 let project = thread.read(cx).meta.project_id.clone();
                 if self.saved_skills(&project).as_ref() != Some(skills) {
-                    // Saved as the Swift app saves them (`skills`, by project).
+                    // Saved as 0.0.x saved them (`skills`, by project).
                     let mut all = match self.library.setting("skills") {
                         Some(Value::Object(m)) => m,
                         _ => serde_json::Map::new(),
@@ -3272,7 +3271,7 @@ impl Workspace {
                 }
                 self.composer.skills.insert(project, skills.clone());
             }
-            // Remembered by model (`contextWindows`, as the Swift app keeps them).
+            // Remembered by model (`contextWindows`, as 0.0.x kept them).
             Event::ContextWindows(windows) => {
                 let mut all = match self.library.setting("contextWindows") {
                     Some(Value::Object(m)) => m,

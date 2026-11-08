@@ -20,7 +20,7 @@ use std::rc::Rc;
 
 pub const WIDTH: f32 = 380.;
 
-/// What Split into a Stack asks Claude, as the Swift app does.
+/// What Split into a Stack asks Claude.
 const SPLIT_INTO_STACK: &str = "Split the work in this thread into a GitHub stack of small pull requests with `gh stack`. Group the changes into layers that each make sense on their own and build on the one below, bottom first, one branch per layer with its changes committed there (`gh stack init`, then `gh stack add` for each layer above). Then run `gh stack submit --auto --open` and tell me the stack number and its PRs. Don't merge anything.";
 
 /// Where file links go: set by the window to open them in its Files tab.
@@ -62,8 +62,8 @@ pub fn split_lines(link: &str) -> (String, Option<(usize, usize)>) {
 /// Biggest file shown; past it, its first part.
 const MAX_FILE: u64 = 8 * 1024 * 1024;
 
-/// A folder's files as a tree, read a folder at a time as it's opened (as Finder and the
-/// Swift app do): each folder read so far, its entries folders first, by name. Everything on
+/// A folder's files as a tree, read a folder at a time as it's opened (as Finder
+/// does): each folder read so far, its entries folders first, by name. Everything on
 /// disk shows; what git ignores is dimmed rather than hidden.
 #[derive(Default)]
 struct Tree {
@@ -195,7 +195,7 @@ fn read_file(full: &str) -> ViewerRead {
     ViewerRead { content, note, cut_lines, carries: std::sync::Arc::new(carries) }
 }
 
-/// Lines longer than this are cut, as the Swift app's viewer does.
+/// Lines longer than this are cut.
 const LINE_LIMIT: usize = 5_000;
 
 const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff", "ico", "svg"];
@@ -2296,7 +2296,7 @@ fn pull_tint(pr: &yh_core::forge::PullRequest, theme: &Theme) -> gpui_kit::Hsla 
     }
 }
 
-/// Lane spacing and the dot's size and place in a stack's tree, as the Swift app's `GraphCell`.
+/// Lane spacing and the dot's size and place in a stack's tree.
 const LANE: f32 = 18.;
 const DOT: f32 = 16.;
 const DOT_Y: f32 = 17.;

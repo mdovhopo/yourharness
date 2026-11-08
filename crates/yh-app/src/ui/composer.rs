@@ -654,7 +654,7 @@ impl Composer {
         }
     }
 
-    /// Model, effort and permissions, as the Swift app's chips: each menu says what its choices
+    /// Model, effort and permissions, as chips: each menu says what its choices
     /// mean, with a footnote on when they apply.
     fn pickers(&self, thread: &Entity<ThreadState>, compact: bool, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let ws = self.workspace.read(cx);
@@ -798,7 +798,7 @@ fn picker_row(title: String, subtitle: Option<String>, secondary: gpui_kit::Hsla
     })
 }
 
-/// The Swift app's names for effort levels.
+/// Effort levels' names, as the menu shows them.
 fn effort_label(e: &str) -> &str {
     match e {
         "low" => "Low",
@@ -821,7 +821,7 @@ fn effort_detail(e: &str) -> Option<&'static str> {
     })
 }
 
-/// A permission mode's long name and what it does (the Swift app's `PermissionMode`).
+/// A permission mode's long name and what it does.
 fn mode_detail(mode: &str) -> (&'static str, &'static str) {
     match mode {
         "ask" => ("Ask Before Changes", "Claude asks before editing files or running commands."),
@@ -875,7 +875,7 @@ fn card_buttons() -> gpui_kit::Div {
     div().flex().flex_wrap().justify_end().items_center().gap(px(space::S))
 }
 
-/// A tool waiting for your permission, as the Swift app's `PermissionCard`: the tool's icon,
+/// A tool waiting for your permission: the tool's icon,
 /// "Allow Run command?", the argument that matters and Claude's description. The buttons sit
 /// beside it, or under it when the card is narrow (the side chat). `more`: requests waiting
 /// after this one (parallel sub-agents), each shown in turn.
@@ -1771,7 +1771,7 @@ impl Composer {
 
     fn suggestions(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let s = self.suggest.as_ref()?;
-        // Every match, scrolling past 300 pt, as the Swift app's menu.
+        // Every match, scrolling past 300 pt.
         let mut list = div()
             .id("suggestions")
             .track_scroll(&self.suggest_scroll)
@@ -1834,7 +1834,7 @@ struct Question {
     other: Entity<InputState>,
 }
 
-/// What Claude hears when you skip its question (the Swift app's words).
+/// What Claude hears when you skip its question.
 const SKIP_MESSAGE: &str = "The user chose not to answer. Continue with your best judgment, or ask in chat.";
 
 /// Claude asks (`AskUserQuestion`): pick options or write your own; Skip declines.
@@ -1848,7 +1848,7 @@ pub struct QuestionCard {
 impl QuestionCard {
     /// The card for `p`, or None when its input has no questions (it shows as a plain
     /// permission then). Typing an answer redraws the card (Answer waits for every question),
-    /// and replaces a single choice, as in the Swift app.
+    /// and replaces a single choice.
     fn new(p: &Permission, workspace: gpui_kit::WeakEntity<Workspace>, window: &mut Window, cx: &mut Context<Composer>) -> Option<Entity<QuestionCard>> {
         let input: Value = serde_json::from_str(&p.input).ok()?;
         let parsed: Vec<(String, Option<String>, bool, Vec<(String, Option<String>)>)> = input["questions"]
@@ -1953,7 +1953,7 @@ impl Render for QuestionCard {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::get(cx);
         let title = card_title(icons::message_question(), if self.questions.len() == 1 { "Claude asks".to_string() } else { format!("Claude asks {} questions", self.questions.len()) }, &theme);
-        // The questions scroll past 420 pt, as in the Swift app; the title and buttons stay.
+        // The questions scroll past 420 pt; the title and buttons stay.
         let mut questions = div().id("question-list").max_h(px(420.)).overflow_y_scroll().flex().flex_col().gap(px(space::S + 2.));
         for (qi, q) in self.questions.iter().enumerate() {
             // With descriptions, each option on its own line with what it means beside it.
@@ -2046,7 +2046,7 @@ impl PlanCard {
 
 impl PlanCard {
     /// Auto when the thread's model can use it, else Accept Edits (edits go through, commands
-    /// still ask), as the Swift app recommends. Also whether Auto is offered at all.
+    /// still ask). Also whether Auto is offered at all.
     fn recommended(&self, cx: &App) -> (&'static str, bool) {
         let auto = self.workspace.upgrade().and_then(|ws| ws.read(cx).selected_thread().map(|t| ws.read(cx).supports_auto_mode(t.read(cx)))).unwrap_or(true);
         (if auto { "auto" } else { "acceptEdits" }, auto)
@@ -2077,7 +2077,7 @@ impl PlanCard {
         self.approve_in(mode, cx);
     }
 
-    /// ⌘⌫: keep planning, with what's written as feedback (the Swift app's words).
+    /// ⌘⌫: keep planning, with what's written as feedback.
     fn keep_planning(&self, cx: &mut App) {
         let feedback = self.feedback.read(cx).value().trim().to_string();
         let message = if feedback.is_empty() {

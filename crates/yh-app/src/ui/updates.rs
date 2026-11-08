@@ -1,4 +1,4 @@
-//! Updates, as the Swift app shows them (UpdateViews.swift): the sidebar's banner while there's
+//! Updates: the sidebar's banner while there's
 //! something to do (a version to get, its download with Cancel, Restart, a failure, "X is the
 //! latest" after a check you asked for, "Updated to X" after an update), the version under the
 //! limits with a popover (version, build, release notes, where updates stand), release notes

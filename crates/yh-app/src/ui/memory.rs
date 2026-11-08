@@ -93,7 +93,7 @@ pub enum Tab {
 }
 
 /// The memory as a map: active memories' IDs, their links as index pairs, their places (0…1).
-/// Claude Code's own memory for the project's folder, the Swift app's `ClaudeMemoryStatus`: on
+/// Claude Code's own memory for the project's folder: on
 /// or off, its files, and the ones YourHarness doesn't have.
 #[derive(Clone, Default)]
 pub struct ClaudeMemory {
@@ -109,7 +109,7 @@ impl ClaudeMemory {
     }
 }
 
-/// When a project's Claude Code memory was last brought in (seconds since 1970). The Swift app
+/// When a project's Claude Code memory was last brought in (seconds since 1970). 0.0.x
 /// saved dates from 2001; those are moved over.
 fn synced_at(lib: &yh_core::library::Library, project: &str) -> Option<f64> {
     let v = lib.setting("claudeMemorySyncedAt")?.get(project)?.as_f64()?;
@@ -1157,7 +1157,7 @@ impl MemoryPage {
                     .px(px(space::M))
                     .py(px(space::S + 2.))
                     .child(crate::ui::rows::markdown_view(&yh_core::markdown::parse(&body_text), theme))
-                    // A double click goes to the editor, as in the Swift app.
+                    // A double click goes to the editor.
                     .on_click(cx.listener(|this, e: &gpui_kit::ClickEvent, _, cx| {
                         if e.click_count() >= 2 {
                             this.editing_body = true;
@@ -2249,7 +2249,7 @@ struct Source {
     on: bool,
 }
 
-/// Before a specialist starts, as the Swift app's MemoryAgentWindow does: the Importer's
+/// Before a specialist starts: the Importer's
 /// sources (Claude Code's memory for the folder, instruction files, files you add, pasted text)
 /// and what it should know; the Reconciler's starting point and what to focus on; for both,
 /// the model and effort. Start opens the specialist's conversation and sets it going.

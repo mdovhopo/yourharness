@@ -1,5 +1,5 @@
-//! A thread's browser as you see it, in the right sidebar and in its own window (the Swift app's
-//! `BrowserPanel`): its tabs, the address bar with Pick and Take Control, the card for a page's
+//! A thread's browser as you see it, in the right sidebar and in its own window: its
+//! tabs, the address bar with Pick and Take Control, the card for a page's
 //! alert, confirm or prompt, the place the page is laid over (GPUI keeps it empty; the web view
 //! follows its bounds every frame), and the console and network under it. With nothing open:
 //! the dev servers this thread started, and Import Sign-ins.
@@ -51,7 +51,7 @@ enum LogKind {
     Network,
 }
 
-/// The page sizes the menu offers, as the Swift app's (`ViewportChoice`).
+/// The page sizes the menu offers.
 const PAGE_SIZES: [(&str, Option<(f64, f64)>); 5] = [
     ("Fit the Sidebar", None),
     ("Laptop (1512 × 982)", Some(crate::webview::LAPTOP)),
@@ -134,7 +134,7 @@ impl BrowserPanel {
             answer,
             answer_for: None,
             filter,
-            // Open, as the Swift app's; `YH_BROWSER_PANE=console|network` picks the pane, `=none` folds it.
+            // Open; `YH_BROWSER_PANE=console|network` picks the pane, `=none` folds it.
             logs_open: std::env::var("YH_BROWSER_PANE").as_deref() != Ok("none"),
             log_kind: if std::env::var("YH_BROWSER_PANE").as_deref() == Ok("network") { LogKind::Network } else { LogKind::Console },
             errors_only: std::env::var("YH_BROWSER_ERRORS_ONLY").as_deref() == Ok("1"),
@@ -265,7 +265,7 @@ impl BrowserPanel {
     }
 
     /// Looks for the dev servers this thread started: ports under its `claude`, and local
-    /// addresses its commands printed (the Swift app's `LocalServers`). Never a scan of every port.
+    /// addresses its commands printed. Never a scan of every port.
     fn scan_servers(&mut self, cx: &mut Context<Self>) {
         let Some(thread) = self.thread_id().map(str::to_string) else { return };
         if self.scanning {
@@ -683,7 +683,7 @@ impl BrowserPanel {
             .into_any_element()
     }
 
-    /// The card a page's alert, confirm or prompt asks you with (the Swift app's `DialogCard`).
+    /// The card a page's alert, confirm or prompt asks you with.
     fn dialog_card(&mut self, dialog: &(String, String, Option<String>, u64), tab: u32, theme: &Theme, window: &mut Window, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let (kind, message, default, number) = dialog;
         if self.answer_for != Some((tab, *number)) {
@@ -710,7 +710,7 @@ impl BrowserPanel {
             .into_any_element()
     }
 
-    /// The console and network under the page (the Swift app's `BrowserLogs`).
+    /// The console and network under the page.
     fn logs(&mut self, thread: &str, theme: &Theme, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let filter = self.filter.read(cx).value().to_lowercase();
         let (kind, errors_only, open) = (self.log_kind, self.errors_only, self.logs_open);

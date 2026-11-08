@@ -21,8 +21,8 @@ const RANGES: [(&str, usize); 5] = [("Week", 7), ("Month", 30), ("Quarter", 90),
 /// The ranges' labels on a narrow page, as Health and Stocks write them.
 const SHORT_RANGES: [&str; 5] = ["W", "M", "3M", "6M", "Y"];
 
-/// The categorical palette (light, dark), in the order checked for color blindness (the
-/// Swift app's; validated with the dataviz script against both surfaces). Past seven
+/// The categorical palette (light, dark), in the order checked for color blindness
+/// (validated with the dataviz script against both surfaces). Past seven
 /// models, the rest share Other.
 const PALETTE: [(u32, u32); 7] =
     [(0x2A78D6, 0x3987E5), (0xEB6834, 0xD95926), (0x1BAF7A, 0x199E70), (0xEDA100, 0xC98500), (0xE87BA4, 0xD55181), (0x008300, 0x008300), (0x6250D6, 0x9085E9)];
@@ -51,7 +51,7 @@ pub struct UsagePage {
 
 gpui_kit::actions!(usage, [CloseUsage]);
 
-/// Rows a page of the per-day table holds, as the Swift app's.
+/// Rows a page of the per-day table holds.
 const DAYS_PER_PAGE: usize = 14;
 /// When the price table was last checked against Anthropic's page (`yh_core::usage::entry`).
 const PRICES_CHECKED: &str = "2026-10-28";

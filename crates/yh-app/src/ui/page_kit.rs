@@ -280,8 +280,8 @@ pub fn group_label(title: impl Into<SharedString>, theme: &Theme) -> gpui_kit::D
 }
 
 /// A multi-line field inside a page that scrolls: the wheel moves the field while it can go
-/// that way, and the page once the field is at its end (as the transcript's capped boxes do,
-/// the Swift app's `TranscriptWheelRouter`). The field keeps every wheel event over it once its
+/// that way, and the page once the field is at its end (as the transcript's capped boxes
+/// do). The field keeps every wheel event over it once its
 /// text overflows, so this watches from the capture phase where each event was before it, and
 /// after the event, if neither the field nor the page moved, moves the page by it.
 pub fn wheel_passes_to_page(

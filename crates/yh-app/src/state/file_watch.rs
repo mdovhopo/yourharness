@@ -2,7 +2,7 @@
 //! reads a folder again when something in it is created, deleted or renamed, and an open
 //! file reloads when it's saved. Events arrive on FSEvents' own thread and are passed on in
 //! batches, a moment after they stop (an editor's save or `git checkout` is many events), so
-//! the main thread hears once per burst. As the Swift app's `FolderWatcher`.
+//! the main thread hears once per burst.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};

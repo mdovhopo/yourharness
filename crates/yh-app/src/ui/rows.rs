@@ -1361,7 +1361,7 @@ fn code_block(code: &Text, lang: &str, theme: &Theme, ctx: Option<&RowContext>, 
                     .when_some(ctx, |d, ctx| d.child(copy_button("copy-code", (ctx.pos, n, &code.text), code.text.clone(), ctx, theme))),
             )
         })
-        // Long lines scroll sideways instead of wrapping, as in the Swift app; a vertical wheel
+        // Long lines scroll sideways instead of wrapping; a vertical wheel
         // over it still scrolls the transcript (the box takes only the horizontal axis).
         .child(
             div()
@@ -1628,8 +1628,7 @@ pub fn box_offsets() -> Vec<(u64, f32, f32)> {
 }
 
 /// A box capped at `max` tall whose content scrolls inside it. A vertical wheel moves the box
-/// while it can go that way, and the transcript once it's at its end (the Swift app's
-/// `TranscriptWheelRouter`): GPUI hands the event to every scroll under the pointer, so the box
+/// while it can go that way, and the transcript once it's at its end: GPUI hands the event to every scroll under the pointer, so the box
 /// stops it from reaching the list only when it took it.
 fn capped_box(key: u64, max: f32, content: impl IntoElement) -> gpui_kit::Stateful<gpui_kit::Div> {
     let (handle, before) = box_scroll(key);
@@ -1654,7 +1653,7 @@ fn capped_box(key: u64, max: f32, content: impl IntoElement) -> gpui_kit::Statef
 }
 
 /// Monospaced text in a box: a command, a tool's input or output. `tint` colours it (a failure).
-/// Past 320 pt it scrolls inside the box, as the Swift app's `CodeBox`.
+/// Past 320 pt it scrolls inside the box.
 fn mono_box(text: String, tint: Option<Hsla>, theme: &Theme) -> impl IntoElement {
     // Keyed by its length and start: hashing a long output whole on every frame costs.
     let key = copy_hash("mono-box", (text.len(), text.chars().take(160).collect::<String>()));

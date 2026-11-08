@@ -1,5 +1,5 @@
 //! Claude's usage limits on the workspace: kept between launches (`rateLimit`,
-//! `rateLimitUpdatedAt`, as the Swift app saves them) and refreshed from the sidebar with a
+//! `rateLimitUpdatedAt`, the keys 0.0.x saved) and refreshed from the sidebar with a
 //! tiny Haiku request through the official `claude` (never its credentials).
 
 use crate::state::workspace::Workspace;

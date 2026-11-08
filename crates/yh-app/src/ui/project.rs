@@ -1,5 +1,5 @@
-//! A project's page, from clicking its name: its pull requests and repos at a glance (the
-//! Swift app's WorkspaceView), with Memory one tab over. Everything's discovered from git and
+//! A project's page, from clicking its name: its pull requests and repos at a glance,
+//! with Memory one tab over. Everything's discovered from git and
 //! the forges' CLIs (`yh_core::workspace`): read on a copy off the main thread, swapped in
 //! whole, again every minute while it shows. Open PRs come grouped into stacks, each a card
 //! drawn as a staircase (`StackGraph`) with what can be done with it (merge, submit, add a
@@ -176,7 +176,7 @@ impl ProjectPage {
     }
 
     /// "Claude Code keeps its own memory here": compact, with the way to one memory on the
-    /// Memory page, as the Swift app's `ClaudeMemoryNudge(compact: true)`.
+    /// Memory page.
     fn claude_memory_nudge(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
         let (on, files) = self.claude_memory?;
         if !on && files == 0 {
@@ -814,7 +814,7 @@ impl ProjectPage {
             .child(icon_button("project-finder", Icon::new(IconName::FolderOpen), "Show in Finder", theme).on_click(move |_, _, cx| cx.reveal_path(Path::new(&p2))))
             .child(div().ml(px(space::XS)).child(Button::new("project-new-thread").small().primary().label("New Thread").icon(IconName::Plus).on_click(cx.listener(|p, _, _, cx| p.new_thread_in(None, cx)))))
             .into_any_element();
-        // The Swift app's `ProjectIcon`: a stack for a workspace of repos, a folder otherwise.
+        // A stack for a workspace of repos, a folder otherwise.
         let icon = if workspace_kind { crate::ui::icons::layers() } else { gpui_kit::component::Icon::new(IconName::Folder) };
         div()
             .id("project-header")

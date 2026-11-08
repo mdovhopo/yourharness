@@ -1,7 +1,7 @@
 //! Keeps the Mac from sleeping on its own while Claude works, as `caffeinate` does, with the
 //! same power assertion and no process of its own. Nothing ticks: it changes only when work
 //! starts or stops, when a setting changes, and at the one deadline it has, if any. Settings
-//! (`keepAwake`, the Swift app's): on/off, while working or always, the display too, and
+//! (`keepAwake`, as 0.0.x saved it): on/off, while working or always, the display too, and
 //! minutes to stay awake after the last turn. The sidebar's cup asks for 1, 2 or 4 hours, or
 //! until you stop it.
 

@@ -3,7 +3,7 @@
 //! the project's scan last saw them, GitHub and GitLab alike), and the ones that only came up
 //! (links pasted, PRs Claude looked at), each as its forge's CLI tells it now. All of it off
 //! the main thread. Claude touching PRs (`gh pr …`, `gh stack`, `glab mr`, a push) has them
-//! looked at again a moment later (`note_results`), as the Swift app's `pullRequestActivity`.
+//! looked at again a moment later (`note_results`).
 
 use crate::state::thread::{EntryRef, ThreadState};
 use std::path::Path;
@@ -78,7 +78,7 @@ pub fn branch_pulls(scan: &yh_core::workspace::Workspace, thread: &yh_core::work
 
 /// The thread's PR links: worked on first (in the order they came up), then the rest.
 /// `branches` are the open PRs of its branches (worked on); `saved` the links its record keeps
-/// (`workedPullRequests`, `pullRequests`, as the Swift app saved them), so a branch's PR
+/// (`workedPullRequests`, `pullRequests`, as 0.0.x saved them), so a branch's PR
 /// that merged and left the open list still shows.
 pub fn links(db: &Database, thread: &str, folder: &str, path_env: Option<&str>, branches: &[PullRequest], saved: (&[String], &[String])) -> Vec<(Link, bool)> {
     let total = db.transcript_count(thread);
@@ -209,7 +209,7 @@ pub fn look_up(links: Vec<(Link, bool)>, path_env: Option<String>, open: &[PullR
 // MARK: Claude touching PRs
 
 /// Whether a command changes PRs: merging, opening, pushing to one (its state is about to
-/// change), as the Swift app's `touchesPullRequests`.
+/// change).
 pub fn touches_pull_requests(input_json: &str) -> bool {
     let v: serde_json::Value = serde_json::from_str(input_json).unwrap_or_default();
     let command = v["command"].as_str().unwrap_or("");

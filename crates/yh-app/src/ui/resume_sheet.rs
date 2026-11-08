@@ -1,4 +1,4 @@
-//! Resume a Claude Code Session (⇧⌘O), as Views/ResumeSessionSheet.swift: paste a session ID
+//! Resume a Claude Code Session (⇧⌘O): paste a session ID
 //! (or a `claude --resume` command), see what it is, pick the project it goes in, and open it
 //! as a thread that continues it. A copied ID fills itself in; one already open shows its
 //! thread instead.

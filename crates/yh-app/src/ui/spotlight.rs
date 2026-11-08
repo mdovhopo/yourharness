@@ -1,4 +1,4 @@
-//! ⌘K: one search over everything, as the Swift app's (Model/Spotlight.swift): recent threads
+//! ⌘K: one search over everything: recent threads
 //! before you type; then threads by title, tasks and memories in every project, projects,
 //! what was said in conversations, and what the app can do. Titles, projects and actions
 //! match as you type; transcripts and memories come from the full-text indexes a moment later,

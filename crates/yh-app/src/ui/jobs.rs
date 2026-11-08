@@ -1,7 +1,7 @@
 //! Above the composer while Claude has jobs running: what each is, how long it's been going
 //! and the last thing it printed, so it's clear whether Claude is waiting on something or
 //! done. Claude is woken when one ends; you can type meanwhile. Open a job for its live
-//! output; Stop ends it (`stop_task`, as the Swift app's Stop). Sub-agents in the background
+//! output; Stop ends it (`stop_task`). Sub-agents in the background
 //! are listed too, with what each is doing now; one opens in the right sidebar's Sub-agents.
 //!
 //! A view of its own: its clock and the output it reads (off the main thread, once a second,
@@ -386,7 +386,7 @@ impl Render for JobsStrip {
     }
 }
 
-/// What Quit does: asks first while background jobs run, as the Swift app did (they stop
+/// What Quit does: asks first while background jobs run (they stop
 /// with the app). Set up once the window is there; until then Quit just quits. Every way of
 /// quitting comes here: ⌘Q, closing the window, Dock → Quit and logging out (through
 /// `platform::guard_terminate`), and the updater's Restart (`ask_then`).

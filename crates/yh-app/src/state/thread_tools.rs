@@ -3,7 +3,7 @@
 //! and ⌘K. It can't delete anything. A thread in Home reaches every project; a thread anywhere
 //! else only its own project's threads, and only sessions that ran in its folder. With title
 //! updates on, it can have its own thread's title rewritten when the subject changes.
-//! Names, schemas and replies are the Swift app's: agents already use them.
+//! Names, schemas and replies are as 0.0.x had them: agents already use them.
 //!
 //! Calls run on a thread of their own: what only the main thread knows (which threads are
 //! working, waiting, unread) is asked for over `ToolRequest`s; the database is read right here.

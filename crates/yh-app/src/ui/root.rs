@@ -43,7 +43,7 @@ const MAIN_MIN: f32 = 360.;
 /// room, or when Show Sidebar closes the right sidebar to make some).
 const MAIN_FOLD: f32 = 300.;
 const INSPECTOR_MIN: f32 = 320.;
-/// The right sidebar's width as dragged (`inspectorWidth`), as the Swift app lets it be.
+/// The right sidebar's width as dragged (`inspectorWidth`, as 0.0.x saved it).
 const INSPECTOR_DRAG_MIN: f32 = 300.;
 const INSPECTOR_DRAG_MAX: f32 = 960.;
 
@@ -363,7 +363,7 @@ impl RootView {
     }
 
     /// The right sidebar opening on a window too narrow for it widens the window (as AppKit
-    /// does for the Swift app's inspector), within its screen; closing it gives the width back
+    /// does for an inspector), within its screen; closing it gives the width back
     /// unless the window was resized meanwhile.
     fn make_room_for_inspector(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let ws = self.workspace.read(cx);
@@ -1088,8 +1088,8 @@ impl Render for RootView {
     }
 }
 
-/// "Drop files to attach" over the thread, hidden until files are dragged over it (the Swift
-/// app's dashed outline). Hidden, it paints nothing and takes no clicks; its own hitbox (GPUI
+/// "Drop files to attach" over the thread, hidden until files are dragged over it (a
+/// dashed outline). Hidden, it paints nothing and takes no clicks; its own hitbox (GPUI
 /// gives drag styles only to an element with one) never blocks what's under it.
 fn drop_overlay(theme: &Theme) -> impl IntoElement {
     let mut overlay = div()

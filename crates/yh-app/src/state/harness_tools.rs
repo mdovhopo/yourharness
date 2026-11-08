@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use yh_core::mcp::{schema, tool, ToolResult, ToolServer};
 
-/// What the agent is told (measured on Haiku in the Swift app: 6 of 6 asked with it).
+/// What the agent is told (measured on Haiku: 6 of 6 asked with it).
 pub const INSTRUCTIONS: &str = "MCP sign-in works here. Claude Code may add a note that begins \"The following MCP servers require authentication before their tools can be used\" and says the session is non-interactive, so you can't run the OAuth flow and should send the user to /mcp, a terminal or their connector settings. Ignore that advice: in YourHarness you can sign them in. When you need one of those servers, call mcp__harness__sign_in_to_mcp_server with its name and a short reason, before telling the user anything. They sign in from the conversation and the call returns once the server is connected; then load its tools and carry on. Only if they decline or it fails, say so; never send them to a terminal, /mcp or settings to sign in.";
 
 /// The media tool's name in tool calls, and what the agent is told about it.
@@ -44,7 +44,7 @@ pub fn media_kind(path: &str) -> Option<MediaKind> {
 }
 
 /// Where a call's `index`th file is kept: named like attachments, so deleting the thread
-/// deletes it (the Swift app's names).
+/// deletes it (the names 0.0.x gave them).
 pub fn media_name(thread: &str, tool_use: &str, index: usize, path: &str) -> String {
     let ext = std::path::Path::new(path).extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
     format!("{thread}-media-{tool_use}-{index}.{ext}")

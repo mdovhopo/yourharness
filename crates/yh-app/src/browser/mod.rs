@@ -1,6 +1,6 @@
 //! The agents' browser: each thread's tabs (WKWebViews over the window, see `webview.rs`), and
-//! `mcp__browser__*`, the tools that drive them. Names, schemas and replies are the Swift
-//! app's (legacy/YourHarness/Browser). Tabs live on the main thread (`Browsers`); a tool call
+//! `mcp__browser__*`, the tools that drive them. Names, schemas and replies are as
+//! 0.0.x had them: agents already use them. Tabs live on the main thread (`Browsers`); a tool call
 //! runs on a thread of its own and sends the main thread jobs, waiting on their replies, so
 //! waiting for a page never holds up the window.
 
@@ -130,7 +130,7 @@ impl Tab {
         self.network.clear();
     }
 
-    /// What the agent is doing, over the page for a moment (the Swift app's `show`).
+    /// What the agent is doing, over the page for a moment.
     fn show_activity(&self, label: &str, rect: Option<(f64, f64, f64, f64)>, cx: &mut App) {
         let seq = self.web.show_activity(label, rect);
         if std::env::var("YH_BROWSER_ACTIVITY_LOG").as_deref() == Ok("1") {
@@ -230,8 +230,8 @@ pub struct Browsers {
     /// Threads whose browser is in a window of its own: that window's view, and where in it the
     /// page goes (None until it's laid out). The right sidebar then points there.
     popped: HashMap<String, (usize, Option<(f64, f64, f64, f64)>)>,
-    /// Where threads are saved: each one's tabs go in its record (`browserTabs`, as the Swift
-    /// app keeps them).
+    /// Where threads are saved: each one's tabs go in its record (`browserTabs`, as 0.0.x
+    /// kept them).
     library: Option<std::sync::Arc<yh_core::library::Library>>,
     /// Threads whose tabs changed since they were last saved.
     unsaved: std::collections::HashSet<String>,
@@ -282,8 +282,8 @@ impl Browsers {
         true
     }
 
-    /// The panel showing the thread's browser: last session's tabs reopen (the Swift app's
-    /// `restoreIfNeeded` when the panel appears).
+    /// The panel showing the thread's browser: last session's tabs reopen when the panel
+    /// appears.
     pub fn restore(thread: &str, project: Option<&str>) -> bool {
         Browsers::with(|b| b.restore_if_needed(thread, project))
     }
@@ -446,8 +446,8 @@ impl Browsers {
         }
     }
 
-    /// Pages nobody has used or looked at for 30 minutes (`YH_BROWSER_IDLE_SECS`) are closed, as
-    /// the Swift app does: each tab is a web content process. Their addresses stay, to open again.
+    /// Pages nobody has used or looked at for 30 minutes (`YH_BROWSER_IDLE_SECS`) are closed:
+    /// each tab is a web content process. Their addresses stay, to open again.
     pub fn close_idle(&mut self) {
         let limit = Duration::from_secs(std::env::var("YH_BROWSER_IDLE_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(30 * 60));
         let shown = self.shown.as_ref().map(|(t, _)| t.clone());
@@ -530,7 +530,7 @@ impl Browsers {
     }
 
     /// A picture of what was picked (its box in CSS pixels, a little around it), as a JPEG for
-    /// the message (the Swift app's `PickedElement.image`); None without a tab or a box.
+    /// the message; None without a tab or a box.
     pub fn picture_of_pick(thread: &str, json: &str) -> Option<flume::Receiver<Option<Vec<u8>>>> {
         let v: Value = serde_json::from_str(json).ok()?;
         let r: Vec<f64> = v["rect"].as_array()?.iter().filter_map(Value::as_f64).collect();
@@ -553,8 +553,7 @@ impl Browsers {
         Some(out)
     }
 
-    /// What a picked element reads like in your message: enough for the agent to find it again
-    /// (the Swift app's `PickedElement.promptText`).
+    /// What a picked element reads like in your message: enough for the agent to find it again.
     pub fn picked_text(json: &str) -> Option<String> {
         let v: Value = serde_json::from_str(json).ok()?;
         let s = |k: &str| v[k].as_str().unwrap_or("").to_string();
@@ -790,7 +789,7 @@ fn one_line(text: &str, limit: usize) -> String {
     clip(&text.lines().collect::<Vec<_>>().join(" "), limit)
 }
 
-/// A script's exception as the agent should read it (the Swift app's `BrowserError(script:)`).
+/// A script's exception as the agent should read it.
 fn script_error(message: &str) -> String {
     let message = message.strip_prefix("Error: ").unwrap_or(message);
     if let Some(r) = message.strip_prefix("stale:") {
@@ -1721,7 +1720,7 @@ return JSON.stringify(__yhValue, (key, v) => {{
 /// Null unless the drag starts on a `draggable` element; then the events a browser fires for
 /// it, in order, and whether the drop was taken (the last dragover was cancelled). Runs in the
 /// page's world, so its handlers see this drag's dropEffect and effectAllowed; `from` and `to`
-/// are defined before it. The Swift app's `BrowserTab.htmlDrag`.
+/// are defined before it.
 const HTML_DRAG: &str = r#"
 const [x0, y0] = from, [x1, y1] = to;
 const source = document.elementFromPoint(x0, y0)?.closest('[draggable="true"]');

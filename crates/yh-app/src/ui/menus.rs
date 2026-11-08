@@ -1,5 +1,4 @@
-//! The menu bar, as the Swift app has it (YourHarnessApp.swift's commands plus what SwiftUI
-//! gives every app): About, Services, Hide; File with Close Window; Edit; View with Enter Full
+//! The menu bar, the app's commands plus what every Mac app has: About, Services, Hide; File with Close Window; Edit; View with Enter Full
 //! Screen; Thread; Window; Help; and Debug in development builds. Titles that follow state
 //! ("Hide Usage", "Hide Right Sidebar") and items that can't do anything now are set again
 //! when what they show changes (`MenuState`), not on every change.

@@ -114,7 +114,7 @@ pub fn running_words(commands: usize, agents: usize, agents_commands: usize) -> 
     Some(said)
 }
 
-/// "4s", "2m 14s", "1h 5m", as the Swift app says how long a turn took.
+/// "4s", "2m 14s", "1h 5m": how long a turn took.
 pub fn format_duration(seconds: f64) -> String {
     let total = seconds.round() as u64;
     if total < 60 {

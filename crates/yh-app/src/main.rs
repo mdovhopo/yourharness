@@ -102,7 +102,7 @@ fn main() {
             KeyBinding::new("cmd-o", ui::root::AddProject, None),
             KeyBinding::new("shift-cmd-o", ui::root::ResumeSession, None),
         ]);
-        // The standard app and window keys (SwiftUI gave the Swift app these). ⌘Z outside a text
+        // The standard app and window keys. ⌘Z outside a text
         // field undoes the last thread action; in one, the root decides (`RootView`'s Undo).
         cx.bind_keys([
             KeyBinding::new("cmd-z", ui::root::UndoThreadAction, None),
@@ -180,7 +180,7 @@ fn main() {
         .expect("window");
         let workspace = root.read(cx).workspace.clone();
         cx.set_global(MainWindow(window.window_id()));
-        // Closing the window quits, as in the Swift app (`applicationShouldTerminateAfterLastWindowClosed`),
+        // Closing the window quits the app,
         // through the same question as ⌘Q while jobs run: the window stays until it's answered.
         let _ = window.update(cx, |_, window, cx| {
             window.on_window_should_close(cx, |_, cx| {

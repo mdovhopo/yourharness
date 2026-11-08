@@ -66,7 +66,7 @@ impl Subagent {
         }
     }
 
-    /// As saved (the Swift app's `SubagentSnapshot`): with what it was asked, from its call.
+    /// As saved (the record 0.0.x wrote, `SubagentSnapshot`): with what it was asked, from its call.
     fn record(&self, input: Option<&str>) -> yh_core::subagent_record::SubagentRecord {
         use yh_core::subagent_record::{SubagentEntry, SubagentRecord};
         let input: serde_json::Value = input.and_then(|i| serde_json::from_str(i).ok()).unwrap_or_default();
@@ -820,7 +820,7 @@ impl ThreadState {
 
     /// Your message, as sent: `id` is what the CLI's lifecycle events name it by. Sent while
     /// Claude works (`queued`), it waits above the composer and joins the transcript where
-    /// Claude picks it up, as in the Swift app: never in both places.
+    /// Claude picks it up: never in both places.
     pub fn add_user(&mut self, text: &str, images: &[String], id: &str, queued: bool, delivery: Option<&str>) {
         if queued {
             self.queue.push(Queued { id: id.to_string(), text: text.to_string(), attachments: images.to_vec() });

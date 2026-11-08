@@ -1,4 +1,4 @@
-//! Notifications about threads you aren't looking at, as the Swift app's `Notifier` posts them:
+//! Notifications about threads you aren't looking at:
 //! the thread's title, its project as the subtitle, what happened as the body, with a sound.
 //! A finished turn only while the app is in the background (the sidebar marks it otherwise);
 //! Claude waiting for you whenever it's another thread. Clicking one opens its thread; opening a

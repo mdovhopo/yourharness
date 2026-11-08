@@ -1,5 +1,5 @@
 //! Export State and Import State (Settings, File): everything the app keeps as one `.yhstate`
-//! file, the Swift app's format (`yh_core::state_archive`). Export asks whether the browser's
+//! file, in the format 0.0.x wrote (`yh_core::state_archive`). Export asks whether the browser's
 //! sign-ins go too, writes the file off the main thread and says when it's done, with Show in
 //! Finder. Import checks the file and shows what you have now against what's in it, with "Save
 //! a copy first", before replacing anything; the swap happens at the next launch, before the

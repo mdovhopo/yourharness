@@ -1,6 +1,6 @@
 //! Projects with their threads: Home first, then as saved; in each, pinned threads, then the
 //! newest; settled ones on a shelf of their own. A project folds away with its chevron
-//! (`collapsedProjectIDs`, as the Swift app saves it). Hovering a row shows Pin, Settle and a
+//! (`collapsedProjectIDs`, as 0.0.x saved it). Hovering a row shows Pin, Settle and a
 //! "…" menu; right-click for the same; double-click renames (Return saves, Escape cancels).
 //! ↑/↓ move between threads while the sidebar has focus. One flat column of rows, so a row
 //! can be scrolled to by index. A cached view: it redraws when the workspace says something
@@ -35,7 +35,7 @@ const GAP: f32 = 6.;
 /// Where titles start, from the row's edge.
 const TITLE_X: f32 = ROW_INSET + CHEVRON + GAP + ICON + GAP;
 
-/// Settings: projects folded away (the Swift app's key), shelves open, projects showing all.
+/// Settings: projects folded away (0.0.x's key), shelves open, projects showing all.
 const COLLAPSED: &str = "collapsedProjectIDs";
 const SHELVES: &str = "expandedShelves";
 const SHOW_ALL: &str = "sidebarShowAll";
@@ -51,7 +51,7 @@ fn agents_marker(t: &ThreadState) -> Option<SharedString> {
     t.jobs.summary().map(Into::into)
 }
 
-/// An idle thread with background jobs running: what its hourglass says, as the Swift app.
+/// An idle thread with background jobs running: what its hourglass says.
 fn jobs_marker(t: &ThreadState, busy: bool) -> Option<SharedString> {
     let count = t.jobs.background().count();
     if busy || count == 0 {
@@ -385,7 +385,7 @@ impl Sidebar {
         .detach();
     }
 
-    /// A folder added (or one already there): a new thread in it, as the Swift app does.
+    /// A folder added (or one already there): a new thread in it.
     pub fn add_project_at(&mut self, path: &str, cx: &mut Context<Self>) {
         let id = self.workspace.update(cx, |ws, cx| ws.add_project(path, cx));
         self.new_thread(&id, cx);
@@ -499,8 +499,8 @@ impl Sidebar {
             }
         };
         let name = project.name.clone();
-        // A workspace of repos (a folder or shell holding them) is a stack, the rest a folder, as
-        // the Swift app's `ProjectIcon`; known once the project's been read.
+        // A workspace of repos (a folder or shell holding them) is a stack, the rest a folder;
+        // known once the project's been read.
         let stacked = self.workspace.read(cx).scans.get(&project.id).and_then(|w| w.layout.as_ref()).is_some_and(|l| matches!(l.kind, yh_core::workspace::LayoutKind::Folder | yh_core::workspace::LayoutKind::Shell));
         let icon = if home { icons::house() } else if stacked { icons::layers() } else { Icon::new(IconName::Folder) };
         let chevron_key = pid.clone();
@@ -682,7 +682,7 @@ impl Sidebar {
         } else if unread {
             (div().w(px(7.)).h(px(7.)).rounded_full().bg(theme.accent).into_any_element(), "New reply")
         } else {
-            // Idle: a small grey dot, as the Swift app's.
+            // Idle: a small grey dot.
             (div().w(px(6.)).h(px(6.)).rounded_full().bg(theme.tertiary.opacity(0.6)).into_any_element(), "")
         };
         let status_tip: SharedString = agents.clone().or_else(|| jobs.clone()).unwrap_or_else(|| status_tip.into());
@@ -761,7 +761,7 @@ impl Sidebar {
                         .child(div().w(px(2.))),
                 )
         };
-        // VoiceOver: the title, then what it's doing, as the Swift app's row reads.
+        // VoiceOver: the title, then what it's doing.
         let spoken = {
             let mut parts = vec![t.title.clone()];
             if generating {

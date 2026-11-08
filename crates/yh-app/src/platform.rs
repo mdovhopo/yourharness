@@ -1,5 +1,5 @@
 //! What GPUI doesn't say about the Mac: the window's NSWindow (to park it, and to send it real
-//! events as the window server would, the way web/host/HostProbe.swift does), the screen's
+//! events as the window server would), the screen's
 //! refresh rate, memory and CPU, and whether a run can be trusted.
 
 #![allow(non_upper_case_globals, unexpected_cfgs, deprecated)]
@@ -741,7 +741,7 @@ pub fn quick_look_visible(close: bool) -> bool {
 
 /// While Claude works, macOS doesn't put the app to sleep behind your other windows (App Nap):
 /// its permission requests and notifications would come late. The Mac itself may still sleep
-/// (Keep Awake is separate). The Swift app's `workingChanged`.
+/// (Keep Awake is separate).
 pub fn set_working_activity(working: bool) {
     thread_local! {
         static TOKEN: std::cell::Cell<id> = const { std::cell::Cell::new(nil) };
@@ -903,8 +903,8 @@ fn set_frame_later(w: id, f: NSRect) {
     }));
 }
 
-/// A window taller or wider than its screen comes back fitted to it (`fitOnScreen` in the
-/// Swift app: 0.0.2, 0.0.3 and 0.0.7 could grow one past the bottom, and saved it so).
+/// A window taller or wider than its screen comes back fitted to it (0.0.2, 0.0.3 and
+/// 0.0.7 could grow one past the bottom, and saved it so).
 /// Returns whether it will change.
 pub fn fit_on_screen(window: &Window) -> bool {
     let w = ns_window(window);

@@ -68,7 +68,7 @@ impl Updater {
             let out = std::process::Command::new("/usr/bin/plutil").args(["-extract", "CFBundleVersion", "raw", "-o", "-"]).arg(b.join("Contents/Info.plist")).output().ok()?;
             out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string()).filter(|b| !b.is_empty())
         });
-        // The version it ran as last time, in the app's own settings (the Swift app kept it in
+        // The version it ran as last time, in the app's own settings (0.0.x kept it in
         // its defaults): newer now means it was just updated.
         let last = library.setting("lastRunVersion").and_then(|v| v.as_str().and_then(Version::parse));
         let updated_from = match (&last, &current) {

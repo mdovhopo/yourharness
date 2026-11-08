@@ -436,7 +436,7 @@ fn fix_layout_size(view: id, size: Option<(f64, f64)>) {
 /// The mouse buttons WebKit sees held while the agent's mouse events go in. WebKit reads them
 /// (`event.buttons`) from the real mouse, `+[NSEvent pressedMouseButtons]`, which is up: every
 /// press and drag said no button was down, and pages that check gave up on a drag halfway. So
-/// that method answers `HELD` while it's set (the Swift app's `SyntheticMouse`).
+/// that method answers `HELD` while it's set.
 mod synthetic_mouse {
     use objc::runtime::{Class, Method, Sel};
     use objc::{class, sel, sel_impl};
@@ -528,10 +528,10 @@ pub struct WebView {
     keyboard: std::cell::Cell<bool>,
 }
 
-/// A parked page is drawn at half its CSS size, as the Swift app parked it.
+/// A parked page is drawn at half its CSS size.
 const PARKED_SCALE: f64 = 0.5;
 
-/// Where pages wait while no panel shows them (the Swift app's `BrowserParking`): the content
+/// Where pages wait while no panel shows them: the content
 /// view of a borderless, non-activating panel far off screen that never takes focus or the
 /// mouse, stays out of the Window menu, Mission Control, Exposé and ⌘` cycling, and stays
 /// ordered in, so WebKit keeps laying pages out, running their timers and animation frames
@@ -613,7 +613,7 @@ fn pass_through_class() -> &'static objc::runtime::Class {
     unsafe { &*(ptr as *const Class) }
 }
 
-/// Fades a layer in, as the Swift app's overlay does.
+/// Fades a layer in.
 fn fade_in(layer: id) {
     unsafe {
         let fade: id = msg_send![class!(CABasicAnimation), animationWithKeyPath: ns_string("opacity")];
@@ -635,8 +635,8 @@ pub const PHONE: (f64, f64) = (402., 874.);
 impl WebView {
     /// A web view in the window whose GPUI view is `host`, hidden until it's given a place.
     /// Its cookies and storage persist (the default data store), per app.
-    /// `store`: the project's ID (a UUID), whose cookies and storage it uses (the Swift app's
-    /// stores, so sign-ins carry over); None for the app's default store.
+    /// `store`: the project's ID (a UUID), whose cookies and storage it uses (the stores
+    /// 0.0.x used, so sign-ins carry over); None for the app's default store.
     pub fn new(host: id, store: Option<&str>) -> WebView {
         unsafe {
             let config: id = msg_send![class!(WKWebViewConfiguration), new];
@@ -1292,7 +1292,7 @@ impl WebView {
     }
 
     /// What the agent is doing (`label`: Click, Type, Scroll…), over the page's bottom edge, and
-    /// where (CSS pixels), ringed, as the Swift app shows it. Returns its number, for
+    /// where (CSS pixels), ringed. Returns its number, for
     /// `clear_activity` to take down this one and not a newer one.
     pub fn show_activity(&self, label: &str, rect: Option<(f64, f64, f64, f64)>) -> u64 {
         let seq = self.activity.get() + 1;

@@ -1,4 +1,4 @@
-//! The open thread's header buttons, the Swift app's `SelectedThreadToolbar`: the checkouts it
+//! The open thread's header buttons: the checkouts it
 //! works in (a popover with each one's state, and running the thread in another), its pull
 //! requests, and the right sidebar. Built from what the workspace already holds: nothing here
 //! runs git or reads files.
@@ -195,7 +195,7 @@ pub fn checkouts(workspace: &Entity<Workspace>, theme: &Theme, cx: &App) -> Opti
     )
 }
 
-/// A memory specialist's own buttons, as its Swift window had: its model and effort, what this
+/// A memory specialist's own buttons: its model and effort, what this
 /// session changed in the memory (read when the menu opens), Set Up before it starts, Open
 /// Memory, and New Session.
 fn specialist(workspace: &Entity<Workspace>, cx: &App) -> Option<AnyElement> {
@@ -275,7 +275,7 @@ pub fn buttons(workspace: &Entity<Workspace>, theme: &Theme, cx: &App) -> AnyEle
     let ws = workspace.read(cx);
     let shows = ws.shows_inspector;
     let (w1, w2) = (workspace.clone(), workspace.clone());
-    // As the Swift app's: the count of PRs the thread worked on beside the icon; the icon alone
+    // The count of PRs the thread worked on beside the icon; the icon alone
     // for ones only mentioned; hidden when it links none (shown until that's known).
     let counts = ws.selected.as_ref().and_then(|id| ws.pull_counts.get(id).copied());
     let tip = match counts {
@@ -294,7 +294,7 @@ pub fn buttons(workspace: &Entity<Workspace>, theme: &Theme, cx: &App) -> AnyEle
         .children(specialist(workspace, cx))
         .when(counts.is_none_or(|(_, all)| all > 0), |d| {
             d.child(pulls.on_click(move |_, _, cx| {
-                // Open on the PRs tab already: it closes, as in the Swift app.
+                // Open on the PRs tab already: it closes.
                 w1.update(cx, |ws, cx| {
                     if ws.shows_inspector && ws.panel == Panel::PullRequests {
                         ws.set_shows_inspector(false, cx);

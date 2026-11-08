@@ -1,4 +1,4 @@
-//! A video's first frame as a picture, for its tile in the transcript (the Swift app's
+//! A video's first frame as a picture, for its tile in the transcript (an
 //! `AVAssetImageGenerator` thumbnail): made once, aside, kept in the data folder's `thumbnails/`.
 
 #![allow(unexpected_cfgs, deprecated)]

@@ -1,4 +1,4 @@
-//! A thread's browser in a window of its own (the Swift app's pop-out): the same pages, moved
+//! A thread's browser in a window of its own: the same pages, moved
 //! from over the right sidebar to over this window, which the sidebar then points to. Closing
 //! the window puts them back.
 

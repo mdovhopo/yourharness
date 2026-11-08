@@ -1,7 +1,7 @@
-//! Settings (⌘,), the Swift app's four tabs: Agents (where `claude` is, its account, `gh` and
+//! Settings (⌘,), four tabs: Agents (where `claude` is, its account, `gh` and
 //! `glab`, the agents still to come), General (appearance, notifications, sleep, new thread
 //! defaults, settling, titles, memory, plans, browser, diagrams, Home and data), MCP and Releases.
-//! Each change is saved at once, in the Swift app's settings keys, and takes effect at once or
+//! Each change is saved at once, in the settings keys 0.0.x used, and takes effect at once or
 //! with each thread's next `claude`.
 
 use crate::state::workspace::Workspace;
@@ -950,7 +950,7 @@ pub fn close_window(cx: &mut App) {
     }
 }
 
-/// Settings in a window of its own, as the Swift app's Settings scene: one at a time, brought
+/// Settings in a window of its own: one at a time, brought
 /// forward (on `tab`, when given) if it's open.
 pub fn open_window(workspace: Entity<Workspace>, tab: Option<Tab>, cx: &mut App) {
     use gpui_kit::{size, Bounds, TitlebarOptions, WindowBounds, WindowOptions};

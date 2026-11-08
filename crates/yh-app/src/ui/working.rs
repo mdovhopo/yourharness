@@ -157,7 +157,7 @@ impl Render for WorkingTimer {
         self.shown_jumps = self.jumps(cx);
         let j = self.shown_jumps;
         use crate::ui::root::{EndOfThread, NextMessage, PreviousMessage, TopOfThread};
-        // At the end of the transcript, where Claude's next words go, as the Swift app's typing
+        // At the end of the transcript, where Claude's next words go, a typing
         // row: a still mark (an animation would draw every frame), what it's doing, the clock.
         // Laid over the list's bottom padding, so it never moves the rows.
         // Read back from the end, rows pass under it: then it's a pill of its own, as the jump

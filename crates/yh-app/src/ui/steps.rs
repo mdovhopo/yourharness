@@ -1,6 +1,5 @@
 //! How a tool call reads at a glance: an icon, a verb and the one argument that matters
-//! ("Read …/src/ui/rows.rs", "Run command cargo test", "Click button “Sign in”"), as the Swift
-//! app's `ToolPresentation`, `BrowserCall` and `MemoryCall`.
+//! ("Read …/src/ui/rows.rs", "Run command cargo test", "Click button “Sign in”").
 
 use gpui_kit::component::IconName;
 use serde_json::Value;
@@ -242,7 +241,7 @@ pub fn line_of(path: &str, text: &str) -> Option<usize> {
 
 /// A sub-agent's report as the Agent tool hands it back, without the CLI's frame: the notes
 /// above `[Subagent hand-back] … The report follows:`, the two spaces it indents every line by,
-/// and the `agentId:` and `<usage>` lines after (as the Swift app's `SubagentReport.text`).
+/// and the `agentId:` and `<usage>` lines after.
 pub fn subagent_report(result: &str) -> String {
     const START: &str = "The report follows:\n";
     let Some(frame) = result.find("[Subagent hand-back]") else { return result.to_string() };

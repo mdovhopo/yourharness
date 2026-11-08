@@ -146,7 +146,7 @@ impl TranscriptView {
                             Some((tool, last))
                         })
                         .collect::<Vec<_>>();
-                    // The last 40 lines, as the Swift app's `JobOutput`.
+                    // The last 40 lines.
                     let outputs = open
                         .into_iter()
                         .map(|(tool, path)| {
