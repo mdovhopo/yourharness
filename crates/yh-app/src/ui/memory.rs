@@ -312,11 +312,12 @@ impl MemoryPage {
                 static PROBED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
                 if std::env::var("YH_MEMORY_PROBE").is_ok() && page.memories.len() >= 2 && !PROBED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                     let (a, b) = (page.memories[0].clone(), page.memories[1].id.clone());
-                    page.link(&a.id, &b, cx);
                     if let Some(store) = page.store.clone() {
                         let mut renamed = a.clone();
                         renamed.title = format!("{} (renamed)", a.title);
                         store.save(renamed, &user(), None, None);
+                        page.link(&a.id, &b, cx);
+                        // Restoring keeps its links: they aren't part of a version.
                         store.restore_version(&a.id, 1, &user());
                         store.db.flush();
                         let back = store.memory(&a.id).map(|m| (m.title, m.links.len())).unwrap_or_default();
