@@ -189,6 +189,19 @@ pub fn look_up(links: Vec<(Link, bool)>, path_env: Option<String>, open: &[PullR
             }
         }
     }
+    // A worked-on PR in a GitHub stack brings the rest of its open stack, so its card shows
+    // the stack whole (it said "3 PRs" over one, "into" the PR below it rather than the trunk).
+    let stacks: Vec<(String, u64)> = found
+        .iter()
+        .filter(|t| t.worked)
+        .filter_map(|t| t.pull.as_ref().ok().and_then(|p| p.stack.map(|s| (p.link.path.to_lowercase(), s.number))))
+        .collect();
+    for o in open {
+        let in_stack = o.stack.is_some_and(|s| stacks.contains(&(o.link.path.to_lowercase(), s.number)));
+        if in_stack && !found.iter().any(|t| t.link.id() == o.link.id()) {
+            found.push(ThreadPull { link: o.link.clone(), worked: true, pull: Ok(o.clone()) });
+        }
+    }
     found
 }
 

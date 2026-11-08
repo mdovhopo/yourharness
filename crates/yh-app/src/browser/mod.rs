@@ -907,7 +907,8 @@ impl BrowserTools {
         let _ = self.script(id, "await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))".into(), false, Duration::from_secs(2));
     }
 
-    fn wait_for_navigation(&self, id: u32, a: &Value) -> Result<(), Fail> {
+    /// `target`: the URL asked for, named when it fails (the tab still shows the page before).
+    fn wait_for_navigation(&self, id: u32, a: &Value, target: Option<&str>) -> Result<(), Fail> {
         if a["wait_until"].as_str() == Some("none") {
             return Ok(());
         }
@@ -915,7 +916,11 @@ impl BrowserTools {
         let timeout = a["timeout"].as_f64().unwrap_or(30.).clamp(1., 60.);
         let finished = self.wait_for_load(id, Duration::from_secs_f64(timeout));
         if let Some(error) = self.with_tab(id, |t| t.nav_error.take())? {
-            return Err(format!("Couldn't load {}: {error}", self.with_tab(id, |t| t.short_url())?));
+            let failed = match target {
+                Some(url) => clip(url.strip_prefix("https://").or_else(|| url.strip_prefix("http://")).unwrap_or(url).trim_end_matches('/'), 120),
+                None => self.with_tab(id, |t| t.short_url())?,
+            };
+            return Err(format!("Couldn't load {failed}: {error}"));
         }
         if !finished {
             self.with_tab(id, |t| t.log(&json!({"kind": "console", "level": "info", "text": "Still loading after the timeout."})))?;
@@ -1215,6 +1220,7 @@ impl BrowserTools {
             "open" => {
                 let address = a["url"].as_str().ok_or("Give a url to open.")?.to_string();
                 let url = url_from(&address).ok_or("Give a url to open.")?;
+                let asked = url.clone();
                 let thread = self.thread.clone();
                 let project = self.project.clone().filter(|p| p.len() == 36);
                 let new_tab = a["new_tab"].as_bool() == Some(true);
@@ -1240,7 +1246,7 @@ impl BrowserTools {
                 if a["show"].as_bool() != Some(false) {
                     self.reveal();
                 }
-                self.wait_for_navigation(id, a)?;
+                self.wait_for_navigation(id, a, Some(&asked))?;
                 let short = self.with_tab(id, |t| t.short_url())?;
                 Ok(self.result(id, &format!("Opened {short} in tab {id}"), true))
             }
@@ -1248,9 +1254,13 @@ impl BrowserTools {
                 let id = self.tab_id(a)?;
                 self.check_dialog(id)?;
                 let before = self.with_tab(id, |t| t.web.url())?;
-                let action = a["action"].as_str().map(str::to_string);
-                if let Some(address) = a["url"].as_str() {
+                // `url: "back"` (or forward, reload) means the action, not a web search for the word.
+                let address = a["url"].as_str().map(str::trim).filter(|u| !u.is_empty());
+                let action = a["action"].as_str().or(address.filter(|u| ["back", "forward", "reload"].contains(u))).map(str::to_string);
+                let mut target = None;
+                if let (Some(address), None) = (address, action.as_deref()) {
                     let url = url_from(address).ok_or("Give a url.")?;
+                    target = Some(url.clone());
                     self.with_tab(id, move |t| t.load(&url))?;
                 } else {
                     let act = action.clone();
@@ -1272,7 +1282,7 @@ impl BrowserTools {
                         _ => Err("Give a url, or an action: back, forward or reload.".to_string()),
                     })??;
                 }
-                self.wait_for_navigation(id, a)?;
+                self.wait_for_navigation(id, a, target.as_deref())?;
                 let short = self.with_tab(id, |t| t.short_url())?;
                 let verb = match action.as_deref() {
                     Some("reload") => "Reloaded".to_string(),

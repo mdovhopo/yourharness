@@ -351,6 +351,9 @@ pub struct Inspector {
     pulls: HashMap<String, (crate::state::pulls::ThreadPulls, std::time::Instant)>,
     /// Threads whose PRs are being looked up now.
     pulls_syncing: HashSet<String>,
+    /// A thread whose PRs were looked up before its project's first scan landed: looked up
+    /// again once it does, for its branches' PRs and unsubmitted stacks.
+    pulls_await_scan: Option<(String, String)>,
     /// Looks again every 30 seconds while the PRs tab shows.
     _pulls_timer: Option<gpui_kit::Task<()>>,
     /// The open thread was working when last seen: its turn ending looks again.
@@ -432,6 +435,7 @@ impl Inspector {
             stacks_installed: None,
             pulls: HashMap::new(),
             pulls_syncing: HashSet::new(),
+            pulls_await_scan: None,
             _pulls_timer: None,
             was_running: false,
             _subscriptions: subscriptions,
@@ -467,6 +471,15 @@ impl Inspector {
 
     /// Watches the open thread: its sub-agents' changes redraw the sidebar, nothing else of it.
     fn follow_selection(&mut self, cx: &mut Context<Self>) {
+        if let Some((thread, project)) = self.pulls_await_scan.clone() {
+            // Once the scan is in and the first lookup is back (a second one now would be dropped).
+            if self.workspace.read(cx).scans.contains_key(&project) && !self.pulls_syncing.contains(&thread) {
+                self.pulls_await_scan = None;
+                if let Some(t) = self.workspace.read(cx).thread(&thread) {
+                    self.refresh_pulls_of(t, cx);
+                }
+            }
+        }
         let selected = self.workspace.read(cx).selected_thread();
         if selected.as_ref().map(|t| t.entity_id()) != self.thread.as_ref().map(|t| t.entity_id()) {
             self.thread = selected.clone();
@@ -567,6 +580,9 @@ impl Inspector {
         if !self.pulls_syncing.insert(id.clone()) {
             return;
         }
+        if !self.workspace.read(cx).scans.contains_key(&project) {
+            self.pulls_await_scan = Some((id.clone(), project.clone()));
+        }
         // Its project's repos and their open PRs, read again now and then: where its branches are.
         self.workspace.update(cx, |ws, cx| ws.scan_project(&project, cx));
         let path = std::env::var("YH_PATH").ok();
@@ -598,6 +614,10 @@ impl Inspector {
                     });
                 }
                 this.pulls.insert(key, (crate::state::pulls::ThreadPulls { pulls: found, local }, std::time::Instant::now()));
+                // The project's first scan may have landed meanwhile: look again with it.
+                if this.pulls_await_scan.is_some() {
+                    this.follow_selection(cx);
+                }
                 cx.notify();
             });
         })
@@ -2175,7 +2195,7 @@ fn pull_row(p: &crate::state::pulls::ThreadPull, graph: Option<(&yh_core::stacks
                     .flex_col()
                     .gap(px(2.))
                     .child(div().font_weight(FontWeight::MEDIUM).child(format!("{} #{}", p.link.path, p.link.number)))
-                    .child(div().text_size(px(text::CAPTION)).text_color(theme.secondary).line_clamp(2).child(format!("Couldn't look it up: {why}"))),
+                    .child(div().text_size(px(text::CAPTION)).text_color(theme.secondary).line_clamp(2).text_ellipsis().child(format!("Couldn't look it up: {why}"))),
             )
             .context_menu(menu)
             .into_any_element();
@@ -2221,7 +2241,7 @@ fn pull_row(p: &crate::state::pulls::ThreadPull, graph: Option<(&yh_core::stacks
                 .flex()
                 .items_start()
                 .gap(px(space::S))
-                .child(div().flex_1().min_w_0().font_weight(FontWeight::MEDIUM).when(finished, |d| d.text_color(theme.secondary)).line_clamp(2).child(pr.title.clone()))
+                .child(div().flex_1().min_w_0().font_weight(FontWeight::MEDIUM).when(finished, |d| d.text_color(theme.secondary)).line_clamp(2).text_ellipsis().child(pr.title.clone()))
                 .when_some(chip, |d, c| {
                     d.child(div().flex_none().mt(px(1.)).px(px(space::XS + 2.)).rounded(px(radius::SMALL)).bg(tint.opacity(0.14)).text_size(px(text::CAPTION)).font_weight(FontWeight::MEDIUM).text_color(tint).child(c))
                 }),
