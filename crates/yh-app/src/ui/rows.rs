@@ -155,6 +155,20 @@ pub fn render_item(thread: &Entity<ThreadState>, ix: usize, window: &mut Window,
         .px(px(28.))
         .when(!in_box, |d| d.py(px(space::XS)))
         .child(div().w_full().max_w(px(764.)).child(content))
+        // Right-click on selected text: Copy and Look Up (nothing opens without a selection).
+        .id(("row", item.pos as u64 as usize))
+        .context_menu(|menu, window, cx| {
+            let text = gpui_kit::base::TextSelection::selected_text(window, cx);
+            if text.trim().is_empty() {
+                return menu;
+            }
+            let (copy, word) = (text.clone(), text.trim().to_string());
+            menu.item(PopupMenuItem::new("Copy").on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(copy.to_string()))))
+                .item(PopupMenuItem::new(format!("Look Up “{}”", word.chars().take(30).collect::<String>())).on_click(move |_, _, cx| {
+                    let query: String = word.bytes().map(|b| if b.is_ascii_alphanumeric() { (b as char).to_string() } else { format!("%{b:02X}") }).collect();
+                    cx.open_url(&format!("dict://{query}"));
+                }))
+        })
         .into_any_element()
 }
 
