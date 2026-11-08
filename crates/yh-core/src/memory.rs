@@ -137,6 +137,21 @@ fn decode_steps(text: Option<String>) -> Vec<Step> {
 }
 
 /// Who did something to a memory, for its history and the activity log.
+/// One event of a memory's activity log.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MemoryEvent {
+    pub kind: String,
+    pub title: Option<String>,
+    pub actor: Option<String>,
+    pub at: f64,
+    pub query: Option<String>,
+    pub count: Option<i64>,
+    /// The thread it happened in, when an agent of one did it.
+    pub thread: Option<String>,
+    pub memory: Option<String>,
+    pub detail: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 pub struct Actor {
     /// `agent`, `user`, `importer`, `reconciler` or `app`.
@@ -369,6 +384,60 @@ impl Store {
             )?;
             log_event(c, &m.scope, Some(&m), "linked", &actor, None, None, Some(to.clone()))
         });
+    }
+
+    /// Puts a memory back as one of its versions said it (its kind, words, status and, for a
+    /// task, its progress): a new version, as the Swift app's `restoreMemoryVersion`.
+    pub fn restore_version(&self, id: &str, version: i64, actor: &Actor) {
+        let (id, actor) = (id.to_string(), actor.clone());
+        let _ = self.db.write(move |c, rev| {
+            let Some(mut m) = read_memories(c, "id = ?1", &[&id], "id")?.into_iter().next() else { return Ok(()) };
+            let old: Option<(String, String, String, String, String, Option<String>, Option<String>)> = c
+                .query_row(
+                    "SELECT kind, title, description, body, status, task_state, task_steps FROM memory_versions WHERE memory_id = ? AND version = ?",
+                    params![id, version],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+                )
+                .optional()?;
+            let Some((kind, title, description, body, status, task_state, steps)) = old else { return Ok(()) };
+            m.kind = kind;
+            m.title = title;
+            m.description = description;
+            m.body = body;
+            m.status = status;
+            if m.is_task() {
+                m.task_state = task_state;
+                m.steps = decode_steps(steps);
+            }
+            m.updated_at = now();
+            save_memory(c, rev, &m, &actor, None, None)
+        });
+    }
+
+    /// The activity log with where each event happened: newest first.
+    pub fn activity(&self, scope: &str, limit: usize) -> Vec<MemoryEvent> {
+        let scope = scope.to_string();
+        self.db
+            .read_with(|c| {
+                let mut s = c.prepare(
+                    "SELECT kind, title, actor, at, query, count, thread_id, memory_id, detail FROM memory_events WHERE scope = ? ORDER BY at DESC, id DESC LIMIT ?",
+                )?;
+                let rows = s.query_map(params![scope, limit as i64], |r| {
+                    Ok(MemoryEvent {
+                        kind: r.get(0)?,
+                        title: r.get(1)?,
+                        actor: r.get(2)?,
+                        at: r.get(3)?,
+                        query: r.get(4)?,
+                        count: r.get(5)?,
+                        thread: r.get(6)?,
+                        memory: r.get(7)?,
+                        detail: r.get(8)?,
+                    })
+                })?;
+                rows.collect()
+            })
+            .unwrap_or_default()
     }
 
     pub fn unlink(&self, from: &str, to: &str, actor: &Actor) {
@@ -718,6 +787,24 @@ mod tests {
         assert!(s.find("release", Some("project:P"), false, 10).is_empty());
         assert_eq!(s.find("release", Some("project:P"), true, 10).len(), 1);
         assert!(s.events("project:P", 10).iter().any(|e| e.0 == "archived"));
+    }
+
+    #[test]
+    fn restores_a_version_and_tells_where_events_happened() {
+        let s = store("restore");
+        let actor = Actor { kind: "agent".into(), thread: Some("T9".into()) };
+        let mut m = Memory::new("project:P", "project", "First", "one", "First body.", "agent");
+        s.save(m.clone(), &actor, None, None);
+        m.title = "Second".into();
+        m.body = "Second body.".into();
+        s.save(m.clone(), &actor, None, None);
+        s.restore_version(&m.id, 1, &Actor { kind: "user".into(), thread: None });
+        s.db.flush();
+        let back = s.memory(&m.id).unwrap();
+        assert_eq!((back.title.as_str(), back.body.as_str()), ("First", "First body."));
+        assert_eq!(s.versions(&m.id).len(), 3);
+        let events = s.activity("project:P", 10);
+        assert!(events.iter().any(|e| e.thread.as_deref() == Some("T9") && e.memory.as_deref() == Some(m.id.as_str())));
     }
 
     #[test]

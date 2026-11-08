@@ -106,7 +106,11 @@ pub struct MemoryPage {
     pub tab: Tab,
     /// Every memory of the project, archived ones too; read again when memory changes.
     pub memories: Vec<Memory>,
-    events: Vec<(String, Option<String>, Option<String>, f64, Option<String>, Option<i64>)>,
+    events: Vec<yh_core::memory::MemoryEvent>,
+    /// Activity's Show: `all`, `changes`, `recall` (reads and searches), `sessions`.
+    activity_filter: &'static str,
+    /// The memory's text in its editor (Edit) rather than as Markdown (Preview).
+    editing_body: bool,
     loaded_revision: Option<u64>,
     pub loaded: bool,
     /// Claude Code's own memory here, read with the rest.
@@ -203,6 +207,8 @@ impl MemoryPage {
             tab: Tab::Memories,
             memories: vec![],
             events: vec![],
+            activity_filter: "all",
+            editing_body: false,
             loaded_revision: None,
             claude: None,
             pressed_one_memory: false,
@@ -281,7 +287,7 @@ impl MemoryPage {
                             is_home,
                         }
                     });
-                    (all, store.events(&scope, 300), stats, Graph { ids, edges, points }, claude)
+                    (all, store.activity(&scope, 300), stats, Graph { ids, edges, points }, claude)
                 })
                 .await;
             let _ = this.update(cx, |page, cx| {
@@ -357,6 +363,7 @@ impl MemoryPage {
         self.narrow_list = false;
         self.pending_fill = self.selected().cloned();
         self.shown_version = None;
+        self.editing_body = false;
         cx.notify();
     }
 
@@ -557,6 +564,32 @@ impl MemoryPage {
             store.delete(id, &user());
             self.selection = None;
             self.editing = None;
+            self.written(cx);
+        }
+    }
+
+    /// Link To: a link from this memory to another, so an agent reading one finds the other.
+    fn link(&mut self, from: &str, to: &str, cx: &mut Context<Self>) {
+        if let Some(store) = &self.store {
+            store.link(from, to, None, &user());
+            self.written(cx);
+        }
+    }
+
+    /// Unlink: the link between two memories goes, whichever way it ran.
+    fn unlink(&mut self, a: &str, b: &str, cx: &mut Context<Self>) {
+        if let Some(store) = &self.store {
+            store.unlink(a, b, &user());
+            self.written(cx);
+        }
+    }
+
+    /// Restore This Version: the memory as that version said it, saved as a new version.
+    fn restore_version(&mut self, id: &str, version: i64, cx: &mut Context<Self>) {
+        if let Some(store) = &self.store {
+            store.restore_version(id, version, &user());
+            // The editors take the restored text once it's read back (unless you've edited them).
+            self.shown_version = None;
             self.written(cx);
         }
     }
@@ -1027,12 +1060,64 @@ impl MemoryPage {
                             this.set_status(&status_id, if archived { "active" } else { "archived" }, cx)
                         })))
                         .child(Button::new("delete").small().ghost().icon(icons::trash()).tooltip("Delete").on_click(cx.listener(move |this, _, _, cx| this.delete(&del_id, cx))))
+                        .child({
+                            let short = current.short_id();
+                            Button::new("memory-more").small().ghost().icon(gpui_kit::component::Icon::new(IconName::Ellipsis)).tooltip("More").dropdown_menu(move |menu, _, _| {
+                                let short = short.clone();
+                                menu.item(PopupMenuItem::new("Copy ID").on_click(move |_, _, cx| cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(short.clone()))))
+                            })
+                        })
                     }),
             )
             // The editors draw without a frame; their own inset is taken back so the text lines up.
             .child(div().ml(px(-10.)).child(Input::new(&self.title).appearance(false).text_size(px(text::LARGE_TITLE)).font_weight(FontWeight::SEMIBOLD)))
             .child(div().ml(px(-10.)).mt(px(-4.)).child(Input::new(&self.description).appearance(false).text_color(theme.secondary)))
-            .child(page_kit::card(theme).mt(px(space::XS)).px(px(space::M)).py(px(space::S + 2.)).child(Textarea::new(&self.body).appearance(false)));
+            .when_some(current.merged_into.as_ref().and_then(|to| self.memories.iter().find(|m| &m.id == to)).map(|m| (m.id.clone(), m.title.clone())), |d, (to, title)| {
+                d.child(
+                    div()
+                        .id("merged-into")
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .text_size(px(text::FOOTNOTE))
+                        .text_color(theme.accent)
+                        .cursor_pointer()
+                        .child(icons::link().size(px(12.)))
+                        .child(format!("Merged into “{title}”"))
+                        .on_click(cx.listener(move |this, _, _, cx| this.select(&to, cx))),
+                )
+            });
+        // The memory's text: as Markdown, or in its editor (Edit; a new one starts there).
+        let editing_body = self.editing_body || !listed;
+        let body_text = self.body.read(cx).value().to_string();
+        body = body
+            .child(
+                div().mt(px(space::XS)).flex().items_center().child(section("Memory", theme)).child(div().flex_1()).when(listed, |d| {
+                    d.child(Button::new("memory-edit").small().ghost().label(if editing_body { "Preview" } else { "Edit" }).on_click(cx.listener(|this, _, _, cx| {
+                        this.editing_body = !this.editing_body;
+                        cx.notify();
+                    })))
+                }),
+            )
+            .child(if editing_body {
+                page_kit::card(theme).px(px(space::M)).py(px(space::S + 2.)).child(Textarea::new(&self.body).appearance(false)).into_any_element()
+            } else if body_text.trim().is_empty() {
+                page_kit::card(theme).px(px(space::M)).py(px(space::S + 2.)).text_color(theme.tertiary).child("Empty. Click Edit to write it.").into_any_element()
+            } else {
+                page_kit::card(theme)
+                    .id("memory-preview")
+                    .px(px(space::M))
+                    .py(px(space::S + 2.))
+                    .child(crate::ui::rows::markdown_view(&yh_core::markdown::parse(&body_text), theme))
+                    // A double click goes to the editor, as in the Swift app.
+                    .on_click(cx.listener(|this, e: &gpui_kit::ClickEvent, _, cx| {
+                        if e.click_count() >= 2 {
+                            this.editing_body = true;
+                            cx.notify();
+                        }
+                    }))
+                    .into_any_element()
+            });
         if current.is_task() {
             let state = current.task_state.clone().unwrap_or_else(|| "active".into());
             let page = cx.entity().downgrade();
@@ -1088,13 +1173,38 @@ impl MemoryPage {
                 )),
             );
         }
-        if !current.links.is_empty() {
+        if listed {
+            // Links both ways: this one's to others, and others' to it; Link To adds one, and
+            // each row's Unlink takes it away.
+            let incoming: Vec<&Memory> = self.memories.iter().filter(|m| m.id != current.id && m.links.iter().any(|(to, _)| *to == current.id) && !current.links.iter().any(|(to, _)| *to == m.id)).collect();
+            let mut rows: Vec<(String, Option<String>, bool)> = current.links.iter().map(|(to, r)| (to.clone(), r.clone(), true)).collect();
+            rows.extend(incoming.iter().map(|m| (m.id.clone(), None, false)));
+            let candidates: Vec<(String, String)> = {
+                let mut v: Vec<(String, String)> =
+                    self.memories.iter().filter(|m| m.status == "active" && m.id != current.id && !current.links.iter().any(|(to, _)| *to == m.id)).map(|m| (m.id.clone(), m.title.clone())).collect();
+                v.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
+                v
+            };
+            let page = cx.entity().downgrade();
+            let from = current.id.clone();
+            let link_to = Button::new("link-to").small().ghost().icon(gpui_kit::component::Icon::new(IconName::Plus)).label("Link To").disabled(candidates.is_empty()).dropdown_menu(move |mut menu, _, _| {
+                for (id, title) in &candidates {
+                    let (page, from, to) = (page.clone(), from.clone(), id.clone());
+                    menu = menu.item(PopupMenuItem::new(title.clone()).on_click(move |_, _, cx| {
+                        let _ = page.update(cx, |p, cx| p.link(&from, &to, cx));
+                    }));
+                }
+                menu
+            });
             let mut links = div().flex().flex_col().gap(px(2.));
-            for (to, relation) in &current.links {
-                let other = self.memories.iter().find(|x| &x.id == to);
+            if rows.is_empty() {
+                links = links.child(div().px(px(6.)).text_size(px(text::FOOTNOTE)).text_color(theme.tertiary).child("Not linked to other memories. Links let an agent that reads one find the rest."));
+            }
+            for (to, relation, outgoing) in rows {
+                let other = self.memories.iter().find(|x| x.id == to);
                 let title = other.map(|x| x.title.clone()).unwrap_or_else(|| to.chars().take(8).collect());
                 let color = other.map_or(theme.tertiary, |x| kind_color(&x.kind, theme));
-                let target = to.clone();
+                let (target, a, b) = (to.clone(), current.id.clone(), to.clone());
                 links = links.child(
                     div()
                         .id(SharedString::from(format!("link-{to}")))
@@ -1106,14 +1216,20 @@ impl MemoryPage {
                         .rounded(px(radius::SMALL))
                         .cursor_pointer()
                         .hover(|s| s.bg(theme.hover))
-                        .child(icons::link().size(px(12.)).text_color(theme.tertiary))
+                        .child(gpui_kit::component::Icon::new(if outgoing { IconName::ArrowRight } else { IconName::ArrowLeft }).size(px(12.)).text_color(theme.tertiary))
                         .child(page_kit::dot(color, 6.))
-                        .child(div().text_color(theme.accent).child(title))
-                        .when_some(relation.clone(), |d, r| d.child(div().text_size(px(text::FOOTNOTE)).text_color(theme.tertiary).child(r)))
+                        .child(div().flex_1().min_w_0().truncate().text_color(theme.accent).child(title))
+                        .when_some(relation, |d, r| d.child(page_kit::quiet_chip(r, theme)))
+                        .child(
+                            crate::ui::thread_toolbar::icon_button(SharedString::from(format!("unlink-{to}")), icons::link(), "Unlink", theme).on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.unlink(&a, &b, cx);
+                            })),
+                        )
                         .on_click(cx.listener(move |this, _, _, cx| this.select(&target, cx))),
                 );
             }
-            body = body.child(section("Linked", theme)).child(links);
+            body = body.child(div().flex().items_center().child(section("Linked", theme)).child(div().flex_1()).child(link_to)).child(links);
         }
         if !current.sources.is_empty() {
             let mut sources = div().flex().flex_col().gap(px(2.));
@@ -1165,7 +1281,22 @@ impl MemoryPage {
                         })),
                 );
                 if open {
-                    history = history.child(page_kit::card(theme).ml(px(space::XL)).my(px(space::XS)).p(px(space::M)).text_size(px(text::FOOTNOTE)).whitespace_normal().child(text_.clone()));
+                    let current_version = self.versions.last().map(|v| v.0) == Some(v);
+                    let id = current.id.clone();
+                    history = history.child(
+                        page_kit::card(theme)
+                            .ml(px(space::XL))
+                            .my(px(space::XS))
+                            .p(px(space::M))
+                            .flex()
+                            .flex_col()
+                            .gap(px(space::S))
+                            .child(div().font_weight(FontWeight::SEMIBOLD).child(title.clone()))
+                            .child(div().text_size(px(text::FOOTNOTE)).whitespace_normal().child(crate::ui::rows::selectable(text_.clone(), theme)))
+                            .when(!current_version, |d| {
+                                d.child(div().flex().child(Button::new(SharedString::from(format!("restore-{v}"))).small().outline().icon(icons::rotate_ccw()).label("Restore This Version").on_click(cx.listener(move |this, _, _, cx| this.restore_version(&id, v, cx)))))
+                            }),
+                    );
                 }
             }
             body = body.child(section("History", theme)).child(history);
@@ -1621,50 +1752,140 @@ impl MemoryPage {
             .into_any_element()
     }
 
-    fn activity(&self, theme: &Theme) -> gpui_kit::AnyElement {
-        if self.events.is_empty() {
-            return page_kit::empty_state(icons::activity(), "No Activity Yet", "Agents' saves, reads and searches show here.", None, theme).into_any_element();
+    /// Everything that happened in the memory, newest first, as sentences: Show picks what
+    /// (all, changes, reads and searches, sessions); an event links to the thread it happened
+    /// in, and clicking one opens its memory.
+    fn activity(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let filter = self.activity_filter;
+        let shows = |kind: &str| match filter {
+            "changes" => !["recalled", "searched", "injected"].contains(&kind),
+            "recall" => kind == "recalled" || kind == "searched",
+            "sessions" => kind == "injected",
+            _ => true,
+        };
+        let page = cx.entity().downgrade();
+        let segments: Vec<Segment> = [("all", "All"), ("changes", "Changes"), ("recall", "Reads & Searches"), ("sessions", "Sessions")]
+            .into_iter()
+            .map(|(key, label)| {
+                let page = page.clone();
+                Segment::new(SharedString::from(format!("activity-{key}")), label, filter == key, move |_, _, cx| {
+                    let _ = page.update(cx, |p, cx| {
+                        p.activity_filter = key;
+                        cx.notify();
+                    });
+                })
+            })
+            .collect();
+        let events: Vec<&yh_core::memory::MemoryEvent> = self.events.iter().filter(|e| shows(&e.kind)).collect();
+        let top = div().flex().justify_center().pt(px(space::M)).child(page_kit::segmented(segments, theme));
+        if events.is_empty() {
+            return div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(top)
+                .child(div().flex_1().child(page_kit::empty_state(icons::activity(), "Nothing Yet", "What agents and you do with memory shows here: saves, reads, searches, sessions.", None, theme)))
+                .into_any_element();
         }
         let mut list = page_kit::card(theme).overflow_hidden().flex().flex_col();
-        for (n, (kind, title, actor, at, query, count)) in self.events.iter().enumerate() {
-            let t = || title.clone().unwrap_or_default();
-            let (what, icon): (String, gpui_kit::component::Icon) = match kind.as_str() {
+        for (n, e) in events.iter().enumerate() {
+            let named = e.memory.as_ref().and_then(|id| self.memories.iter().find(|m| &m.id == id)).map(|m| m.title.clone());
+            let t = || named.clone().or(e.title.clone()).unwrap_or_else(|| "a memory".into());
+            let other = || e.detail.as_ref().and_then(|id| self.memories.iter().find(|m| &m.id == id)).map(|m| m.title.clone()).unwrap_or_else(|| "another memory".into());
+            let (what, icon): (String, gpui_kit::component::Icon) = match e.kind.as_str() {
                 "created" => (format!("saved “{}”", t()), gpui_kit::component::Icon::new(IconName::Plus)),
                 "updated" => (format!("updated “{}”", t()), icons::rotate_ccw()),
-                "archived" => (format!("archived “{}”", t()), icons::archive()),
+                "archived" => (format!("archived “{}”{}", t(), e.detail.as_ref().map(|d| format!(": {d}")).unwrap_or_default()), icons::archive()),
                 "restored" => (format!("restored “{}”", t()), icons::archive_restore()),
                 "deleted" => (format!("deleted “{}”", t()), icons::trash()),
                 "recalled" => (format!("read “{}”", t()), gpui_kit::component::Icon::new(IconName::BookOpen)),
-                "searched" => (format!("searched “{}”, {} found", query.clone().unwrap_or_default(), count.unwrap_or(0)), gpui_kit::component::Icon::new(IconName::Search)),
-                "imported" => (if t().is_empty() { "imported memories".to_string() } else { format!("imported “{}”", t()) }, icons::download()),
-                "injected" => (format!("started a session with {} memories in its index", count.unwrap_or(0)), icons::zap()),
-                other => (format!("{other} {}", t()), icons::circle()),
+                "searched" => (
+                    format!(
+                        "searched for “{}”: {}",
+                        e.query.clone().unwrap_or_default(),
+                        match e.count.unwrap_or(0) {
+                            0 => "nothing found".to_string(),
+                            1 => "1 found".to_string(),
+                            n => format!("{n} found"),
+                        }
+                    ),
+                    gpui_kit::component::Icon::new(IconName::Search),
+                ),
+                "linked" => (format!("linked “{}” to “{}”", t(), other()), icons::link()),
+                "unlinked" => (format!("unlinked “{}”", t()), icons::link()),
+                "merged" => (format!("merged memories into “{}”", t()), icons::link()),
+                "pinned" => (format!("pinned “{}”", t()), icons::pin()),
+                "unpinned" => (format!("unpinned “{}”", t()), icons::pin_off()),
+                "progressed" => (format!("moved “{}” along: {}", t(), e.detail.clone().unwrap_or_default().replace('/', " of ")), icons::circle_check()),
+                "imported" => (format!("imported memories{}", e.detail.as_ref().map(|d| format!(": {d}")).unwrap_or_default()), icons::download()),
+                "exported" => (format!("exported {} memories", e.count.unwrap_or(0)), icons::download()),
+                "injected" => (format!("started a session with {} memories in its index", e.count.unwrap_or(0)), icons::zap()),
+                other => (format!("{other} “{}”", t()), icons::circle()),
             };
-            let who = match actor.as_deref() {
+            let who = match e.actor.as_deref() {
                 Some("user") => "You",
                 Some("importer") => "The importer",
                 Some("reconciler") => "The reconciler",
                 Some("app") => "The app",
+                _ if e.kind == "injected" => "",
                 _ => "An agent",
             };
+            let thread = e.thread.as_ref().and_then(|id| self.workspace.read(cx).thread(id).map(|t| (id.clone(), t.read(cx).title.clone())));
+            let opens = e.memory.clone().filter(|id| self.memories.iter().any(|m| &m.id == id));
+            let ws = self.workspace.clone();
             list = list.child(
                 div()
+                    .id(SharedString::from(format!("event-{n}")))
                     .flex()
                     .items_center()
                     .gap(px(space::M))
                     .px(px(space::L))
                     .py(px(space::S))
                     .when(n > 0, |d| d.border_t_1().border_color(theme.separator))
+                    .when(opens.is_some(), |d| d.cursor_pointer().hover(|s| s.bg(theme.hover)))
                     .child(div().flex_none().w(px(24.)).h(px(24.)).rounded_full().bg(theme.selected).flex().items_center().justify_center().child(icon.size(px(12.)).text_color(theme.secondary)))
-                    .child(div().flex_1().min_w_0().truncate().child(div().flex().gap(px(4.)).child(div().flex_none().font_weight(FontWeight::MEDIUM).child(who)).child(div().min_w_0().truncate().text_color(theme.text).child(what))))
-                    .child(div().flex_none().text_size(px(text::CAPTION)).text_color(theme.tertiary).child(ago(*at))),
+                    .child(div().flex_1().min_w_0().truncate().child(div().flex().gap(px(4.)).when(!who.is_empty(), |d| d.child(div().flex_none().font_weight(FontWeight::MEDIUM).child(who))).child(div().min_w_0().truncate().text_color(theme.text).child(what))))
+                    .when_some(thread, |d, (id, title)| {
+                        d.child(
+                            div()
+                                .id(SharedString::from(format!("event-thread-{n}")))
+                                .flex_none()
+                                .max_w(px(200.))
+                                .truncate()
+                                .text_size(px(text::FOOTNOTE))
+                                .text_color(theme.accent)
+                                .cursor_pointer()
+                                .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Open the thread this happened in").build(window, cx))
+                                .child(title)
+                                .on_click(move |_, _, cx| {
+                                    cx.stop_propagation();
+                                    ws.update(cx, |ws, cx| ws.select(&id, cx));
+                                }),
+                        )
+                    })
+                    .child(div().flex_none().text_size(px(text::CAPTION)).text_color(theme.tertiary).child(ago(e.at)))
+                    .when_some(opens, |d, id| {
+                        d.on_click(cx.listener(move |this, _, _, cx| {
+                            this.archived = this.memories.iter().find(|m| m.id == id).is_some_and(|m| m.status != "active");
+                            this.tab = Tab::Memories;
+                            this.select(&id, cx);
+                        }))
+                    }),
             );
         }
         div()
-            .id("memory-activity")
             .size_full()
-            .overflow_y_scroll()
-            .child(div().max_w(px(880.)).w_full().mx_auto().px(px(space::XL)).py(px(space::L + space::XS)).child(list))
+            .flex()
+            .flex_col()
+            .child(top)
+            .child(
+                div()
+                    .id("memory-activity")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(div().max_w(px(880.)).w_full().mx_auto().px(px(space::XL)).py(px(space::M)).child(list)),
+            )
             .into_any_element()
     }
 }
@@ -1810,7 +2031,7 @@ impl Render for MemoryPage {
                 div().flex_1().min_h_0().flex().flex_col().children(self.claude_nudge(&theme, cx)).child(columns).into_any_element()
             }
             Tab::Tasks => div().flex_1().min_h_0().child(self.tasks(&theme, cx)).into_any_element(),
-            Tab::Activity => div().flex_1().min_h_0().child(self.activity(&theme)).into_any_element(),
+            Tab::Activity => div().flex_1().min_h_0().child(self.activity(&theme, cx)).into_any_element(),
             Tab::Insights => div().flex_1().min_h_0().child(self.insights(&theme, cx)).into_any_element(),
             Tab::Graph => div().flex_1().min_h_0().child(self.graph_view(&theme, cx)).into_any_element(),
         };
