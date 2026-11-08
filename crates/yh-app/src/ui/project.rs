@@ -1027,7 +1027,7 @@ impl ProjectPage {
                         }
                     }));
                 if t.is_none() || a.is_none() {
-                    menu.separator().label("Check out one of the stack's branches (its top one, to add) to use these")
+                    menu.separator().item(crate::ui::page_kit::menu_note("Check out one of the stack's branches (its top one, to add) to use these"))
                 } else {
                     menu
                 }

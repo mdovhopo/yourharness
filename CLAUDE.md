@@ -23,7 +23,8 @@ and what each chunk covers. The SwiftUI app this replaces is frozen in `legacy/Y
 - `patches/`, `scripts/vendor.sh`: GPUI crates we patch, unpacked into `vendor/` (not
   committed). `gpui-pre-macos`: `GPUI_KEEP_DRAWING=1` draws a window parked off screen;
   `gpui-pre`: cached views draw anew while VoiceOver listens (a reused one dropped out of its
-  tree); `gpui-component`: an icon-only button is named by its tooltip.
+  tree); `gpui-component`: an icon-only button is named by its tooltip; menus drawn as macOS's (13 pt rows,
+  a hairline edge, one shadow, the lit row in `list_active`, which `theme.rs` sets to the soft accent).
 - UI building blocks come from **gpui-kit** (GPUI 0.3.11 + gpui-component, Apache-2.0):
   inputs, selects, popovers, dialogs, tables, charts, menus. Zed's own crates (ui, editor,
   markdown) are reference code only: GPL, and tied to Zed.
@@ -58,7 +59,8 @@ Launch options: `YH_DATA_DIR`, `YH_CLAUDE_HISTORY=1` (also list Claude Code's ow
 themselves, every waiting one by its own id; `YH_ANSWER_DELAY=<s>` answers that much later, so the cards
 show and pile up: parallel sub-agents print `PERMISSIONS waiting: 2`). Also `YH_CLICK=<x,y>[;<x,y>…]` (clicks
 in window points through the window, a second apart, after `YH_DRAFT_DELAY` + 0.5 s: the composer's pickers,
-the plan card's Approve menu; `YH_CLICK_WINDOW=<title>` sends them, and `YH_WHEEL`'s, to that window instead:
+the plan card's Approve menu; `r<x,y>` right-clicks, for context menus, and `h<x,y>` only moves the pointer, a menu
+row lit; `YH_CLICK_WINDOW=<title>` sends them, and `YH_WHEEL`'s, to that window instead:
 `Settings`), `YH_WHEEL=<x,y,dy,count>[;…]` (`count` pixel wheel events of `dy`, positive scrolling up, at that point
 through the window as a real wheel goes, same delay; after each step `WHEEL …` prints the open transcript's top row
 and every capped tool box that can scroll, `key:offset/max`: for the 320 pt boxes and sideways code blocks; with Settings

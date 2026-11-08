@@ -3,7 +3,8 @@
 # (not committed; Cargo.toml's [patch.crates-io] points there). Run by scripts/bundle.sh.
 # gpui-pre-macos: GPUI_KEEP_DRAWING=1 keeps drawing a window parked off screen (test runs).
 # gpui-pre: cached views draw anew while VoiceOver listens (a reused one left its tree).
-# gpui-component: an icon-only button is named by its tooltip for VoiceOver.
+# gpui-component: an icon-only button is named by its tooltip for VoiceOver; menus on the app's type
+# scale (13 pt rows, 22 pt tall), a hairline edge, one shadow, a soft lit row (`list_active`).
 #
 # Each crate is checked against crates.io's SHA-256 (its index's `cksum`), taken from cargo's
 # own download cache when it's there, else downloaded with retries; a failed run leaves no

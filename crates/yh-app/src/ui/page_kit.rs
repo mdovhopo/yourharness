@@ -325,3 +325,21 @@ pub fn wheel_passes_to_page(
         .size_full(),
     )
 }
+
+/// A menu's footnote ("Applies from your next message."): caption size, tertiary, wrapping,
+/// in line with the rows' titles, and never lit or clicked.
+pub fn menu_note(note: impl Into<SharedString>) -> gpui_kit::component::menu::PopupMenuItem {
+    let note: SharedString = note.into();
+    gpui_kit::component::menu::PopupMenuItem::element(move |_, cx| {
+        let theme = Theme::get(cx);
+        div()
+            .py(px(2.))
+            .max_w(px(260.))
+            .whitespace_normal()
+            .text_size(px(text::CAPTION))
+            .line_height(px(14.))
+            .text_color(theme.tertiary)
+            .child(note.clone())
+    })
+    .disabled(true)
+}

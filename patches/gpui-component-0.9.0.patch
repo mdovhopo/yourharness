@@ -1,5 +1,5 @@
---- gpui-component/src/button/button.rs	2026-11-08 18:49:20
-+++ gpui-component/src/button/button.rs	2026-11-08 18:49:35
+--- gpui-component/src/button/button.rs
++++ gpui-component/src/button/button.rs
 @@ -768,7 +768,14 @@
          let accessibility_label = self
              .accessibility_label
@@ -16,3 +16,215 @@
          // Like an HTML `title`, the tooltip describes the button.
          let description = self.tooltip.as_ref().map(|(tooltip, _)| tooltip.clone());
          let content = h_flex()
+--- gpui-component/src/menu/menu_item.rs
++++ gpui-component/src/menu/menu_item.rs
+@@ -117,8 +117,9 @@
+             .gap_x_1()
+             .py_1()
+             .px_2()
+-            .text_base()
+-            .text_color(cx.theme().foreground)
++            // YourHarness patch: the app's body size, and the menu's own text colour.
++            .text_size(gpui::px(13.))
++            .text_color(cx.theme().popover_foreground)
+             .relative()
+             .items_center()
+             .justify_between()
+@@ -130,14 +131,10 @@
+                 // Not `group_hover` on the item's own group: GPUI styles an
+                 // element before registering its group, and that fallback keeps
+                 // the pointer's item lit after a key moves the highlight away.
+-                this.hover(|this| {
+-                    this.bg(cx.theme().tokens.accent)
+-                        .text_color(cx.theme().accent_foreground)
+-                })
+-                .when(self.selected, |this| {
+-                    this.bg(cx.theme().tokens.accent)
+-                        .text_color(cx.theme().accent_foreground)
+-                })
++                // YourHarness patch: the lit row is a soft fill (the theme's `list_active`, the
++                // app's soft accent), its text left as it is, so subtitles keep their colour.
++                this.hover(|this| this.bg(cx.theme().list_active))
++                    .when(self.selected, |this| this.bg(cx.theme().list_active))
+                 .when_some(self.on_click, |this, on_click| {
+                     this.on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                         cx.stop_propagation();
+--- gpui-component/src/menu/popup_menu.rs
++++ gpui-component/src/menu/popup_menu.rs
+@@ -1,4 +1,3 @@
+-use crate::ThemeStyled as _;
+ use crate::actions::{Cancel, Confirm, SelectDown, SelectUp};
+ use crate::actions::{SelectLeft, SelectRight};
+ use crate::menu::menu_item::MenuItemElement;
+@@ -17,6 +16,24 @@
+ use std::collections::HashSet;
+ use std::rc::Rc;
+ 
++// YourHarness patch: menus sized and drawn as macOS's are, on the app's type scale (13 pt
++// rows, 11 pt section labels), compact rows, a hairline edge and one soft shadow, the
++// surface's radius concentric with its rows'.
++/// A menu row's text, and its line height (two-line rows stay tight).
++const MENU_TEXT: Pixels = px(13.);
++const MENU_LINE: Pixels = px(16.);
++/// A section label's text and line height.
++const MENU_LABEL_TEXT: Pixels = px(11.);
++const MENU_LABEL_LINE: Pixels = px(14.);
++/// A single-line row's height.
++const MENU_ROW: Pixels = px(22.);
++/// The surface's padding around its rows, and its radius (a row's radius plus the padding).
++const MENU_PADDING: Pixels = px(5.);
++const MENU_ROW_RADIUS: Pixels = px(7.);
++const MENU_RADIUS: Pixels = px(12.);
++/// Icons and the check mark, in a column of their own.
++const MENU_ICON: Pixels = px(14.);
++
+ const CONTEXT: &str = "PopupMenu";
+ 
+ pub fn init(cx: &mut App) {
+@@ -1220,7 +1237,7 @@
+             Icon::empty()
+         };
+ 
+-        Some(icon.xsmall())
++        Some(icon.size(MENU_ICON).flex_none())
+     }
+ 
+     #[inline]
+@@ -1267,7 +1284,7 @@
+         let has_left_icon = options.has_left_icon;
+         let is_left_check = options.check_side.is_left() && item.is_checked();
+         let right_check_icon = if options.check_side.is_right() && item.is_checked() {
+-            Some(Icon::new(IconName::Check).xsmall())
++            Some(Icon::new(IconName::Check).size(MENU_ICON))
+         } else {
+             None
+         };
+@@ -1280,12 +1297,13 @@
+ 
+         let (item_height, radius) = match self.size {
+             Size::Small => (px(20.), options.radius.half()),
+-            _ => (px(26.), options.radius),
++            _ => (MENU_ROW, options.radius),
+         };
+ 
+         let this = MenuItemElement::new(ix)
+             .relative()
+-            .text_sm()
++            .text_size(MENU_TEXT)
++            .line_height(MENU_LINE)
+             .py_0()
+             .px(INNER_PADDING)
+             .rounded(radius)
+@@ -1321,19 +1339,29 @@
+             );
+ 
+         match item {
++            // A hairline, inset to the rows' text.
+             PopupMenuItem::Separator => this
+-                .h_auto()
++                .h(px(1.))
+                 .p_0()
+-                .my_0p5()
+-                .mx_neg_1()
+-                .border_b(px(2.))
+-                .border_color(cx.theme().border)
++                .my(px(4.))
++                .mx(INNER_PADDING)
++                .rounded(px(0.))
++                .bg(cx.theme().popover_foreground.alpha(0.1))
+                 .disabled(true),
+-            PopupMenuItem::Label(label) => this.disabled(true).cursor_default().child(
++            // A section's name: small, semibold, secondary.
++            PopupMenuItem::Label(label) => this
++                .disabled(true)
++                .cursor_default()
++                .text_size(MENU_LABEL_TEXT)
++                .line_height(MENU_LABEL_LINE)
++                .font_weight(gpui::FontWeight::SEMIBOLD)
++                .pt(px(3.))
++                .pb(px(1.))
++                .child(
+                 h_flex()
+                     .cursor_default()
+                     .items_center()
+-                    .gap_x_1()
++                    .gap_x(px(6.))
+                     .children(Self::render_icon(has_left_icon, false, None, window, cx))
+                     .child(div().flex_1().child(label.clone())),
+             ),
+@@ -1354,7 +1382,7 @@
+                         .flex_1()
+                         .min_h(item_height)
+                         .items_center()
+-                        .gap_x_1()
++                        .gap_x(px(6.))
+                         .children(Self::render_icon(
+                             has_left_icon,
+                             is_left_check,
+@@ -1384,7 +1412,7 @@
+                 })
+                 .disabled(*disabled)
+                 .h(item_height)
+-                .gap_x_1()
++                .gap_x(px(6.))
+                 .children(Self::render_icon(
+                     has_left_icon,
+                     is_left_check,
+@@ -1436,7 +1464,7 @@
+                         .min_h(item_height)
+                         .size_full()
+                         .items_center()
+-                        .gap_x_1()
++                        .gap_x(px(6.))
+                         .children(Self::render_icon(
+                             has_left_icon,
+                             false,
+@@ -1453,7 +1481,8 @@
+                                 .child(label.clone())
+                                 .child(
+                                     Icon::new(IconName::ChevronRight)
+-                                        .xsmall()
++                                        .size(px(12.))
++                                        .flex_none()
+                                         .text_color(cx.theme().muted_foreground),
+                                 ),
+                         ),
+@@ -1539,7 +1568,7 @@
+         let options = RenderOptions {
+             has_left_icon,
+             check_side: self.check_side,
+-            radius: cx.theme().radius.min(px(8.)),
++            radius: MENU_ROW_RADIUS,
+         };
+ 
+         v_flex()
+@@ -1555,15 +1584,26 @@
+             .on_action(cx.listener(Self::confirm))
+             .on_action(cx.listener(Self::dismiss))
+             .on_mouse_down_out(cx.listener(Self::on_mouse_down_out))
+-            .popover_style(cx)
++            .bg(cx.theme().popover)
+             .text_color(cx.theme().popover_foreground)
++            .border_1()
++            .border_color(cx.theme().popover_foreground.alpha(0.12))
++            .rounded(MENU_RADIUS)
++            // One soft shadow, darker in dark mode, where the surface is lighter than what's under it.
++            .shadow(vec![
++                gpui::BoxShadow::new(
++                    px(0.),
++                    px(6.),
++                    gpui::hsla(0., 0., 0., if cx.theme().is_dark() { 0.38 } else { 0.16 }),
++                )
++                .blur_radius(px(9.)),
++            ])
+             .relative()
+             .occlude()
+             .child(
+                 v_flex()
+                     .id("items")
+-                    .p_1()
+-                    .gap_y_0p5()
++                    .p(MENU_PADDING)
+                     .min_w(rems(8.))
+                     .when_some(self.min_width, |this, min_width| this.min_w(min_width))
+                     .max_w(max_width)

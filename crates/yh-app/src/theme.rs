@@ -176,6 +176,13 @@ pub fn apply_appearance(appearance: WindowAppearance, window: &mut Window, cx: &
     colors.button_primary_foreground = gpui_kit::white();
     // A switch's knob is white in both modes, as macOS's (it took the near-black canvas in dark).
     colors.switch_thumb = gpui_kit::white();
+    // Menus and popovers on the app's surfaces, not the kit's near-black: a card in dark mode
+    // (lighter than the canvas, as macOS's menus are), white in light. A menu's lit row is the
+    // soft accent, as the sidebar's selection is soft (the patched menu reads `list_active`).
+    let dark = matches!(mode, ThemeMode::Dark);
+    colors.popover = if dark { ours.card } else { ours.canvas };
+    colors.popover_foreground = ours.text;
+    colors.list_active = ours.accent_soft;
     // Buttons read tokens made from the colours.
     theme.tokens = gpui_kit::component::theme::ThemeTokens::from(&theme.colors);
 }

@@ -109,11 +109,15 @@ fn uptime() -> f64 {
 }
 
 fn mouse_event(w: id, kind: u64, point: NSPoint, clicks: isize) -> id {
+    mouse_event_with(w, kind, point, clicks, 0)
+}
+
+fn mouse_event_with(w: id, kind: u64, point: NSPoint, clicks: isize, flags: u64) -> id {
     unsafe {
         let number: isize = msg_send![w, windowNumber];
-        msg_send![class!(NSEvent), mouseEventWithType: kind location: point modifierFlags: 0u64
+        msg_send![class!(NSEvent), mouseEventWithType: kind location: point modifierFlags: flags
             timestamp: uptime() windowNumber: number context: nil eventNumber: 0isize
-            clickCount: clicks pressure: if kind == 1 { 1.0f32 } else { 0.0f32 }]
+            clickCount: clicks pressure: if kind == NSLeftMouseDown { 1.0f32 } else { 0.0f32 }]
     }
 }
 
@@ -128,6 +132,22 @@ pub fn click(w: id, x: f32, y: f32) {
         let point = window_point(w, x, y);
         for kind in [NSLeftMouseDown, NSLeftMouseUp] {
             let event = mouse_event(w, kind, point, 1);
+            if event != nil {
+                let _: () = msg_send![w, sendEvent: event];
+            }
+        }
+    }
+}
+
+/// A right click (a context menu) at a point in window coordinates, through the window: sent as
+/// a control-click, which GPUI takes as a right click (a made-up right-button event carries no
+/// button number, so it would read as the left).
+pub fn right_click(w: id, x: f32, y: f32) {
+    const CONTROL: u64 = 1 << 18;
+    unsafe {
+        let point = window_point(w, x, y);
+        for kind in [NSLeftMouseDown, NSLeftMouseUp] {
+            let event = mouse_event_with(w, kind, point, 1, CONTROL);
             if event != nil {
                 let _: () = msg_send![w, sendEvent: event];
             }

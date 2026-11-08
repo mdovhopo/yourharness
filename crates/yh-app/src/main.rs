@@ -623,22 +623,34 @@ fn main() {
         }
         // `YH_CLICK=<x,y>[;<x,y>…]`: clicks there (window points) through the window, a second
         // apart, after `YH_DRAFT_DELAY` (+0.5 s after `YH_HOVER`): for menus and buttons only a
-        // click opens (the composer's pickers, the plan card's Approve menu).
+        // click opens (the composer's pickers, the plan card's Approve menu). `r<x,y>` right-clicks
+        // (context menus), `h<x,y>` only moves the pointer there (a menu row highlighted).
         if let Some(points) = env("YH_CLICK") {
-            let points: Vec<(f32, f32)> = points
+            let points: Vec<(char, f32, f32)> = points
                 .split(';')
-                .filter_map(|p| p.split_once(',').and_then(|(x, y)| Some((x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?))))
+                .filter_map(|p| {
+                    let p = p.trim();
+                    let (kind, p) = match p.chars().next()? {
+                        k @ ('r' | 'h') => (k, &p[1..]),
+                        _ => ('l', p),
+                    };
+                    p.split_once(',').and_then(|(x, y)| Some((kind, x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?)))
+                })
                 .collect();
             let delay: f64 = env("YH_DRAFT_DELAY").and_then(|v| v.parse().ok()).unwrap_or(1.0) + 0.5;
             // `YH_CLICK_WINDOW=<title>`: in that window instead (`Settings`), found by its title.
             let in_window = env("YH_CLICK_WINDOW");
             cx.spawn(async move |cx| {
                 cx.background_executor().timer(Duration::from_secs_f64(delay)).await;
-                for (x, y) in points {
+                for (kind, x, y) in points {
                     if let Some(ns) = input_target(window, in_window.as_deref(), cx) {
                         crate::platform::mouse_move(ns, x, y);
-                        crate::platform::click(ns, x, y);
-                        eprintln!("CLICK {x},{y}");
+                        match kind {
+                            'r' => crate::platform::right_click(ns, x, y),
+                            'h' => {}
+                            _ => crate::platform::click(ns, x, y),
+                        }
+                        eprintln!("CLICK {kind} {x},{y}");
                     }
                     cx.background_executor().timer(Duration::from_secs(1)).await;
                 }

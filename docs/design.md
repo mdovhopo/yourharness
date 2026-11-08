@@ -46,6 +46,10 @@ Mac app as GPUI lets us get, without paying for it in frames. We don't copy the 
   header.
 - **Pages (Memory, Usage, Project)**: large title, a subtitle line, actions as a toolbar row; tabs
   as a segmented control, not a row of buttons.
+- **Menus** (gpui-component's, patched): the popover surface (a card in dark, white in light), a
+  hairline edge, radius LARGE with rows MEDIUM inside 5 pt of padding, one soft shadow; rows 22 pt,
+  13 pt text, a 14 pt check/icon column, the lit row the soft accent; section names caption
+  semibold secondary; notes (`page_kit::menu_note`) caption tertiary; separators hairlines.
 - **Settings, sheets, popovers**: grouped rows like macOS System Settings: section title, rows
   with label left and control right, footers in footnote secondary.
 

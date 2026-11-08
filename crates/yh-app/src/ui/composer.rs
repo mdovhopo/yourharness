@@ -714,7 +714,7 @@ impl Composer {
                         sub
                     });
                 }
-                menu.separator().label("Switches instantly. Set the default in Settings.")
+                menu.separator().item(crate::ui::page_kit::menu_note("Switches instantly. Set the default in Settings."))
             })
         };
         let effort_menu = (!efforts.is_empty()).then(|| {
@@ -736,7 +736,7 @@ impl Composer {
                         let _ = w.update(cx, |ws, cx| ws.set_effort(&id, Some(e.clone()), cx));
                     }));
                 }
-                menu.separator().label("Applies from your next message.")
+                menu.separator().item(crate::ui::page_kit::menu_note("Applies from your next message."))
             })
         });
         let mode_menu = {
@@ -755,7 +755,7 @@ impl Composer {
                         let _ = w.update(cx, |ws, cx| ws.set_mode(&project, value, cx));
                     }));
                 }
-                menu.separator().label("Applies to every thread in this project, right away.")
+                menu.separator().item(crate::ui::page_kit::menu_note("Applies to every thread in this project, right away."))
             })
         };
         div()
@@ -792,9 +792,9 @@ fn picker_row(title: String, subtitle: Option<String>, secondary: gpui_kit::Hsla
         div()
             .flex()
             .flex_col()
-            .py(px(1.))
+            .py(px(3.))
             .child(div().when_some(tint, |d, c| d.text_color(c)).child(title.clone()))
-            .when_some(subtitle.clone(), |d, s| d.child(div().text_size(px(11.)).line_height(px(14.)).text_color(secondary).whitespace_normal().max_w(px(260.)).child(s)))
+            .when_some(subtitle.clone(), |d, s| d.child(div().text_size(px(text::CAPTION)).line_height(px(14.)).text_color(secondary).whitespace_normal().max_w(px(260.)).child(s)))
     })
 }
 
