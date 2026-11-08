@@ -339,6 +339,10 @@ pub struct Inspector {
     seen_subagents: u64,
     /// Background sub-agents running in the thread when last drawn: the Sub-agents tab's badge.
     seen_agents: usize,
+    /// The end of what each command the shown sub-agent started printed, by task ID: read off
+    /// the main thread every two seconds while one runs and the Sub-agents tab shows.
+    agent_outputs: HashMap<String, String>,
+    agent_ticker: Option<gpui_kit::Task<()>>,
     thread_watch: Option<Subscription>,
     prompt_open: bool,
     sub_scroll: ScrollHandle,
@@ -423,6 +427,8 @@ impl Inspector {
             thread: None,
             seen_subagents: 0,
             seen_agents: 0,
+            agent_outputs: HashMap::new(),
+            agent_ticker: None,
             thread_watch: None,
             prompt_open: false,
             sub_scroll: ScrollHandle::new(),
@@ -1142,6 +1148,129 @@ impl Inspector {
 // MARK: Drawing
 
 impl Inspector {
+    /// (task id, output file) of the commands a sub-agent started that still need reading:
+    /// running ones, and ended ones not read yet.
+    fn agent_command_files(&self, agent_call: &str, cx: &App) -> Vec<(String, String)> {
+        let Some(thread) = self.thread.as_ref() else { return vec![] };
+        let t = thread.read(cx);
+        let folder = t.jobs.folder.clone().or_else(|| t.session_id.as_ref().map(|s| crate::state::jobs::output_folder(&self.workspace.read(cx).folder_of(t), s)));
+        t.jobs
+            .owned_by(agent_call)
+            .into_iter()
+            .filter(|j| j.status == crate::state::jobs::JobStatus::Running || !self.agent_outputs.contains_key(&j.id))
+            .filter_map(|j| Some((j.id.clone(), j.output_file.clone().or_else(|| folder.as_ref().map(|f| format!("{f}/{}.output", j.id)))?)))
+            .collect()
+    }
+
+    /// Reads the shown sub-agent's commands' output every two seconds while there's any to
+    /// read and the tab shows; stops by itself after.
+    fn follow_agent_commands(&mut self, agent_call: String, cx: &mut Context<Self>) {
+        if self.agent_ticker.is_some() || self.agent_command_files(&agent_call, cx).is_empty() {
+            return;
+        }
+        self.agent_ticker = Some(cx.spawn(async move |this, cx| loop {
+            let files = this
+                .update(cx, |this, cx| {
+                    let shown = this.workspace.read(cx).panel == Panel::Subagents
+                        && this.thread.as_ref().is_some_and(|t| t.read(cx).inspected_subagent.as_deref() == Some(agent_call.as_str()) || t.read(cx).jobs.owned_by(&agent_call).iter().any(|j| j.status == crate::state::jobs::JobStatus::Running));
+                    if shown { this.agent_command_files(&agent_call, cx) } else { vec![] }
+                })
+                .unwrap_or_default();
+            if files.is_empty() {
+                let _ = this.update(cx, |this, _| this.agent_ticker = None);
+                break;
+            }
+            let read = cx
+                .background_executor()
+                .spawn(async move {
+                    files
+                        .into_iter()
+                        .map(|(id, path)| {
+                            let text = crate::state::jobs::tail(&path, 8192).map(|t| {
+                                let lines: Vec<&str> = t.lines().collect();
+                                lines[lines.len().saturating_sub(8)..].join("\n")
+                            });
+                            (id, text.unwrap_or_default())
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                let mut changed = false;
+                for (id, text) in read {
+                    if this.agent_outputs.get(&id) != Some(&text) {
+                        this.agent_outputs.insert(id, text);
+                        changed = true;
+                    }
+                }
+                if changed {
+                    cx.notify();
+                }
+            });
+            cx.background_executor().timer(std::time::Duration::from_secs(2)).await;
+        }));
+    }
+
+    /// The commands a sub-agent started (in the background, or taking a while): each with how
+    /// it stands and the end of its output.
+    fn agent_commands(&self, agent_call: &str, theme: &Theme, cx: &App) -> Option<gpui_kit::AnyElement> {
+        let thread = self.thread.as_ref()?.read(cx);
+        let owned = thread.jobs.owned_by(agent_call);
+        if owned.is_empty() {
+            return None;
+        }
+        let mut list = div().flex().flex_col().gap(px(space::S)).child(
+            div().text_size(px(text::CAPTION)).font_weight(FontWeight::SEMIBOLD).text_color(theme.secondary).child(if owned.len() == 1 { "Its command".to_string() } else { format!("Its commands · {}", owned.len()) }),
+        );
+        for job in owned {
+            let running = job.status == crate::state::jobs::JobStatus::Running;
+            let (label, failed) = if running {
+                (if job.background { "In background".to_string() } else { "Running".to_string() }, false)
+            } else {
+                job.status_label()
+            };
+            let output = self.agent_outputs.get(&job.id).filter(|o| !o.is_empty()).cloned();
+            list = list.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(space::XS))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(space::S))
+                            .child(Icon::new(if job.watch { IconName::Eye } else { IconName::SquareTerminal }).size(px(13.)).text_color(theme.secondary))
+                            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(if job.description.is_empty() { "Command".to_string() } else { job.description.clone() }))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_size(px(text::CAPTION))
+                                    .text_color(if failed { theme.error } else if running { theme.accent } else { theme.secondary })
+                                    .child(label),
+                            ),
+                    )
+                    .when_some(output, |d, text| {
+                        d.child(
+                            div()
+                                .ml(px(21.))
+                                .font_family(MONO)
+                                .text_size(px(text::CAPTION))
+                                .line_height(px(15.))
+                                .bg(theme.code)
+                                .rounded(px(radius::MEDIUM))
+                                .px(px(8.))
+                                .py(px(6.))
+                                .text_color(theme.secondary)
+                                .whitespace_normal()
+                                .child(text),
+                        )
+                    }),
+            );
+        }
+        Some(list.into_any_element())
+    }
+
     /// The tabs: a segmented control of icons, each named in its tooltip and in the panel's
     /// header under it.
     fn tabs(&self, panel: Panel, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1156,8 +1285,10 @@ impl Inspector {
             let (icon, tip): (Icon, SharedString) = match p {
                 Panel::PullRequests => (crate::ui::icons::pull_request(), "Pull Requests".into()),
                 Panel::SideChat => (crate::ui::icons::message_square(), "Side Chat".into()),
-                Panel::Subagents if agents == 1 => (crate::ui::icons::bot(), "Sub-agents: 1 running".into()),
-                Panel::Subagents if agents > 1 => (crate::ui::icons::bot(), format!("Sub-agents: {agents} running").into()),
+                Panel::Subagents if agents > 0 => (
+                    crate::ui::icons::bot(),
+                    format!("Sub-agents: {}", self.thread.as_ref().and_then(|t| t.read(cx).jobs.summary()).unwrap_or_default()).into(),
+                ),
                 Panel::Subagents => (crate::ui::icons::bot(), "Sub-agents".into()),
                 Panel::Files => (crate::ui::icons::files(), "Files".into()),
                 Panel::Browser => (Icon::new(IconName::Globe), "Browser".into()),
@@ -1208,7 +1339,7 @@ impl Inspector {
         div().flex().items_center().px(px(space::M)).h(px(44.)).flex_none().border_b_1().border_color(theme.separator).child(track)
     }
 
-    fn subagents(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+    fn subagents(&mut self, theme: &Theme, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let Some(thread) = self.thread.clone() else { return empty("No thread open.", theme) };
         let runs = thread.read(cx).subagents();
         if runs.is_empty() {
@@ -1325,11 +1456,13 @@ impl Inspector {
                 .outline()
                 .icon(icons::circle_stop().size(px(13.)))
                 .label("Stop")
-                .tooltip("Stop this sub-agent. The thread carries on.")
+                .tooltip("Stop this sub-agent and the commands it started. The thread carries on.")
                 .on_click(move |_, _, cx| {
                     ws.update(cx, |ws, cx| ws.stop_job(&t, &task, cx));
                 })
         });
+        let commands = self.agent_commands(&selected.0, theme, cx);
+        self.follow_agent_commands(selected.0.clone(), cx);
         let mut detail = div()
             .id("subagent-detail")
             .flex_1()
@@ -1375,6 +1508,9 @@ impl Inspector {
                     )
                     .when_some(stop, |d, b| d.child(b)),
             );
+        if let Some(commands) = commands {
+            detail = detail.child(commands);
+        }
         if !prompt.is_empty() {
             let open = self.prompt_open;
             detail = detail.child(

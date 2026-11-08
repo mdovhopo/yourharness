@@ -47,13 +47,8 @@ fn agents_marker(t: &ThreadState) -> Option<SharedString> {
     if agents == 0 {
         return None;
     }
-    let mut said = if agents == 1 { "1 sub-agent running".to_string() } else { format!("{agents} sub-agents running") };
-    match t.jobs.background().count() {
-        0 => {}
-        1 => said += " · a background job",
-        n => said += &format!(" · {n} background jobs"),
-    }
-    Some(said.into())
+    // "1 command and 2 sub-agents running (1 command of theirs)": worded by who started what.
+    t.jobs.summary().map(Into::into)
 }
 
 /// An idle thread with background jobs running: what its hourglass says, as the Swift app.
@@ -64,10 +59,10 @@ fn jobs_marker(t: &ThreadState, busy: bool) -> Option<SharedString> {
     }
     let waiting = t.jobs.waiting();
     Some(match waiting {
-        0 if count == 1 => "A background job is running".into(),
-        0 => format!("{count} background jobs are running").into(),
-        1 => "Claude is waiting on a background job".into(),
-        n => format!("Claude is waiting on {n} background jobs").into(),
+        0 if count == 1 => "1 command running".into(),
+        0 => format!("{count} commands running").into(),
+        1 => "Claude is waiting on a background command".into(),
+        n => format!("Claude is waiting on {n} background commands").into(),
     })
 }
 

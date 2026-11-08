@@ -319,8 +319,9 @@ pub enum Event {
     SubagentFinished { tool_id: String, status: String, summary: Option<String>, usage: SubagentUsage },
     /// A job Claude left running: a command in the background (`run_in_background`), a
     /// foreground one that's taking a while, or a watch (Monitor). `task_id` is what
-    /// `stop_task` takes; `tool_id` the call that started it.
-    JobStarted { task_id: String, tool_id: Option<String>, description: String, background: bool },
+    /// `stop_task` takes; `tool_id` the call that started it; `parent_task` the sub-agent's
+    /// task that started it (`parent_task_id`), none when the thread itself did.
+    JobStarted { task_id: String, tool_id: Option<String>, description: String, background: bool, parent_task: Option<String> },
     /// Its end: `status` `completed`, `failed`, `killed`, `stopped`…; `summary` says the exit
     /// code (`job_exit_code`), `output_file` holds everything it printed.
     JobFinished { task_id: String, status: String, summary: Option<String>, output_file: Option<String> },
@@ -735,6 +736,7 @@ impl Parser {
                         tool_id: object["tool_use_id"].as_str().map(str::to_string),
                         description: object["description"].as_str().unwrap_or("").into(),
                         background: object["is_backgrounded"] == true,
+                        parent_task: object["parent_task_id"].as_str().filter(|t| !t.is_empty()).map(str::to_string),
                     }]
                 }
                 "task_started" => vec![Event::SubagentStarted {
@@ -1061,6 +1063,34 @@ mod tests {
         let done = events.iter().position(|e| matches!(e, Event::Done { .. })).unwrap();
         let end = events.iter().position(|e| matches!(e, Event::SubagentFinished { .. })).unwrap();
         assert!(done < end);
+    }
+
+    /// A real capture (sanitized), on Haiku: the thread starts a background `sleep 60` and a
+    /// background sub-agent, which starts one of its own and then a foreground command; the
+    /// sub-agent is stopped (`stop_task`) and both its commands end with it.
+    const AGENT_COMMANDS: &str = include_str!("../fixtures/subagent-background-commands.jsonl");
+
+    #[test]
+    fn a_sub_agents_commands_say_whose_they_are() {
+        let events = events(AGENT_COMMANDS);
+        let starts: Vec<(&str, bool, Option<&str>)> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::JobStarted { task_id, background, parent_task, .. } => Some((task_id.as_str(), *background, parent_task.as_deref())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(starts, [("bq3issmvi", true, None), ("b02xabzjz", true, Some("a8119ad0491f6a5ca")), ("b7y5k2xv8", false, Some("a8119ad0491f6a5ca"))]);
+        // Stopping the agent stopped its commands too; the thread's own ran on.
+        let ends: Vec<(String, String)> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::JobFinished { task_id, status, .. } => Some((task_id.clone(), status.clone())),
+                Event::SubagentFinished { status, .. } => Some(("agent".into(), status.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ends, [("agent".to_string(), "stopped".to_string()), ("b7y5k2xv8".into(), "stopped".into()), ("b02xabzjz".into(), "stopped".into()), ("bq3issmvi".into(), "completed".into())]);
     }
 
     #[test]

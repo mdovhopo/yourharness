@@ -2838,27 +2838,36 @@ impl Workspace {
     /// Background jobs and sub-agents running in every thread, for asking before quitting:
     /// (title, detail), as the Swift app words it.
     pub fn quit_question(&self, cx: &App) -> Option<(String, String)> {
-        let jobs: Vec<String> = self.threads.iter().flat_map(|t| t.read(cx).jobs.background().map(|j| j.description.clone()).collect::<Vec<_>>()).collect();
+        // Worded by who started what: a running sub-agent's commands count with it.
+        let commands: Vec<String> =
+            self.threads.iter().flat_map(|t| { let j = &t.read(cx).jobs; j.background().filter(|c| !j.in_agent(c)).map(|c| c.description.clone()).collect::<Vec<_>>() }).collect();
         let agents: Vec<String> = self.threads.iter().flat_map(|t| t.read(cx).jobs.agents.iter().map(|j| j.description.clone()).collect::<Vec<_>>()).collect();
-        quit_words(&jobs, &agents)
+        let theirs: usize = self.threads.iter().map(|t| t.read(cx).jobs.agents_commands()).sum();
+        quit_words(&commands, &agents, theirs)
     }
 }
 
-/// "2 sub-agents are running" / "“Build” stops if you quit YourHarness.", for the quit question.
-fn quit_words(jobs: &[String], agents: &[String]) -> Option<(String, String)> {
-    let they = || "They stop if you quit YourHarness.".to_string();
-    match (jobs, agents) {
-        ([], []) => None,
-        ([job], []) => Some(("A background job is running".into(), format!("“{job}” stops if you quit YourHarness."))),
-        ([], [agent]) => Some(("A sub-agent is running".into(), format!("“{agent}” stops if you quit YourHarness."))),
-        (jobs, []) => Some((format!("{} background jobs are running", jobs.len()), they())),
-        ([], agents) => Some((format!("{} sub-agents are running", agents.len()), they())),
-        (jobs, agents) => {
-            let j = if jobs.len() == 1 { "A background job".to_string() } else { format!("{} background jobs", jobs.len()) };
-            let a = if agents.len() == 1 { "a sub-agent".to_string() } else { format!("{} sub-agents", agents.len()) };
-            Some((format!("{j} and {a} are running"), they()))
-        }
+/// "1 command and 2 sub-agents are running" / "“Build” stops if you quit YourHarness.", for
+/// the quit question. `theirs`: commands the running sub-agents started.
+fn quit_words(commands: &[String], agents: &[String], theirs: usize) -> Option<(String, String)> {
+    let plural = |n: usize, one: &str, many: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {many}") };
+    let title = match (commands.len(), agents.len()) {
+        (0, 0) => return None,
+        (1, 0) => "A background command is running".to_string(),
+        (0, 1) => "A sub-agent is running".to_string(),
+        (c, 0) => format!("{c} background commands are running"),
+        (0, a) => format!("{a} sub-agents are running"),
+        (c, a) => format!("{} and {} are running", plural(c, "command", "commands"), plural(a, "sub-agent", "sub-agents")),
+    };
+    let mut detail = match (commands, agents) {
+        ([one], []) | ([], [one]) => format!("“{one}” stops if you quit YourHarness"),
+        _ => "They stop if you quit YourHarness".to_string(),
+    };
+    if theirs > 0 {
+        let whose = if agents.len() == 1 { "the sub-agent" } else { "the sub-agents" };
+        detail += &format!(", with {} {whose} started", if theirs == 1 { "the command".to_string() } else { format!("the {theirs} commands") });
     }
+    Some((title, detail + "."))
 }
 
 fn make_thread(meta: ThreadMeta, workspace: WeakEntity<Workspace>, cx: &mut Context<Workspace>) -> Entity<ThreadState> {
@@ -3352,11 +3361,14 @@ mod tests {
     #[test]
     fn the_quit_question_counts_sub_agents_with_commands() {
         let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
-        assert_eq!(quit_words(&[], &[]), None);
-        assert_eq!(quit_words(&s(&["Build"]), &[]).unwrap().0, "A background job is running");
-        assert_eq!(quit_words(&[], &s(&["Survey"])).unwrap(), ("A sub-agent is running".into(), "“Survey” stops if you quit YourHarness.".into()));
-        assert_eq!(quit_words(&[], &s(&["a", "b"])).unwrap().0, "2 sub-agents are running");
-        assert_eq!(quit_words(&s(&["x"]), &s(&["a", "b"])).unwrap().0, "A background job and 2 sub-agents are running");
-        assert_eq!(quit_words(&s(&["x", "y"]), &s(&["a"])).unwrap().0, "2 background jobs and a sub-agent are running");
+        assert_eq!(quit_words(&[], &[], 0), None);
+        assert_eq!(quit_words(&s(&["Build"]), &[], 0).unwrap(), ("A background command is running".into(), "“Build” stops if you quit YourHarness.".into()));
+        assert_eq!(quit_words(&[], &s(&["Survey"]), 0).unwrap(), ("A sub-agent is running".into(), "“Survey” stops if you quit YourHarness.".into()));
+        assert_eq!(quit_words(&[], &s(&["a", "b"]), 0).unwrap().0, "2 sub-agents are running");
+        assert_eq!(quit_words(&s(&["x"]), &s(&["a", "b"]), 0).unwrap().0, "1 command and 2 sub-agents are running");
+        assert_eq!(
+            quit_words(&s(&["x", "y"]), &s(&["a"]), 1).unwrap(),
+            ("2 commands and 1 sub-agent are running".into(), "They stop if you quit YourHarness, with the command the sub-agent started.".into())
+        );
     }
 }

@@ -137,6 +137,8 @@ impl JobsStrip {
                 .jobs
                 .running
                 .iter()
+                // A running sub-agent's commands show as a count on its row: nothing to read.
+                .filter(|j| !thread.jobs.in_agent(j))
                 .filter_map(|j| {
                     let path = j.output_file.clone().or_else(|| folder.as_ref().map(|f| format!("{f}/{}.output", j.id)))?;
                     Some((j.id.clone(), path, self.expanded.contains(&j.id)))
@@ -146,9 +148,16 @@ impl JobsStrip {
     }
 
     /// A sub-agent in the background: "Agent: Survey the parser", what it's doing now, how
-    /// long it's been going; a click follows it in the right sidebar, Stop ends it.
-    fn agent_row(&self, job: &Job, thread: &Entity<ThreadState>, theme: &Theme) -> impl IntoElement {
-        let elapsed = jobs::clock(job.started.elapsed().as_secs());
+    /// long it's been going and the commands it has running ("2:14 · 1 command running"); a
+    /// click follows it in the right sidebar (its commands are listed there), Stop ends it,
+    /// and the CLI ends its commands with it.
+    fn agent_row(&self, job: &Job, commands: usize, thread: &Entity<ThreadState>, theme: &Theme) -> impl IntoElement {
+        let mut elapsed = jobs::clock(job.started.elapsed().as_secs());
+        match commands {
+            0 => {}
+            1 => elapsed += " · 1 command running",
+            n => elapsed += &format!(" · {n} commands running"),
+        }
         let description = if job.description.is_empty() { "Sub-agent".to_string() } else { job.description.clone() };
         let doing = job.last_line.clone().unwrap_or_else(|| "Working…".into());
         let (ws, t) = (self.workspace.clone(), thread.clone());
@@ -214,7 +223,7 @@ impl JobsStrip {
                         .ghost()
                         .xsmall()
                         .label("Stop")
-                        .tooltip("Stop this sub-agent. The thread carries on.")
+                        .tooltip("Stop this sub-agent and the commands it started. The thread carries on.")
                         .on_click(move |_, _, cx| stop_ws.update(cx, |ws, cx| ws.stop_job(&stop_thread, &task, cx))),
                 )
             })
@@ -228,6 +237,8 @@ impl JobsStrip {
         let stop_id = job.id.clone();
         let (ws, thread) = (self.workspace.clone(), thread.clone());
         let description = if job.description.is_empty() { "Command".to_string() } else { job.description.clone() };
+        // A sub-agent's that outlived it (or a foreground agent's): said whose it is.
+        let from_agent = job.owner_task.is_some();
         div()
             .flex()
             .flex_col()
@@ -257,7 +268,14 @@ impl JobsStrip {
                                     .min_w_0()
                                     .flex()
                                     .flex_col()
-                                    .child(div().font_weight(FontWeight::MEDIUM).overflow_hidden().whitespace_nowrap().text_ellipsis().child(description))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .min_w_0()
+                                            .gap(px(4.))
+                                            .when(from_agent, |d| d.child(div().flex_none().text_color(theme.secondary).child("Sub-agent's:")))
+                                            .child(div().flex_1().min_w_0().font_weight(FontWeight::MEDIUM).overflow_hidden().whitespace_nowrap().text_ellipsis().child(description)),
+                                    )
                                     .when_some(last.filter(|_| !open), |d, line| {
                                         d.child(
                                             div()
@@ -337,8 +355,14 @@ impl Render for JobsStrip {
         } else {
             "Running"
         };
-        let jobs: Vec<Job> = t.jobs.running.clone();
-        let agents: Vec<Job> = t.jobs.agents.clone();
+        // A running sub-agent's commands are on its row, not rows of their own.
+        let jobs: Vec<Job> = t.jobs.running.iter().filter(|j| !t.jobs.in_agent(j)).cloned().collect();
+        let agents: Vec<(Job, usize)> = t
+            .jobs
+            .agents
+            .iter()
+            .map(|a| (a.clone(), t.jobs.running.iter().filter(|j| j.owner_task.as_deref() == Some(a.id.as_str())).count()))
+            .collect();
         let mut strip = div()
             .w_full()
             .max_w(px(828.))
@@ -352,8 +376,8 @@ impl Render for JobsStrip {
             .flex()
             .flex_col()
             .child(div().px(px(space::M)).pt(px(space::S)).pb(px(2.)).text_size(px(ts::CAPTION)).font_weight(FontWeight::MEDIUM).text_color(theme.secondary).child(header));
-        for job in &agents {
-            strip = strip.child(self.agent_row(job, &thread, &theme));
+        for (job, commands) in &agents {
+            strip = strip.child(self.agent_row(job, *commands, &thread, &theme));
         }
         for job in &jobs {
             strip = strip.child(self.job_row(job, &thread, &theme, cx));

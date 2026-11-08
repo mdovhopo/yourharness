@@ -27,6 +27,10 @@ pub struct Job {
     /// A sub-agent in the background: `tool_id` is its Agent call, `last_line` what it's
     /// doing now (`task_progress`). Its output file is its transcript: never read.
     pub agent: bool,
+    /// Who started it, when a sub-agent did (`parent_task_id`): that agent's task ID, and its
+    /// Agent call once known. `None`: the thread itself.
+    pub owner_task: Option<String>,
+    pub owner: Option<String>,
     /// Your message it started under: while that's the latest, Claude is waiting on it.
     pub turn: Option<String>,
     pub started: Instant,
@@ -94,6 +98,22 @@ impl Job {
     }
 }
 
+/// "1 command and 2 sub-agents running", "2 sub-agents running (1 command of theirs)": what
+/// runs in the background, worded by who started it. `None` when nothing does.
+pub fn running_words(commands: usize, agents: usize, agents_commands: usize) -> Option<String> {
+    let plural = |n: usize, one: &str, many: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {many}") };
+    let mut said = match (commands, agents) {
+        (0, 0) => return None,
+        (c, 0) => plural(c, "command", "commands"),
+        (0, a) => plural(a, "sub-agent", "sub-agents"),
+        (c, a) => format!("{} and {}", plural(c, "command", "commands"), plural(a, "sub-agent", "sub-agents")),
+    } + " running";
+    if agents > 0 && agents_commands > 0 {
+        said += &format!(" ({} of theirs)", plural(agents_commands, "command", "commands"));
+    }
+    Some(said)
+}
+
 /// "4s", "2m 14s", "1h 5m", as the Swift app says how long a turn took.
 pub fn format_duration(seconds: f64) -> String {
     let total = seconds.round() as u64;
@@ -134,7 +154,8 @@ pub struct Jobs {
 }
 
 impl Jobs {
-    pub fn start(&mut self, task_id: String, tool_id: Option<String>, tool_name: Option<&str>, description: String, background: bool) {
+    /// `owner`: the sub-agent that started it (its task ID, and its Agent call when known).
+    pub fn start(&mut self, task_id: String, tool_id: Option<String>, tool_name: Option<&str>, description: String, background: bool, owner: Option<(String, Option<String>)>) {
         if self.running.iter().any(|j| j.id == task_id) {
             return;
         }
@@ -146,6 +167,8 @@ impl Jobs {
             background,
             watch: tool_name == Some("Monitor"),
             agent: false,
+            owner_task: owner.as_ref().map(|o| o.0.clone()),
+            owner: owner.and_then(|o| o.1),
             turn: self.turn.clone(),
             started: Instant::now(),
             status: JobStatus::Running,
@@ -174,7 +197,8 @@ impl Jobs {
             job.output_file = output_file;
         }
         self.version += 1;
-        let note = job.background.then(|| (job.end_note(), job.status == JobStatus::Failed));
+        // A sub-agent's command: its own log says how it went, not the thread.
+        let note = (job.background && job.owner_task.is_none()).then(|| (job.end_note(), job.status == JobStatus::Failed));
         self.keep_ended(job);
         note
     }
@@ -191,6 +215,8 @@ impl Jobs {
             background: true,
             watch: false,
             agent: true,
+            owner_task: None,
+            owner: None,
             turn: self.turn.clone(),
             started: Instant::now(),
             status: JobStatus::Running,
@@ -239,6 +265,39 @@ impl Jobs {
             .collect()
     }
 
+    /// The sub-agent's Agent call a job's owner task is, once its start is known.
+    pub fn agent_call(&self, task_id: &str) -> Option<String> {
+        self.agents.iter().find(|a| a.id == task_id).and_then(|a| a.tool_id.clone())
+    }
+
+    /// Jobs a sub-agent started (by its Agent call), running first, then ended, oldest first.
+    pub fn owned_by(&self, agent_call: &str) -> Vec<&Job> {
+        let mut ended: Vec<&Job> = self.ended.values().filter(|j| j.owner.as_deref() == Some(agent_call)).collect();
+        ended.sort_by_key(|j| j.started);
+        self.running.iter().filter(|j| j.owner.as_deref() == Some(agent_call)).chain(ended).collect()
+    }
+
+    /// Running jobs a background sub-agent still running started: they show with it.
+    pub fn in_agent(&self, job: &Job) -> bool {
+        job.owner_task.as_ref().is_some_and(|t| self.agents.iter().any(|a| &a.id == t))
+    }
+
+    /// Commands (and watches) running in the background on their own: the thread's, and any a
+    /// sub-agent left after it ended. Those of a running sub-agent count with it.
+    pub fn own_commands(&self) -> usize {
+        self.background().filter(|j| !self.in_agent(j)).count()
+    }
+
+    /// Background commands the running sub-agents started.
+    pub fn agents_commands(&self) -> usize {
+        self.background().filter(|j| self.in_agent(j)).count()
+    }
+
+    /// "1 command and 2 sub-agents running", worded by who started what; `None` when nothing.
+    pub fn summary(&self) -> Option<String> {
+        running_words(self.own_commands(), self.agents_running(), self.agents_commands())
+    }
+
     /// Background sub-agents running, for the strip, the sidebar and the quit question.
     pub fn agents_running(&self) -> usize {
         self.agents.len()
@@ -267,9 +326,9 @@ impl Jobs {
         }
         self.version += 1;
         gone.into_iter()
-            .map(|mut j| {
+            .filter_map(|mut j| {
                 j.end(JobStatus::Stopped);
-                let note = j.end_note();
+                let note = j.owner_task.is_none().then(|| j.end_note());
                 self.keep_ended(j);
                 note
             })
@@ -305,7 +364,7 @@ impl Jobs {
             notes.push(format!("{} “{}” {outcome}", j.kind(), j.description));
         }
         for mut j in std::mem::take(&mut self.running) {
-            if j.background {
+            if j.background && j.owner_task.is_none() {
                 notes.push(format!("{} “{}” {outcome}", j.kind(), j.description));
             }
             j.end(JobStatus::Stopped);
@@ -384,8 +443,8 @@ mod tests {
 
     fn jobs() -> Jobs {
         let mut jobs = Jobs { turn: Some("m1".into()), ..Default::default() };
-        jobs.start("b1".into(), Some("t1".into()), Some("Bash"), "Build".into(), true);
-        jobs.start("b2".into(), Some("t2".into()), Some("Bash"), "Loop".into(), false);
+        jobs.start("b1".into(), Some("t1".into()), Some("Bash"), "Build".into(), true, None);
+        jobs.start("b2".into(), Some("t2".into()), Some("Bash"), "Loop".into(), false, None);
         jobs
     }
 
@@ -412,7 +471,7 @@ mod tests {
         jobs.tool_result("t1", "Command running in background with ID: b1. Output is being written to: /private/tmp/c/s/tasks/b1.output. You will be notified.");
         assert_eq!(jobs.running[0].output_file.as_deref(), Some("/private/tmp/c/s/tasks/b1.output"));
         assert_eq!(jobs.folder.as_deref(), Some("/private/tmp/c/s/tasks"));
-        jobs.start("b3".into(), None, None, "Next".into(), true);
+        jobs.start("b3".into(), None, None, "Next".into(), true, None);
         assert_eq!(jobs.running[1].output_file.as_deref(), Some("/private/tmp/c/s/tasks/b3.output"));
     }
 
@@ -441,7 +500,7 @@ mod tests {
     #[test]
     fn a_watch_keeps_what_it_last_saw() {
         let mut jobs = Jobs::default();
-        jobs.start("w".into(), None, Some("Monitor"), "Load".into(), true);
+        jobs.start("w".into(), None, Some("Monitor"), "Load".into(), true, None);
         jobs.saw("w", "sample 1: 2.58\nsample 2: 2.69\n");
         assert_eq!(jobs.running[0].last_line.as_deref(), Some("sample 2: 2.69"));
         assert_eq!(jobs.finish("w", "completed", None, None).map(|(n, failed)| n.starts_with("Watch “Load” ended after") && !failed), Some(true));
@@ -479,6 +538,36 @@ mod tests {
         assert!(jobs.any_running());
         assert_eq!(jobs.cut_off("stopped when YourHarness quit"), ["Sub-agent “Early” stopped when YourHarness quit"]);
         assert!(!jobs.any_running());
+    }
+
+    #[test]
+    fn a_sub_agents_commands_go_with_it() {
+        let mut jobs = Jobs { turn: Some("m1".into()), ..Default::default() };
+        jobs.start_agent(Some("a1".into()), "agent-call".into(), "Survey".into());
+        jobs.start("b1".into(), Some("t1".into()), Some("Bash"), "Main sleep".into(), true, None);
+        let owner = Some(("a1".to_string(), jobs.agent_call("a1")));
+        jobs.start("b2".into(), Some("t2".into()), Some("Bash"), "Agent sleep".into(), true, owner);
+        assert_eq!(jobs.running[1].owner.as_deref(), Some("agent-call"));
+        assert_eq!((jobs.own_commands(), jobs.agents_running(), jobs.agents_commands()), (1, 1, 1));
+        assert_eq!(jobs.summary().as_deref(), Some("1 command and 1 sub-agent running (1 command of theirs)"));
+        assert_eq!(jobs.owned_by("agent-call").len(), 1);
+        // Its end leaves no note in the thread; it stays listed under the agent.
+        assert_eq!(jobs.finish("b2", "stopped", None, None), None);
+        assert_eq!(jobs.owned_by("agent-call").iter().map(|j| j.status).collect::<Vec<_>>(), [JobStatus::Stopped]);
+        // One the agent left behind when it ended counts on its own.
+        jobs.start("b3".into(), Some("t3".into()), Some("Bash"), "Left".into(), true, Some(("a1".into(), Some("agent-call".into()))));
+        jobs.finish_agent("agent-call");
+        assert_eq!(jobs.summary().as_deref(), Some("2 commands running"));
+        assert_eq!(jobs.cut_off("stopped when Claude exited"), ["Background command “Main sleep” stopped when Claude exited"]);
+    }
+
+    #[test]
+    fn running_words_by_owner() {
+        assert_eq!(running_words(0, 0, 0), None);
+        assert_eq!(running_words(1, 0, 0).as_deref(), Some("1 command running"));
+        assert_eq!(running_words(0, 2, 0).as_deref(), Some("2 sub-agents running"));
+        assert_eq!(running_words(1, 2, 0).as_deref(), Some("1 command and 2 sub-agents running"));
+        assert_eq!(running_words(0, 2, 3).as_deref(), Some("2 sub-agents running (3 commands of theirs)"));
     }
 
     #[test]

@@ -1420,12 +1420,30 @@ impl ThreadState {
                 self.interrupt_requested = false;
                 true
             }
-            Event::JobStarted { task_id, tool_id, description, background } => {
-                let tool = tool_id.as_ref().and_then(|id| self.tools.get(id)).and_then(|(e, _)| e.borrow().data.tool_name.clone());
-                self.jobs.start(task_id, tool_id, tool.as_deref(), description, background);
+            Event::JobStarted { task_id, tool_id, description, background, parent_task } => {
+                // A sub-agent's call isn't among the thread's tools: its log has it.
+                let tool = tool_id.as_ref().and_then(|id| self.tools.get(id)).and_then(|(e, _)| e.borrow().data.tool_name.clone()).or_else(|| {
+                    let id = tool_id.as_deref()?;
+                    let call = parent_task.as_deref().and_then(|t| self.agent_call_of(t))?;
+                    let (e, _) = self.tools.get(&call)?;
+                    let b = e.borrow();
+                    b.sub.as_ref()?.log.iter().rev().find(|s| s.id == id).and_then(|s| s.tool.clone())
+                });
+                let owner = parent_task.map(|t| {
+                    let call = self.agent_call_of(&t);
+                    (t, call)
+                });
+                // A sub-agent's: the Sub-agents panel lists it under that agent.
+                if owner.is_some() {
+                    self.subagents_version += 1;
+                }
+                self.jobs.start(task_id, tool_id, tool.as_deref(), description, background, owner);
                 true
             }
             Event::JobFinished { task_id, status, summary, output_file } => {
+                if self.jobs.running.iter().any(|j| j.id == task_id && j.owner_task.is_some()) {
+                    self.subagents_version += 1;
+                }
                 let code = summary.as_deref().and_then(yh_core::claude::job_exit_code);
                 match self.jobs.finish(&task_id, &status, code, output_file) {
                     Some((note, true)) => self.error_notice(&note),
@@ -1489,6 +1507,14 @@ impl ThreadState {
             self.notice(note);
         }
         !notes.is_empty() || !agents.is_empty()
+    }
+
+    /// The Agent call of a sub-agent, by its task ID: a background one from the jobs, a
+    /// foreground one from its call's start.
+    fn agent_call_of(&self, task_id: &str) -> Option<String> {
+        self.jobs.agent_call(task_id).or_else(|| {
+            self.tools.iter().find(|(_, (e, _))| e.borrow().sub.as_ref().is_some_and(|s| s.task_id.as_deref() == Some(task_id))).map(|(id, _)| id.clone())
+        })
     }
 
     /// A background sub-agent that ended without word: its call says it stopped.
