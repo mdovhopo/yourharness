@@ -1,25 +1,28 @@
 # YourHarness
 
-Native macOS (26+, Apple Silicon only) harness over AI coding CLIs. Being rewritten in **Rust on
-GPUI**, one process. Read docs/architecture.md first: layers, what the app must keep, the plan
-and what each chunk covers. The SwiftUI app this replaces is frozen in `legacy/YourHarness`
-(tag `swift-app-frozen`), and its Swift core and the superseded web rewrite are in
-`legacy/Sources`, `legacy/web`. Read them for what a feature does, never port them one for one.
-`legacy/CLAUDE.md` has the old app's notes.
+Native macOS (26+, Apple Silicon only) harness over AI coding CLIs, in **Rust on GPUI**, one
+process. Read docs/architecture.md first: the crates, threads and their `claude`, the tools the
+app serves, storage, the browser, and what keeps it fast. The other docs cover one area each
+(storage, browser, files, MCP, memory, design, workspaces, performance).
 
 ## Layout
 
-- `crates/yh-core`: storage (`db.rs`, `harness.sqlite` in the Swift app's format; `library.rs`,
-  project and thread records), `claude` processes and stream-json (`claude.rs`), Claude Code
-  history (`history.rs`), crash recovery (`recovery.rs`), markdown, and later memory, git, forge,
-  MCP servers. No GPUI. `cargo test -p yh-core` reads the `extreme` preset when it's there.
+- `crates/yh-core`: storage (`db.rs`, `harness.sqlite` in the format 0.0.x wrote, so 0.0.16
+  still opens it after a downgrade; `library.rs`, project and thread records; `legacy_import.rs`,
+  the JSON files of 0.0.6 and earlier), `claude` processes and stream-json (`claude.rs`), Claude
+  Code history (`history.rs`), crash recovery (`recovery.rs`), markdown and diagrams, memory, git
+  and forges, the in-app MCP servers. No GPUI. `cargo test -p yh-core` reads the `extreme`
+  preset when it's there.
 - `crates/yh-app`: the app.
   - `state/`: what it knows, no drawing. `workspace.rs` owns projects, threads, selection,
     each thread's `claude` and every request (send, stop, allow, pin, rename…), and emits
     `WorkspaceEvent`s; `thread.rs` holds a thread's rows.
+    `thread_tools.rs` and `harness_tools.rs` serve agents the `threads` and `harness` tools.
   - `ui/`: `root.rs` (window, transcript deck), `sidebar.rs`, `transcript.rs`, `rows.rs`,
-    `composer.rs` (with the permission, question and plan cards).
-  - `platform.rs` (AppKit), `probe.rs` (the perf run), `theme.rs`.
+    `composer.rs` (with the permission, question and plan cards), `inspector.rs` (the right
+    sidebar), the pages (`project.rs`, `memory.rs`, `usage.rs`), `settings.rs`, sheets.
+  - `browser/` and `webview.rs` (the agents' browser, WKWebViews over the window),
+    `platform.rs` (AppKit), `probe.rs` (the perf run), `theme.rs`.
 - `patches/`, `scripts/vendor.sh`: GPUI crates we patch, unpacked into `vendor/` (not
   committed). `gpui-pre-macos`: `GPUI_KEEP_DRAWING=1` draws a window parked off screen;
   `gpui-pre`: cached views draw anew while VoiceOver listens (a reused one dropped out of its
@@ -38,9 +41,9 @@ scripts/bundle.sh                 # → build/YourHarness Next.app
 APP=test-harness-root/next-test/app/"YourHarness Next.app" FEATURES=snapshots scripts/bundle.sh
 ```
 
-The bundle ID is `com.mdovhopo.yourharness.next` until the switch, so it never shares
-permissions or data with the user's app (`/Applications/YourHarness.app`, the frozen 0.0.16).
-**Never point a development run at the user's real data folder**: pass `YH_DATA_DIR=<scratch>`
+A development build (`YourHarness Next.app`) has the bundle ID `com.mdovhopo.yourharness.next`,
+so it never shares permissions or data with the user's installed app
+(`/Applications/YourHarness.app`). **Never point a development run at the user's real data folder**: pass `YH_DATA_DIR=<scratch>`
 (a folder with a `harness.sqlite`, e.g. an APFS clone `cp -c` of `test-harness-root/extreme`),
 and `YH_PATH="$PATH"` so no login shell starts and `claude` is found. Launch in the
 background, never taking focus:
@@ -145,8 +148,7 @@ sidebar's version card open), `YH_SETTLE_MERGED_AFTER=<s>` (when threads whose P
 (Import State's sheet; `YH_STATE_IMPORT_CONFIRM=1` then replaces, keeping a copy, and restarts), `YH_NOTIFICATION_CLICK=<seconds>` (a click on the last notification posted, which
 `YH_NOTIFICATIONS=log` only printed as `NOTIFY <kind>: title · project · body`: it opens that thread, printing `NOTIFY
 clicked`; real notifications go through a `UNUserNotificationCenter` delegate, never from a test).
-`YH_MEMORY_TAB=memories|tasks|activity`, after `YH_DRAFT_DELAY`), `YH_SPOTLIGHT=<words>` (⌘K typed;
-`YH_SPOTLIGHT_ENTER=1` with a session ID resumes it). Transcript: `YH_SCROLL_TO=<row>` (the open
+Transcript: `YH_SCROLL_TO=<row>` (the open
 thread's transcript starts at that row; negative counts from the end), `YH_SELECT_PROBE=1` (drags across the
 last reply through the window's events, prints `SELECT PASS` and what ⌘C would copy, then clicks it away;
 `=keep` leaves it selected for a snapshot; `YH_SELECT_PROBE_DELAY`), `YH_OPEN_STEP_FILE=<Read|Edit|Write>`
@@ -203,8 +205,7 @@ the keyboard on nothing drawn); a release needs none, and no panic. Shortcuts go
 events through the window (one that doesn't land is `WRONG`, and its action is dispatched
 instead: the keyboard left on a field or page that's gone reaches nothing); `PERF stall` lines name the action they came after. The fake `claude`
 also leaves background jobs running, for the jobs strip. Full runs
-take ten minutes, so they're kept for the end of big chunks: the user allows one more at most
-and one when the rewrite is whole. Judge by frames on time, worst frames and clicks (docs/
+take ten minutes, so run them only when the user asks or before a release. Judge by frames on time, worst frames and clicks (docs/
 performance.md), not averages; no `INVALID` lines; `PERF stall` lines say when and in what
 phase a frame ran long. `YH_PERF_FRONT=1` takes over the screen, so only when the user is away. A
 slowdown counts once a baseline build shows it isn't there under the same conditions; a fix once
@@ -226,26 +227,40 @@ the test fails without it, over several runs. Rules from measurements (docs/arch
 - **The user's data is sacred.** Keep `harness.sqlite`'s format. Never write to the real data
   folder from a test.
 - **CLI protocols change often.** Parsers ignore unknown events and never crash on new fields;
-  test them against the recorded sessions in `legacy/Tests/HarnessCoreTests/Fixtures/`.
+  test them against the recorded sessions in `crates/yh-core/fixtures/`. When the protocol
+  changes, capture a real session, sanitize it (no local paths or user config) and add it there.
 - **Never extract or reuse CLI credentials.** Always drive the official binary.
 
 ## Working autonomously
 
-Push to `rewrite` after each finished feature. Watch the Claude session limit with
+Commit and push after each finished feature. Watch the Claude session limit with
 `scripts/limits.sh` (it costs one tiny Haiku request). When `five_hour` nears its limit,
 commit, push, note the next step in the task, schedule a wake-up just after its reset, and
 pause.
 
-## Versions
+## Versions and releases
 
-Nothing is released from `rewrite` until it's the whole app. `main` keeps the frozen app and its
-release scripts (`legacy/scripts` here). The pipeline is ready for after the switch:
-`RELEASE=1 scripts/bundle.sh` builds the real app (bundle ID `com.mdovhopo.yourharness`, signed with
-the app's own identity from `~/.yourharness/signing`), `scripts/dmg.sh` packs it with its `.sha256`,
-`scripts/check-dmg.sh <dmg> [identity]` checks it as the updaters will, `scripts/release.sh <version>`
-(from `main` only) tests, builds and checks the DMG, then tags and pushes, and
-`.github/workflows/release.yml` builds it again and publishes it (run it by hand to test the pipeline
-on a branch, artifact only: `gh workflow run release.yml --ref rewrite`), and the updater (`state/updater.rs`) installs it on every copy, the Swift app's included: same
-bundle ID and signature. Never run a `RELEASE=1` build here: it shares your app's permissions and
-data. Test the updater with `.next` copies and `YH_UPDATE_FEED=<release.json>` (`YH_UPDATE_DOWNLOAD=1`,
-`YH_UPDATE_RESTART=1` run the whole flow; `VERSION_OVERRIDE=9.9.9 scripts/bundle.sh` makes the newer copy).
+The version is in `VERSION` (semver). When a feature lands, add a line to CHANGELOG.md under
+**Unreleased**, in the reader's terms. `scripts/release.sh <version>` (from `main` only, with a
+clean tree: stash only the user's own uncommitted files, by name, around it, and put them back)
+tests, files the Unreleased notes under the version, builds and checks the DMG, then tags,
+pushes and installs the app it built in /Applications; the tag's workflow
+(`.github/workflows/release.yml`) builds it again and publishes it on GitHub Releases with that
+version's notes (run it by hand to test the pipeline on a branch, artifact only:
+`gh workflow run release.yml --ref <branch>`).
+
+`RELEASE=1 scripts/bundle.sh` builds the real app (`build/YourHarness.app`, bundle ID
+`com.mdovhopo.yourharness`), `scripts/dmg.sh` packs it with its `.sha256`, and
+`scripts/check-dmg.sh <dmg> [identity]` checks it as the updaters will. Releases are signed with
+the app's own self-signed certificate, "YourHarness Self-Signed", so macOS sees every build as
+the same app and keeps the permissions it was given, and the updater (`state/updater.rs`) only
+installs updates signed the same way; it updates every copy, 0.0.x's included (same bundle ID
+and signature). The certificate and its passwords live in `~/.yourharness/signing` (a lost
+certificate means a new identity, and macOS asking for everything again) and in the repo's
+`SIGNING_P12` / `SIGNING_P12_PASSWORD` secrets; `scripts/bundle.sh` signs in a keychain of its
+own (`scripts/signing-keychain.sh`), never the login keychain, so signing never prompts.
+
+Never run a `RELEASE=1` build for testing: it shares your app's permissions and data. Test the
+updater with `.next` copies and `YH_UPDATE_FEED=<release.json>` (`YH_UPDATE_DOWNLOAD=1`,
+`YH_UPDATE_RESTART=1` run the whole flow; `VERSION_OVERRIDE=9.9.9 scripts/bundle.sh` makes the
+newer copy).
