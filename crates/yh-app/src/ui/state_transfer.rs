@@ -9,10 +9,17 @@ use serde_json::{json, Value};
 use std::path::PathBuf;
 
 fn app_info() -> Value {
+    // The bundle's version, as releases number it (the crate's stays 0.0.1).
+    let version = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.ancestors().nth(3).map(|a| a.to_path_buf()))
+        .and_then(|b| yh_core::updates::bundle_info(&b))
+        .map(|(_, v)| v.to_string())
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
     json!({
         "name": "YourHarness Next",
         "bundleID": "com.mdovhopo.yourharness.next",
-        "version": env!("CARGO_PKG_VERSION"),
+        "version": version,
         "build": Value::Null,
         "commit": option_env!("YH_GIT_COMMIT"),
     })

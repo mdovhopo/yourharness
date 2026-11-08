@@ -526,11 +526,13 @@ impl SettingsView {
 
     fn releases(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let updater = cx.try_global::<SettingsLinks>().map(|l| l.updater.clone());
+        // The bundle's version (what releases and the updater go by), not the crate's.
+        let version = updater.as_ref().and_then(|u| u.read(cx).current.as_ref().map(|v| v.to_string())).unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
         let version_line: String = match updater.as_ref().map(|u| u.read(cx).phase.clone()) {
-            Some(crate::state::updater::Phase::UpToDate) => format!("Version {} · up to date", env!("CARGO_PKG_VERSION")),
+            Some(crate::state::updater::Phase::UpToDate) => format!("Version {version} · up to date"),
             Some(crate::state::updater::Phase::Available(_)) => "A new version is out (see the sidebar)".into(),
             Some(crate::state::updater::Phase::Checking) => "Checking…".into(),
-            _ => format!("This is version {}", env!("CARGO_PKG_VERSION")),
+            _ => format!("This is version {version}"),
         };
         let mut notes = section("What's New");
         for (version, body) in changelog(3) {
