@@ -54,6 +54,16 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 - Export State asks whether to include the browser's sign-ins and says when it's done, with Show in Finder; Import State compares what you have now with what's in the file and saves a copy of yours first.
 - Idle threads show a small grey dot; VoiceOver reads sidebar rows (title and what they're doing), project headers and the thread's title.
 - While Claude works, macOS doesn't nap the app in the background.
+- Claude and the commands it runs get your login shell's environment (PATH and all), as a fresh Terminal window has it, even when the app is opened from the Dock or from inside a Claude Code session.
+- Find in thread marks the words it found (the current match orange, the rest yellow), opens folded work to show a match, ignores case and accents, and ⌘G goes round from the end.
+- While Claude works, the end of the thread says what it's doing ("Compacting the conversation…") and for how long; the plan's strip above the composer shows only while it's being worked on; a lightning button stops Claude and sends what you wrote right away, and the composer says how steering works.
+- A command in the background shows how long it's run, or how it ended ("Exited 1 · 3s"), in its step, and opening it shows what it's printing.
+- "Edited N files" counts what changed in the turn by any means, a shell command or a script included; with another thread in the same folder, only the files the turn named.
+- The / menu lists every match with where it comes from (YourHarness, MCP, project, a plugin), finds MCP prompts by the name it shows, and knows a project's commands before its first message. `/mcp enable`, `disable` and `reconnect` work in place.
+- A thread's first title, when its subject wasn't clear yet, is written again once Claude has answered; linked GitHub PRs and issues are looked up so the title says what they're about.
+- The side chat can look at the thread's browser and search the memory, read-only; it stays until you close it and never notifies.
+- Videos show their first frame; built-in commands' output is headed "Command output"; the PR button counts the PRs the thread worked on; "Show work" and "Hide work" on a finished turn; ⌘-click opens a local address in your default browser; right-click on selected text offers Copy and Look Up.
+- Code blocks scroll sideways rather than wrap, and long tool input and output scroll inside their box, the wheel moving on to the thread at their ends.
 
 ### Fixed
 - Claude's actions in the browser no longer take two seconds longer each while the browser isn't showing (you're reading the thread, or another one is open): its pages wait off screen where they keep drawing.
@@ -61,6 +71,11 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 - Without `claude`, a thread says "Couldn't find a working `claude` CLI. Check Settings → Agents."
 - A message sent while a thread was still loading no longer shows twice.
 - A finished turn no longer sends its notification twice.
+- Stop (the button or ⌘.) puts queued messages back in the composer first, and a message sent while Claude works waits above the composer instead of also showing in the thread; it joins the thread where Claude reads it, marked Steered or Interrupted.
+- A session that can't be resumed says so and the next message starts a new one; queued messages come back to the composer if Claude exits.
+- Changing the effort while Claude works no longer ends the turn: it applies once Claude is idle.
+- A thread whose worktree was removed runs in its project's folder again.
+- A sub-agent's steps and report are kept across relaunches; several MCP questions at once each wait their turn, and a page-mode one closes when you finish on the page.
 
 ## [0.0.16] - 2026-11-04
 

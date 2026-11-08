@@ -87,7 +87,7 @@ scrolling). The browser is how Claude sees the UI it builds, so this must pass. 
 `YH_SEND_FILES=<a.png:b.pdf:folder>` (with it: images inline, the rest by path; alone: attached to the
 selected thread's composer, as a drop does), `YH_NEW_THREAD=1` (a new thread in the first project at launch:
 its empty state), `YH_QUEUE=<text>` (sent `YH_QUEUE_DELAY` s after launch, 3, so it queues behind the
-`YH_SEND` turn; `YH_QUEUE_ACTION=now|edit|remove` then does what its buttons do, `YH_QUEUE_ACTION_DELAY` s later),
+`YH_SEND` turn; `YH_QUEUE_ACTION=now|edit|remove` then does what its buttons do, `YH_QUEUE_ACTION_DELAY` s later), `YH_STOP=<s>` (⌘. that long after launch, through the window: prints `STOP pressed` and what the composer holds 3 s later),
 `YH_SEND_SEQ=<a>|<b>|…` (sent to the selected thread one after another, each once the last turn is over: for
 `/btw`, `/model`, `/effort`, `/rename`, `/clear`, `/context`, `/usage`, or a second message naming a skill to chain),
 `YH_DRAFT=<text>` (typed in the composer:
