@@ -1,20 +1,14 @@
 .DS_Store
-/.build
+
+# Build outputs
+/target
 /build
-/.swiftpm
-/Packages
-xcuserdata/
-DerivedData/
-*.xcodeproj
+# GPUI crates unpacked and patched by scripts/vendor.sh
+/vendor
+
+# Scratch data for test runs (a folder, or a link to one), and perf results
+/test-harness-root
+perf-results/
 
 # Worktrees of background agents
 .claude/worktrees/
-
-test-harness-root/*
-
-# The page
-/legacy/web/ui/node_modules
-/legacy/web/ui/dist
-/target
-/vendor
-perf-results/
