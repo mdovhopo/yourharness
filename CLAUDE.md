@@ -141,11 +141,20 @@ pushes for real: the sandbox repo only), with `YH_NEW_WORKTREE_BRANCH=<name>` ty
 `YH_NEW_STACK_BRANCHES=<a:b>` picked in New Stack (Submit off). Right sidebar: `YH_FILES_PROBE=1` (with
 `YH_OPEN_FILE`: the file scrolled through in 40 steps, printing how long it took to open and the longest
 step's lines took to make, PASS under 50 ms; try `test-harness-root/files`' 100,000-line catalog),
-`YH_FILES_WRAP=1` (Wrap Lines on), `YH_SUBAGENT_STOP=<seconds>` (Stop pressed on the open sub-agent that
+`YH_FILES_WRAP=1` (Wrap Lines on), `YH_FILES_LOG=1` (prints each tree folder read again
+and each open file reloaded from disk, with its scroll place, and Find's counts), `YH_FILES_FIND=<words>` (Find in the
+first file opened, typed), `YH_PR_PANEL_LOG=1` (what the PRs tab lists, stacks and unsubmitted `gh stack` branches
+included, each time it changes, and `PRS activity` / `PRS looking again` when Claude touches PRs),
+`YH_SEARCH_PROBE=<words>` (how long until the full-text index, caught up in the background, finds them, and its first
+hits), `YH_SUBAGENT_STOP=<seconds>` (Stop pressed on the open sub-agent that
 long after it shows, printing `SUBAGENT stop <task>`). Memory: `YH_MEMORY_SETUP=importer|reconciler` (the
 specialist's setup over the window, `YH_MEMORY_IMPORT_SOURCES=<a:b>` ticked, `YH_MEMORY_AGENT_NOTE`,
 `YH_MEMORY_AGENT_MODEL=haiku`; `YH_MEMORY_SETUP_START=1` presses Start: a real turn),
-`YH_MEMORY_ADD_STEP=<text>` (with `YH_OPEN_MEMORY=1`: the first task opened and the step added).
+`YH_MEMORY_ADD_STEP=<text>` (with `YH_OPEN_MEMORY=1`: the first task opened and the step added),
+`YH_MEMORY_PROBE=1` (links the first memory to the second, renames the first and restores its version 1, printing
+`MEMORY probe: …`). MCP: `YH_MCP_ADD_ENV=NAME=value` (with `YH_MCP_ADD_COMMAND`: an environment variable added),
+`YH_MCP_ADD_DESKTOP=1` (Import from Claude Desktop pressed; give it `YH_CLAUDE_DESKTOP_CONFIG=<scratch file>`, never
+the real one).
 
 ## Performance is the product
 

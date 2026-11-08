@@ -62,7 +62,7 @@ Swift paths are under legacy/YourHarness/, Rust under crates/yh-app/src/. Tick i
 
 ## G. Right sidebar
 - [x] 42. Sub-agent Stop button. (Its task ID now comes with `task_started`; checked that the probe gets it and calls `stop_task`, not yet on a sub-agent that kept running.)
-- [x] 43. File viewer: syntax highlighting, image preview, Open in Default App for binaries, missing-file message, long-line notice. (Colouring is yh-core's light keyword/string/number/comment pass, line by line, so a comment or string spanning lines only colours its first line; the file isn't watched for changes.)
+- [x] 43. File viewer: syntax highlighting, image preview, Open in Default App for binaries, missing-file message, long-line notice. (Colouring is yh-core's light keyword/string/number/comment pass, line by line, each line starting in what the lines above left open, so block comments and multi-line strings colour whole for the languages that have them. The folder is watched (FSEvents, `state/file_watch.rs`): the tree reads changed folders again, an open file reloads keeping its place.)
 - [x] 44. Files toolbar/menus: Show/Hide Folder, Wrap Lines, More menu; tab menu; preview tabs. (Wrap Lines draws the file in GPUI's measured `list`.)
 - [x] 45. PR rows: context menu, Merged and Closed group.
 - [x] 46. Split into a Stack button.
@@ -79,6 +79,14 @@ Swift paths are under legacy/YourHarness/, Rust under crates/yh-app/src/. Tick i
 - [x] 52. Importer/Reconciler setup screens, model/effort per specialist, New Session, live Changes pane. (The setup is a dialog over the window, not a window of its own; the specialist's model and effort, Changes, Open Memory and New Session are in its thread's header, Changes as a menu read when opened; Set Up… shows there before it starts. Specialists opened from ⌘K still start without the setup.)
 - [x] 53. Task detail: Add a step.
 - [x] 54. Task rows: threads working on each.
+- [x] Memory detail: Preview as Markdown (default) and Edit, Link To and Unlink (links both ways), Restore This Version, Copy ID, Merged into. Activity: Show filter, the thread each event happened in.
+
+## Right sidebar, second pass (2026-11-08)
+- [x] Files: tree read from disk a folder at a time and watched, ignored files dimmed, row menus, ⌘F in the viewer.
+- [x] PRs: stacks as a card with a lane graph, unsubmitted `gh stack` layers, PRs of every written checkout's branch (from the project's scan, saved with the thread as `workedPullRequests`), re-synced 3 s and 12 s after Claude touches PRs, polled every 15 s.
+- [x] Sub-agents: steps as the transcript presents them (`steps::present`, Markdown, selectable output; not the transcript's own rows, which are tied to its list), live activity, "in the background", agent type in the run list.
+- [x] /mcp: Remove asks first; sign-in wait with Open Again, Copy Link, pasted callback; Ask Claude to Fix It; Add Server by URL (headers, OAuth client ID, secret, callback port), command (environment) or JSON; Import from Claude Desktop; `McpSheet::new_embedded` for Settings. Sign-in card's Open Again; elicitation switches and menus.
+- [x] Full-text index catches up a few seconds after launch without a write.
 
 ## Browser
 - [x] Pick element, pop-out window, idle close. (Open in Window in the panel's ⋯ menu: the thread's pages move to a window of their own, the panel then says so with Show Window and Move Back Here; closing the window brings them back. Its own window counts as looked at for idle close.)
