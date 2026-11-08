@@ -19,7 +19,17 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 - Narrow windows work down to the smallest size: the sidebars give way before the thread does (the left one folds away when there's no room beside the right one), and Memory, Usage and the project page switch to icons and one column at a time by their own width. A memory's text box grows with what you write.
 - Several permission requests at once (from parallel sub-agents) each get their own answer, one after another.
 - ⌘↩ answers a question once every question has an answer, or approves a plan in the recommended mode; ⌘⌫ skips or keeps planning.
-- The browser: back, forward and reload, an address field, closable tabs, console and network panes, Pick an element for your message, local dev servers offered when nothing's open, pages left alone for 30 minutes close (and reopen in one click), and the whole browser can open in its own window.
+- The browser: back, forward and reload, an address field, closable tabs, console and network panes, Pick an element for your message, local dev servers offered when nothing's open, pages left alone for 30 minutes close (and reopen when the browser is next used), and the whole browser can open in its own window.
+- Links that open a new window (`target=_blank`, `window.open`, sign-in popups) open as a new tab in the thread's browser, up to eight, and close again when the page closes itself; a page whose process crashes loads again by itself.
+- Take Control in the browser's toolbar stops Claude acting there while you use it (it can still look), with a banner and Give Back; Claude is told, and its old element references stop working.
+- A thread's browser tabs are saved with it and reopen the next time you or Claude use the browser, even after a quit; pages closed for being idle come back the same way.
+- When a page shows an alert, confirm or prompt while you browse, a card asks you ("The page says…", OK and Cancel); Claude can still answer it with its own tool.
+- Claude hears when a page answers 404 or 500, when a page fails to load, and when a link was a download the browser skipped; element references keep counting up across pages, so an old one never names an element on the next page.
+- The browser's empty state offers the dev servers this thread started (what's listening under its `claude`, and the local addresses its commands printed), not every server on the Mac.
+- The browser's toolbar has Stop while a page loads, and its menu Page Size, Page Appearance (Same as the App, Light, Dark), Show Web Inspector and Close Tab; Clear Browsing Data asks first. Under the page, the console and network sit in a strip you can fold, filter, show errors only, clear, and open a row of to read all of it.
+- While Claude clicks, types, scrolls or drags, the page shows where, ringed, with what it's doing; screenshots never include it.
+- An element you pick in the browser comes into your message with a picture of it.
+- Import Sign-ins has Select All and Select None, offers Open Privacy Settings when Safari's cookies need Full Disk Access, and reloads open pages afterwards.
 - The thread's header shows the repos and worktrees it works in, with their state, and can run the thread in another one.
 - Settings → Agents shows where `claude` is (and lets you choose another), the account it's signed in with, `gh` and `glab`.
 - The sidebar's left column hides with ⌃⌘S and resizes by dragging; the window's size and place and the open thread come back at launch.

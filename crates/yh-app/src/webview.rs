@@ -120,8 +120,9 @@ fn delegate() -> id {
         extern "C" fn failed(_: &Object, _: Sel, view: id, _: id, error: id) {
             unsafe {
                 let code: isize = msg_send![error, code];
-                // -999: cancelled, as when another navigation replaces it.
-                if code == -999 {
+                // -999: cancelled, as when another navigation replaces it; 102: the load became
+                // a download (or another policy change), said on its own.
+                if code == -999 || code == 102 {
                     return;
                 }
                 let text: id = msg_send![error, localizedDescription];
@@ -730,7 +731,8 @@ impl WebView {
 
     /// Answers the page's dialog: OK (with `text` for a prompt) or Cancel. False when none waits.
     pub fn answer_dialog(&self, accept: bool, text: Option<String>) -> bool {
-        let Some(reply) = DIALOGS.with(|d| d.borrow_mut().remove(&(self.view as usize))) else { return false };
+        // `try_with`: a web view let go of as the app quits may outlive the table.
+        let Some(reply) = DIALOGS.try_with(|d| d.borrow_mut().remove(&(self.view as usize))).ok().flatten() else { return false };
         match reply {
             DialogReply::Alert(b) => unsafe { b.call(()) },
             DialogReply::Confirm(b) => unsafe { b.call((if accept { YES } else { NO },)) },
@@ -1064,12 +1066,13 @@ impl WebView {
     /// Ends the page's web content process, as a crash would (test runs: `{"crash": true}`).
     pub fn end_content_process(&self) -> bool {
         unsafe {
-            let selector = sel!(_killWebContentProcess);
+            let selector = sel!(_webProcessIdentifier);
             let can: bool = msg_send![self.view, respondsToSelector: selector];
-            if can {
-                let _: () = msg_send![self.view, _killWebContentProcess];
+            if !can {
+                return false;
             }
-            can
+            let pid: i32 = msg_send![self.view, _webProcessIdentifier];
+            pid > 0 && libc::kill(pid, libc::SIGKILL) == 0
         }
     }
 

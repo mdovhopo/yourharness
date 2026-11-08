@@ -143,7 +143,8 @@ impl Tab {
         let key = self.web.key();
         cx.spawn(async move |cx| {
             cx.background_executor().timer(Duration::from_millis(1400)).await;
-            let _ = cx.update(|_| Browsers::with(|b| b.tab_mut(key).map(|t| t.web.clear_activity(seq))));
+            // Not once the app is going: the browsers may be gone.
+            let _ = cx.update(|_| BROWSERS.try_with(|b| b.try_borrow_mut().ok().and_then(|mut b| b.tab_mut(key).map(|t| t.web.clear_activity(seq)))));
         })
         .detach();
     }
@@ -1959,10 +1960,15 @@ pub fn run_probe(path: String, thread: String, project: Option<String>) {
             if let Some(on) = step["control"].as_bool() {
                 let t = thread.clone();
                 if let Some(jobs) = JOBS.get() {
-                    let _ = jobs.send(Box::new(move |b, _| {
+                    let _ = jobs.send(Box::new(move |b, cx| {
                         let s = b.session(&t);
                         s.user_has_control = on;
                         s.tabs.iter().for_each(Tab::reset_refs);
+                        // The panel shows the banner, as after its button.
+                        if let Some(f) = b.changed.take() {
+                            f(cx);
+                            b.changed = Some(f);
+                        }
                     }));
                 }
                 eprintln!("== {index} control {on}");

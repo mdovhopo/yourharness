@@ -67,7 +67,17 @@ going back to the sidebar; with `YH_BROWSER_OPEN=<url>`), `YH_BROWSER_PROBE=<ste
 `[{"tool": "click", "args": {"selector": "#go"}}, {"sleep": 1}]`, run on the selected thread's browser at launch
 as the agent makes them, a new thread in the first project if none is selected, so give it a `YH_PROJECT`; each
 result printed, screenshots next to the file as `<steps>.<n>.jpg`, then `== place …` and `== done`;
-`YH_BROWSER_PROBE_QUIT=1` quits after; `YH_BROWSER_AUTO_SHOW=0` keeps the page parked, the sidebar closed). After
+`YH_BROWSER_PROBE_QUIT=1` quits after; `YH_BROWSER_AUTO_SHOW=0` keeps the page parked, the sidebar closed;
+`YH_BROWSER_PROBE_THREAD=<id>` runs it on that thread while `YH_SELECT` opens another; steps may also be
+`{"control": true|false}`, Take Control and Give Back as the panel's button does, and `{"crash": true}`, the tab's web
+content process ended as a crash would). Browser panel checks: `YH_BROWSER_ACTIVITY_LOG=1` prints each time the page
+shows where the agent acts (`YH_BROWSER_ACTIVITY_SHOT=<png>` draws that overlay alone, which screenshots leave out),
+`YH_BROWSER_DIALOG_ANSWER=ok|cancel` answers a page's alert, confirm or prompt through the card you'd click,
+`YH_BROWSER_PANE=console|network|none` picks the log strip's pane or folds it (`YH_BROWSER_ERRORS_ONLY=1` filtered),
+`YH_BROWSER_CONFIRM_CLEAR=1` shows Clear Browsing Data's question, and Import Sign-ins takes
+`YH_COOKIE_SITES=<Cookies.binarycookies>` (a synthetic Safari-format file shown as its sites step; `YH_COOKIE_IMPORT=all`
+then selects all and imports, printing `COOKIES imported …`) and `YH_COOKIE_FAILED=access` (what Safari's cookies say
+without Full Disk Access). After
 changing anything in `browser/`, `webview.rs` or the browser panel or window, run `scripts/browser-fidelity/run.sh
 [out dir]` (a few minutes; `SKIP_BUILD=1` reuses the copy in the out dir, `RUNS=panel` for one): it renders test
 pages in a plain, unscaled WKWebView (Safari's engine) at every page size and checks the built-in browser against

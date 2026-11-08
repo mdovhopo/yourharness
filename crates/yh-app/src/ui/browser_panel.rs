@@ -155,10 +155,13 @@ impl BrowserPanel {
         if self.thread == thread {
             return;
         }
+        // Another thread's browser: what was open over this one's goes.
+        if self.thread.is_some() {
+            self.confirming_clear = false;
+            self.cookie_import = None;
+            self.open_rows.clear();
+        }
         self.thread = thread;
-        self.confirming_clear = false;
-        self.cookie_import = None;
-        self.open_rows.clear();
         self.test_hooks(cx);
     }
 
