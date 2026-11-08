@@ -173,6 +173,70 @@ impl Composer {
         }
     }
 
+    /// `YH_KEYS=<step>[;<step>…]`, for tests of the cards' keys: once a question or plan card
+    /// shows (and `YH_KEYS_DELAY` s more, 2), each step a second apart through the window as
+    /// typed: a keystroke (`cmd-enter`), `text:<words>` typed, or `focus:composer`,
+    /// `focus:other` (the first question's own answer; `focus:other2` the second's…),
+    /// `focus:feedback` (the plan's).
+    fn key_probe(keys: String, window: &mut Window, cx: &mut Context<Self>) {
+        let delay: f64 = std::env::var("YH_KEYS_DELAY").ok().and_then(|v| v.parse().ok()).unwrap_or(2.0);
+        cx.spawn_in(window, async move |this, cx| {
+            use std::time::Duration;
+            loop {
+                cx.background_executor().timer(Duration::from_millis(250)).await;
+                match this.read_with(cx, |c, _| matches!(c.card, Some((_, Card::Question(_) | Card::Plan(_))))) {
+                    Ok(true) => break,
+                    Ok(false) => {}
+                    Err(_) => return,
+                }
+            }
+            eprintln!("KEYS card shown");
+            cx.background_executor().timer(Duration::from_secs_f64(delay)).await;
+            for step in keys.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+                if let Some(target) = step.strip_prefix("focus:") {
+                    let _ = this.update_in(cx, |c, window, cx| {
+                        let handle = match (target, c.card.as_ref().map(|(_, k)| k)) {
+                            (t, Some(Card::Question(q))) if t.starts_with("other") => {
+                                let n: usize = t["other".len()..].parse().unwrap_or(1);
+                                q.read(cx).questions.get(n.saturating_sub(1)).map(|q| q.other.focus_handle(cx))
+                            }
+                            ("feedback", Some(Card::Plan(p))) => Some(p.read(cx).feedback.focus_handle(cx)),
+                            ("composer", _) => Some(c.input.focus_handle(cx)),
+                            _ => None,
+                        };
+                        match handle {
+                            Some(h) => window.focus(&h, cx),
+                            None => eprintln!("KEYS no field {target}"),
+                        }
+                    });
+                } else {
+                    let strokes: Vec<String> = match step.strip_prefix("text:") {
+                        Some(text) => text.chars().map(|c| if c == ' ' { "space".into() } else { c.to_string() }).collect(),
+                        None => vec![step.to_string()],
+                    };
+                    for k in strokes {
+                        let parsed = gpui_kit::Keystroke::parse_with_os(&k, gpui_kit::OperatingSystem::Mac).map_err(|_| ());
+                        let Ok(ks) = parsed else {
+                            eprintln!("KEYS can't read {k}");
+                            continue;
+                        };
+                        // A window update, not the composer's: the key's handlers update it.
+                        let _ = cx.update(|window, cx| window.dispatch_keystroke(ks, cx));
+                    }
+                }
+                let card = this.read_with(cx, |c, cx| match c.card.as_ref().map(|(_, k)| k) {
+                    Some(Card::Question(q)) => format!("question, Answer {}", if q.read(cx).all_answered(cx) { "on" } else { "off" }),
+                    Some(Card::Plan(_)) => "plan".into(),
+                    Some(Card::Tool) => "permission".into(),
+                    None => "none".into(),
+                });
+                eprintln!("KEYS {step} -> card {}", card.unwrap_or_default());
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+            }
+        })
+        .detach();
+    }
+
     /// ⌘↩ inside the composer (its field or a card's): the input propagates `Enter`, and this
     /// takes it so the window's Allow binding never answers a second request too. With a draft
     /// in the composer it sends now (the field's own `PressEnter`); otherwise it answers the
@@ -240,6 +304,9 @@ impl Composer {
                 cx.notify();
             }),
         ];
+        if let Ok(keys) = std::env::var("YH_KEYS") {
+            Self::key_probe(keys, window, cx);
+        }
         Composer {
             workspace,
             height: Rc::new(std::cell::Cell::new(0.)),
