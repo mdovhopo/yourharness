@@ -24,7 +24,7 @@ thread_local! {
 
 /// Big tool results get moved to a file by Claude Code, and the refs with them.
 const OUTLINE_BUDGET: usize = 18_000;
-const MAX_TABS: usize = 8;
+pub const MAX_TABS: usize = 8;
 
 #[derive(Clone)]
 pub struct Console {
@@ -72,11 +72,82 @@ pub struct Tab {
     pub navigations: u64,
     /// An alert, confirm or prompt the page waits on: (kind, message, default text).
     pub dialog: Option<(String, String, Option<String>)>,
-    /// The page's color scheme when set (`resize`), else it follows the app.
-    color_scheme: Option<String>,
+    /// Goes up with each dialog, so the card asking you starts each one afresh.
+    pub dialog_id: u64,
+    /// The page's color scheme when set (`resize`, the panel's menu), else it follows the app.
+    pub color_scheme: Option<String>,
+    /// Reopened from the last session and not used since: the agent's next `open` takes it over.
+    pub restored: bool,
+    /// Refs go on counting from here on the next page, so a stale one can't name a new element.
+    next_ref: u64,
 }
 
 impl Tab {
+    fn new(id: u32, web: WebView) -> Tab {
+        Tab {
+            id,
+            web,
+            console: vec![],
+            network: vec![],
+            next_log: 0,
+            reported_console: 0,
+            reported_network: 0,
+            console_read: 0,
+            network_read: 0,
+            last_url: None,
+            last_title: None,
+            nav_error: None,
+            navigations: 0,
+            dialog: None,
+            dialog_id: 0,
+            color_scheme: None,
+            restored: false,
+            next_ref: 1,
+        }
+    }
+
+    /// Goes somewhere: a reopened tab is then in use.
+    pub fn load(&mut self, url: &str) {
+        self.restored = false;
+        self.web.load(url);
+    }
+
+    /// Light, dark, or `auto` (the app's), for the page's `prefers-color-scheme`.
+    pub fn set_color_scheme(&mut self, scheme: &str) {
+        self.web.set_color_scheme(scheme);
+        self.color_scheme = (scheme == "light" || scheme == "dark").then(|| scheme.to_string());
+    }
+
+    /// Refs from before are stale: the page's helpers start numbering again above them.
+    fn reset_refs(&self) {
+        let (tx, _rx) = flume::bounded(1);
+        self.web.call(&format!("__yh.reset({})", self.next_ref), false, tx);
+    }
+
+    /// Empties the console and network logs (the panel's Clear).
+    pub fn clear_logs(&mut self) {
+        self.console.clear();
+        self.network.clear();
+    }
+
+    /// What the agent is doing, over the page for a moment (the Swift app's `show`).
+    fn show_activity(&self, label: &str, rect: Option<(f64, f64, f64, f64)>, cx: &mut App) {
+        let seq = self.web.show_activity(label, rect);
+        if std::env::var("YH_BROWSER_ACTIVITY_LOG").as_deref() == Ok("1") {
+            let at = rect.map(|(x, y, w, h)| format!(" at {x:.0},{y:.0} {w:.0}×{h:.0}")).unwrap_or_default();
+            eprintln!("BROWSER activity {label}{at} shown={}", self.web.shows_activity());
+            if let Ok(png) = std::env::var("YH_BROWSER_ACTIVITY_SHOT") {
+                eprintln!("BROWSER activity drawn {}", self.web.overlay_png(&png));
+            }
+        }
+        let key = self.web.key();
+        cx.spawn(async move |cx| {
+            cx.background_executor().timer(Duration::from_millis(1400)).await;
+            let _ = cx.update(|_| Browsers::with(|b| b.tab_mut(key).map(|t| t.web.clear_activity(seq))));
+        })
+        .detach();
+    }
+
     pub fn short_url(&self) -> String {
         let url = self.web.url().unwrap_or_else(|| "about:blank".into());
         let url = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://")).unwrap_or(&url).to_string();
@@ -123,13 +194,24 @@ pub struct Session {
     next_id: u32,
     /// When the agent or you last used it, or it was last on screen.
     last_active: Option<Instant>,
-    /// The pages closed for being idle, to open again from the panel.
+    /// Where its tabs were at the last quit, or when they closed for being idle: reopened when
+    /// the browser is next used (the agent's call, or the panel showing).
     pub restorable: Vec<String>,
+    /// You took over: the agent's actions fail until you give it back; it can still look.
+    pub user_has_control: bool,
 }
 
 impl Session {
     pub fn selected_tab(&self) -> Option<&Tab> {
         self.selected.and_then(|id| self.tabs.iter().find(|t| t.id == id)).or(self.tabs.last())
+    }
+
+    /// What's saved with the thread: the open tabs' addresses, or what still waits to reopen.
+    fn saved_urls(&self) -> Vec<String> {
+        if self.tabs.is_empty() {
+            return self.restorable.clone();
+        }
+        self.tabs.iter().filter_map(|t| t.web.url()).filter(|u| !u.starts_with("about:")).collect()
     }
 }
 
@@ -147,11 +229,132 @@ pub struct Browsers {
     /// Threads whose browser is in a window of its own: that window's view, and where in it the
     /// page goes (None until it's laid out). The right sidebar then points there.
     popped: HashMap<String, (usize, Option<(f64, f64, f64, f64)>)>,
+    /// Where threads are saved: each one's tabs go in its record (`browserTabs`, as the Swift
+    /// app keeps them).
+    library: Option<std::sync::Arc<yh_core::library::Library>>,
+    /// Threads whose tabs changed since they were last saved.
+    unsaved: std::collections::HashSet<String>,
+    /// When the panel was last told the logs grew: at most a few times a second.
+    logs_told: Option<Instant>,
+    /// A menu is open over the page (the window draws it under the web view): pages step aside.
+    covered: bool,
 }
 
 impl Browsers {
     pub fn with<T>(f: impl FnOnce(&mut Browsers) -> T) -> T {
         BROWSERS.with(|b| f(&mut b.borrow_mut()))
+    }
+
+    /// The thread's browser, made on first use with the tabs saved with the thread waiting to
+    /// reopen.
+    fn session(&mut self, thread: &str) -> &mut Session {
+        if !self.sessions.contains_key(thread) {
+            let saved: Vec<String> = self
+                .library
+                .as_ref()
+                .and_then(|l| l.thread_record(thread))
+                .and_then(|r| r.get("browserTabs").and_then(Value::as_array).map(|a| a.iter().filter_map(|u| u.as_str().map(str::to_string)).collect()))
+                .unwrap_or_default();
+            self.sessions.insert(thread.to_string(), Session { restorable: saved, ..Default::default() });
+        }
+        self.sessions.get_mut(thread).expect("made above")
+    }
+
+    /// Reopens what waits to (last session's tabs, or ones closed for being idle), once, on
+    /// first use; true if it did.
+    pub fn restore_if_needed(&mut self, thread: &str, project: Option<&str>) -> bool {
+        let host = self.host;
+        let s = self.session(thread);
+        if !s.tabs.is_empty() || s.restorable.is_empty() || host == 0 {
+            return false;
+        }
+        let urls: Vec<String> = std::mem::take(&mut s.restorable).into_iter().take(MAX_TABS).collect();
+        for url in urls {
+            let id = self.open_tab(thread, project.filter(|p| p.len() == 36), &url);
+            if let Some(t) = self.sessions.get_mut(thread).and_then(|s| s.tabs.iter_mut().find(|t| t.id == id)) {
+                t.restored = true;
+            }
+        }
+        if std::env::var("YH_DATA_DIR").is_ok() {
+            eprintln!("BROWSER reopened {} tabs for {thread}", self.sessions.get(thread).map_or(0, |s| s.tabs.len()));
+        }
+        true
+    }
+
+    /// The panel showing the thread's browser: last session's tabs reopen (the Swift app's
+    /// `restoreIfNeeded` when the panel appears).
+    pub fn restore(thread: &str, project: Option<&str>) -> bool {
+        Browsers::with(|b| b.restore_if_needed(thread, project))
+    }
+
+    /// The tabs of threads that changed into their records.
+    fn save_unsaved(&mut self) {
+        let Some(library) = self.library.clone() else { return };
+        for thread in std::mem::take(&mut self.unsaved) {
+            let Some(urls) = self.sessions.get(&thread).map(Session::saved_urls) else { continue };
+            library.update_thread(&thread, |r| {
+                if urls.is_empty() {
+                    r.remove("browserTabs");
+                } else {
+                    r.insert("browserTabs".into(), json!(urls));
+                }
+            });
+        }
+    }
+
+    /// Everything not saved yet, now (at quit).
+    pub fn save_now() {
+        Browsers::with(|b| b.save_unsaved());
+    }
+
+    /// Take Control, or Give Back: refs the agent had are stale either way.
+    pub fn set_control(thread: &str, on: bool) {
+        Browsers::with(|b| {
+            let s = b.session(thread);
+            if s.user_has_control == on {
+                return;
+            }
+            s.user_has_control = on;
+            for t in &s.tabs {
+                t.reset_refs();
+            }
+            if std::env::var("YH_DATA_DIR").is_ok() {
+                eprintln!("BROWSER control {}", if on { "taken" } else { "given back" });
+            }
+        });
+    }
+
+    pub fn has_control(thread: &str) -> bool {
+        Browsers::with(|b| b.sessions.get(thread).is_some_and(|s| s.user_has_control))
+    }
+
+    /// The tab a page opens (`window.open`, `target=_blank`, a sign-in popup), in its opener's
+    /// browser, made with the configuration WebKit gives; None past the most tabs.
+    fn popup(opener: usize, configuration: cocoa::base::id, url: Option<String>) -> Option<cocoa::base::id> {
+        BROWSERS.with(|b| {
+            // Never inside another change to the browsers (WebKit asks from the run loop).
+            let mut b = b.try_borrow_mut().ok()?;
+            let (thread, from) = b.sessions.iter().find_map(|(thread, s)| s.tabs.iter().find(|t| t.web.key() == opener).map(|t| (thread.clone(), t.id)))?;
+            if b.sessions.get(&thread).is_some_and(|s| s.tabs.len() >= MAX_TABS) || b.host == 0 {
+                return None;
+            }
+            let web = WebView::with_configuration(b.host as cocoa::base::id, configuration);
+            let view = web.key() as cocoa::base::id;
+            let s = b.session(&thread);
+            s.next_id += 1;
+            let id = s.next_id;
+            let mut tab = Tab::new(id, web);
+            tab.log(&json!({"kind": "console", "level": "info", "text": format!("Opened by tab {from} ({})", url.as_deref().unwrap_or("a new window"))}));
+            s.tabs.push(tab);
+            s.selected = Some(id);
+            s.last_active = Some(Instant::now());
+            b.unsaved.insert(thread.clone());
+            b.place();
+            if std::env::var("YH_DATA_DIR").is_ok() {
+                eprintln!("BROWSER tab {id} opened by tab {from}: {}", url.as_deref().unwrap_or("a new window"));
+            }
+            Some(view)
+        })
     }
 
     fn tab_mut(&mut self, view: usize) -> Option<&mut Tab> {
@@ -167,6 +370,7 @@ impl Browsers {
                 Some((host, bounds)) => (*host, *bounds),
                 None => (self.host, self.shown.as_ref().filter(|(t, _)| t == thread).map(|(_, b)| *b)),
             };
+            let here = here.filter(|_| !self.covered);
             for tab in &session.tabs {
                 if host != 0 {
                     tab.web.move_to(host as cocoa::base::id);
@@ -185,13 +389,24 @@ impl Browsers {
         });
     }
 
-    /// Where the page goes in the thread's own window (its bounds there), each frame it draws.
-    pub fn show_popped(thread: &str, bounds: (f64, f64, f64, f64)) {
+    /// Where the page goes in the thread's own window (its bounds there), each frame it draws;
+    /// None hides it (Import Sign-ins over it).
+    pub fn show_popped(thread: &str, bounds: Option<(f64, f64, f64, f64)>) {
         Browsers::with(|b| {
             let Some(entry) = b.popped.get_mut(thread) else { return };
-            if entry.1 != Some(bounds) {
-                entry.1 = Some(bounds);
+            if entry.1 != bounds {
+                entry.1 = bounds;
                 b.touch(thread);
+                b.place();
+            }
+        });
+    }
+
+    /// A menu opened over the page, or closed: the pages step aside meanwhile.
+    pub fn set_covered(on: bool) {
+        Browsers::with(|b| {
+            if b.covered != on {
+                b.covered = on;
                 b.place();
             }
         });
@@ -241,16 +456,6 @@ impl Browsers {
         }
     }
 
-    /// Opens the pages closed for being idle again.
-    pub fn reopen(thread: &str, project: Option<&str>) {
-        Browsers::with(|b| {
-            let urls = b.sessions.get_mut(thread).map(|s| std::mem::take(&mut s.restorable)).unwrap_or_default();
-            for url in urls {
-                b.open_tab(thread, project, &url);
-            }
-        });
-    }
-
     /// The panel's place for a thread's browser, or None when it isn't showing.
     pub fn show(thread: Option<(String, (f64, f64, f64, f64))>) {
         Browsers::with(|b| {
@@ -266,33 +471,18 @@ impl Browsers {
 
     fn open_tab(&mut self, thread: &str, project: Option<&str>, url: &str) -> u32 {
         let host = self.host as cocoa::base::id;
-        let session = self.sessions.entry(thread.to_string()).or_default();
+        let session = self.session(thread);
         session.next_id += 1;
         let id = session.next_id;
         let web = WebView::new(host, project);
         if let Some(u) = url_from(url) {
             web.load(&u);
         }
-        session.tabs.push(Tab {
-            id,
-            web,
-            console: vec![],
-            network: vec![],
-            next_log: 0,
-            reported_console: 0,
-            reported_network: 0,
-            console_read: 0,
-            network_read: 0,
-            last_url: None,
-            last_title: None,
-            nav_error: None,
-            navigations: 0,
-            dialog: None,
-            color_scheme: None,
-        });
+        session.tabs.push(Tab::new(id, web));
         session.selected = Some(id);
         session.last_active = Some(Instant::now());
         session.restorable.clear();
+        self.unsaved.insert(thread.to_string());
         self.place();
         id
     }
@@ -319,6 +509,30 @@ impl Browsers {
         let (tx, rx) = flume::bounded(1);
         Browsers::with_tab(thread, |t| t.web.call("const info = await __yh.pick(); return info && { ...info, url: location.href };", false, tx))?;
         Some(rx)
+    }
+
+    /// A picture of what was picked (its box in CSS pixels, a little around it), as a JPEG for
+    /// the message (the Swift app's `PickedElement.image`); None without a tab or a box.
+    pub fn picture_of_pick(thread: &str, json: &str) -> Option<flume::Receiver<Option<Vec<u8>>>> {
+        let v: Value = serde_json::from_str(json).ok()?;
+        let r: Vec<f64> = v["rect"].as_array()?.iter().filter_map(Value::as_f64).collect();
+        if r.len() != 4 || r[2] < 1. || r[3] < 1. {
+            return None;
+        }
+        let rect = (r[0] - 6., r[1] - 6., r[2] + 12., r[3] + 12.);
+        static PICKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = PICKS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let path = std::env::temp_dir().join(format!("yh-pick-{}-{n}.jpg", std::process::id())).to_string_lossy().into_owned();
+        let (tx, rx) = flume::bounded(1);
+        let (done, out) = flume::bounded(1);
+        let p = path.clone();
+        Browsers::with_tab(thread, move |t| t.web.capture(Some(rect), 1200., p, tx))?;
+        std::thread::spawn(move || {
+            let bytes = rx.recv_timeout(Duration::from_secs(10)).ok().and_then(Result::ok).and_then(|_| std::fs::read(&path).ok());
+            let _ = std::fs::remove_file(&path);
+            let _ = done.send(bytes);
+        });
+        Some(out)
     }
 
     /// What a picked element reads like in your message: enough for the agent to find it again
@@ -348,6 +562,7 @@ impl Browsers {
             if s.selected == Some(id) {
                 s.selected = s.tabs.last().map(|t| t.id);
             }
+            self.unsaved.insert(thread.to_string());
         }
         self.place();
     }
@@ -382,22 +597,44 @@ impl Browsers {
     }
 }
 
-/// Starts the browser: the window's view to lay pages over, and the loops that run tool
-/// calls' jobs and take in what pages report.
-pub fn start(host: cocoa::base::id, reveal: impl Fn(&str, &mut App) + 'static, changed: impl Fn(&mut App) + 'static, cx: &mut App) {
+/// Starts the browser: the window's view to lay pages over, where threads are saved (their tabs
+/// go with them), and the loops that run tool calls' jobs and take in what pages report.
+pub fn start(
+    host: cocoa::base::id,
+    library: Option<std::sync::Arc<yh_core::library::Library>>,
+    reveal: impl Fn(&str, &mut App) + 'static,
+    changed: impl Fn(&mut App) + 'static,
+    cx: &mut App,
+) {
     Browsers::with(|b| {
         b.host = host as usize;
+        b.library = library;
         b.reveal = Some(Box::new(reveal));
         b.changed = Some(Box::new(changed));
     });
+    crate::webview::set_popups(Browsers::popup);
     let (jobs, rx) = flume::unbounded::<Job>();
     let _ = JOBS.set(jobs);
-    // Idle pages close, looked at every few minutes (every few seconds in a test with a short limit).
+    // Each second, threads whose tabs went somewhere are saved (redirects come in bursts); idle
+    // pages close, looked at every five minutes (every two seconds in a test with a short limit).
     #[allow(clippy::infinite_loop)]
-    cx.spawn(async move |cx| loop {
+    cx.spawn(async move |cx| {
         let every = if std::env::var("YH_BROWSER_IDLE_SECS").is_ok() { 2 } else { 300 };
-        cx.background_executor().timer(Duration::from_secs(every)).await;
-        cx.update(|_| Browsers::with(|b| b.close_idle()));
+        let mut ticks = 0u64;
+        loop {
+            cx.background_executor().timer(Duration::from_secs(1)).await;
+            ticks += 1;
+            cx.update(|_| {
+                Browsers::with(|b| {
+                    if !b.unsaved.is_empty() {
+                        b.save_unsaved();
+                    }
+                    if ticks % every == 0 {
+                        b.close_idle();
+                    }
+                })
+            });
+        }
     })
     .detach();
     cx.spawn(async move |cx| {
@@ -411,30 +648,7 @@ pub fn start(host: cocoa::base::id, reveal: impl Fn(&str, &mut App) + 'static, c
     cx.spawn(async move |cx| {
         while let Ok(event) = rx.recv_async().await {
             let _ = cx.update(|cx| {
-                let notify = BROWSERS.with(|b| {
-                    let mut b = b.borrow_mut();
-                    let (view, nav) = match &event {
-                        WebEvent::Log { view, .. } | WebEvent::UploadAsked { view } => (*view, false),
-                        WebEvent::Started { view } | WebEvent::Finished { view } | WebEvent::Failed { view, .. } | WebEvent::Dialog { view, .. } => (*view, true),
-                    };
-                    let Some(tab) = b.tab_mut(view) else { return false };
-                    match event {
-                        WebEvent::Log { json, .. } => {
-                            if let Ok(v) = serde_json::from_str::<Value>(&json) {
-                                tab.log(&v);
-                            }
-                        }
-                        WebEvent::Started { .. } => {
-                            tab.navigations += 1;
-                            tab.nav_error = None;
-                        }
-                        WebEvent::Finished { .. } => {}
-                        WebEvent::Failed { error, .. } => tab.nav_error = Some(error),
-                        WebEvent::Dialog { kind, message, default, .. } => tab.dialog = Some((kind, message, default)),
-                        WebEvent::UploadAsked { .. } => {}
-                    }
-                    nav
-                });
+                let notify = BROWSERS.with(|b| take_event(&mut b.borrow_mut(), event));
                 if notify {
                     let changed = BROWSERS.with(|b| b.borrow_mut().changed.take());
                     if let Some(f) = changed {
@@ -446,6 +660,85 @@ pub fn start(host: cocoa::base::id, reveal: impl Fn(&str, &mut App) + 'static, c
         }
     })
     .detach();
+}
+
+/// What a page reported, taken in; whether the panel should draw again.
+fn take_event(b: &mut Browsers, event: WebEvent) -> bool {
+    let view = match &event {
+        WebEvent::Log { view, .. }
+        | WebEvent::UploadAsked { view }
+        | WebEvent::Started { view }
+        | WebEvent::Committed { view }
+        | WebEvent::Finished { view }
+        | WebEvent::Failed { view, .. }
+        | WebEvent::Closed { view }
+        | WebEvent::Crashed { view }
+        | WebEvent::Dialog { view, .. } => *view,
+    };
+    let Some(thread) = b.sessions.iter().find(|(_, s)| s.tabs.iter().any(|t| t.web.key() == view)).map(|(t, _)| t.clone()) else { return false };
+    if let WebEvent::Closed { .. } = event {
+        // `window.close()` from a page a script opened: its tab goes.
+        let id = b.tab_mut(view).map(|t| t.id).unwrap_or(0);
+        if std::env::var("YH_DATA_DIR").is_ok() {
+            eprintln!("BROWSER tab {id} closed itself");
+        }
+        b.close_tab(&thread, id);
+        return true;
+    }
+    let mut navigated = false;
+    let Some(tab) = b.tab_mut(view) else { return false };
+    let notify = match event {
+        WebEvent::Log { json, .. } => {
+            if let Ok(v) = serde_json::from_str::<Value>(&json) {
+                tab.log(&v);
+            }
+            // The log strip shows counts: told a few times a second at most.
+            let due = b.logs_told.is_none_or(|t| t.elapsed() > Duration::from_millis(250));
+            if due {
+                b.logs_told = Some(Instant::now());
+            }
+            due
+        }
+        WebEvent::Started { .. } => {
+            tab.navigations += 1;
+            tab.nav_error = None;
+            true
+        }
+        WebEvent::Committed { .. } => {
+            // A new document: its refs go on from the last page's.
+            tab.reset_refs();
+            navigated = true;
+            true
+        }
+        WebEvent::Finished { .. } => {
+            navigated = true;
+            true
+        }
+        WebEvent::Failed { error, url, .. } => {
+            tab.log(&json!({ "kind": "request", "method": "GET", "url": url.unwrap_or_default(), "type": "document", "failure": error }));
+            tab.log(&json!({ "kind": "console", "level": "error", "text": format!("Navigation failed: {error}") }));
+            tab.nav_error = Some(error);
+            true
+        }
+        WebEvent::Crashed { .. } => {
+            tab.log(&json!({ "kind": "console", "level": "error", "text": "The page crashed (its web content process ended). Reloading." }));
+            if std::env::var("YH_DATA_DIR").is_ok() {
+                eprintln!("BROWSER tab {} crashed, reloading", tab.id);
+            }
+            tab.web.reload();
+            true
+        }
+        WebEvent::Dialog { kind, message, default, .. } => {
+            tab.dialog = Some((kind, message, default));
+            tab.dialog_id += 1;
+            true
+        }
+        WebEvent::UploadAsked { .. } | WebEvent::Closed { .. } => false,
+    };
+    if navigated {
+        b.unsaved.insert(thread);
+    }
+    notify
 }
 
 /// As typed in a URL field: a URL, a host, `localhost:3000`, or words to search for.
@@ -479,6 +772,18 @@ fn one_line(text: &str, limit: usize) -> String {
     clip(&text.lines().collect::<Vec<_>>().join(" "), limit)
 }
 
+/// A script's exception as the agent should read it (the Swift app's `BrowserError(script:)`).
+fn script_error(message: &str) -> String {
+    let message = message.strip_prefix("Error: ").unwrap_or(message);
+    if let Some(r) = message.strip_prefix("stale:") {
+        format!("Ref {r} is from an older snapshot: the page changed. Take a fresh snapshot.")
+    } else if message.contains("__yh") {
+        "The page isn't ready for that yet (it's loading, or it's not a web page).".into()
+    } else {
+        message.to_string()
+    }
+}
+
 fn quoted(text: &str, limit: usize) -> String {
     format!("\"{}\"", one_line(text, limit))
 }
@@ -506,7 +811,12 @@ impl BrowserTools {
     fn main<T: Send + 'static>(&self, f: impl FnOnce(&mut Browsers, &mut App) -> T + Send + 'static) -> Result<T, Fail> {
         let (tx, rx) = flume::bounded(1);
         let thread = self.thread.clone();
+        // The agent's first call reopens last session's tabs; a side chat only looks.
+        let restore = (!self.read_only).then(|| self.project.clone());
         let job: Job = Box::new(move |b, cx| {
+            if let Some(project) = restore {
+                b.restore_if_needed(&thread, project.as_deref());
+            }
             b.touch(&thread);
             let _ = tx.send(f(b, cx));
         });
@@ -540,8 +850,28 @@ impl BrowserTools {
     fn script(&self, id: u32, body: String, in_page: bool, timeout: Duration) -> Result<Value, Fail> {
         let (tx, rx) = flume::bounded(1);
         self.with_tab(id, move |t| t.web.call(&body, in_page, tx))?;
-        let text = rx.recv_timeout(timeout).map_err(|_| "The page didn't answer in time.".to_string())??;
+        let text = rx.recv_timeout(timeout).map_err(|_| "The page didn't answer in time.".to_string())?.map_err(|e| script_error(&e))?;
         Ok(serde_json::from_str(&text).unwrap_or(Value::String(text)))
+    }
+
+    /// The user took control: the agent can look, not act.
+    fn check_control(&self) -> Result<(), Fail> {
+        let thread = self.thread.clone();
+        if self.main(move |b, _| b.sessions.get(&thread).is_some_and(|s| s.user_has_control))? {
+            return Err("The user has taken control of the browser. You can still look (status, snapshot, screenshot, console, network); wait for them to give it back before acting.".into());
+        }
+        Ok(())
+    }
+
+    /// Where the agent acts, shown over the page for a moment.
+    fn show(&self, id: u32, label: &str, rect: Option<(f64, f64, f64, f64)>) {
+        let label = label.to_string();
+        let thread = self.thread.clone();
+        let _ = self.main(move |b, cx| {
+            if let Some(t) = b.sessions.get(&thread).and_then(|s| s.tabs.iter().find(|t| t.id == id)) {
+                t.show_activity(&label, rect, cx);
+            }
+        });
     }
 
     fn helper(&self, id: u32, body: &str) -> Result<Value, Fail> {
@@ -672,6 +1002,7 @@ impl BrowserTools {
     fn result(&self, id: u32, line: &str, show_page: bool) -> ToolResult {
         let page = self
             .with_tab(id, move |t| {
+                t.restored = false;
                 let (url, title) = (t.web.url(), t.title());
                 let changed = show_page || t.last_url != url || t.last_title.as_deref() != Some(title.as_str());
                 t.last_url = url;
@@ -722,6 +1053,9 @@ impl BrowserTools {
                 if t.web.is_loading() {
                     line += &format!(" (loading {}%)", (t.web.progress() * 100.) as i64);
                 }
+                if t.restored {
+                    line += " (reopened from last session)";
+                }
                 lines.push(line);
                 if let Some((kind, message, _)) = &t.dialog {
                     lines.push(format!("    waiting on a {kind}: {}", quoted(message, 120)));
@@ -737,7 +1071,11 @@ impl BrowserTools {
                 let failed = t.network.iter().filter(|r| r.failed()).count();
                 lines.push(format!("Logged: {} ({}), {} ({failed} failed).", count(t.console.len(), "console message"), count(errors, "error"), count(t.network.len(), "request")));
             }
-            lines.push("You can act; the user watches in the app and may take over.".into());
+            lines.push(if s.user_has_control {
+                "The user has taken control: you can look, but actions fail until they give it back.".into()
+            } else {
+                "You can act; the user watches in the app and may take over.".into()
+            });
             lines.join("\n")
         })
     }
@@ -746,7 +1084,8 @@ impl BrowserTools {
         if self.is_loading(id) {
             self.wait_for_load(id, Duration::from_secs(10));
         }
-        let mut options = json!({ "budget": OUTLINE_BUDGET, "keepRefs": self.read_only });
+        let start = self.with_tab(id, |t| t.next_ref)?;
+        let mut options = json!({ "budget": OUTLINE_BUDGET, "keepRefs": self.read_only, "start": start });
         if let Some(s) = selector {
             options["selector"] = s.into();
         }
@@ -754,6 +1093,12 @@ impl BrowserTools {
         if !info.is_object() {
             return Err("Couldn't read the page.".into());
         }
+        if let Some(next) = info["nextRef"].as_u64() {
+            self.with_tab(id, move |t| t.next_ref = t.next_ref.max(next))?;
+        }
+        let thread = self.thread.clone();
+        let control = self.main(move |b, _| b.sessions.get(&thread).is_some_and(|s| s.user_has_control))?;
+        let dialog = self.with_tab(id, |t| t.dialog.clone())?;
         let ints = |k: &str| -> Vec<i64> { info[k].as_array().map(|a| a.iter().filter_map(|v| v.as_f64().map(|f| f as i64)).collect()).unwrap_or_default() };
         let (viewport, scroll, size) = (ints("viewport"), ints("scroll"), ints("size"));
         let short = self.with_tab(id, |t| t.short_url())?;
@@ -761,6 +1106,12 @@ impl BrowserTools {
         let mut lines = vec![format!("Tab {id}: {short}{title}")];
         if viewport.len() == 2 && scroll.len() == 2 && size.len() == 2 {
             lines.push(format!("Viewport {}×{}, scrolled to {},{} of {}×{}.", viewport[0], viewport[1], scroll[0], scroll[1], size[0], size[1]));
+        }
+        if let Some((kind, message, _)) = dialog {
+            lines.push(format!("A {kind} is open: {}. Answer it with dialog.", quoted(&message, 200)));
+        }
+        if control {
+            lines.push("The user has control: you can read, not act.".into());
         }
         lines.push(String::new());
         let outline = info["outline"].as_str().unwrap_or("");
@@ -850,6 +1201,11 @@ impl BrowserTools {
     }
 
     fn perform(&self, name: &str, a: &Value, tool_use: Option<&str>) -> Result<ToolResult, Fail> {
+        // While the user has control, the agent can only look.
+        const ACTIONS: &[&str] = &["open", "navigate", "click", "hover", "type", "press", "select", "scroll", "drag", "evaluate", "close", "resize", "dialog", "upload"];
+        if ACTIONS.contains(&name) {
+            self.check_control()?;
+        }
         match name {
             "status" => Ok(ToolResult::text(self.status()?)),
             "open" => {
@@ -863,8 +1219,8 @@ impl BrowserTools {
                     match current.filter(|_| !new_tab) {
                         Some(id) => {
                             let s = b.sessions.get_mut(&thread).unwrap();
-                            if let Some(t) = s.tabs.iter().find(|t| t.id == id) {
-                                t.web.load(&url);
+                            if let Some(t) = s.tabs.iter_mut().find(|t| t.id == id) {
+                                t.load(&url);
                             }
                             s.selected = Some(id);
                             Ok(id)
@@ -891,7 +1247,7 @@ impl BrowserTools {
                 let action = a["action"].as_str().map(str::to_string);
                 if let Some(address) = a["url"].as_str() {
                     let url = url_from(address).ok_or("Give a url.")?;
-                    self.with_tab(id, move |t| t.web.load(&url))?;
+                    self.with_tab(id, move |t| t.load(&url))?;
                 } else {
                     let act = action.clone();
                     self.with_tab(id, move |t| match act.as_deref() {
@@ -937,14 +1293,18 @@ impl BrowserTools {
                 let count = a["count"].as_i64().unwrap_or(1).clamp(1, 3) as isize;
                 let modifiers = modifier_flags(&a["modifiers"]);
                 let described = if let (Some(x), Some(y), false) = (a["x"].as_f64(), a["y"].as_f64(), Self::has_target(a)) {
+                    self.show(id, "Click", Some((x - 12., y - 12., 24., 24.)));
                     self.with_tab(id, move |t| t.web.click(x, y, right, count, modifiers))?;
                     format!("at {},{}", x as i64, y as i64)
                 } else {
-                    let (x, y, _, describe, blocked) = self.locate(id, a)?;
+                    let (x, y, rect, describe, blocked) = self.locate(id, a)?;
                     if let Some(blocker) = &blocked {
                         if a["force"].as_bool() != Some(true) {
                             return Err(format!("{describe} is covered by {blocker} there. Close or scroll that away first, or pass force: true to click it with a script."));
                         }
+                    }
+                    self.show(id, "Click", Some(rect));
+                    if blocked.is_some() {
                         self.helper(id, &format!("const t = {}; return __yh.click(t)", Self::target(a)))?;
                     } else {
                         self.with_tab(id, move |t| t.web.click(x, y, right, count, modifiers))?;
@@ -957,7 +1317,8 @@ impl BrowserTools {
             }
             "hover" => {
                 let id = self.tab_id(a)?;
-                let (x, y, _, describe, _) = self.locate(id, a)?;
+                let (x, y, rect, describe, _) = self.locate(id, a)?;
+                self.show(id, "Hover", Some(rect));
                 self.with_tab(id, move |t| t.web.hover(x, y))?;
                 self.settle(id, Duration::from_secs(2));
                 Ok(self.result(id, &format!("Hovered over {describe}"), false))
@@ -969,7 +1330,9 @@ impl BrowserTools {
                 let clear = a["clear"].as_bool().unwrap_or(true);
                 let mut described = "the focused element".to_string();
                 if Self::has_target(a) {
-                    described = self.locate(id, a)?.3;
+                    let (_, _, rect, describe, _) = self.locate(id, a)?;
+                    self.show(id, "Type", Some(rect));
+                    described = describe;
                 }
                 let target = Self::target(a);
                 if let Some(d) = self.helper(id, &format!("const t = {target}; return __yh.prepareTyping(t, {clear})"))?.as_str() {
@@ -1007,8 +1370,11 @@ impl BrowserTools {
                 let spec = a["key"].as_str().unwrap_or("").to_string();
                 let key = Key::parse(&spec).ok_or("Unknown key. Use names like Enter, Tab, Escape, Backspace, ArrowDown, PageDown, a, or combinations like Shift+Tab and Meta+A.")?;
                 if Self::has_target(a) {
-                    self.locate(id, a)?;
+                    let rect = self.locate(id, a)?.2;
                     self.helper(id, &format!("const t = {}; __yh.prepareTyping(t, false)", Self::target(a)))?;
+                    self.show(id, &format!("Press {spec}"), Some(rect));
+                } else {
+                    self.show(id, &format!("Press {spec}"), None);
                 }
                 let count = a["count"].as_i64().unwrap_or(1).clamp(1, 50);
                 for _ in 0..count {
@@ -1024,11 +1390,16 @@ impl BrowserTools {
             }
             "select" => {
                 let id = self.tab_id(a)?;
-                let values: Vec<String> = a["values"].as_array().map(|v| v.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default();
+                // As the schema says, or one option as models sometimes write it.
+                let values: Vec<String> = match a["values"].as_array() {
+                    Some(v) => v.iter().filter_map(|x| x.as_str().map(str::to_string)).collect(),
+                    None => a["value"].as_str().map(|v| vec![v.to_string()]).unwrap_or_default(),
+                };
                 if values.is_empty() {
                     return Err("Give the option to select, as values.".into());
                 }
-                let (_, _, _, describe, _) = self.locate(id, a)?;
+                let (_, _, rect, describe, _) = self.locate(id, a)?;
+                self.show(id, "Select", Some(rect));
                 let picked = self.helper(id, &format!("const t = {}; const v = {}; return __yh.select(t, v)", Self::target(a), json!(values)))?;
                 let picked: Vec<String> = picked.as_array().map(|v| v.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or(values);
                 self.settle(id, Duration::from_secs(10));
@@ -1046,6 +1417,7 @@ impl BrowserTools {
                     }
                 }
                 let line = self.helper(id, &format!("const o = {}; return __yh.scroll(o)", Value::Object(o)))?;
+                self.show(id, "Scroll", None);
                 self.settle(id, Duration::from_secs(2));
                 Ok(self.result(id, line.as_str().unwrap_or("Scrolled"), false))
             }
@@ -1055,8 +1427,9 @@ impl BrowserTools {
                 if from.is_null() || to.is_null() {
                     return Err("Give from and to, each a ref or selector.".into());
                 }
-                let (fx, fy, _, fd, _) = self.locate(id, &from)?;
+                let (fx, fy, start, fd, _) = self.locate(id, &from)?;
                 let (tx, ty, _, td, _) = self.locate(id, &to)?;
+                self.show(id, "Drag", Some(start));
                 // From a `draggable` element it's an HTML drag and drop, played as the page's drag
                 // events: WebKit hands that to an AppKit drag session, which follows the real
                 // mouse, so mouse events alone never drop anything.
@@ -1187,6 +1560,7 @@ impl BrowserTools {
                 let id = self.tab_id(a)?;
                 self.check_dialog(id)?;
                 let source = a["expression"].as_str().ok_or("Give the JavaScript to run, as expression.")?.to_string();
+                self.show(id, "Run JavaScript", None);
                 // An expression, or a function body with its own return: told apart in our world.
                 let is_expression = self.script(id, format!("const s = {}; return __yh.isExpression(s)", json!(source)), false, Duration::from_secs(5)).ok().and_then(|v| v.as_bool()).unwrap_or(true);
                 let body = if is_expression { format!("return (\n{source}\n);") } else { source };
@@ -1255,8 +1629,7 @@ return JSON.stringify(__yhValue, (key, v) => {{
                 self.with_tab(id, move |t| {
                     t.web.set_viewport(viewport);
                     if let Some(s) = scheme {
-                        t.web.set_color_scheme(&s);
-                        t.color_scheme = (s != "auto").then_some(s);
+                        t.set_color_scheme(&s);
                     }
                 })?;
                 // Laid out with the panel's next frame.
@@ -1299,7 +1672,8 @@ return JSON.stringify(__yhValue, (key, v) => {{
                     return Err(format!("No file at {missing}."));
                 }
                 let names: Vec<String> = paths.iter().map(|p| p.rsplit('/').next().unwrap_or(p).to_string()).collect();
-                let (x, y, _, describe, _) = self.locate(id, a)?;
+                let (x, y, rect, describe, _) = self.locate(id, a)?;
+                self.show(id, "Upload", Some(rect));
                 self.with_tab(id, move |t| {
                     t.web.set_upload(Some(paths));
                     t.web.click(x, y, false, 1, 0);
@@ -1579,6 +1953,33 @@ pub fn run_probe(path: String, thread: String, project: Option<String>) {
         for (index, step) in steps.iter().enumerate() {
             if let Some(seconds) = step["sleep"].as_f64() {
                 std::thread::sleep(Duration::from_secs_f64(seconds));
+                continue;
+            }
+            // `{"control": true}`: you take control (false gives it back), as the panel's button does.
+            if let Some(on) = step["control"].as_bool() {
+                let t = thread.clone();
+                if let Some(jobs) = JOBS.get() {
+                    let _ = jobs.send(Box::new(move |b, _| {
+                        let s = b.session(&t);
+                        s.user_has_control = on;
+                        s.tabs.iter().for_each(Tab::reset_refs);
+                    }));
+                }
+                eprintln!("== {index} control {on}");
+                std::thread::sleep(Duration::from_millis(200));
+                continue;
+            }
+            // `{"crash": true}`: the current tab's web content process is ended, as a crash would.
+            if step["crash"].as_bool() == Some(true) {
+                let t = thread.clone();
+                if let Some(jobs) = JOBS.get() {
+                    let _ = jobs.send(Box::new(move |b, _| {
+                        if let Some(tab) = b.sessions.get(&t).and_then(|s| s.selected_tab()) {
+                            eprintln!("== {index} crash: {}", tab.web.end_content_process());
+                        }
+                    }));
+                }
+                std::thread::sleep(Duration::from_millis(200));
                 continue;
             }
             let Some(tool) = step["tool"].as_str() else { continue };

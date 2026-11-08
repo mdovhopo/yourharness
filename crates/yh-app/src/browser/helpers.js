@@ -316,9 +316,11 @@
   };
   yh.nextRef = () => next;
 
-  yh.snapshot = ({ selector, budget, keepRefs }) => {
+  yh.snapshot = ({ selector, budget, keepRefs, start }) => {
     const root = selector ? document.querySelector(selector) : document.body;
     if (!root) throw new Error('No element matches ' + selector);
+    // Refs go on from the last page's, even if the reset on its commit came too early.
+    if (start && next < start) next = start;
     assigning = !keepRefs;
     if (assigning) refs = new Map();
     const all = lines(build(root), 0, []);

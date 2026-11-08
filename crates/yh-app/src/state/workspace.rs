@@ -30,6 +30,9 @@ pub enum WorkspaceEvent {
     OpenMcp,
     /// Text goes at the end of the open thread's composer (an element picked in the browser).
     AppendToComposer(String),
+    /// Pictures attached to the open thread's composer (an element picked in the browser): JPEG
+    /// or PNG bytes.
+    AttachImages(Vec<Vec<u8>>),
 }
 
 /// One thread's `claude`, between turns too.
@@ -279,6 +282,12 @@ impl Workspace {
 
     pub fn thread(&self, id: &str) -> Option<Entity<ThreadState>> {
         self.by_id.get(id).cloned()
+    }
+
+    /// The thread's `claude` process, while it has one: what it started is under it (the dev
+    /// servers its browser offers).
+    pub fn claude_pid(&self, id: &str) -> Option<u32> {
+        self.runtimes.get(id).map(|rt| rt.process.pid)
     }
 
     pub fn selected_thread(&self) -> Option<Entity<ThreadState>> {

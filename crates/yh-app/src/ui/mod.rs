@@ -1,5 +1,6 @@
 //! What the app draws. Views read state and call it; they keep only view state.
 
+pub mod browser_panel;
 pub mod browser_window;
 pub mod composer;
 pub mod diagram;

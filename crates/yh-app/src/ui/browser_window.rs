@@ -3,11 +3,9 @@
 //! the window puts them back.
 
 use crate::state::workspace::Workspace;
-use crate::theme::{radius, space, text, Theme, UI};
-use crate::ui::inspector::{strip_tab, tab_close, tool_button};
-use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::{Disableable, Icon, IconName, Sizable};
-use gpui_kit::{div, prelude::*, px, AnyWindowHandle, App, Context, Entity, FontWeight, SharedString, Subscription, WeakEntity, Window};
+use crate::theme::Theme;
+use crate::ui::browser_panel::BrowserPanel;
+use gpui_kit::{div, prelude::*, px, AnyWindowHandle, App, Context, Entity, WeakEntity, Window};
 use std::cell::RefCell;
 use std::collections::HashMap;
 
@@ -17,11 +15,8 @@ thread_local! {
 }
 
 pub struct BrowserWindow {
-    workspace: Entity<Workspace>,
-    thread: String,
-    project: String,
-    address: Entity<InputState>,
-    _subscriptions: Vec<Subscription>,
+    /// The same panel as the right sidebar's, drawing the page over this window.
+    panel: Entity<BrowserPanel>,
 }
 
 /// Whether the thread's browser is in its own window.
@@ -98,145 +93,18 @@ pub fn close(thread: &str, cx: &mut App) {
 
 impl BrowserWindow {
     fn new(workspace: Entity<Workspace>, thread: String, project: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let address = cx.new(|cx| InputState::new(window, cx).placeholder("Address, or words to search for"));
-        let subscriptions = vec![cx.subscribe_in(&address, window, |this, input, event: &InputEvent, _, cx| {
-            if let InputEvent::PressEnter { .. } = event {
-                let text = input.read(cx).value().to_string();
-                this.go_to(&text, cx);
-            }
-        })];
-        BrowserWindow { workspace, thread, project, address, _subscriptions: subscriptions }
-    }
-
-    fn go_to(&mut self, text: &str, cx: &mut Context<Self>) {
-        let text = text.trim();
-        if text.is_empty() {
-            return;
-        }
-        let url = crate::browser::url_from(text).unwrap_or_else(|| format!("https://duckduckgo.com/?q={}", text.split_whitespace().collect::<Vec<_>>().join("+")));
-        if crate::browser::Browsers::with_tab(&self.thread, |t| t.web.load(&url)).is_none() {
-            crate::browser::Browsers::open_for_user(&self.thread, Some(&self.project), Some(&url));
-        }
-        cx.notify();
+        let panel = cx.new(|cx| {
+            let mut p = BrowserPanel::new(workspace, true, window, cx);
+            p.set_thread(Some((thread, project)), cx);
+            p
+        });
+        BrowserWindow { panel }
     }
 }
 
 impl Render for BrowserWindow {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::get(cx);
-        let thread = self.thread.clone();
-        let tabs: Vec<(u32, String, bool, bool)> = crate::browser::Browsers::with(|b| {
-            b.sessions
-                .get(&thread)
-                .map(|s| {
-                    let current = s.selected_tab().map(|t| t.id);
-                    s.tabs.iter().map(|t| (t.id, if t.title().is_empty() { t.short_url() } else { t.title() }, Some(t.id) == current, t.web.is_loading())).collect()
-                })
-                .unwrap_or_default()
-        });
-        let (url, can_back, can_forward) = crate::browser::Browsers::with_tab(&thread, |t| (t.web.url().unwrap_or_default(), t.web.can_go_back(), t.web.can_go_forward())).unwrap_or_default();
-        if !gpui_kit::Focusable::focus_handle(self.address.read(cx), cx).is_focused(window) && self.address.read(cx).value() != url.as_str() {
-            let shown = url.clone();
-            self.address.update(cx, |a, cx| a.set_value(shown, window, cx));
-        }
-        let mut strip = div().id("pop-tabs").flex_1().min_w_0().flex().items_center().gap(px(2.)).overflow_x_scroll();
-        for (id, title, on, loading) in tabs.iter().cloned() {
-            let (t, t2) = (thread.clone(), thread.clone());
-            let icon = if loading { Icon::new(IconName::LoaderCircle) } else { Icon::new(IconName::Globe) };
-            strip = strip.child(
-                strip_tab(SharedString::from(format!("pop-tab-{id}")), Some(icon), title, on, false, 220., &theme)
-                    .child(tab_close(SharedString::from(format!("pop-tab-close-{id}")), &theme).on_click(cx.listener(move |_, _, _, cx| {
-                        crate::browser::Browsers::close_tab_now(&t2, id);
-                        cx.stop_propagation();
-                        cx.notify();
-                    })))
-                    .on_click(cx.listener(move |_, _, _, cx| {
-                        crate::browser::Browsers::select_tab(&t, id);
-                        cx.notify();
-                    })),
-            );
-        }
-        let nav = |id: &'static str, icon: Icon, tip: &'static str, enabled: bool, act: fn(&crate::webview::WebView)| {
-            let thread = thread.clone();
-            tool_button(id, icon, tip, &theme).disabled(!enabled).on_click(cx.listener(move |_, _, _, cx| {
-                crate::browser::Browsers::with_tab(&thread, |t| act(&t.web));
-                cx.notify();
-            }))
-        };
-        let new_tab = {
-            let (thread, project) = (thread.clone(), self.project.clone());
-            tool_button("pop-new-tab", Icon::new(IconName::Plus), "New Tab", &theme).on_click(cx.listener(move |this, _, window, cx| {
-                crate::browser::Browsers::open_for_user(&thread, Some(&project), None);
-                this.address.update(cx, |a, cx| {
-                    a.set_value("", window, cx);
-                    a.focus(window, cx);
-                });
-                cx.notify();
-            }))
-        };
-        let back_to_sidebar = {
-            let (thread, ws) = (thread.clone(), self.workspace.clone());
-            tool_button("pop-back", Icon::new(IconName::PanelRight), "Move to Sidebar: show this browser in the right sidebar again", &theme).on_click(move |_, _, cx| {
-                close(&thread, cx);
-                ws.update(cx, |ws, cx| ws.show_panel(crate::state::workspace::Panel::Browser, cx));
-            })
-        };
-        let place = thread.clone();
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .font_family(UI)
-            .text_size(px(text::BODY))
-            .text_color(theme.text)
-            .bg(theme.canvas)
-            .child(div().flex().items_center().gap(px(space::XS)).px(px(space::S)).pt(px(space::XS + 2.)).child(strip).child(new_tab))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(2.))
-                    .px(px(space::S))
-                    .py(px(space::XS + 2.))
-                    .child(nav("pop-back-nav", Icon::new(IconName::ArrowLeft), "Back", can_back, |w| w.go_back()))
-                    .child(nav("pop-forward", Icon::new(IconName::ArrowRight), "Forward", can_forward, |w| w.go_forward()))
-                    .child(nav("pop-reload", Icon::new(IconName::RotateCw), "Reload", !tabs.is_empty(), |w| w.reload()))
-                    .child(div().flex_1().min_w_0().px(px(space::XS)).child(Input::new(&self.address).small().text_size(px(text::FOOTNOTE)).prefix(Icon::new(IconName::Search).size(px(13.)).text_color(theme.tertiary))))
-                    .child(back_to_sidebar),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .relative()
-                    .border_t_1()
-                    .border_color(theme.separator)
-                    .when(tabs.is_empty(), |d| {
-                        d.child(
-                            div()
-                                .size_full()
-                                .flex()
-                                .flex_col()
-                                .items_center()
-                                .justify_center()
-                                .gap(px(space::S))
-                                .child(div().mb(px(2.)).w(px(36.)).h(px(36.)).rounded(px(radius::LARGE - 2.)).bg(theme.selected).flex().items_center().justify_center().child(Icon::new(IconName::Globe).size(px(16.)).text_color(theme.secondary)))
-                                .child(div().text_size(px(text::HEADLINE)).font_weight(FontWeight::SEMIBOLD).child("No Pages Open"))
-                                .child(div().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child("Type an address, or wait for Claude to open one.")),
-                        )
-                    })
-                    .child(
-                        // GPUI keeps this empty; the page is laid over it, following its bounds.
-                        gpui_kit::canvas(
-                            move |bounds, _, _| {
-                                let (o, s) = (bounds.origin, bounds.size);
-                                crate::browser::Browsers::show_popped(&place, (f64::from(o.x), f64::from(o.y), f64::from(s.width), f64::from(s.height)));
-                            },
-                            |_, _, _, _| {},
-                        )
-                        .absolute()
-                        .size_full(),
-                    ),
-            )
+        div().size_full().bg(theme.canvas).child(self.panel.clone())
     }
 }

@@ -35,8 +35,15 @@ pub enum WebEvent {
     /// A console line or a request, as the hooks post them (JSON).
     Log { view: usize, json: String },
     Started { view: usize },
+    /// The new page's first bytes came: a new document, whose refs start over.
+    Committed { view: usize },
     Finished { view: usize },
-    Failed { view: usize, error: String },
+    /// A navigation failed (not one another replaced): why, and the address it was going to.
+    Failed { view: usize, error: String, url: Option<String> },
+    /// The page closed itself (`window.close()` in a page a script opened).
+    Closed { view: usize },
+    /// Its web content process ended (a crash, or memory): it's loaded again.
+    Crashed { view: usize },
     /// The page waits on an alert, confirm or prompt (`kind`), answered with `answer_dialog`.
     Dialog { view: usize, kind: String, message: String, default: Option<String> },
     /// The page opened a file chooser and nothing was waiting to answer it.
@@ -57,6 +64,16 @@ thread_local! {
 }
 
 static EVENTS: std::sync::OnceLock<flume::Sender<WebEvent>> = std::sync::OnceLock::new();
+
+/// Makes the tab a page opens (`window.open`, `target=_blank`): from the opener's address, the
+/// configuration to make it with and where it goes, the new web view, or None to refuse.
+pub type PopupMaker = fn(usize, id, Option<String>) -> Option<id>;
+static POPUPS: std::sync::OnceLock<PopupMaker> = std::sync::OnceLock::new();
+
+/// Who makes the tabs pages open; set once, at start.
+pub fn set_popups(maker: PopupMaker) {
+    let _ = POPUPS.set(maker);
+}
 
 /// Where every web view's events go; set once, before the first web view.
 pub fn set_events(sender: flume::Sender<WebEvent>) {
@@ -108,8 +125,67 @@ fn delegate() -> id {
                     return;
                 }
                 let text: id = msg_send![error, localizedDescription];
-                post(WebEvent::Failed { view: view as usize, error: rust_string(text).unwrap_or_else(|| "failed".into()) });
+                let info: id = msg_send![error, userInfo];
+                let failing: id = if info == nil { nil } else { msg_send![info, objectForKey: ns_string("NSErrorFailingURLKey")] };
+                let url = if failing == nil { None } else { rust_string(msg_send![failing, absoluteString]) };
+                post(WebEvent::Failed { view: view as usize, error: rust_string(text).unwrap_or_else(|| "failed".into()), url });
             }
+        }
+        extern "C" fn committed(_: &Object, _: Sel, view: id, _: id) {
+            post(WebEvent::Committed { view: view as usize });
+        }
+        // The main frame's response: logged with its status (a 404 or 500 shows in the network
+        // log and in what the agent's next result says). What can't be shown is a download,
+        // which is skipped.
+        extern "C" fn response_policy(_: &Object, _: Sel, view: id, response: id, decide: id) {
+            unsafe {
+                let decide = decide as *mut block::Block<(isize,), ()>;
+                let main: bool = msg_send![response, isForMainFrame];
+                let can_show: bool = msg_send![response, canShowMIMEType];
+                if main {
+                    let r: id = msg_send![response, response];
+                    let url: id = msg_send![r, URL];
+                    let url = if url == nil { String::new() } else { rust_string(msg_send![url, absoluteString]).unwrap_or_default() };
+                    let http: bool = msg_send![r, isKindOfClass: class!(NSHTTPURLResponse)];
+                    let status: Option<isize> = if http { Some(msg_send![r, statusCode]) } else { None };
+                    let json = serde_json::json!({ "kind": "request", "method": "GET", "url": url, "type": "document", "status": status });
+                    post(WebEvent::Log { view: view as usize, json: json.to_string() });
+                }
+                // WKNavigationResponsePolicyAllow 1, …Download 2.
+                (*decide).call((if can_show { 1 } else { 2 },));
+            }
+        }
+        extern "C" fn became_download(_: &Object, _: Sel, view: id, response: id, download: id) {
+            unsafe {
+                let r: id = msg_send![response, response];
+                let url: id = msg_send![r, URL];
+                let url = if url == nil { None } else { rust_string(msg_send![url, absoluteString]) };
+                // Nothing is saved: the download stops here.
+                let _: () = msg_send![download, cancel: nil];
+                let text = format!("Download of {} skipped: the browser doesn't download files.", url.unwrap_or_else(|| "a file".into()));
+                let json = serde_json::json!({ "kind": "console", "level": "info", "text": text });
+                post(WebEvent::Log { view: view as usize, json: json.to_string() });
+            }
+        }
+        // `target=_blank`, `window.open`, a sign-in popup: a new tab in the same browser, made with
+        // the configuration WebKit gives (the opener's, so `window.opener` works); nil past the
+        // most tabs there can be.
+        extern "C" fn create_web_view(_: &Object, _: Sel, view: id, configuration: id, action: id, _: id) -> id {
+            unsafe {
+                let request: id = msg_send![action, request];
+                let url: id = if request == nil { nil } else { msg_send![request, URL] };
+                let url = if url == nil { None } else { rust_string(msg_send![url, absoluteString]) };
+                match POPUPS.get() {
+                    Some(open) => open(view as usize, configuration, url).unwrap_or(nil),
+                    None => nil,
+                }
+            }
+        }
+        extern "C" fn did_close(_: &Object, _: Sel, view: id) {
+            post(WebEvent::Closed { view: view as usize });
+        }
+        extern "C" fn terminated(_: &Object, _: Sel, view: id) {
+            post(WebEvent::Crashed { view: view as usize });
         }
         extern "C" fn alert(_: &Object, _: Sel, view: id, message: id, _: id, done: id) {
             let reply = unsafe { block::RcBlock::copy(done as *mut block::Block<(), ()>) };
@@ -165,6 +241,12 @@ fn delegate() -> id {
         decl.add_method(sel!(userContentController:didReceiveScriptMessage:), message as extern "C" fn(&Object, Sel, id, id));
         decl.add_method(sel!(webView:didStartProvisionalNavigation:), started as extern "C" fn(&Object, Sel, id, id));
         decl.add_method(sel!(webView:didFinishNavigation:), finished as extern "C" fn(&Object, Sel, id, id));
+        decl.add_method(sel!(webView:didCommitNavigation:), committed as extern "C" fn(&Object, Sel, id, id));
+        decl.add_method(sel!(webView:decidePolicyForNavigationResponse:decisionHandler:), response_policy as extern "C" fn(&Object, Sel, id, id, id));
+        decl.add_method(sel!(webView:navigationResponse:didBecomeDownload:), became_download as extern "C" fn(&Object, Sel, id, id, id));
+        decl.add_method(sel!(webView:createWebViewWithConfiguration:forNavigationAction:windowFeatures:), create_web_view as extern "C" fn(&Object, Sel, id, id, id, id) -> id);
+        decl.add_method(sel!(webViewDidClose:), did_close as extern "C" fn(&Object, Sel, id));
+        decl.add_method(sel!(webViewWebContentProcessDidTerminate:), terminated as extern "C" fn(&Object, Sel, id));
         decl.add_method(sel!(webView:didFailProvisionalNavigation:withError:), failed as extern "C" fn(&Object, Sel, id, id, id));
         decl.add_method(sel!(webView:didFailNavigation:withError:), failed as extern "C" fn(&Object, Sel, id, id, id));
         let cls = decl.register();
@@ -390,6 +472,46 @@ pub struct WebView {
     full_height: std::cell::Cell<Option<f64>>,
     /// Where it was last given a place (`set_frame`), to lay it out again.
     bounds: std::cell::Cell<Option<(f64, f64, f64, f64)>>,
+    /// Over the page, under nothing that takes the mouse: where the agent just acted, ringed,
+    /// and what it's doing, labelled (`show_activity`). Not part of the page, so screenshots
+    /// and snapshots never see it. Made on first use.
+    overlay: std::cell::Cell<id>,
+    activity: std::cell::Cell<u64>,
+}
+
+fn yes_number() -> id {
+    unsafe { msg_send![class!(NSNumber), numberWithBool: YES] }
+}
+
+/// A view that's drawn but never hit: the mouse goes through it to the page.
+fn pass_through_class() -> &'static objc::runtime::Class {
+    use objc::declare::ClassDecl;
+    use objc::runtime::{Class, Object, Sel};
+    static CLASS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    let ptr = *CLASS.get_or_init(|| {
+        let mut decl = ClassDecl::new("YHPassThroughView", class!(NSView)).expect("YHPassThroughView");
+        extern "C" fn hit_test(_: &Object, _: Sel, _: NSPoint) -> id {
+            nil
+        }
+        unsafe {
+            decl.add_method(sel!(hitTest:), hit_test as extern "C" fn(&Object, Sel, NSPoint) -> id);
+        }
+        decl.register() as *const Class as usize
+    });
+    unsafe { &*(ptr as *const Class) }
+}
+
+/// Fades a layer in, as the Swift app's overlay does.
+fn fade_in(layer: id) {
+    unsafe {
+        let fade: id = msg_send![class!(CABasicAnimation), animationWithKeyPath: ns_string("opacity")];
+        let from: id = msg_send![class!(NSNumber), numberWithDouble: 0f64];
+        let to: id = msg_send![class!(NSNumber), numberWithDouble: 1f64];
+        let _: () = msg_send![fade, setFromValue: from];
+        let _: () = msg_send![fade, setToValue: to];
+        let _: () = msg_send![fade, setDuration: 0.2f64];
+        let _: () = msg_send![layer, addAnimation: fade forKey: ns_string("fade")];
+    }
 }
 
 /// The viewport presets (`resize`): a laptop is the default.
@@ -424,11 +546,33 @@ impl WebView {
                 let _: () = msg_send![script, release];
             }
             let _: () = msg_send![controller, addScriptMessageHandler: delegate() contentWorld: page_world() name: ns_string("yourHarnessLog")];
+            // As Safari: pages may open windows (each a tab here), play media, go full screen.
+            let prefs: id = msg_send![config, preferences];
+            let _: () = msg_send![prefs, setJavaScriptCanOpenWindowsAutomatically: YES];
+            let _: () = msg_send![prefs, setElementFullscreenEnabled: YES];
+            let _: () = msg_send![config, setMediaTypesRequiringUserActionForPlayback: 0usize];
+            let web = WebView::with_configuration(host, config);
+            let _: () = msg_send![config, release];
+            web
+        }
+    }
+
+    /// A web view made with `config` as it is: a page's popup, whose configuration WebKit gives
+    /// (the opener's scripts and data store already in it).
+    pub fn with_configuration(host: id, config: id) -> WebView {
+        unsafe {
             let frame = NSRect::new(NSPoint::new(0., 0.), NSSize::new(10., 10.));
             let view: id = msg_send![class!(WKWebView), alloc];
             let view: id = msg_send![view, initWithFrame: frame configuration: config];
-            let _: () = msg_send![config, release];
             let _: () = msg_send![view, setHidden: YES];
+            // Safari's Develop menu and Show Web Inspector can attach.
+            let prefs: id = msg_send![config, preferences];
+            let _: () = msg_send![prefs, setValue: yes_number() forKey: ns_string("developerExtrasEnabled")];
+            let inspectable = sel!(setInspectable:);
+            let can: bool = msg_send![view, respondsToSelector: inspectable];
+            if can {
+                let _: () = msg_send![view, setInspectable: YES];
+            }
             // Safari's user agent: sites serve the page a Mac browser gets.
             let _: () = msg_send![view, setCustomUserAgent: ns_string(&user_agent())];
             let _: () = msg_send![view, setNavigationDelegate: delegate()];
@@ -442,7 +586,15 @@ impl WebView {
             let _: () = msg_send![view, setHidden: NO];
             let _: () = msg_send![page, addSubview: view];
             let _: () = msg_send![host, addSubview: page];
-            let web = WebView { page, view, viewport: std::cell::Cell::new(Some(LAPTOP)), full_height: Default::default(), bounds: Default::default() };
+            let web = WebView {
+                page,
+                view,
+                viewport: std::cell::Cell::new(Some(LAPTOP)),
+                full_height: Default::default(),
+                bounds: Default::default(),
+                overlay: std::cell::Cell::new(nil),
+                activity: Default::default(),
+            };
             web.lay_out(LAPTOP.0, LAPTOP.1, LAPTOP.0, LAPTOP.1);
             web
         }
@@ -541,6 +693,10 @@ impl WebView {
             }
             let _: () = msg_send![self.page, setBoundsSize: NSSize::new(cw, ch)];
             let _: () = msg_send![self.view, setFrame: NSRect::new(NSPoint::new(0., 0.), NSSize::new(cw, ch))];
+            let overlay = self.overlay.get();
+            if overlay != nil {
+                let _: () = msg_send![overlay, setFrame: NSRect::new(NSPoint::new(0., 0.), NSSize::new(cw, ch))];
+            }
         }
     }
 
@@ -905,6 +1061,190 @@ impl WebView {
         }
     }
 
+    /// Ends the page's web content process, as a crash would (test runs: `{"crash": true}`).
+    pub fn end_content_process(&self) -> bool {
+        unsafe {
+            let selector = sel!(_killWebContentProcess);
+            let can: bool = msg_send![self.view, respondsToSelector: selector];
+            if can {
+                let _: () = msg_send![self.view, _killWebContentProcess];
+            }
+            can
+        }
+    }
+
+    pub fn stop_loading(&self) {
+        unsafe {
+            let _: () = msg_send![self.view, stopLoading];
+        }
+    }
+
+    /// Safari's Web Inspector for the page, through WebKit's inspector object; false when this
+    /// WebKit has none (Safari's Develop menu can still attach: the page is inspectable).
+    pub fn show_inspector(&self) -> bool {
+        unsafe {
+            let selector = sel!(_inspector);
+            let can: bool = msg_send![self.view, respondsToSelector: selector];
+            if !can {
+                return false;
+            }
+            let inspector: id = msg_send![self.view, _inspector];
+            if inspector == nil {
+                return false;
+            }
+            let shows: bool = msg_send![inspector, respondsToSelector: sel!(show)];
+            if shows {
+                let _: () = msg_send![inspector, show];
+            }
+            shows
+        }
+    }
+
+    /// The overlay over the page, made the first time it's needed.
+    fn ensure_overlay(&self) -> id {
+        unsafe {
+            let existing = self.overlay.get();
+            if existing != nil {
+                return existing;
+            }
+            let b: NSRect = msg_send![self.view, frame];
+            let overlay: id = msg_send![pass_through_class(), alloc];
+            let overlay: id = msg_send![overlay, initWithFrame: b];
+            let _: () = msg_send![overlay, setWantsLayer: YES];
+            let _: () = msg_send![self.page, addSubview: overlay];
+            self.overlay.set(overlay);
+            overlay
+        }
+    }
+
+    /// What the agent is doing (`label`: Click, Type, Scroll…), over the page's bottom edge, and
+    /// where (CSS pixels), ringed, as the Swift app shows it. Returns its number, for
+    /// `clear_activity` to take down this one and not a newer one.
+    pub fn show_activity(&self, label: &str, rect: Option<(f64, f64, f64, f64)>) -> u64 {
+        let seq = self.activity.get() + 1;
+        self.activity.set(seq);
+        unsafe {
+            let overlay = self.ensure_overlay();
+            let layer: id = msg_send![overlay, layer];
+            if layer == nil {
+                return seq;
+            }
+            let _: () = msg_send![layer, setSublayers: nil];
+            let (cw, ch) = self.size();
+            let page_frame: NSRect = msg_send![self.page, frame];
+            // Screen points per CSS pixel: the ring and the label keep their size on screen.
+            let zoom = if cw > 0. && page_frame.size.width > 0. { (page_frame.size.width / cw).clamp(0.05, 4.) } else { 1. };
+            let window: id = msg_send![self.page, window];
+            let backing: f64 = if window == nil { 2. } else { msg_send![window, backingScaleFactor] };
+            let accent: id = msg_send![class!(NSColor), controlAccentColor];
+            let cg = |c: id| -> id { msg_send![c, CGColor] };
+            let add = |l: id| {
+                let _: () = msg_send![layer, addSublayer: l];
+                fade_in(l);
+            };
+            if let Some((x, y, w, h)) = rect {
+                let (w, h) = (w.max(10. / zoom), h.max(10. / zoom));
+                let ring: id = msg_send![class!(CALayer), layer];
+                let _: () = msg_send![ring, setFrame: NSRect::new(NSPoint::new(x, ch - y - h), NSSize::new(w, h))];
+                let _: () = msg_send![ring, setBorderWidth: 2. / zoom];
+                let _: () = msg_send![ring, setBorderColor: cg(accent)];
+                let soft: id = msg_send![accent, colorWithAlphaComponent: 0.12f64];
+                let _: () = msg_send![ring, setBackgroundColor: cg(soft)];
+                let _: () = msg_send![ring, setCornerRadius: 4. / zoom];
+                add(ring);
+            }
+            if !label.is_empty() {
+                let size = 11. / zoom;
+                let font: id = msg_send![class!(NSFont), systemFontOfSize: size weight: 0.23f64];
+                let attrs: id = msg_send![class!(NSDictionary), dictionaryWithObject: font forKey: ns_string("NSFont")];
+                let text = ns_string(label);
+                let measured: NSSize = msg_send![text, sizeWithAttributes: attrs];
+                let (tw, th) = (measured.width.ceil(), measured.height.ceil());
+                let (pad_x, pad_y) = (10. / zoom, 5. / zoom);
+                let (pw, ph) = (tw + pad_x * 2., th + pad_y * 2.);
+                let pill: id = msg_send![class!(CALayer), layer];
+                let _: () = msg_send![pill, setFrame: NSRect::new(NSPoint::new(((cw - pw) / 2.).max(0.), 8. / zoom), NSSize::new(pw, ph))];
+                let back: id = msg_send![class!(NSColor), windowBackgroundColor];
+                let back: id = msg_send![back, colorWithAlphaComponent: 0.94f64];
+                let _: () = msg_send![pill, setBackgroundColor: cg(back)];
+                let _: () = msg_send![pill, setCornerRadius: ph / 2.];
+                let line: id = msg_send![class!(NSColor), separatorColor];
+                let _: () = msg_send![pill, setBorderColor: cg(line)];
+                let _: () = msg_send![pill, setBorderWidth: 1. / zoom];
+                let words: id = msg_send![class!(CATextLayer), layer];
+                let _: () = msg_send![words, setFrame: NSRect::new(NSPoint::new(pad_x, pad_y), NSSize::new(tw, th))];
+                let _: () = msg_send![words, setString: text];
+                let _: () = msg_send![words, setFont: font];
+                let _: () = msg_send![words, setFontSize: size];
+                let ink: id = msg_send![class!(NSColor), labelColor];
+                let _: () = msg_send![words, setForegroundColor: cg(ink)];
+                let _: () = msg_send![words, setAlignmentMode: ns_string("center")];
+                let _: () = msg_send![words, setContentsScale: (backing * zoom).clamp(0.5, 8.)];
+                let _: () = msg_send![pill, addSublayer: words];
+                add(pill);
+            }
+        }
+        seq
+    }
+
+    /// Takes the overlay down, unless a newer one is up.
+    pub fn clear_activity(&self, seq: u64) {
+        if self.activity.get() != seq {
+            return;
+        }
+        unsafe {
+            let overlay = self.overlay.get();
+            if overlay == nil {
+                return;
+            }
+            let layer: id = msg_send![overlay, layer];
+            if layer != nil {
+                let _: () = msg_send![layer, setSublayers: nil];
+            }
+        }
+    }
+
+    /// Whether the overlay shows anything now, for test runs.
+    pub fn shows_activity(&self) -> bool {
+        unsafe {
+            let overlay = self.overlay.get();
+            if overlay == nil {
+                return false;
+            }
+            let layer: id = msg_send![overlay, layer];
+            let subs: id = if layer == nil { nil } else { msg_send![layer, sublayers] };
+            let n: usize = if subs == nil { 0 } else { msg_send![subs, count] };
+            n > 0
+        }
+    }
+
+    /// The overlay alone drawn into a PNG (its CSS-pixel size), for test runs: what the user sees
+    /// over the page, which the page's own screenshots leave out.
+    pub fn overlay_png(&self, path: &str) -> bool {
+        unsafe {
+            let overlay = self.overlay.get();
+            if overlay == nil {
+                return false;
+            }
+            let layer: id = msg_send![overlay, layer];
+            if layer == nil {
+                return false;
+            }
+            let (w, h) = self.size();
+            let (pw, ph) = (w.round() as isize, h.round() as isize);
+            let rep: id = msg_send![class!(NSBitmapImageRep), alloc];
+            let rep: id = msg_send![rep, initWithBitmapDataPlanes: std::ptr::null_mut::<*mut u8>() pixelsWide: pw pixelsHigh: ph bitsPerSample: 8isize samplesPerPixel: 4isize hasAlpha: YES isPlanar: NO colorSpaceName: ns_string("NSDeviceRGBColorSpace") bytesPerRow: 0isize bitsPerPixel: 0isize];
+            let context: id = msg_send![class!(NSGraphicsContext), graphicsContextWithBitmapImageRep: rep];
+            let cg: *mut std::ffi::c_void = msg_send![context, CGContext];
+            let _: () = msg_send![layer, renderInContext: cg];
+            let props: id = msg_send![class!(NSDictionary), dictionary];
+            let png: id = msg_send![rep, representationUsingType: 4usize properties: props];
+            let ok: bool = msg_send![png, writeToFile: ns_string(path) atomically: YES];
+            let _: () = msg_send![rep, release];
+            ok
+        }
+    }
+
     /// Runs JavaScript in the page; the reply is its result as JSON text (the script should
     /// return `JSON.stringify(...)`), or the error.
     pub fn evaluate(&self, script: &str, reply: flume::Sender<Result<String, String>>) {
@@ -963,6 +1303,10 @@ impl Drop for WebView {
             let _: () = msg_send![self.view, stopLoading];
             let _: () = msg_send![self.page, removeFromSuperview];
             let _: () = msg_send![self.view, release];
+            let overlay = self.overlay.get();
+            if overlay != nil {
+                let _: () = msg_send![overlay, release];
+            }
             let _: () = msg_send![self.page, release];
         }
     }

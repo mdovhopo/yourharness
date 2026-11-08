@@ -177,8 +177,10 @@ fn main() {
         {
             let (ws, inspector) = (workspace.clone(), root.read(cx).inspector.clone());
             let host = window.update(cx, |_, window, _| platform::ns_view(window)).unwrap_or(std::ptr::null_mut());
+            let library = workspace.read(cx).library.clone();
             browser::start(
                 host,
+                Some(library),
                 move |thread, cx| {
                     // In its own window, that window comes forward instead.
                     if ui::browser_window::is_open(thread) {
@@ -193,6 +195,7 @@ fn main() {
                 },
                 move |cx| {
                     inspector.update(cx, |_, cx| cx.notify());
+                    ui::browser_panel::notify_all(cx);
                     ui::browser_window::notify_all(cx);
                 },
                 cx,
@@ -225,6 +228,7 @@ fn main() {
         cx.on_app_quit({
             let workspace = workspace.clone();
             move |cx| {
+                browser::Browsers::save_now();
                 workspace.update(cx, |ws, cx| ws.prepare_for_quit(cx));
                 async {}
             }
@@ -333,7 +337,9 @@ fn main() {
                         ws.new_thread(&project, cx);
                     }
                 }
-                ws.selected_thread().map(|t| (t.read(cx).id().to_string(), t.read(cx).meta.project_id.clone()))
+                // `YH_BROWSER_PROBE_THREAD=<id>`: on that thread's browser while another is open.
+                let chosen = env("YH_BROWSER_PROBE_THREAD").and_then(|id| ws.thread(&id)).or_else(|| ws.selected_thread());
+                chosen.map(|t| (t.read(cx).id().to_string(), t.read(cx).meta.project_id.clone()))
             });
             match found {
                 Some((thread, project)) => browser::run_probe(steps, thread, Some(project)),
@@ -772,7 +778,12 @@ fn main() {
                 (Some(project), Ok(cookies)) => {
                     let (tx, rx) = flume::bounded(1);
                     webview::store_cookies(&project, cookies, tx);
-                    cx.spawn(async move |_| eprintln!("imported {} cookies", rx.recv_async().await.unwrap_or(0))).detach();
+                    cx.spawn(async move |cx| {
+                        eprintln!("imported {} cookies", rx.recv_async().await.unwrap_or(0));
+                        // Open pages load again with them, as after Import Sign-ins.
+                        let _ = cx.update(|_| browser::Browsers::with(|b| b.sessions.values().flat_map(|s| s.tabs.iter()).for_each(|t| t.web.reload())));
+                    })
+                    .detach();
                 }
                 (_, Err(e)) => eprintln!("cookie import failed: {e}"),
                 (None, _) => eprintln!("cookie import failed: no thread selected"),
