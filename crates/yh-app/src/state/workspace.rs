@@ -964,9 +964,14 @@ impl Workspace {
         }
         let folder = self.folder_of(thread.read(cx));
         let path = std::env::var("YH_PATH").ok();
+        // The links its record keeps (as the PRs tab reads them), so a merged branch PR counts.
+        let strings = |key: &str| -> Vec<String> {
+            self.library.thread_field(&id, key).and_then(|v| v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())).unwrap_or_default()
+        };
+        let saved = (strings("workedPullRequests"), strings("pullRequests"));
         cx.spawn(async move |this, cx| {
             let key = id.clone();
-            let links = cx.background_executor().spawn(async move { crate::state::pulls::links(&db, &id, &folder, path.as_deref()) }).await;
+            let links = cx.background_executor().spawn(async move { crate::state::pulls::links(&db, &id, &folder, path.as_deref(), &[], (&saved.0, &saved.1)) }).await;
             let counts = (links.iter().filter(|(_, worked)| *worked).count(), links.len());
             let _ = this.update(cx, |ws, cx| {
                 if ws.pull_counts.insert(key, counts) != Some(counts) {
