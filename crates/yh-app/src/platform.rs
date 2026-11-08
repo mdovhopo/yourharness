@@ -180,6 +180,31 @@ pub fn shortcut(w: id, key: &str, code: u16, shift: bool) {
     }
 }
 
+/// A key through the window as typed: down and up, with its virtual key code and modifier flags
+/// (`1 << 17` ⇧, `1 << 18` ⌃, `1 << 19` ⌥, `1 << 20` ⌘), so the whole AppKit path runs
+/// (sent to the application: key equivalents through the menu and every view first, then the
+/// first responder).
+pub fn key_event(w: id, chars: &str, plain: &str, code: u16, flags: u64) {
+    unsafe {
+        let number: isize = msg_send![w, windowNumber];
+        let s = NSString::alloc(nil).init_str(chars);
+        let p = NSString::alloc(nil).init_str(plain);
+        for kind in [NSKeyDown, NSKeyUp] {
+            let event: id = msg_send![class!(NSEvent), keyEventWithType: kind location: NSPoint::new(0., 0.)
+                modifierFlags: flags timestamp: uptime() windowNumber: number context: nil
+                characters: s charactersIgnoringModifiers: p isARepeat: NO keyCode: code];
+            if event != nil {
+                // Through the application, as a key press goes: key equivalents (the menu, then
+                // every view's performKeyEquivalent:) before the first responder's keyDown:.
+                let app: id = msg_send![class!(NSApplication), sharedApplication];
+                let _: () = msg_send![app, sendEvent: event];
+            }
+        }
+        let _: () = msg_send![s, release];
+        let _: () = msg_send![p, release];
+    }
+}
+
 pub fn mouse_move(w: id, x: f32, y: f32) {
     unsafe {
         let _: () = msg_send![w, setAcceptsMouseMovedEvents: YES];
@@ -1026,4 +1051,15 @@ pub fn accessibility_tree(w: id, limit: usize) -> Vec<String> {
     let mut out = vec![];
     unsafe { walk(w, 0, &mut out, limit) };
     out
+}
+
+/// A letter's or digit's virtual key code on a US layout, for test key events.
+pub fn key_code(c: char) -> u16 {
+    match c.to_ascii_lowercase() {
+        'a' => 0, 's' => 1, 'd' => 2, 'f' => 3, 'h' => 4, 'g' => 5, 'z' => 6, 'x' => 7, 'c' => 8, 'v' => 9,
+        'b' => 11, 'q' => 12, 'w' => 13, 'e' => 14, 'r' => 15, 'y' => 16, 't' => 17, '1' => 18, '2' => 19,
+        '3' => 20, '4' => 21, '6' => 22, '5' => 23, '9' => 25, '7' => 26, '8' => 28, '0' => 29, 'o' => 31,
+        'u' => 32, 'i' => 34, 'p' => 35, 'l' => 37, 'j' => 38, 'k' => 40, 'n' => 45, 'm' => 46,
+        _ => 49,
+    }
 }

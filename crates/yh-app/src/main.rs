@@ -419,6 +419,66 @@ fn main() {
         }
         // `YH_DRAFT=<text>`: typed into the composer after `YH_DRAFT_DELAY` seconds (`/co` opens the
         // command menu, `@na` the file menu).
+        // `YH_TYPE_KEYS=h,i,shift-space,x`: typed into the composer as real key events through
+        // the window (`YH_TYPE_KEYS_DELAY` s after launch, 3), then what it holds is printed.
+        if let Some(spec) = env("YH_TYPE_KEYS") {
+            let delay: f64 = env("YH_TYPE_KEYS_DELAY").and_then(|v| v.parse().ok()).unwrap_or(3.0);
+            let root = root.clone();
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(Duration::from_secs_f64(delay)).await;
+                // The window's own pointer: events are sent outside any update, as AppKit hands
+                // them to GPUI at once, which would find the window already borrowed.
+                // `YH_TYPE_KEYS_CLICKS=0.85,0.4;0.4,0.93`: real clicks first, at those fractions of
+                // the window (the page, then the composer, as a person would), instead of
+                // focusing the composer directly.
+                let clicks: Vec<(f32, f32)> = env("YH_TYPE_KEYS_CLICKS")
+                    .map(|v| v.split(';').filter_map(|p| p.split_once(',')).filter_map(|(x, y)| Some((x.trim().parse().ok()?, y.trim().parse().ok()?))).collect())
+                    .unwrap_or_default();
+                let mut ns: usize = 0;
+                let mut size = (0f32, 0f32);
+                let _ = window.update(cx, |_, window, cx| {
+                    if clicks.is_empty() {
+                        let input = root.read(cx).composer.read(cx).input.clone();
+                        window.focus(&input.focus_handle(cx), cx);
+                    }
+                    ns = platform::ns_window(window) as usize;
+                    let v = window.viewport_size();
+                    size = (f32::from(v.width), f32::from(v.height));
+                });
+                for (fx, fy) in clicks {
+                    #[allow(deprecated)]
+                    let target = ns as cocoa::base::id;
+                    platform::click(target, fx * size.0, fy * size.1);
+                    eprintln!("TYPE clicked at {:.0},{:.0}", fx * size.0, fy * size.1);
+                    cx.background_executor().timer(Duration::from_millis(400)).await;
+                }
+                cx.background_executor().timer(Duration::from_millis(300)).await;
+                for step in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    let (shift, key) = match step.strip_prefix("shift-") { Some(k) => (true, k), None => (false, step) };
+                    let (plain, code): (String, u16) = match key {
+                        "space" => (" ".into(), 49),
+                        "return" => ("\r".into(), 36),
+                        k if k.len() == 1 => {
+                            let c = k.chars().next().unwrap_or('a');
+                            (c.to_string(), platform::key_code(c))
+                        }
+                        other => { eprintln!("TYPE can't read {other}"); continue }
+                    };
+                    let chars = if shift { plain.to_uppercase() } else { plain.clone() };
+                    let flags = if shift { 1u64 << 17 } else { 0 };
+                    #[allow(deprecated)]
+                    let target = ns as cocoa::base::id;
+                    platform::key_event(target, &chars, &plain, code, flags);
+                    cx.background_executor().timer(Duration::from_millis(60)).await;
+                }
+                cx.background_executor().timer(Duration::from_millis(500)).await;
+                let _ = window.update(cx, |_, _, cx| {
+                    let value = root.read(cx).composer.read(cx).input.read(cx).value().to_string();
+                    eprintln!("TYPE composer holds {value:?}");
+                });
+            })
+            .detach();
+        }
         if let Some(text) = env("YH_DRAFT").map(|t| t.replace("\\n", "\n")) {
             let delay: f64 = env("YH_DRAFT_DELAY").and_then(|v| v.parse().ok()).unwrap_or(0.5);
             let root = root.clone();
