@@ -88,6 +88,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 - In Settings → General, scrolling over the title prompt scrolls the page once the prompt reaches its top or bottom, instead of stopping there.
 - VoiceOver reads the conversation: your messages, Claude's replies, notices, sub-agents, a turn's "Worked for …" line and each step by what it did and on what, with whether it's open, running or failed.
 - The Pull Requests tab shows a GitHub stack whole when the thread worked on one of its PRs (it said "3 PRs" over one, "into" the PR below rather than the trunk), shows your branch's unsubmitted `gh stack` as soon as the project is read instead of 15 seconds later, and long titles end in an ellipsis.
+- `/mcp` and Settings → MCP no longer list the app's own servers (browser, memory, threads, harness) under This session, and `/mcp disable all` no longer turns off Claude's browser and memory with yours.
 - Claude's browser `navigate` with `url: "back"` (or forward, reload) goes back instead of searching the web for the word, and a page that fails to load is named in the error, not the page before it.
 
 ## [0.0.16] - 2026-11-04

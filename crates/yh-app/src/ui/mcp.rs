@@ -88,11 +88,15 @@ pub struct Server {
     pub summary: String,
 }
 
+/// The servers in an `mcp_status` reply, leaving out the app's own (`sdk`: browser, memory,
+/// threads, harness), which aren't yours to switch off, reconnect or sign in to, as the Swift
+/// app left them out (`/mcp disable all` turned off Claude's browser and memory too).
 pub fn parse_status(v: &Value) -> Vec<Server> {
     v["mcpServers"]
         .as_array()
         .into_iter()
         .flatten()
+        .filter(|s| s["transport"].as_str() != Some("sdk") && s["config"]["type"].as_str() != Some("sdk"))
         .map(|s| {
             let config = &s["config"];
             let summary = config["url"].as_str().map(str::to_string).unwrap_or_else(|| {
