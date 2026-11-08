@@ -82,6 +82,8 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 - What's New and Release Notes open in the middle of the window, like the app's other dialogs, instead of beside the button you clicked.
 - The sidebar's update card shows What's New as a link lined up under the version, instead of plain text set off to the right.
 - ⌘K's matches in conversations read as plain text, without the reply's `**` and backtick marks.
+- VoiceOver reaches the rest of the sidebar: Show more, the Settled shelf, Add Project, and each project's collapse, Memory and New Thread buttons.
+- Memory's Graph keeps a few memories together in the middle of the page instead of flinging them to its far corners.
 - In Settings → General, scrolling over the title prompt scrolls the page once the prompt reaches its top or bottom, instead of stopping there.
 - VoiceOver reads the conversation: your messages, Claude's replies, notices, sub-agents, a turn's "Worked for …" line and each step by what it did and on what, with whether it's open, running or failed.
 

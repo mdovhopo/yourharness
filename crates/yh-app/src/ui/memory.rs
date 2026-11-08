@@ -1663,7 +1663,7 @@ impl MemoryPage {
             move |bounds, _, _| cell.set(bounds),
             move |bounds, _, window, cx| {
                 let (w, h) = (f32::from(bounds.size.width) - pad * 2., f32::from(bounds.size.height) - pad * 2.);
-                let side = w.min(h);
+                let side = graph_side(w, h, points.len());
                 let (ox, oy) = (f32::from(bounds.origin.x) + pad + (w - side) / 2., f32::from(bounds.origin.y) + pad + (h - side) / 2.);
                 let at = |p: (f64, f64)| (ox + p.0 as f32 * side, oy + p.1 as f32 * side);
                 for &(a, b) in &edges {
@@ -1750,7 +1750,7 @@ impl MemoryPage {
                 cx.listener(move |this, e: &gpui_kit::MouseDownEvent, _, cx| {
                     let b = cell.get();
                     let (w, h) = (f32::from(b.size.width) - pad * 2., f32::from(b.size.height) - pad * 2.);
-                    let side = w.min(h);
+                    let side = graph_side(w, h, pts.len());
                     let (ox, oy) = (f32::from(b.origin.x) + pad + (w - side) / 2., f32::from(b.origin.y) + pad + (h - side) / 2.);
                     let (mx, my) = (f32::from(e.position.x), f32::from(e.position.y));
                     let near = pts
@@ -2420,4 +2420,10 @@ impl Render for SpecialistSetup {
             ),
         )
     }
+}
+
+/// How big a square the graph's map takes: the whole page for a big graph, less for a few
+/// memories, so two of them aren't drawn at the page's far corners.
+fn graph_side(w: f32, h: f32, n: usize) -> f32 {
+    w.min(h).min(140. * (n as f32).sqrt() + 120.).max(0.)
 }

@@ -515,6 +515,8 @@ impl Sidebar {
             .child(
                 div()
                     .id(SharedString::from(format!("chevron-{}", project.id)))
+                    .role(gpui_kit::Role::Button)
+                    .aria_label(if collapsed { format!("Show threads of {name}") } else { format!("Hide threads of {name}") })
                     .flex_none()
                     .w(px(CHEVRON))
                     .h(px(18.))
@@ -570,6 +572,8 @@ impl Sidebar {
                 // Memory: shown on hover, and while its page is open.
                 div()
                     .id(SharedString::from(format!("memory-{}", project.id)))
+                    .role(gpui_kit::Role::Button)
+                    .aria_label(format!("Memory of {name}"))
                     .flex_none()
                     .w(px(22.))
                     .h(px(22.))
@@ -590,6 +594,8 @@ impl Sidebar {
             .child(
                 div()
                     .id(SharedString::from(format!("new-{}", project.id)))
+                    .role(gpui_kit::Role::Button)
+                    .aria_label(format!("New thread in {name}"))
                     .flex_none()
                     .w(px(22.))
                     .h(px(22.))
@@ -1030,6 +1036,8 @@ impl Sidebar {
 fn small_row(id: SharedString, label: String, theme: &Theme) -> gpui_kit::Stateful<gpui_kit::Div> {
     div()
         .id(id)
+        .role(gpui_kit::Role::Button)
+        .aria_label(label.clone())
         .relative()
         .flex()
         .items_center()
@@ -1081,6 +1089,8 @@ impl Render for Sidebar {
                     let key = project.clone();
                     div()
                         .id(SharedString::from(format!("shelf-{project}")))
+                        .role(gpui_kit::Role::Button)
+                        .aria_label(format!("Settled, {count}, {}", if open { "shown" } else { "hidden" }))
                         .flex()
                         .items_center()
                         .gap(px(GAP))
@@ -1105,6 +1115,8 @@ impl Render for Sidebar {
                 }
                 SidebarRow::AddProject => div()
                     .id("add-project")
+                    .role(gpui_kit::Role::Button)
+                    .aria_label("Add Project…")
                     .flex()
                     .items_center()
                     .gap(px(GAP))
