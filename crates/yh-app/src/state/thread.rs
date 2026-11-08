@@ -253,6 +253,8 @@ pub struct ThreadState {
     pub items: Vec<Item>,
     pub list: ListState,
     pub running: bool,
+    /// You pressed Stop on this turn: its end says "Interrupted", and nobody's notified.
+    pub stop_requested: bool,
     /// A turn ended while you were elsewhere.
     pub unread: bool,
     /// The checklist Claude keeps with its task tools, from the rows held.
@@ -339,6 +341,7 @@ impl ThreadState {
             items: vec![],
             list: ListState::new(0, ListAlignment::Bottom, px(800.)),
             running: false,
+            stop_requested: false,
             unread: false,
             plan: Default::default(),
             find_hit: None,
@@ -1127,9 +1130,17 @@ impl ThreadState {
             }
             Event::Done { is_error, text } => {
                 self.end_turn();
-                // Stopped for a message sent now, which carries that on itself.
-                if is_error && !text.is_empty() && self.composer.sending_now.is_empty() {
-                    self.error_notice(&text);
+                // Stopped for a message sent now, which carries that on itself; stopped by you,
+                // a plain note (the CLI ends it as `error_during_execution`).
+                if is_error && self.composer.sending_now.is_empty() {
+                    if self.stop_requested {
+                        self.notice("Interrupted");
+                    } else if text.is_empty() || (text.starts_with("error_") && !text.contains(' ')) {
+                        let why = if text.is_empty() { String::new() } else { format!(" ({text})") };
+                        self.error_notice(&format!("Claude stopped with an error{why}."));
+                    } else {
+                        self.error_notice(&text);
+                    }
                 }
                 true
             }

@@ -1422,7 +1422,9 @@ impl Workspace {
         let selected = self.selected.as_deref() == Some(id.strip_prefix(SIDE).unwrap_or(&id));
         // Waiting on jobs it started, Claude isn't done: it's back when they report.
         let waiting_on_jobs = thread.read(cx).jobs.waiting() > 0;
-        if !waiting_on_jobs {
+        // You stopped it yourself: you're there, nothing to tell.
+        let stopped = thread.update(cx, |t, _| std::mem::take(&mut t.stop_requested));
+        if !waiting_on_jobs && !stopped {
             let body = Self::last_reply(thread.read(cx));
             self.notify_about(crate::state::notify::Kind::Finished, thread, body, cx);
         }
@@ -1527,6 +1529,8 @@ impl Workspace {
     pub fn interrupt(&mut self, thread: &Entity<ThreadState>, cx: &mut Context<Self>) {
         let id = thread.read(cx).id().to_string();
         if let Some(rt) = self.runtimes.get_mut(&id) {
+            // Your Stop, not a message sent now (which carries its own mark).
+            thread.update(cx, |t, _| t.stop_requested = t.running && t.composer.sending_now.is_empty());
             rt.process.interrupt();
         }
     }
@@ -1863,11 +1867,13 @@ impl Workspace {
             if let Some(db) = &self.library.db {
                 let now = yh_core::library::now_ms() / 1000.0;
                 let saved: Vec<(usize, yh_core::db::Row)> =
-                    rows.iter().enumerate().map(|(i, e)| (i, yh_core::recovery::row_of(e, if e.kind == yh_core::library::Kind::Tool { e.id.clone() } else { format!("h{i}") }, Some(now)))).collect();
+                    rows.iter().enumerate().map(|(i, e)| (i, yh_core::recovery::row_of(e, if e.kind == yh_core::library::Kind::Tool { e.id.clone() } else { format!("h{i}") }, e.date.or(Some(now))))).collect();
                 db.save_rows(&id, saved.len(), saved);
             }
-            // Read back from what was saved, as any history.
+            // Read back from what was saved, as any history. `new_thread` already selected it,
+            // so selecting it again won't load it: load it here.
             thread.update(cx, |t, _| t.unload());
+            self.ensure_loaded(&thread, cx);
         }
         Ok((id, messages))
     }
