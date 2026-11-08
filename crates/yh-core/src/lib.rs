@@ -9,6 +9,7 @@ pub mod dev_servers;
 pub mod db;
 pub mod diagrams;
 pub mod files;
+pub mod find;
 pub mod footprint;
 pub mod forge;
 pub mod git;

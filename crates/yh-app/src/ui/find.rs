@@ -1,6 +1,8 @@
-//! Find in thread (⌘F): rows whose text, tool input or result has what you type, among the rows
-//! held; ↩ steps to older ones, ⇧↩ to newer, ⎋ closes. Past the oldest row held, the page before
-//! is read and the next ↩ looks there too.
+//! Find in thread (⌘F): rows whose text, tool input or result has what you type (from one
+//! character, case and accents ignored), among the rows held, their matches marked in the rows
+//! (the current row's orange, the others yellow); ↩ and ⌘G go to the next one down, ⇧↩ and ⇧⌘G
+//! up, round from either end; ⎋ closes. Past the oldest row held, the page before is read and
+//! the next step looks there too.
 
 use crate::state::workspace::Workspace;
 use crate::theme::{space, text, Theme};
@@ -41,8 +43,11 @@ impl FindBar {
 
     pub fn close(&mut self, cx: &mut Context<Self>) {
         self.open = false;
+        self.hits.clear();
+        self.current = None;
         if let Some(t) = self.workspace.read(cx).selected_thread() {
             t.update(cx, |t, cx| {
+                t.set_find_query(None);
                 t.show_hit(None);
                 cx.notify();
             });
@@ -50,38 +55,59 @@ impl FindBar {
         cx.notify();
     }
 
+    /// What's typed, matched without case or accents, from one character.
+    fn query(&self, cx: &Context<Self>) -> String {
+        yh_core::find::query(&self.input.read(cx).value())
+    }
+
+    /// New matches; stays on the row it was on if that still matches, else the newest.
     pub fn search(&mut self, cx: &mut Context<Self>) {
-        let q = self.input.read(cx).value().trim().to_lowercase();
+        let q = self.query(cx);
         let Some(thread) = self.workspace.read(cx).selected_thread() else { return };
-        self.hits = if q.chars().count() < 2 { vec![] } else { thread.read(cx).find(&q) };
-        self.current = self.hits.len().checked_sub(1);
+        let was = self.current.and_then(|i| self.hits.get(i).copied());
+        self.hits = if q.is_empty() { vec![] } else { thread.read(cx).find(&q) };
+        self.current = was.and_then(|p| self.hits.iter().position(|h| *h == p)).or(self.hits.len().checked_sub(1));
         let hit = self.current.map(|i| self.hits[i]);
         thread.update(cx, |t, cx| {
+            t.set_find_query(Some(q));
             t.show_hit(hit);
             cx.notify();
         });
         cx.notify();
     }
 
-    /// `back`: to the older match.
     /// Find Next and Previous have somewhere to go (the menu's items are on).
     pub fn has_hits(&self) -> bool {
         self.open && !self.hits.is_empty()
     }
 
-    pub fn step(&mut self, back: bool, cx: &mut Context<Self>) {
+    /// `newer` (↩, ⌘G): to the next match down; else (⇧↩, ⇧⌘G) up. Round from either end;
+    /// past the oldest row held, the page before is read first and looked through too.
+    pub fn step(&mut self, newer: bool, cx: &mut Context<Self>) {
         let Some(thread) = self.workspace.read(cx).selected_thread() else { return };
-        let next = match (self.current, back) {
-            (Some(0), true) | (None, _) => {
-                // Nothing older held: read the page before; the next ↩ finds there too.
-                if back && thread.read(cx).before > 0 {
-                    let ws = self.workspace.clone();
-                    ws.update(cx, |ws, cx| ws.load_earlier(&thread, cx));
-                }
+        // Rows came (an earlier page, a new reply) since the last look.
+        let was = self.current.and_then(|i| self.hits.get(i).copied());
+        let q = self.query(cx);
+        if !q.is_empty() {
+            self.hits = thread.read(cx).find(&q);
+            self.current = was.and_then(|p| self.hits.iter().position(|h| *h == p)).or(self.hits.len().checked_sub(1));
+        }
+        if self.hits.is_empty() {
+            return;
+        }
+        let last = self.hits.len() - 1;
+        let next = match (self.current, newer) {
+            (Some(0), false) if thread.read(cx).before > 0 => {
+                // Nothing older held: read the page before; the next step finds there too.
+                let ws = self.workspace.clone();
+                ws.update(cx, |ws, cx| ws.load_earlier(&thread, cx));
                 return;
             }
-            (Some(i), true) => i - 1,
-            (Some(i), false) => (i + 1).min(self.hits.len() - 1),
+            (Some(0), false) | (None, false) => last,
+            (Some(i), false) => i - 1,
+            (Some(i), true) if i >= last => 0,
+            (Some(i), true) => i + 1,
+            (None, true) => 0,
         };
         self.current = Some(next);
         let hit = self.hits[next];
@@ -101,7 +127,7 @@ impl Render for FindBar {
         }
         let label = match self.current {
             Some(i) => format!("{} of {}", i + 1, self.hits.len()),
-            None if self.input.read(cx).value().trim().chars().count() >= 2 => "No matches".into(),
+            None if !self.input.read(cx).value().trim().is_empty() => "No matches".into(),
             None => String::new(),
         };
         let has_hits = !self.hits.is_empty();
@@ -124,18 +150,18 @@ impl Render for FindBar {
                     .small()
                     .ghost()
                     .icon(Icon::new(IconName::ChevronUp).size(px(14.)).text_color(theme.secondary))
-                    .tooltip("Previous Match (↩)")
+                    .tooltip("Previous Match (⇧⌘G)")
                     .disabled(!has_hits)
-                    .on_click(cx.listener(|this, _, _, cx| this.step(true, cx))),
+                    .on_click(cx.listener(|this, _, _, cx| this.step(false, cx))),
             )
             .child(
                 Button::new("find-next")
                     .small()
                     .ghost()
                     .icon(Icon::new(IconName::ChevronDown).size(px(14.)).text_color(theme.secondary))
-                    .tooltip("Next Match (⇧↩)")
+                    .tooltip("Next Match (⌘G)")
                     .disabled(!has_hits)
-                    .on_click(cx.listener(|this, _, _, cx| this.step(false, cx))),
+                    .on_click(cx.listener(|this, _, _, cx| this.step(true, cx))),
             )
             .child(div().flex_1().pl(px(space::S)).text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child(label))
             .child(

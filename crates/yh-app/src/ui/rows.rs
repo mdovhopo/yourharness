@@ -99,6 +99,8 @@ pub fn render_item(thread: &Entity<ThreadState>, ix: usize, window: &mut Window,
         return div().into_any_element();
     }
     start_reading_order(item.pos);
+    // Find open: this row's texts mark what it looks for (nothing to do when it's closed).
+    FIND.with(|f| *f.borrow_mut() = state.find_query.clone().map(|q| (q, state.find_hit == Some(item.pos))));
     let ctx = RowContext {
         thread: thread.clone(),
         pos: item.pos,
@@ -130,6 +132,8 @@ pub fn render_item(thread: &Entity<ThreadState>, ix: usize, window: &mut Window,
         Fold::Open => work_box(content, &theme),
         _ => content,
     };
+    // Texts outside the transcript (the plan card, the right sidebar) never take its marks.
+    FIND.with(|f| f.borrow_mut().take());
     let hit = state.find_hit == Some(item.pos);
     // Open work keeps its spacing inside its box, so the rule down its side runs unbroken
     // from row to row.
@@ -400,6 +404,11 @@ fn user_text(text: &str, ctx: &RowContext, theme: &Theme, window: &Window) -> An
         cuts.push(r.start);
         cuts.push(r.end);
     }
+    let marks = find_marks(text);
+    for (r, _) in &marks {
+        cuts.push(r.start);
+        cuts.push(r.end);
+    }
     cuts.sort_unstable();
     cuts.dedup();
     let runs: Vec<gpui_kit::TextRun> = cuts
@@ -412,6 +421,9 @@ fn user_text(text: &str, ctx: &RowContext, theme: &Theme, window: &Window) -> An
             }
             if styled.links.iter().any(|(r, _)| r.start <= w[0] && w[1] <= r.end) {
                 run.color = theme.accent;
+            }
+            if let Some((_, mark)) = marks.iter().find(|(r, _)| r.start <= w[0] && w[1] <= r.end) {
+                run.background_color = mark.background_color;
             }
             run
         })
@@ -1017,19 +1029,39 @@ fn next_reading_order(text: &str) -> (u64, ElementId) {
     (order, ElementId::NamedInteger("sel".into(), hasher.finish()))
 }
 
+thread_local! {
+    /// What Find looks for while it's open, and whether the row being drawn is the one it's on
+    /// (set per row by `render_item`). None: no marks, nothing looked for.
+    static FIND: std::cell::RefCell<Option<(String, bool)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Find's marks in `text`: every match, orange in the row Find is on, yellow in the others.
+fn find_marks(text: &str) -> Vec<(std::ops::Range<usize>, HighlightStyle)> {
+    FIND.with(|f| {
+        let f = f.borrow();
+        let Some((query, current)) = f.as_ref() else { return vec![] };
+        let color = if *current { gpui_kit::hsla(30. / 360., 1., 0.5, 0.6) } else { gpui_kit::hsla(52. / 360., 1., 0.5, 0.35) };
+        yh_core::find::ranges(text, query).into_iter().map(|r| (r, HighlightStyle { background_color: Some(color), ..Default::default() })).collect()
+    })
+}
+
 /// Plain text you can select (a tool's output, a notice).
 pub fn selectable(text: impl Into<SharedString>, theme: &Theme) -> AnyElement {
     let text: SharedString = text.into();
     let (order, id) = next_reading_order(&text);
-    SelText::new(id, text.clone(), StyledText::new(text), order, theme.accent.opacity(0.28)).into_any_element()
+    let marks = find_marks(&text);
+    let element = SelText::new(id, text.clone(), StyledText::new(text), order, theme.accent.opacity(0.28));
+    if marks.is_empty() { element.into_any_element() } else { element.rich(marks, vec![]).into_any_element() }
 }
 
 fn styled_text(styled: &Text, theme: &Theme, ctx: Option<&RowContext>) -> AnyElement {
     let text: SharedString = styled.text.clone().into();
     let (order, id) = next_reading_order(&styled.text);
     let mut element = SelText::new(id, text.clone(), StyledText::new(text), order, theme.accent.opacity(0.28));
-    if !styled.spans.is_empty() {
+    let marks = find_marks(&styled.text);
+    if !styled.spans.is_empty() || !marks.is_empty() {
         let mut highlights: Vec<(std::ops::Range<usize>, HighlightStyle)> = styled.spans.iter().map(|(r, s)| (r.clone(), highlight_style(*s, theme))).collect();
+        highlights.extend(marks);
         highlights.sort_by_key(|(r, _)| r.start);
         let mono = styled.spans.iter().filter(|(_, s)| matches!(s, Span::Code | Span::CodeLink)).map(|(r, _)| r.clone()).collect();
         element = element.rich(highlights, mono);

@@ -287,6 +287,8 @@ pub struct ThreadState {
     pub plan: yh_core::plan::Plan,
     /// The row Find is on, by its number.
     pub find_hit: Option<i64>,
+    /// What Find looks for while open (folded: no case, no accents); None draws no marks.
+    pub find_query: Option<String>,
     /// Requests waiting for you, oldest first: parallel sub-agents can each ask at once. The
     /// composer shows the first; each is answered by its own request id.
     pub permissions: Vec<Permission>,
@@ -382,6 +384,7 @@ impl ThreadState {
             unread: false,
             plan: Default::default(),
             find_hit: None,
+            find_query: None,
             permissions: vec![],
             elicitations: vec![],
             sign_in: None,
@@ -816,14 +819,16 @@ impl ThreadState {
         positions.iter().filter_map(|p| self.index(*p).map(|ix| &self.items[ix]))
     }
 
-    /// Rows whose text, tool input or result has `query` (lower case), oldest first, by number.
+    /// Rows whose text, tool input or result has `query` (`yh_core::find::query`: case and
+    /// accents don't count), oldest first, by number.
     pub fn find(&self, query: &str) -> Vec<i64> {
+        use yh_core::find::contains;
         self.items
             .iter()
             .filter(|item| {
                 item.entries.iter().any(|e| {
                     let b = e.borrow();
-                    let has = |s: &str| s.to_lowercase().contains(query);
+                    let has = |s: &str| contains(s, query);
                     has(&b.data.text) || b.data.tool_input.as_deref().is_some_and(has) || b.data.tool_result.as_deref().is_some_and(has)
                 })
             })
@@ -831,10 +836,43 @@ impl ThreadState {
             .collect()
     }
 
-    /// Find moves to a row: it's shown and marked.
+    /// What Find looks for, while it's open: the rows draw its matches marked. Nothing is
+    /// measured again (a mark is a background); the rows on screen are drawn again with the
+    /// thread's notify, the list drawing what's in view each frame.
+    pub fn set_find_query(&mut self, query: Option<String>) {
+        self.find_query = query.filter(|q| !q.is_empty());
+    }
+
+    /// Find moves to a row: what's folded over it opens (its turn, its work row, the step whose
+    /// input or output has the match), and it's shown and marked.
     pub fn show_hit(&mut self, pos: Option<i64>) {
         let old = self.find_hit;
         self.find_hit = pos;
+        if let (Some(p), Some(ix)) = (pos, pos.and_then(|p| self.index(p))) {
+            // A finished turn folded away: opened by its first folded row.
+            if self.fold_at(ix) == Fold::Hidden {
+                if let Some(turn) = self.turns.iter().find(|t| t.items.contains(&p)) {
+                    self.open_turns.insert(turn.items[0]);
+                    self.refresh_folds();
+                }
+            }
+            if let Some(query) = self.find_query.clone() {
+                let item = &mut self.items[ix];
+                if item.ty == ItemType::Work && item.entries.len() > 1 && !item.open {
+                    item.open = true;
+                }
+                for e in &item.entries {
+                    let mut b = e.borrow_mut();
+                    let hidden = b.data.tool_input.as_deref().is_some_and(|s| yh_core::find::contains(s, &query))
+                        || b.data.tool_result.as_deref().is_some_and(|s| yh_core::find::contains(s, &query))
+                        || (b.data.kind == Kind::Thinking && yh_core::find::contains(&b.data.text, &query));
+                    if hidden && !b.open {
+                        b.open = true;
+                        b.version += 1;
+                    }
+                }
+            }
+        }
         for p in [old, pos].into_iter().flatten() {
             self.touch_pos(p);
         }
