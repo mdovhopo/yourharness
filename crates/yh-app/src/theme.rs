@@ -1,4 +1,4 @@
-//! The web POC's palette (web/ui/src/styles.css), light and dark.
+//! The app's palette, light and dark.
 
 use gpui_kit::component::{Theme as ComponentTheme, ThemeMode};
 use gpui_kit::{rgb, rgba, App, Global, Hsla, Window, WindowAppearance};

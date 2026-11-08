@@ -1,5 +1,5 @@
-//! A `claude` process per thread that's been talked to, speaking stream-json as HarnessCore's
-//! `ClaudeSession` does (same arguments, permission prompts as `control_request`s). Its output
+//! A `claude` process per thread that's been talked to, speaking stream-json
+//! (permission prompts come as `control_request`s). Its output
 //! is parsed on a reader thread into `Event`s; the UI only takes what's ready, once per wakeup.
 
 use crate::history::tool_result_text;

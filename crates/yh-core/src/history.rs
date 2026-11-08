@@ -1,5 +1,5 @@
-//! Claude Code's session files (`~/.claude/projects/<folder>/<session>.jsonl`), read the way
-//! HarnessCore's `ClaudeSessionArchive` reads them: the live branch only (the chain back from
+//! Claude Code's session files (`~/.claude/projects/<folder>/<session>.jsonl`), read for
+//! their live branch only (the chain back from
 //! the last message, plus tool results hanging off it), CLI bookkeeping skipped.
 
 use crate::library::{head, EntryData, Kind, TOOL_TEXT_LIMIT};

@@ -1,4 +1,4 @@
-//! One kind of row per item type, as web/ui/src/Rows.tsx. The list asks for a row only while
+//! One kind of row per item type. The list asks for a row only while
 //! it's on screen (or about to be), and measures it again only when it was spliced.
 
 use yh_core::markdown::{self, MdBlock, Span, Styled as Text};

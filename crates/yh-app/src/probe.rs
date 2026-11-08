@@ -1,7 +1,6 @@
 #![allow(deprecated)]
-//! The performance run (`YH_PERF=<folder>`), the twin of web/ui/src/probe.ts and the native
-//! app's PerfProbe: the same phases on the same threads ("Huge …" in the extreme preset) under
-//! the same fake `claude`, through the paths a person takes (real wheel, click and key events
+//! The performance run (`YH_PERF=<folder>`): fixed phases on the
+//! `extreme` preset's "Huge …" threads under a fake `claude`, through the paths a person takes (real wheel, click and key events
 //! sent to the NSWindow). Frames are timed at the display link: a callback per vsync, run on
 //! the main thread, so a late one is a frame where the app couldn't show what changed.
 

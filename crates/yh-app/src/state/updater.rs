@@ -2,7 +2,7 @@
 //! and every six hours, downloads it when you ask, checks it and puts the new app next to
 //! this one; Restart swaps them. The sidebar's footer says when there's one.
 //!
-//! Builds that aren't releases (`.next` until the switch, `.dev`) never look on GitHub: a
+//! Builds that aren't releases (`.next`, `.dev`) never look on GitHub: a
 //! release there would replace them with the main app. `YH_UPDATE_FEED` makes them look at a
 //! file instead, for testing the whole flow; `YH_UPDATE_DOWNLOAD=1` then downloads what it
 //! finds and `YH_UPDATE_RESTART=1` restarts into it, printing each step.

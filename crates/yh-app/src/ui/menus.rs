@@ -33,7 +33,7 @@ impl MenuState {
     }
 }
 
-/// Development builds (`.next` until the switch, `.dev`, or not a bundle) get a Debug menu.
+/// Development builds (`.next`, `.dev`, or not a bundle) get a Debug menu.
 pub fn is_development() -> bool {
     let exe = std::env::current_exe().ok();
     let bundle = exe.as_ref().and_then(|p| p.ancestors().nth(3).map(|a| a.to_path_buf())).filter(|b| b.extension().is_some_and(|e| e == "app"));
