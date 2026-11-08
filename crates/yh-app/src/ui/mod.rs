@@ -24,6 +24,7 @@ pub mod spotlight;
 pub mod steps;
 pub mod state_transfer;
 pub mod transcript;
+pub mod updates;
 pub mod usage;
 pub mod working;
 pub mod thread_toolbar;

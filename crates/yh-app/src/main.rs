@@ -894,6 +894,70 @@ fn main() {
                 }
             });
         }
+        // `YH_THREAD_ACTIONS=<a>,<b>,…`: what the sidebar and the keyboard do, a second apart after
+        // `YH_DRAFT_DELAY`, on the open thread, printing `ACTION <step>: <the open thread>` after
+        // each: `settle`, `unsettle:<n>` (the n-th settled), `delete`, `pin`, `unpin`, `undo` (⌘Z
+        // outside a text field), `new` (⌘N), `memory` (⇧⌘M), `project` (its page), `add:<folder>`
+        // (Add Project), `next`, `inspector` (⌥⌘0), `close` (the window's close button: the quit
+        // question), `settings` (⌘,).
+        if let Some(steps) = env("YH_THREAD_ACTIONS") {
+            let delay: f64 = env("YH_DRAFT_DELAY").and_then(|v| v.parse().ok()).unwrap_or(1.0);
+            let (workspace, root) = (workspace.clone(), root.clone());
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(Duration::from_secs_f64(delay)).await;
+                for step in steps.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    let step = step.to_string();
+                    let _ = window.update(cx, |_, window, cx| {
+                        let selected = workspace.read(cx).selected.clone().unwrap_or_default();
+                        match step.split_once(':').map_or((step.as_str(), ""), |(a, b)| (a, b)) {
+                            ("settle", _) => workspace.update(cx, |ws, cx| ws.toggle_settled(&selected, cx)),
+                            ("unsettle", n) => {
+                                let n: usize = n.parse().unwrap_or(0);
+                                let id = workspace.read(cx).threads.iter().filter(|t| t.read(cx).meta.settled_at.is_some()).nth(n).map(|t| t.read(cx).id().to_string());
+                                if let Some(id) = id {
+                                    workspace.update(cx, |ws, cx| ws.toggle_settled(&id, cx));
+                                }
+                            }
+                            ("delete", _) => workspace.update(cx, |ws, cx| ws.delete(&selected, cx)),
+                            ("pin", _) | ("unpin", _) => workspace.update(cx, |ws, cx| ws.toggle_pin(&selected, cx)),
+                            ("undo", _) => window.dispatch_action(Box::new(ui::root::UndoThreadAction), cx),
+                            ("new", _) => window.dispatch_action(Box::new(NewThread), cx),
+                            ("memory", _) => window.dispatch_action(Box::new(OpenMemory), cx),
+                            ("project", _) => {
+                                let p = workspace.read(cx).selected_thread().map(|t| t.read(cx).meta.project_id.clone());
+                                if let Some(p) = p {
+                                    workspace.update(cx, |ws, cx| ws.open_project(&p, cx));
+                                }
+                            }
+                            ("add", folder) => {
+                                let sidebar = root.read(cx).sidebar.clone();
+                                sidebar.update(cx, |s, cx| s.add_project_at(folder, cx));
+                            }
+                            ("next", _) => window.dispatch_action(Box::new(NextThread), cx),
+                            ("inspector", _) => window.dispatch_action(Box::new(ToggleInspector), cx),
+                            ("settings", _) => window.dispatch_action(Box::new(OpenSettings), cx),
+                            ("close", _) => cx.defer(ui::jobs::quit),
+                            (other, _) => eprintln!("ACTION unknown {other}"),
+                        }
+                    });
+                    cx.background_executor().timer(Duration::from_millis(400)).await;
+                    let _ = cx.update(|cx| {
+                        let ws = workspace.read(cx);
+                        let open = match &ws.page {
+                            Some(state::workspace::Page::Memory(p)) => format!("Memory of {}", ws.project(p).map(|p| p.name.clone()).unwrap_or_default()),
+                            Some(state::workspace::Page::Project(p)) => format!("project page of {}", ws.project(p).map(|p| p.name.clone()).unwrap_or_default()),
+                            Some(state::workspace::Page::Usage) => "Usage".into(),
+                            None => ws.selected_thread().map(|t| format!("“{}” in {}", t.read(cx).title, ws.project(&t.read(cx).meta.project_id).map(|p| p.name.clone()).unwrap_or_default())).unwrap_or_else(|| "nothing".into()),
+                        };
+                        let order: Vec<String> = ws.visible_thread_ids(cx).iter().filter_map(|id| ws.thread(id).map(|t| format!("{}{}", if t.read(cx).meta.pinned { "📌" } else { "" }, t.read(cx).title))).collect();
+                        eprintln!("ACTION {step}: {open} · {} threads, {} settled · order: {}", ws.threads.len(), ws.threads.iter().filter(|t| t.read(cx).meta.settled_at.is_some()).count(), order.join(" | "));
+                    });
+                    cx.background_executor().timer(Duration::from_millis(600)).await;
+                }
+                eprintln!("ACTION done");
+            })
+            .detach();
+        }
         // `YH_PREVIEW_MEDIA=1`: the selected thread's last pictures in Quick Look (ui::rows).
         if env("YH_PREVIEW_MEDIA").as_deref() == Some("1") {
             let workspace = workspace.clone();
@@ -929,7 +993,23 @@ fn main() {
                     cx.background_executor().timer(Duration::from_secs_f64((delay - waited).max(0.0))).await;
                     waited = *delay;
                     let file = if delays.len() > 1 { format!("{}-{delay}.png", file.trim_end_matches(".png")) } else { file.clone() };
-                    let _ = window.update(cx, |_, window, _| snapshot(window, &file));
+                    // `YH_SNAPSHOT_WINDOW=<title>`: another window (Settings, a browser window) instead.
+                    match env("YH_SNAPSHOT_WINDOW") {
+                        Some(title) => {
+                            let _ = cx.update(|cx| {
+                                for w in cx.windows() {
+                                    let _ = w.update(cx, |_, window, _| {
+                                        if window.window_title().starts_with(title.as_str()) {
+                                            snapshot(window, &file);
+                                        }
+                                    });
+                                }
+                            });
+                        }
+                        None => {
+                            let _ = window.update(cx, |_, window, _| snapshot(window, &file));
+                        }
+                    }
                 }
                 if quit {
                     cx.background_executor().timer(Duration::from_millis(300)).await;

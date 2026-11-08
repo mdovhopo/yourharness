@@ -11,7 +11,7 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{Disableable, Icon, IconName, Sizable, WindowExt};
+use gpui_kit::component::{Disableable, Icon, IconName, Sizable};
 use gpui_kit::{div, prelude::*, px, AnyElement, App, Context, Entity, FontWeight, IntoElement, RenderOnce, SharedString, Window};
 use serde_json::{json, Value};
 use yh_core::agents::{Account, Status};
@@ -28,10 +28,11 @@ fn picker(id: impl Into<SharedString>, current: String, options: Vec<(String, St
     })
 }
 
-/// What Settings opens besides itself: the MCP sheet and the updater (set by the window).
+/// What Settings shows from the main window: the updater and its release notes.
 pub struct SettingsLinks {
-    pub mcp: Entity<crate::ui::mcp::McpSheet>,
     pub updater: Entity<crate::state::updater::Updater>,
+    /// The release notes view the popovers show.
+    pub notes: Entity<crate::ui::updates::ReleaseNotesView>,
 }
 
 impl gpui_kit::Global for SettingsLinks {}
@@ -69,6 +70,12 @@ pub struct SettingsView {
     tab: Tab,
     found: Found,
     title_prompt: Entity<TextareaState>,
+    /// Settings → MCP: the servers everywhere, the `/mcp` sheet's list drawn in place.
+    /// Made when the tab shows and let go when it doesn't, so it only asks while it's seen.
+    mcp: Option<Entity<crate::ui::mcp::McpSheet>>,
+    /// "Copied" for a moment after Copy in the sign-in hint.
+    copied: bool,
+    _watch: Vec<gpui_kit::Subscription>,
 }
 
 impl SettingsView {
@@ -76,9 +83,43 @@ impl SettingsView {
         let rules = workspace.read(cx).title_prompt().unwrap_or_else(|| yh_core::titles::DEFAULT_RULES.to_string());
         let title_prompt = cx.new(|cx| TextareaState::new(window, cx).default_value(rules));
         crate::platform::refresh_notification_status();
-        let mut view = SettingsView { workspace, tab, found: Found::default(), title_prompt };
+        let mut watch = vec![cx.observe(&workspace, |_, _, cx| cx.notify())];
+        if let Some(u) = cx.try_global::<SettingsLinks>().map(|l| l.updater.clone()) {
+            watch.push(cx.observe(&u, |_, _, cx| cx.notify()));
+        }
+        let mut view = SettingsView { workspace, tab, found: Found::default(), title_prompt, mcp: None, copied: false, _watch: watch };
         view.detect(cx);
+        view.tab_shown(window, cx);
         view
+    }
+
+    /// What a tab needs when it shows: MCP's servers asked for, Releases' notes read.
+    fn tab_shown(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.tab {
+            Tab::Mcp => {
+                if self.mcp.is_none() {
+                    let ws = self.workspace.clone();
+                    self.mcp = Some(cx.new(|cx| crate::ui::mcp::McpSheet::new_embedded(ws, window, cx)));
+                }
+            }
+            Tab::Releases => {
+                if let Some(u) = cx.try_global::<SettingsLinks>().map(|l| l.updater.clone()) {
+                    u.update(cx, |u, cx| u.load_notes(cx));
+                }
+            }
+            _ => {}
+        }
+        if self.tab != Tab::Mcp {
+            self.mcp = None;
+        }
+    }
+
+    pub fn set_tab(&mut self, tab: Tab, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tab != tab {
+            self.tab = tab;
+            self.tab_shown(window, cx);
+            cx.notify();
+        }
     }
 
     /// Looks for the CLIs and asks `claude` who's signed in, aside.
@@ -94,6 +135,7 @@ impl SettingsView {
                 let chosen = (cli.id == "claude").then(|| chosen.clone()).flatten();
                 statuses.push((cli.id, yh_core::agents::probe(cli.executable, chosen.as_deref())));
             }
+            statuses.push(("git", yh_core::agents::probe("git", None)));
             statuses.push(("gh", yh_core::agents::probe("gh", None)));
             statuses.push(("glab", yh_core::agents::probe("glab", None)));
             let account = statuses.iter().find(|(id, s)| *id == "claude" && s.is_ready()).and_then(|(_, s)| yh_core::agents::account(s.path.as_ref()?));
@@ -199,17 +241,42 @@ impl SettingsView {
         let account: Group = match &self.found.account {
             Some(a) if a.logged_in => section("Account")
                 .when_some(a.email.clone(), |s, e| s.child(row("Signed in as", div().text_color(theme.secondary).child(e))))
-                .when_some(a.plan_name(), |s, p| s.child(row("Plan", div().font_weight(FontWeight::MEDIUM).child(p))))
+                .when_some(a.plan_name(), |s, p| s.child(row("Plan", div().px(px(8.)).rounded_full().bg(theme.accent.opacity(0.15)).font_weight(FontWeight::MEDIUM).child(p))))
+                .when_some(a.org_name.clone(), |s, o| s.child(row("Organization", div().text_color(theme.secondary).child(o))))
                 .when_some(a.sign_in_method(), |s, m| s.child(row("Signed in with", div().text_color(theme.secondary).child(m))))
-                .when_some(a.org_name.clone(), |s, o| s.child(row("Organization", div().text_color(theme.secondary).child(o)))),
-            Some(_) => section("Account").footer("Not signed in. Run `claude` in Terminal and sign in, then Detect Again."),
+                .child(self.usage_bars(theme, cx)),
+            Some(_) => section("Account").child(self.sign_in_hint(theme, cx)),
+            None if claude.as_ref().is_some_and(Status::is_ready) && self.found.refreshing => section("Account").child(row("Account", div().text_color(theme.secondary).child("Checking…"))),
+            None if claude.as_ref().is_some_and(Status::is_ready) => section("Account").child(row("Account", div().text_color(theme.secondary).child("Couldn't read sign-in status"))),
             None => Group::untitled(),
         };
         let account = (!account.is_empty()).then_some(account);
-        let tool = |id: &str, name: &'static str| row(name, div().text_color(theme.secondary).child(self.status(id).map_or_else(checking, Status::describe)));
+        // Who `gh` and `glab` are signed in as, from the last look at a project's PRs.
+        let accounts: std::collections::BTreeMap<yh_core::git::Forge, String> = {
+            let ws = self.workspace.read(cx);
+            ws.scans.values().flat_map(|w| w.pulls.accounts.iter().map(|(f, a)| (*f, a.clone()))).collect()
+        };
+        let tool = |id: &'static str, name: &'static str, url: &'static str, account: Option<String>| {
+            let status = self.status(id);
+            let missing = status.is_some_and(|s| s.path.is_none() && !s.is_ready());
+            row(
+                name,
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .min_w_0()
+                    .when_some(account.clone(), |d, a| {
+                        d.child(div().id(SharedString::from(format!("{id}-account"))).px(px(6.)).rounded(px(radius::SMALL)).bg(theme.accent.opacity(0.15)).text_color(theme.accent).text_size(px(text::CAPTION)).child(a))
+                    })
+                    .child(div().text_color(theme.secondary).child(status.map_or_else(checking, Status::describe)))
+                    .when(missing, |d| d.child(Button::new(SharedString::from(format!("{id}-get"))).small().ghost().label("Get").on_click(move |_, _, cx| cx.open_url(url)))),
+            )
+        };
         let git = section("Git & Code Hosting")
-            .child(tool("gh", "GitHub CLI (gh)"))
-            .child(tool("glab", "GitLab CLI (glab)"))
+            .child(tool("git", "Git", "https://git-scm.com/download/mac", None))
+            .child(tool("gh", "GitHub CLI (gh)", "https://cli.github.com", accounts.get(&yh_core::git::Forge::GitHub).cloned()))
+            .child(tool("glab", "GitLab CLI (glab)", "https://gitlab.com/gitlab-org/cli", accounts.get(&yh_core::git::Forge::GitLab).cloned()))
             .footer("Pull requests come from `gh` and `glab`, signed in as you. YourHarness never sees their tokens.");
         let mut others = section("Other Agents");
         for cli in yh_core::agents::ALL.iter().filter(|c| !c.supported) {
@@ -245,6 +312,61 @@ impl SettingsView {
             .into_any_element()
     }
 
+    /// Not signed in: how to, in Terminal (`claude auth login`), with Copy and Open Terminal.
+    fn sign_in_hint(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        const COMMAND: &str = "claude auth login";
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(space::S))
+            .px(px(space::M))
+            .py(px(space::S + 2.))
+            .child(div().flex().items_center().gap(px(6.)).text_color(theme.warning).child(Icon::new(IconName::CircleUser).size(px(14.)).text_color(theme.warning)).child("Not signed in"))
+            .child(div().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child("Sign in once in Terminal and YourHarness uses that login. It never sees your credentials."))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S))
+                    .child(div().px(px(8.)).py(px(3.)).rounded(px(radius::SMALL + 1.)).bg(theme.selected).font_family(MONO).text_size(px(text::CODE)).child(COMMAND))
+                    .child(Button::new("signin-copy").small().outline().label(if self.copied { "Copied" } else { "Copy" }).on_click(cx.listener(|this, _, _, cx| {
+                        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(COMMAND.to_string()));
+                        this.copied = true;
+                        cx.notify();
+                    })))
+                    .child(Button::new("signin-terminal").small().outline().label("Open Terminal").on_click(|_, _, _| {
+                        let _ = std::process::Command::new("open").args(["-a", "Terminal"]).spawn();
+                    })),
+            )
+            .into_any_element()
+    }
+
+    /// The account's usage limits, as the sidebar's meters read them.
+    fn usage_bars(&self, theme: &Theme, cx: &App) -> AnyElement {
+        let ws = self.workspace.read(cx);
+        let meters: Vec<(String, yh_core::limits::Window)> = yh_core::limits::meters(ws.limits.as_ref()).into_iter().filter_map(|(n, w)| w.map(|w| (n, w))).collect();
+        if meters.is_empty() {
+            return row("Usage", div().text_color(theme.secondary).child("Appears after your first message"));
+        }
+        let now = yh_core::library::now_ms() / 1000.;
+        let mut list = div().flex().flex_col().gap(px(space::S + 2.)).px(px(space::M)).py(px(space::S + 2.));
+        for (name, w) in meters {
+            let used = yh_core::limits::utilization(&w, now);
+            let tint = if used < 0.7 { theme.accent } else if used < 0.9 { theme.warning } else { theme.error };
+            let reset = w.resets_at.filter(|at| *at > now).map(|at| format!("Resets {}", yh_core::clock::relative(at, now))).unwrap_or_default();
+            list = list.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
+                    .child(div().flex().items_center().child(div().flex_1().child(yh_core::limits::title(&name))).child(div().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child(format!("{}% used", (used * 100.).round() as i64))))
+                    .child(div().h(px(6.)).rounded_full().bg(theme.selected).child(div().h_full().rounded_full().min_w(px(6.)).w(gpui_kit::relative(used as f32)).bg(tint)))
+                    .when(!reset.is_empty(), |d| d.child(div().text_size(px(text::CAPTION)).text_color(theme.tertiary).child(reset))),
+            );
+        }
+        list.into_any_element()
+    }
+
     fn general(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let ws = self.workspace.read(cx);
         let lib = ws.library.clone();
@@ -275,6 +397,21 @@ impl SettingsView {
         let titles_on = titles.as_ref().is_none_or(|t| t.get("provider").is_some_and(|p| !p.is_null()));
         let title_model = titles.as_ref().and_then(|t| t["model"].as_str().map(str::to_string)).unwrap_or_default();
         let home = ws.home_project().and_then(|id| ws.project(&id).map(|p| p.path.clone())).unwrap_or_default();
+        let default_home = ws.default_home_folder();
+        let home_moved = home != default_home;
+        let title_error = ws.title_error.clone();
+        let mut title_models: Vec<(String, String)> = vec![("".into(), "Default · Haiku".into())];
+        title_models.extend(ws.models.iter().filter(|m| m.value != "default" && m.value != "haiku").map(|m| (m.value.clone(), m.display_name.clone())));
+        if title_models.len() == 1 {
+            title_models.extend([("haiku".to_string(), "Haiku".to_string()), ("sonnet".to_string(), "Sonnet".to_string())]);
+        }
+        let mut agent_models: Vec<(String, String)> = vec![("".into(), "Same as new threads".into())];
+        agent_models.extend(ws.models.iter().map(|m| (m.value.clone(), m.display_name.clone())));
+        let agent_model = lib.setting("memoryAgentModel").and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
+        let agent_effort = lib.setting("memoryAgentEffort").and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
+        let memory_on = lib.setting("memoryEnabled").and_then(|v| v.as_bool()).unwrap_or(true);
+        let config = yh_core::history::config_directory();
+        let off_everywhere = yh_core::memory_archive::claude_code::setting("/nonexistent-folder", &config).off_everywhere;
         let data_dir = ws.data_dir.clone();
         let (wsa, wsb, wsc, wsd, wse) = (self.workspace.clone(), self.workspace.clone(), self.workspace.clone(), self.workspace.clone(), self.workspace.clone());
         let (k2, k3, k4) = (wsa.clone(), wsa.clone(), wsa);
@@ -312,7 +449,8 @@ impl SettingsView {
                                 .text_color(theme.warning)
                                 .text_size(px(text::FOOTNOTE))
                                 .child(Icon::new(IconName::TriangleAlert).size(px(14.)).text_color(theme.warning))
-                                .child("Notifications are off for YourHarness in System Settings."),
+                                .child(div().flex_1().child("Notifications are off for YourHarness in System Settings."))
+                                .child(Button::new("notifications-settings").small().outline().label("Open System Settings").on_click(|_, _, _| crate::platform::open_notification_settings())),
                         )
                     })
                     .footer("Only for threads you aren't looking at: a turn that finishes while YourHarness is in the background, and Claude asking for approval, an answer or a plan review. The Dock icon counts threads waiting for you."),
@@ -353,7 +491,7 @@ impl SettingsView {
             .child(
                 section("New Thread Defaults")
                     .child(row("Model", picker("settings-model", s("model"), models, set_default("model"))))
-                    .child(row("Reasoning effort", picker("settings-effort", s("effort"), efforts, set_default("effort"))))
+                    .child(row("Reasoning effort", picker("settings-effort", s("effort"), efforts.clone(), set_default("effort"))))
                     .child(row("Permissions for new projects", picker("settings-mode", if s("permissionMode").is_empty() { "auto".into() } else { s("permissionMode") }, modes, set_default("permissionMode"))))
                     .footer("Each thread can override these from the composer. Threads that haven't overridden them follow these defaults."),
             )
@@ -380,6 +518,11 @@ impl SettingsView {
                             .gap(px(6.))
                             .min_w_0()
                             .child(div().text_color(theme.secondary).font_family(MONO).text_size(px(text::FOOTNOTE)).truncate().child(home))
+                            .when(home_moved, |d| {
+                                let ws = self.workspace.clone();
+                                let to = default_home.clone();
+                                d.child(Button::new("home-reset").small().ghost().label("Reset").tooltip("Back to your home folder").on_click(move |_, _, cx| ws.update(cx, |ws, cx| ws.set_home_folder(&to, cx))))
+                            })
                             .child(Button::new("home-change").small().outline().label("Change…").on_click(move |_, _, cx| {
                                 let paths = cx.prompt_for_paths(gpui_kit::PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some("Use as Home".into()) });
                                 let ws = wsc.clone();
@@ -412,7 +555,7 @@ impl SettingsView {
                             picker(
                                 "titles-model",
                                 title_model,
-                                vec![("".into(), "Default · Haiku".into()), ("haiku".into(), "Haiku".into()), ("sonnet".into(), "Sonnet".into())],
+                                title_models,
                                 move |v, _, cx| {
                                     let lib = ws.read(cx).library.clone();
                                     let mut t = lib.setting("titleGeneration").filter(Value::is_object).unwrap_or(json!({"provider": "claude"}));
@@ -462,12 +605,69 @@ impl SettingsView {
                                 wb.read(cx).library.set_setting("titlePrompt", &if keep { Value::Null } else { Value::from(text) });
                             }))
                     })
-                    .child(self.toggle("agentUpdatesTitles", "Update titles when the subject changes", cx)),
+                    .child(self.toggle("agentUpdatesTitles", "Update titles when the subject changes", cx))
+                    .when_some(title_error.filter(|_| titles_on), |s, e| {
+                        s.inline(div().flex().items_center().gap(px(6.)).px(px(space::M)).pb(px(space::S + 2.)).text_size(px(text::FOOTNOTE)).text_color(theme.warning).child(Icon::new(IconName::TriangleAlert).size(px(13.)).text_color(theme.warning)).child(format!("Last title failed: {e}")))
+                    }),
             )
             .child(
                 section("Memory")
                     .child(self.toggle("memoryEnabled", "Give agents the workspace's memory", cx))
                     .child(self.toggle("claudeCodeMemoryOff", "Turn off Claude Code's own memory files", cx))
+                    .child(row(
+                        "Claude Code's memory outside the app",
+                        if off_everywhere {
+                            div().text_color(theme.secondary).child("Off for every folder").into_any_element()
+                        } else {
+                            let settings_file = config.join("settings.json");
+                            let shown = match std::env::var("HOME") {
+                                Ok(h) if !h.is_empty() => settings_file.to_string_lossy().replacen(&h, "~", 1),
+                                _ => settings_file.to_string_lossy().into_owned(),
+                            };
+                            let ws = self.workspace.clone();
+                            Button::new("memory-off-everywhere").small().outline().label("Turn Off Everywhere…").disabled(!memory_on).on_click(move |_, window, cx| {
+                                let detail = format!("Sets autoMemoryEnabled to false in your Claude Code settings ({shown}), so claude keeps no memory files of its own in any folder, in YourHarness or in Terminal. YourHarness keeps the memory. Its existing files are left as they are; import them from a project's Memory page.");
+                                let title = "Turn off Claude Code's memory everywhere?";
+                                let (file, ws) = (settings_file.clone(), ws.clone());
+                                let turn_off = move |cx: &mut App| {
+                                    match yh_core::memory_archive::claude_code::turn_off(&file) {
+                                        Ok(_) => eprintln!("MEMORY Claude Code's memory off everywhere"),
+                                        Err(e) => eprintln!("MEMORY couldn't turn off Claude Code's memory: {e}"),
+                                    }
+                                    ws.update(cx, |ws, cx| ws.memory_changed(cx));
+                                };
+                                if let Ok(answer) = std::env::var("YH_MEMORY_OFF_ANSWER") {
+                                    eprintln!("MEMORY asks: {title} / {detail} -> {answer}");
+                                    if answer == "ok" {
+                                        turn_off(cx);
+                                    }
+                                    return;
+                                }
+                                let answer = window.prompt(gpui_kit::PromptLevel::Warning, title, Some(&detail), &["Turn Off", "Cancel"], cx);
+                                cx.spawn(async move |cx| {
+                                    if answer.await == Ok(0) {
+                                        let _ = cx.update(turn_off);
+                                    }
+                                })
+                                .detach();
+                            })
+                            .into_any_element()
+                        },
+                    ))
+                    .child(row(
+                        "Importer and Reconciler",
+                        div()
+                            .flex()
+                            .gap(px(space::XS + 2.))
+                            .child(picker("memory-agent-model", agent_model, agent_models, {
+                                let lib = lib.clone();
+                                move |v, _, _| lib.set_setting("memoryAgentModel", &if v.is_empty() { Value::Null } else { Value::from(v) })
+                            }))
+                            .child(picker("memory-agent-effort", agent_effort, efforts.clone(), {
+                                let lib = lib.clone();
+                                move |v, _, _| lib.set_setting("memoryAgentEffort", &if v.is_empty() { Value::Null } else { Value::from(v) })
+                            })),
+                    ))
                     .footer("Each project has its own memory, which every thread there starts with: an index of what's remembered and tools to search, read and save. With the second switch on, Claude Code's memory files are off in YourHarness's threads, so there's one memory, not two."),
             )
             .child(
@@ -508,88 +708,57 @@ impl SettingsView {
             .into_any_element()
     }
 
-    fn mcp(&self, _theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let mcp = cx.try_global::<SettingsLinks>().map(|l| l.mcp.clone());
-        section("MCP Servers")
-            .child(row(
-                "Servers that apply in every project",
-                Button::new("settings-mcp").small().outline().label("MCP Servers…").on_click(move |_, window, cx| {
-                    window.close_dialog(cx);
-                    if let Some(m) = mcp.clone() {
-                        m.update(cx, |m, cx| m.show_everywhere(cx));
-                    }
-                }),
-            ))
-            .footer("Your servers for every project, and claude.ai connectors: sign in, add and remove. A project's own servers are in its threads' /mcp.")
+    fn mcp(&self, theme: &Theme, _cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(space::S))
+            .children(self.mcp.clone())
+            .child(div().px(px(space::XS)).text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child("Your servers for every project, and claude.ai connectors: sign in, add and remove. A project's own servers are in its threads' /mcp."))
             .into_any_element()
     }
 
     fn releases(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let updater = cx.try_global::<SettingsLinks>().map(|l| l.updater.clone());
-        // The bundle's version (what releases and the updater go by), not the crate's.
-        let version = updater.as_ref().and_then(|u| u.read(cx).current.as_ref().map(|v| v.to_string())).unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
-        let version_line: String = match updater.as_ref().map(|u| u.read(cx).phase.clone()) {
-            Some(crate::state::updater::Phase::UpToDate) => format!("Version {version} · up to date"),
-            Some(crate::state::updater::Phase::Available(_)) => "A new version is out (see the sidebar)".into(),
-            Some(crate::state::updater::Phase::Checking) => "Checking…".into(),
-            _ => format!("This is version {version}"),
-        };
-        let mut notes = section("What's New");
-        for (version, body) in changelog(3) {
-            let mut block = div().flex().flex_col().gap(px(space::XS)).px(px(space::M)).py(px(space::M - 2.)).child(div().font_weight(FontWeight::SEMIBOLD).child(version));
-            for line in body {
-                let heading = line.starts_with("###");
-                let item = line.trim_start().starts_with("- ");
-                let line = line.trim_start_matches("### ").trim_start().trim_start_matches("- ").to_string();
-                block = block.child(if heading {
-                    div().pt(px(space::XS)).text_size(px(text::FOOTNOTE)).font_weight(FontWeight::SEMIBOLD).text_color(theme.secondary).child(line).into_any_element()
-                } else {
-                    div()
-                        .flex()
-                        .gap(px(space::S))
-                        .text_size(px(text::FOOTNOTE))
-                        .text_color(theme.secondary)
-                        .child(div().flex_none().w(px(6.)).child(if item { "•" } else { "" }))
-                        .child(div().flex_1().min_w_0().child(line))
-                        .into_any_element()
-                });
-            }
-            notes = notes.child(block);
-        }
+        let Some(links) = cx.try_global::<SettingsLinks>() else { return div().into_any_element() };
+        let (updater, notes) = (links.updater.clone(), links.notes.clone());
+        let u = updater.read(cx);
+        let (label, build) = (u.version_label(), u.build.clone());
         div()
             .flex()
             .flex_col()
-            .gap(px(space::L + 4.))
-            .child(section("YourHarness").child(row_owned(
-                version_line,
-                Button::new("settings-updates").small().outline().label("Check for Updates").on_click(move |_, _, cx| {
-                    if let Some(u) = updater.clone() {
-                        u.update(cx, |u, cx| u.check(cx));
-                    }
-                }),
-            )))
-            .child(notes)
+            .gap(px(space::L))
+            .child(
+                Group::untitled()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(space::M))
+                            .px(px(space::M))
+                            .py(px(space::M))
+                            .child(div().size(px(44.)).rounded(px(radius::LARGE - 2.)).bg(theme.accent_soft).flex().items_center().justify_center().child(icons::bot().size(px(24.)).text_color(theme.accent)))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .child(div().text_size(px(text::TITLE)).font_weight(FontWeight::SEMIBOLD).child(format!("YourHarness {label}")))
+                                    .when_some(build, |d, b| d.child(div().text_size(px(text::CAPTION)).text_color(theme.secondary).child(format!("Build {b}")))),
+                            ),
+                    )
+                    .child(div().px(px(space::M)).py(px(space::S)).child(crate::ui::updates::status(&updater, &self.workspace, &notes, theme, cx)))
+                    .footer("Looks for a new release on GitHub at launch and every few hours. Updates download only when you ask, and apply when you restart."),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .pt(px(space::XS))
+                    .child(div().flex_1().font_weight(FontWeight::SEMIBOLD).child("Release Notes"))
+                    .child(div().id("settings-all-releases").text_color(theme.accent).text_size(px(text::FOOTNOTE)).child("All Releases on GitHub").on_click(|_, _, cx| cx.open_url(yh_core::updates::RELEASES_PAGE))),
+            )
+            .child(crate::ui::updates::all_notes(&updater, theme, cx))
             .into_any_element()
     }
-}
-
-/// The newest `n` released versions in CHANGELOG.md, as (heading, lines).
-fn changelog(n: usize) -> Vec<(String, Vec<String>)> {
-    let mut out: Vec<(String, Vec<String>)> = vec![];
-    for line in include_str!("../../../../CHANGELOG.md").lines() {
-        if let Some(rest) = line.strip_prefix("## [") {
-            if rest.starts_with("Unreleased") {
-                out.push((String::new(), vec![]));
-                continue;
-            }
-            out.push((rest.replacen("] - ", " · ", 1).trim_end_matches(']').to_string(), vec![]));
-        } else if let Some((_, lines)) = out.last_mut() {
-            if !line.trim().is_empty() {
-                lines.push(line.to_string());
-            }
-        }
-    }
-    out.into_iter().filter(|(v, _)| !v.is_empty()).take(n).collect()
 }
 
 fn update_keep(ws: &Entity<Workspace>, cx: &mut App, change: impl FnOnce(&mut crate::keep_awake::Settings)) {
@@ -697,10 +866,7 @@ impl Render for SettingsView {
                 .when(!on, |d| d.hover(|s| s.bg(theme.hover)))
                 .child(icon.size(px(14.)).text_color(if on { theme.accent } else { theme.secondary }))
                 .child(label)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.tab = tab;
-                    cx.notify();
-                }))
+                .on_click(cx.listener(move |this, _, window, cx| this.set_tab(tab, window, cx)))
         };
         let body = match self.tab {
             Tab::Agents => self.agents(&theme, cx),
@@ -708,10 +874,16 @@ impl Render for SettingsView {
             Tab::Mcp => self.mcp(&theme, cx),
             Tab::Releases => self.releases(&theme, cx),
         };
+        let _ = window;
         div()
+            .size_full()
             .flex()
             .flex_col()
             .gap(px(space::L))
+            .pt(px(space::M))
+            .bg(theme.canvas)
+            .text_color(theme.text)
+            .font_family(crate::theme::UI)
             .text_size(px(text::BODY))
             .child(
                 div().flex().justify_center().child(
@@ -728,17 +900,78 @@ impl Render for SettingsView {
                         .child(tab_button("settings-tab-releases", icons::download(), "Releases", Tab::Releases, cx)),
                 ),
             )
-            // Short windows keep the whole sheet on screen: the body scrolls in what is left.
-            .child(div().id("settings-body").max_h(px((f32::from(window.viewport_size().height) - 200.).clamp(160., 560.))).overflow_y_scroll().pr(px(space::XS)).pb(px(space::XS)).child(body))
+            // The body scrolls in what the window leaves it.
+            .child(div().id("settings-body").flex_1().min_h_0().overflow_y_scroll().px(px(space::XL)).pb(px(space::XL)).child(body))
     }
 }
 
-/// Opens Settings on General.
+thread_local! {
+    /// Settings' own window, while it's open.
+    static WINDOW: std::cell::RefCell<Option<(gpui_kit::AnyWindowHandle, gpui_kit::WeakEntity<SettingsView>)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Opens Settings on General (⌘,), or brings its window forward.
 pub fn open(workspace: Entity<Workspace>, window: &mut Window, cx: &mut App) {
-    open_on(workspace, Tab::General, window, cx);
+    let _ = window;
+    open_window(workspace, None, cx);
 }
 
 pub fn open_on(workspace: Entity<Workspace>, tab: Tab, window: &mut Window, cx: &mut App) {
-    let view = cx.new(|cx| SettingsView::new(workspace, tab, window, cx));
-    window.open_dialog(cx, move |dialog, window, _| dialog.title("Settings").w(px(620f32.min(f32::from(window.viewport_size().width) - 24.))).child(view.clone()));
+    let _ = window;
+    open_window(workspace, Some(tab), cx);
+}
+
+/// Settings in a window of its own, as the Swift app's Settings scene: one at a time, brought
+/// forward (on `tab`, when given) if it's open.
+pub fn open_window(workspace: Entity<Workspace>, tab: Option<Tab>, cx: &mut App) {
+    use gpui_kit::{size, Bounds, TitlebarOptions, WindowBounds, WindowOptions};
+    let open = WINDOW.with(|w| w.borrow().clone());
+    if let Some((handle, view)) = open {
+        let shown = handle
+            .update(cx, |_, window, cx| {
+                window.activate_window();
+                if let (Some(tab), Some(v)) = (tab, view.upgrade()) {
+                    v.update(cx, |v, cx| v.set_tab(tab, window, cx));
+                }
+            })
+            .is_ok();
+        if shown {
+            return;
+        }
+    }
+    let background = std::env::var("YH_BACKGROUND").as_deref() == Ok("1");
+    let options = WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(680.), px(640.)), cx))),
+        titlebar: Some(TitlebarOptions { title: Some("Settings".into()), ..Default::default() }),
+        focus: !background,
+        show: true,
+        window_min_size: Some(size(px(560.), px(400.))),
+        ..Default::default()
+    };
+    let tab = tab.unwrap_or(Tab::General);
+    let opened = gpui_kit::open_window(options, cx, move |window, cx| {
+        if background {
+            crate::platform::order_back(window);
+        }
+        crate::theme::apply_appearance(window.appearance(), window, cx);
+        cx.new(|cx| SettingsView::new(workspace, tab, window, cx))
+    });
+    let Ok((handle, view)) = opened else { return eprintln!("SETTINGS couldn't open its window") };
+    WINDOW.with(|w| *w.borrow_mut() = Some((handle, view.downgrade())));
+    let _ = handle.update(cx, |_, window, cx| {
+        crate::theme::apply_appearance(window.appearance(), window, cx);
+        window
+            .observe_window_appearance(|window, cx| {
+                crate::theme::apply_appearance(window.appearance(), window, cx);
+                cx.refresh_windows();
+            })
+            .detach();
+        window.on_window_should_close(cx, |_, _| {
+            WINDOW.with(|w| *w.borrow_mut() = None);
+            true
+        });
+    });
+    if std::env::var("YH_DATA_DIR").is_ok() {
+        eprintln!("SETTINGS window opened");
+    }
 }

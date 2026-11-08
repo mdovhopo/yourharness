@@ -78,6 +78,8 @@ pub struct Sidebar {
     workspace: Entity<Workspace>,
     /// A new version, when there's one: said at the bottom.
     updater: Entity<crate::state::updater::Updater>,
+    /// The release notes the banner and the version popover show.
+    release_notes: Entity<crate::ui::updates::ReleaseNotesView>,
     /// Projects showing all their threads, with their Settled shelf open, and folded away.
     expanded: HashSet<String>,
     shelves: HashSet<String>,
@@ -193,6 +195,7 @@ impl Sidebar {
         })
         .detach();
         Sidebar {
+            release_notes: { let u = updater.clone(); cx.new(|cx| crate::ui::updates::ReleaseNotesView::new(u, cx)) },
             updater,
             workspace,
             expanded,
@@ -808,33 +811,9 @@ fn memory_label() -> String {
 }
 
 impl Sidebar {
-    /// A new version: download it, how far along, then Restart.
+    /// What there is to do about an update, above the limits (`ui::updates::banner`).
     fn update_row(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
-        use crate::state::updater::Phase;
-        let phase = self.updater.read(cx).phase.clone();
-        let (text, action): (String, Option<(&'static str, bool)>) = match &phase {
-            Phase::Available(r) => (format!("YourHarness {} is out", r.version), Some(("Update", false))),
-            Phase::Downloading(r, p) => (format!("Downloading {}… {:.0}%", r.version, p * 100.), None),
-            Phase::Preparing(r) => (format!("Checking {}…", r.version), None),
-            Phase::Ready(v) => (format!("{v} is ready"), Some(("Restart", true))),
-            Phase::Failed(e, Some(_)) => (e.clone(), Some(("Retry", false))),
-            _ => return None,
-        };
-        let updater = self.updater.clone();
-        Some(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .text_size(px(text::CAPTION))
-                .child(div().flex_1().min_w_0().text_color(theme.secondary).line_clamp(2).text_ellipsis().child(text))
-                .when_some(action, |d, (label, restart)| {
-                    d.child(Button::new("update-action").xsmall().primary().label(label).on_click(move |_, _, cx| {
-                        updater.update(cx, |u, cx| if restart { u.restart(cx) } else { u.download(cx) })
-                    }))
-                })
-                .into_any_element(),
-        )
+        crate::ui::updates::banner(&self.updater, &self.workspace, &self.release_notes, theme, cx)
     }
 
     /// `5h ━━━━──── 6%  2h 14m`: each limit used, and how long until it resets. The tooltip says
@@ -952,6 +931,7 @@ impl Sidebar {
                             .child(memory_label())
                             .tooltip(tooltip("This app's memory use")),
                     )
+                    .child(crate::ui::updates::version_button(&self.updater, &self.workspace, &self.release_notes, theme, cx))
                     .child(div().flex_1())
                     .child(
                         Button::new("keep-awake")

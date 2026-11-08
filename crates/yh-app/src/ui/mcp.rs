@@ -214,7 +214,6 @@ impl McpSheet {
 
     /// Settings → MCP's list, drawn inside the tab: what applies everywhere, kept current
     /// while it's alive (it stops when it's dropped). Embed it with `.child(entity)`.
-    #[allow(dead_code)] // Settings' own window embeds it (the app agent's), not yet on this branch.
     pub fn new_embedded(workspace: Entity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut sheet = McpSheet::new(workspace, window, cx);
         sheet.embedded = true;

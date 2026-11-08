@@ -177,6 +177,11 @@ pub struct Workspace {
     title_asked_at: HashMap<String, usize>,
     /// The composer's: `/rename` waiting for the CLI's new title, skills by project.
     composer: ComposerJobs,
+    /// Each thread's PRs its tool calls worked on, by how many rows it had then: for settling
+    /// threads whose PRs merged (`settle_merged_threads`).
+    merge_links: Arc<std::sync::Mutex<HashMap<String, (usize, Vec<yh_core::forge::Link>)>>>,
+    /// Why the last generated title failed, until one works.
+    pub title_error: Option<String>,
 }
 
 impl EventEmitter<WorkspaceEvent> for Workspace {}
@@ -237,6 +242,8 @@ impl Workspace {
             scanned_at: HashMap::new(),
             title_asked_at: HashMap::new(),
             composer: ComposerJobs::default(),
+            merge_links: Default::default(),
+            title_error: None,
         };
         if let Some(Value::Object(all)) = workspace.library.setting("slashCommands") {
             for (project, list) in all {
@@ -252,6 +259,21 @@ impl Workspace {
         workspace.keep_awake.configure(crate::keep_awake::Settings::from(workspace.library.setting("keepAwake")));
         let chosen = workspace.library.setting("cliPathOverrides").and_then(|o| o["claude"].as_str().map(std::path::PathBuf::from));
         yh_core::claude::set_chosen_claude(chosen);
+        // Threads whose PRs merged settle: 20 s after launch, then every five minutes (not in
+        // perf runs, which measure the transcript).
+        if std::env::var("YH_PERF").is_err() {
+            let first = std::env::var("YH_SETTLE_MERGED_AFTER").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(20.);
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(Duration::from_secs_f64(first)).await;
+                loop {
+                    if this.update(cx, |ws, cx| ws.settle_merged_threads(cx)).is_err() {
+                        break;
+                    }
+                    cx.background_executor().timer(Duration::from_secs(300)).await;
+                }
+            })
+            .detach();
+        }
         // Idle threads settle on their own: now, and every hour.
         cx.spawn(async move |this, cx| loop {
             cx.background_executor().timer(Duration::from_secs(5)).await;
@@ -320,6 +342,17 @@ impl Workspace {
 
     /// Settings → General: Home, where threads outside a project run, moves to another folder.
     /// Its threads keep their conversations; their next message starts there.
+    /// Where Home starts and Reset puts it: your home folder, or in a development run a `home`
+    /// folder inside the data folder.
+    pub fn default_home_folder(&self) -> String {
+        if std::env::var("YH_DATA_DIR").is_ok() {
+            let home = self.data_dir.join("home");
+            let _ = std::fs::create_dir_all(&home);
+            return home.to_string_lossy().into_owned();
+        }
+        std::env::var("HOME").unwrap_or_default()
+    }
+
     pub fn set_home_folder(&mut self, path: &str, cx: &mut Context<Self>) {
         let Some(id) = self.home_project() else { return };
         // Named for its folder, as the Swift app does; "Home" for your home folder.
@@ -1010,6 +1043,81 @@ impl Workspace {
         }
     }
 
+    /// Settles threads whose PRs have all merged, with nothing new since (the work landed), as
+    /// the Swift app does a little after launch and every five minutes: the same exceptions as
+    /// idle settling, and a PR closed without merging, or still open, keeps it. Each thread's PR
+    /// links are read from its rows aside, again only when it has new rows (`merge_links`).
+    pub fn settle_merged_threads(&mut self, cx: &mut Context<Self>) {
+        let Some(db) = self.library.db.clone() else { return };
+        let candidates: Vec<(String, String, f64, Vec<String>)> = self
+            .threads
+            .iter()
+            .filter_map(|t| {
+                let t = t.read(cx);
+                let id = t.id().to_string();
+                let record = self.library.thread_record(&id)?;
+                let ok = t.meta.settled_at.is_none()
+                    && !t.running
+                    && !t.waiting_for_you()
+                    && self.selected.as_deref() != Some(id.as_str())
+                    && record.get("autoSettle").and_then(|v| v.as_bool()) != Some(false)
+                    && record.get("reactivatedAt").is_none_or(|v| v.is_null());
+                // The PRs its record keeps as worked on (the PRs tab saves them), merged ones too.
+                let saved: Vec<String> = record.get("workedPullRequests").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default();
+                ok.then(|| (id, self.folder_of(t), t.meta.updated_at, saved))
+            })
+            .collect();
+        if candidates.is_empty() {
+            return;
+        }
+        let cache = self.merge_links.clone();
+        let path = std::env::var("YH_PATH").ok();
+        cx.spawn(async move |this, cx| {
+            let settle: Vec<String> = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut out = vec![];
+                    for (id, folder, updated, saved) in candidates {
+                        let count = db.transcript_count(&id);
+                        let cached = cache.lock().unwrap().get(&id).filter(|(n, _)| *n == count).map(|(_, l)| l.clone());
+                        let links = cached.unwrap_or_else(|| {
+                            let links: Vec<yh_core::forge::Link> = crate::state::pulls::links(&db, &id, &folder, path.as_deref(), &[], (&saved, &[])).into_iter().filter(|(_, worked)| *worked).map(|(l, _)| l).collect();
+                            cache.lock().unwrap().insert(id.clone(), (count, links.clone()));
+                            links
+                        });
+                        if links.is_empty() {
+                            continue;
+                        }
+                        let pulls = crate::state::pulls::look_up(links.into_iter().map(|l| (l, true)).collect(), path.clone(), &[]);
+                        let merges: Vec<f64> = pulls
+                            .iter()
+                            .filter_map(|p| p.pull.as_ref().ok().filter(|p| p.state == "merged").map(|p| p.merged_at.as_deref().and_then(yh_core::library::parse_iso).map_or(yh_core::library::now_ms(), |t| t * 1000.)))
+                            .collect();
+                        // Work after the last merge (beyond the turn that merged it) is new work.
+                        let last = merges.iter().cloned().fold(f64::MIN, f64::max);
+                        if merges.len() == pulls.len() && updated <= last + 15. * 60_000. {
+                            out.push(id);
+                        }
+                    }
+                    out
+                })
+                .await;
+            let _ = this.update(cx, |ws, cx| {
+                for id in settle {
+                    // Still as it was when looked at.
+                    let still = ws.thread(&id).is_some_and(|t| t.read(cx).meta.settled_at.is_none() && !t.read(cx).running) && ws.selected.as_deref() != Some(id.as_str());
+                    if still {
+                        if std::env::var("YH_DATA_DIR").is_ok() {
+                            eprintln!("SETTLED merged {id}");
+                        }
+                        ws.set_settled(&id, true, cx);
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
     /// Unpins with Undo, or pins (from the sidebar).
     pub fn toggle_pin(&mut self, id: &str, cx: &mut Context<Self>) {
         let Some(t) = self.thread(id) else { return };
@@ -1628,6 +1736,8 @@ impl Workspace {
             }
             let _ = this.update(cx, |ws, cx| {
                 ws.titles_rewriting.remove(&generating);
+                // Settings → Thread Titles says why the last one failed.
+                ws.title_error = result.as_ref().err().map(|e| if e.is_empty() { "no answer".to_string() } else { e.clone() });
                 cx.notify();
             });
             let Ok(title) = result else { return };

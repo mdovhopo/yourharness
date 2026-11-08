@@ -107,7 +107,8 @@ pub struct RootView {
 
 impl RootView {
     pub fn new(workspace: Entity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let updater = cx.new(crate::state::updater::Updater::new);
+        let library = workspace.read(cx).library.clone();
+        let updater = cx.new(|cx| crate::state::updater::Updater::new(&library, cx));
         let sidebar = cx.new(|cx| Sidebar::new(workspace.clone(), updater.clone(), window, cx));
         let composer = cx.new(|cx| Composer::new(workspace.clone(), window, cx));
         let root = cx.entity().downgrade().into();
@@ -118,7 +119,8 @@ impl RootView {
         let inspector = cx.new(|cx| Inspector::new(workspace.clone(), window, cx));
         let mcp = cx.new(|cx| crate::ui::mcp::McpSheet::new(workspace.clone(), window, cx));
         let jobs = cx.new(|_| crate::ui::jobs::JobsStrip::new(workspace.clone()));
-        cx.set_global(crate::ui::settings::SettingsLinks { mcp: mcp.clone(), updater: updater.clone() });
+        let notes = { let u = updater.clone(); cx.new(|cx| crate::ui::updates::ReleaseNotesView::new(u, cx)) };
+        cx.set_global(crate::ui::settings::SettingsLinks { updater: updater.clone(), notes });
         let links = inspector.downgrade();
         cx.set_global(crate::ui::inspector::FileLinks(std::rc::Rc::new(move |path, lines, cx| {
             let _ = links.update(cx, |i, cx| i.open_file(path, lines, cx));
@@ -808,7 +810,7 @@ impl Render for RootView {
             .on_action(cx.listener(|_, _: &CheckForUpdates, _, cx| {
                 if let Some(links) = cx.try_global::<crate::ui::settings::SettingsLinks>() {
                     let u = links.updater.clone();
-                    u.update(cx, |u, cx| u.check(cx));
+                    u.update(cx, |u, cx| u.check_now(cx));
                 }
             }))
             .on_action(cx.listener(|this, _: &ToggleUsage, _, cx| this.workspace.update(cx, |ws, cx| ws.toggle_usage(cx))))

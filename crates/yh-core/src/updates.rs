@@ -12,6 +12,55 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 pub const GITHUB_LATEST: &str = "https://api.github.com/repos/mdovhopo/yourharness/releases/latest";
+pub const GITHUB_RELEASES: &str = "https://api.github.com/repos/mdovhopo/yourharness/releases?per_page=50";
+/// Every release, for "All Releases on GitHub".
+pub const RELEASES_PAGE: &str = "https://github.com/mdovhopo/yourharness/releases";
+
+/// One release's notes, as GitHub has them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Notes {
+    pub version: Version,
+    pub text: String,
+    pub page: Option<String>,
+    /// When it was published (seconds since 1970).
+    pub published_at: Option<f64>,
+}
+
+/// Every release's notes, newest first: from `feed` (a file or URL, one release or a list), or
+/// GitHub's list. Drafts and pre-releases are left out, as the updater never offers them.
+pub fn fetch_notes(feed: Option<&str>, current: &str) -> Result<Vec<Notes>, String> {
+    let data = match feed {
+        Some(f) if !f.contains("://") => std::fs::read(f).map_err(|e| e.to_string())?,
+        Some(url) => curl(&[url])?,
+        None => curl(&["-H", "Accept: application/vnd.github+json", "-A", &format!("YourHarness/{current}"), GITHUB_RELEASES])?,
+    };
+    let v: Value = serde_json::from_slice(&data).map_err(|_| "GitHub's answer couldn't be read.".to_string())?;
+    let list = match v {
+        Value::Array(list) => list,
+        other => vec![other],
+    };
+    let mut notes: Vec<Notes> = list.iter().filter_map(notes_of).collect();
+    notes.sort_by(|a, b| b.version.cmp(&a.version));
+    Ok(notes)
+}
+
+fn notes_of(v: &Value) -> Option<Notes> {
+    if v["draft"].as_bool() == Some(true) || v["prerelease"].as_bool() == Some(true) {
+        return None;
+    }
+    Some(Notes {
+        version: Version::parse(v["tag_name"].as_str()?)?,
+        text: whats_new(v["body"].as_str().unwrap_or("")),
+        page: v["html_url"].as_str().map(str::to_string),
+        published_at: v["published_at"].as_str().and_then(crate::library::parse_iso),
+    })
+}
+
+/// The notes of the releases after `after` up to and including `through`, newest first;
+/// without `after`, just `through`'s.
+pub fn notes_between(all: &[Notes], after: Option<&Version>, through: &Version) -> Vec<Notes> {
+    all.iter().filter(|n| n.version <= *through && after.map_or(n.version == *through, |a| n.version > *a)).cloned().collect()
+}
 
 #[derive(Clone, Debug)]
 pub struct Version {
@@ -147,6 +196,38 @@ pub fn download(url: &str, to: &Path) -> Result<(), String> {
     curl(&["-o", &to.to_string_lossy(), url]).map(|_| ())
 }
 
+/// As `download`, stopped (curl killed) once `cancel` is set: Err("Cancelled").
+pub fn download_cancellable(url: &str, to: &Path, cancel: &std::sync::atomic::AtomicBool) -> Result<(), String> {
+    let mut child = Command::new("/usr/bin/curl")
+        .args(["-fsSL", "--max-time", "600", "-o"])
+        .arg(to)
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    loop {
+        if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("Cancelled".into());
+        }
+        match child.try_wait().map_err(|e| e.to_string())? {
+            Some(status) if status.success() => return Ok(()),
+            Some(_) => {
+                let mut e = String::new();
+                if let Some(mut err) = child.stderr.take() {
+                    let _ = std::io::Read::read_to_string(&mut err, &mut e);
+                }
+                let e = e.trim().to_string();
+                return Err(if e.contains("resolve host") { "You're offline.".into() } else if e.is_empty() { "The download failed.".into() } else { e });
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(100)),
+        }
+    }
+}
+
 /// The hex digest from a `shasum` line (`<digest>  <file name>`).
 pub fn digest_in(text: &str) -> Option<String> {
     let word = text.split_whitespace().next()?.to_lowercase();
@@ -277,5 +358,25 @@ mod tests {
         assert_eq!(whats_new(&r.notes), "Faster.");
         assert!(parse_release(&json!({ "tag_name": "v1", "assets": [] })).is_err());
         assert_eq!(digest_in(&format!("{}  x.dmg", "a".repeat(64))), Some("a".repeat(64)));
+    }
+
+    #[test]
+    fn notes_for_a_range() {
+        let dir = std::env::temp_dir().join(format!("yh-notes-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let feed = dir.join("releases.json");
+        std::fs::write(&feed, json!([
+            {"tag_name": "v0.1.0", "body": "B\n\n## Install\nx", "published_at": "2026-11-01T00:00:00Z"},
+            {"tag_name": "v0.0.16", "body": "A"},
+            {"tag_name": "v0.2.0-beta", "prerelease": true, "body": "no"},
+            {"tag_name": "v0.0.15", "body": "old"}
+        ]).to_string()).unwrap();
+        let all = fetch_notes(Some(feed.to_str().unwrap()), "0.0.16").unwrap();
+        assert_eq!(all.iter().map(|n| n.version.to_string()).collect::<Vec<_>>(), ["0.1.0", "0.0.16", "0.0.15"]);
+        assert_eq!(all[0].text, "B");
+        let v = |s| Version::parse(s).unwrap();
+        assert_eq!(notes_between(&all, Some(&v("0.0.15")), &v("0.1.0")).len(), 2);
+        assert_eq!(notes_between(&all, None, &v("0.0.16"))[0].text, "A");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
