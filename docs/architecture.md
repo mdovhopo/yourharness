@@ -1,83 +1,131 @@
-# Architecture and the rewrite
+# Architecture
 
-The SwiftUI/AppKit app is frozen (tag `swift-app-frozen`, sources in `legacy/YourHarness`, not
-built). Its features are the reference for what the app does, not for how. The app is being
-rewritten **in Rust on GPUI**, Zed's GPU-drawn UI framework, as one process. Why: under 20
-threads streaming at once, GPUI was the only stack that held 99% of frames on time, at about
-160 MB (docs/gpui-experiment.md). A web UI was tried first (docs/web-experiment.md, and the
-work in `legacy/web`, `legacy/Sources/HarnessBackend`). That work is superseded, but it's kept as a
-reference: its protocol, stores and features describe the same app.
+YourHarness is one native process, written in Rust on **GPUI**, Zed's GPU-drawn UI framework.
+It drives the official `claude` CLI, one process per thread, and serves that process tools of
+its own. GPUI is there for frames: with 20 huge threads streaming at once the app keeps 95–99%
+of frames on time at about 200 MB (docs/performance.md).
 
-## Layers
+## Crates
 
 ```mermaid
 flowchart TB
   subgraph App["crates/yh-app · GPUI"]
-    UI["ui: sidebar, transcript, composer, cards, panels, pages"]
-    State["state: entities that own what the app knows (threads, rows, sessions, settings)"]
-    Mac["platform: what only AppKit does (browser views, Quick Look, notifications, Dock)"]
+    UI["ui: window, sidebar, transcript, composer, right sidebar, pages, sheets"]
+    State["state: entities that own what the app knows"]
+    Mac["platform, webview, browser: what only AppKit and WebKit do"]
     UI --> State
+    State --> Mac
   end
-  Core["crates/yh-core · no GPUI: harness.sqlite, claude processes and stream-json, Claude Code history, markdown, memory, git, forge, MCP servers"]
+  Core["crates/yh-core · no GPUI"]
   State --> Core
-  Legacy["legacy/Sources/HarnessCore, legacy/Sources/HarnessBackend · Swift: the spec"]
-  Core -. "ported from" .-> Legacy
+  Core --> Claude["claude (stream-json)"]
+  Core --> Tools["git, gh, glab"]
+  Core --> DB[("harness.sqlite, usage.sqlite")]
 ```
 
-- **yh-core** is everything that isn't drawing, with no GPUI: storage, `claude` processes and
-  their stream-json parsing, Claude Code's session files, markdown, memory, git and forge
-  clients, and the MCP servers agents call. It's testable on its own (`cargo test -p yh-core`).
+- **yh-core** is everything that isn't drawing, with no GPUI, testable on its own
+  (`cargo test -p yh-core`):
+  - storage: `db.rs`, `schema.rs`, `library.rs` (projects and threads), `legacy_import.rs`
+    (data from 0.0.6 and earlier), `state_archive.rs` (`.yhstate` export and import);
+  - Claude Code: `claude.rs` (the process and its stream-json), `history.rs` (its session
+    files), `recovery.rs` (a turn cut off by a quit or crash), `titles.rs`, `limits.rs`,
+    `usage.rs`, `plan.rs`, `subagent_record.rs`;
+  - what's drawn from text: `markdown.rs`, `links.rs`, `diagrams/` (Mermaid laid out into
+    plain geometry), `find.rs`, `clock.rs`;
+  - memory: `memory.rs`, `memory_tools.rs`, `memory_agents.rs`, `memory_archive.rs`,
+    `memory_stats.rs`;
+  - git and forges: `git.rs`, `github.rs`, `gitlab.rs`, `forge.rs`, `stacks.rs`,
+    `workspace.rs` (a project's repos, worktrees and PRs), `footprint.rs`, `turn_changes.rs`;
+  - the rest: `mcp.rs` (the in-app MCP servers' plumbing), `files.rs`, `attachments.rs`,
+    `cookies.rs`, `dev_servers.rs`, `agents.rs`, `shell_env.rs`, `updates.rs`.
+
   Long or blocking work runs on background threads and hands results back through channels.
-- **yh-app/state** owns what the app knows, as GPUI entities with no rendering: the library
-  (projects, threads), each thread's rows and runtime (session, queue, permissions, plans),
-  settings. Every change goes through it, so saving, search, agents' tools and the screen all
-  see the same thing. Changes notify the entities that care. Nothing is computed in a view.
+- **yh-app/state** owns what the app knows, as GPUI entities with no drawing. `workspace.rs`
+  holds projects, threads, the selection, each thread's `claude` and every request the UI makes
+  (send, stop, allow, pin, rename, settle…), and tells views what changed with
+  `WorkspaceEvent`s and `notify`. `thread.rs` holds a thread's rows; `pulls.rs`, `jobs.rs`,
+  `limits.rs`, `notify.rs`, `updater.rs` and `file_watch.rs` the rest. The tools the app serves
+  to agents live here too (`thread_tools.rs`, `harness_tools.rs`). Every change goes through
+  state, so saving, search, agents' tools and the screen all see the same thing. Nothing is
+  computed in a view.
 - **yh-app/ui** draws state and keeps only view state (scroll positions, what's open, hover,
-  drafts until sent).
-- **yh-app/platform** is the AppKit edge: windows GPUI doesn't own, agents' browser views
-  (WKWebView over the GPUI window), Quick Look, notifications, the Dock badge.
+  drafts until sent): `root.rs` (the window and the transcript deck), `sidebar.rs`,
+  `transcript.rs` and `rows.rs`, `composer.rs` (with the permission, question and plan cards),
+  `inspector.rs` (the right sidebar: PRs, side chat, sub-agents, files, browser), the pages
+  (`project.rs`, `memory.rs`, `usage.rs`, built from `page_kit.rs`), `settings.rs`,
+  `spotlight.rs` (⌘K), `mcp.rs` (`/mcp`), `menus.rs`, and sheets and smaller views.
+- **yh-app's AppKit edge**: `platform.rs` (the NSWindow, real events sent to it, the screen's
+  refresh rate, memory and CPU, whether a run can be trusted), `webview.rs` (WKWebViews laid
+  over the GPUI window), Quick Look, notifications, the Dock badge, `keep_awake.rs`,
+  `video_thumb.rs`. `probe.rs` is the performance run.
+- **GPUI** comes through gpui-kit (GPUI 0.3.11 and gpui-component): inputs, selects, popovers,
+  dialogs, tables, charts, menus. Three crates are patched (`patches/`, unpacked into
+  `vendor/` by `scripts/vendor.sh`); CLAUDE.md says what each patch does.
 
-**Data stays the user's.** `harness.sqlite` keeps the Swift app's format (docs/storage.md):
-same tables, same JSON in `projects` and `threads`, rows in `entries`, big tool output in
-`blobs` (LZFSE). The rewrite reads the user's existing data and writes what the Swift app can
-still read, until the switch.
+## Threads and their `claude`
 
-## What we learned that the app must keep
+A thread that's been talked to has its own `claude` process (`yh_core::claude`), started in
+the thread's folder with stream-json in and out, partial messages, the model, effort and
+permission mode picked in the composer, and `--resume` with the thread's session once it has
+one. Its output is parsed on a reader thread into `Event`s; the main thread takes what's
+arrived at most once a frame (8 ms), consecutive deltas of a block joined, and splices exactly
+the rows that changed. Permission prompts come as `control_request`s and show as cards above
+the composer; questions and plans too. A process with no turn for ten minutes is let go of and
+resumed with the next message. A message sent mid-turn steers (joins the turn after the current
+step) or queues; Stop interrupts. When the app starts after a crash or a quit mid-turn,
+`recovery.rs` fills in what the session file has that the saved rows don't.
 
-From the experiments (details in gpui-experiment.md):
+Titles are generated by a separate one-shot, tool-less request on Haiku. Side chats and the
+memory specialists are sessions of their own, with their own rows.
+
+## The tools the app serves
+
+Claude Code reaches the app's own tools over the stream-json control channel it already has:
+the servers are named in `initialize`'s `sdkMcpServers` and called with `mcp_message` control
+requests (`yh_core::mcp`), so there's no port, no token, and nothing else can call them.
+
+| Server | What it does |
+|---|---|
+| `memory` | The workspace's memory: search, read, save, update, link, forget, track tasks. Every call is recorded for the Memory page's activity (docs/memory.md). |
+| `threads` | Look through the app's threads (list, read, search), tidy them (rename, settle, pin), bring in Claude Code sessions. Nothing can be deleted. |
+| `browser` | Drive the thread's browser: open, navigate, snapshot, screenshot, click, type, and the rest (docs/browser.md). |
+| `harness` | `sign_in_to_mcp_server`: a card in the thread asks you to sign in to an MCP server Claude needs. |
+
+The names, schemas and replies are the ones agents already use: keep them stable. The thread's
+own MCP servers (its `.mcp.json`, your config) are Claude Code's; `/mcp` shows and manages them.
+
+## Storage
+
+Everything is in `harness.sqlite` in the data folder, in the format 0.0.x wrote, so 0.0.16
+still opens it after a downgrade; `usage.sqlite` is the usage index. One writer thread, reader
+connections of their own, big tool output in `blobs`, a full-text index caught up in the
+background. See docs/storage.md.
+
+## The browser
+
+Each thread has its own browser, real WKWebViews (Safari's engine) laid over the spot GPUI
+keeps for them, in the right sidebar or in a window of their own; a page nobody shows is parked
+off screen. Each project has its own cookie store, so sign-ins stay within it.
+The agent drives it through the `browser` tools; you watch, and can take control. See
+docs/browser.md, and run `scripts/browser-fidelity/run.sh` after changing it.
+
+## What keeps it fast
+
+These come from measurements (docs/performance.md):
 
 - **The transcript is GPUI's `list`, bottom-aligned**, so it follows the end. Rows are measured
   once and again only when spliced: a streamed delta re-measures exactly the row it changed.
   Off-screen rows cost nothing.
 - **Cache views that change rarely** (`AnyView::cached`): the sidebar redraws only when told
   to. A frame under streaming draws the transcript and little else. A view that grows (the
-  composer with its cards) isn't cached, because a cached view needs a fixed size.
-- **Claude's events are parsed off the main thread.** The main thread takes what's arrived at
-  most once a frame (8 ms), with consecutive deltas of a block joined.
-- **Hold little.** Keep the newest 160 rows of a thread, and read earlier pages while
-  scrolling up. Six transcripts stay made for going back and forth. A running thread nobody
-  is looking at keeps its newest 300 rows.
+  composer with its cards) is cached at the height it measured.
+- **Claude's events are parsed off the main thread**, and applied at most once a frame.
+- **Hold little.** A thread holds its newest 160 rows and reads earlier pages while you scroll
+  up. Six transcripts stay made for going back and forth; the rest let go of their rows. A
+  running thread nobody is looking at keeps its newest 300 rows.
 - **Nothing that changes often in a view that's always there**, and nothing slow on the main
   thread from a click: answer the click in the next frame and do the work after.
 - **Events into GPUI dispatch synchronously.** Never send one to the window from inside an
   entity update, because it re-enters.
 - **Test runs hold off App Nap.** A background app nobody watches gets its timers and display
   link slowed down, which looks exactly like a frozen app.
-
-## Plan
-
-Each feature ends with a live Haiku turn that uses it, checked, and a push to `rewrite`. Full
-perf runs (`scripts/perf-run.sh`) are kept for the end of big chunks: one more at most, and one
-when the rewrite is whole. Nothing is released from `rewrite` until it's the
-whole app; the user's app stays the frozen 0.0.16 until then. The web rewrite's chunks 1–4
-(`legacy/Sources/HarnessBackend`, `legacy/web`) are the closest spec for chunks 1–4 here.
-
-| Chunk | What | Status |
-|---|---|---|
-| 0 | Repo on the new stack: Cargo workspace (`yh-core`, `yh-app`), GPUI through gpui-kit with gpui-component, patches, scripts (bundle, perf, limits), docs; the POC as the starting point | done |
-| 1 | **The app owns threads.** Read and write `harness.sqlite` in the Swift app's format (projects, threads, rows, blobs), the user's data folder. Thread runtime: sessions, resume, idle reap, saving rows as they change, crash recovery. Sidebar: pin, settle, rename, delete, new thread. Composer: model, effort and mode from the CLI's catalog; queue and steer; stop. Permission, question and plan cards. Unread. | done |
-| 2 | Transcript parity: markdown details (tree-sitter code, tables, links), Edit diffs, sub-agent cards, plan checklist, notices and compaction, slash commands, @ mentions, images and files in messages, find in thread. | done |
-| 3 | App shell: titles (generated, renamed), notifications and badge, Home project, ⌘K search, settings, usage limits, resume a Claude Code session. | done |
-| 4 | Agents' tools served by the app: memory and thread MCP servers, their views (Memory page, tasks). | done: memory and thread MCP servers, the Memory page (memories, tasks, activity, insights, graph), import and export, the Importer and Reconciler with their setup |
-| 5 | Right sidebar: side chat, sub-agents, files, pull requests and workspaces, the agents' browser (a WKWebView placed over the GPUI window). | done: PRs (a thread's), side chat, sub-agents, files, the browser (WKWebView over GPUI, every tool: resize with its viewport presets, dialog, upload; pick element, its own window, Import Sign-ins from another browser's cookies), the project page (stacks drawn as a graph, repos and worktrees) |
-| 6 | The rest: usage view, MCP sheet, state export and import, updater, release pipeline; then the switch. | done: usage view, `/mcp` sheet (status, on/off, reconnect, sign in/out, tools, add and remove), MCP servers' questions (elicitation), Claude's MCP sign-in card, state export and import (the Swift app's `.yhstate`), the updater, the release pipeline (Rust workflow, `RELEASE=1` signed builds), Settings → MCP. Left: the switch (the real bundle ID and data folder, 0.1.0) |

@@ -1,13 +1,56 @@
 # Performance
 
-## The rewrite on GPUI: numbers per chunk
+The requirement: 10 to 20 threads working at once, with huge histories, and no visible freezes,
+hangs or crashes; every click answered in the next frame, or a loading indicator for what's
+asynchronous.
 
-`scripts/perf-run.sh`: the `extreme` preset, 20 fake turns at rate 1, window parked below the
-screen, 30 s phases, App Nap held off, GPUI's inactive-window 30 fps cap off (a perf run's
-window is never active). Frames on time at 120 Hz · worst frame; peak footprint over the run.
-Same MacBook, on battery unless noted.
+## How it's measured
 
-| Phase | Chunk 0 (2026-11-06) | Chunk 1 | Chunk 5 (AC power) | Final (AC, 2026-11-07) |
+`scripts/perf-run.sh <results>` builds a copy of its own (`test-harness-root/perf-build/`),
+clones the `extreme` preset into a fresh data folder (`test-harness-root/perf-run-<time>-<pid>`,
+printed as `data:`, to delete after), and launches it with a fake `claude`
+(`presets/extreme/fake-claude/`) that streams turns with reasoning, hundreds of tools,
+sub-agents and compactions, no tokens spent. The probe (`crates/yh-app/src/probe.rs`) then runs
+its phases on the preset's 20 "Huge …" threads (4 of about 32,000 rows, 16 of half that),
+through the paths a person takes: real wheel, click and key events sent to the NSWindow.
+Frames are timed at the display link, a callback per vsync on the main thread, so a late one is
+a frame where the app couldn't show what changed.
+
+Results: `phases.json` (frames on time, worst frames, CPU and memory per phase, and whether the
+run was valid), `clicks.json` (each click: when it was answered and when it was done),
+`dev.log` (`PERF …` lines). Options:
+
+| | |
+|---|---|
+| `YH_PERF_PHASES=<a,b>` | Some phases only: `open-huge`, `idle-huge`, `scroll-huge`, `scroll-huge-fast`, `switch-huge`, `switch-all-idle`, `stream-1`, `stream-all`, `stream-all-scroll`, `stream-all-switch`, `stream-all-typing`, … |
+| `YH_PERF_SECONDS=<n>` | Each phase's length (30 by default). |
+| `YH_PERF_PHASES=stream-all-everything` | Every kind of click in turn while 20 threads stream, each timed by kind (`PERF click <kind>: n · median · worst`, `PERF slow click` over 100 ms); `YH_PERF_ONLY=<groups>` for some, named in `probe::GROUPS`. |
+| `YH_PERF_PHASES=stream-all-chaos` | Any of those in any order, plus stop and send; each action logged first (`PERF chaos <n> <action> in <thread>`), so a crash says what led to it; `YH_PERF_CHAOS_SEED=<n>` plays a run again. |
+| `YH_PERF_FRONT=1` | The window in front, full screen, the real pointer moving over it: takes over the Mac, only when nobody's using it. Without it the window is parked below the screen. |
+| `SKIP_BUILD=1`, `PERF_APP=<path.app>`, `PERF_SEED=<folder>`, `FORCE=1` | Reuse the perf build; build and run another copy (runs side by side, or a baseline); a smaller seed; run on battery. |
+
+After each action in `everything` and `chaos`, the state is checked, and what's off prints as
+`PERF WRONG: …` (a pin or settle not undone by ⌘Z, a page left over a thread chosen, ⌘N not
+landing on a blank in the right project, Find marks left after closing, the keyboard on
+nothing drawn). A release needs no `WRONG`, no panic, no `INVALID`.
+
+Other probes for one view each (all in CLAUDE.md): `YH_USAGE_PROBE` (the usage chart, longest
+stall under 100 ms), `YH_FILES_PROBE` (a long file opened and scrolled in Files, under 50 ms a
+step), `YH_SEARCH_PROBE` (the full-text index catching up), `YH_SELECT_PROBE`, `YH_WHEEL`,
+`YH_SCROLL_TO`, `YH_TIMING=1` and `YH_EVENT_LOG=1`.
+
+To see where time goes, attach Time Profiler to a running copy:
+`xcrun xctrace record --template 'Time Profiler' --attach <pid> --time-limit 8s` (with
+`DEVELOPER_DIR` set), then `xctrace export … table[@schema="time-profile"]`.
+
+## Results
+
+`scripts/perf-run.sh`, the `extreme` preset, 20 fake turns, window parked below the screen,
+30 s phases, App Nap held off, GPUI's inactive-window 30 fps cap off (a perf run's window is
+never active). Frames on time at 120 Hz · worst frame; peak footprint over the run. Same
+MacBook; the first two columns on battery.
+
+| Phase | 2026-11-06, first build | 2026-11-06, threads and storage | 2026-11-06, right sidebar and browser (AC) | 2026-11-07, whole app (AC) |
 |---|---|---|---|---|
 | open-huge | 100.0% · 12 ms | 100.0% · 9 ms | 100.0% · 9 ms | 98.9% · 23 ms |
 | idle-huge | 99.9% · 27 ms | 99.9% · 24 ms | 100.0% · 15 ms | 99.1% · 49 ms |
@@ -24,81 +67,65 @@ Same MacBook, on battery unless noted.
 | Switch click (median / worst, streaming) | 32 / 37 ms | 34 / 51 ms | 32 / 44 ms | see clicks.json |
 | Key to screen (median / worst) | 14 / 22 ms | 18 / 29 ms | 15 / 46 ms | see clicks.json |
 
-The final run (2026-11-07, AC power, the whole rewrite) is valid (no `INVALID`, no `PERF stall`, no frame over 50 ms), with scroll-huge at 95.5%, scroll-huge-fast 93.8% and stream-all-typing 94.9%, below Chunk 5. Settled on 2026-11-08 with six alternating 20 s runs of the scroll phases (before and after the fix below): the same build ranges 96.9–99.0% (scroll-huge) and 97.3–98.7% (fast) between runs, so most of that "drop" is run-to-run spread, and Chunk 5's 99.4% was one run at the top of it. Compare with three or more alternating runs, never one.
+The whole-app run (2026-11-07, AC power) is valid (no `INVALID`, no `PERF stall`, no frame
+over 50 ms). Its scroll phases look lower than the run before, but six alternating 20 s runs of
+them on 2026-11-08 put the same build at 96.9–99.0% (scroll-huge) and 97.3–98.7% (fast)
+between runs: most of that is run-to-run spread, and the 99.4% before was one run at the top of
+it. Compare with three or more alternating runs, never one.
 
-What the profile showed (Time Profiler, 8 s of scroll-huge): the root view renders on every frame of scrolling, because the list's scroll notifies the transcript view and GPUI dirties its parents; every child of the root that isn't a cached view is laid out again. The composer wasn't cached (it grows), and cost 9% of the main thread. It's now a cached view placed at the height it measured (`Composer::measure`, `RootView::placed_composer`), and gone from the profile; frames on time didn't move beyond the spread, CPU 2–3 points lower. Selectable text costs about 9% in all, mostly text layout plain text needs too; its selection registration 2–4%. The rest is GPUI's list laying out the visible rows each frame (about 20%) and text shaping (18%). Open: rare long frames in both builds (169 ms, 72 ms, 65 ms in three of twelve phases).
+What the profile showed (Time Profiler, 8 s of scroll-huge): the root view renders on every
+frame of scrolling, because the list's scroll notifies the transcript view and GPUI dirties its
+parents; every child of the root that isn't a cached view is laid out again. The composer
+wasn't cached (it grows), and cost 9% of the main thread. It's now a cached view placed at the
+height it measured (`Composer::measure`, `RootView::placed_composer`), and gone from the
+profile; frames on time didn't move beyond the spread, CPU 2–3 points lower. Selectable text
+costs about 9% in all, mostly text layout plain text needs too; its selection registration
+2–4%. The rest is GPUI's list laying out the visible rows each frame (about 20%) and text
+shaping (18%).
 
-Perf runs were kept for the end of big chunks (both used). Chunk 5 (2026-11-06, with the Memory page, the right sidebar and the browser in): every phase at 98.6% or better, no frame over 50 ms, no `PERF stall`, no `INVALID`; the worst frame, 46 ms, came while typing under 20 streams. Chunk 1 notes: typing varied between runs (94–99%; it redrew the transcript per key until the transcript view was cached); one 1,010 ms frame in one fast-scroll run didn't come back in two more, and long frames are now logged with their phase (`PERF stall`).
+Open: rare long frames (169 ms, 72 ms, 65 ms in three of twelve phases); typing under 20
+streams varies between runs (94–99%). Long frames are logged with their phase (`PERF stall`).
 
-Chunk 0 notes: GPUI 0.3.11 caps an inactive window at 30 fps (and Low Power Mode too). The
-first chunk-0 run, without turning that off, ran every phase without input at a steady 30 fps.
-That's power saving, not stalls: worst frames stayed under 52 ms. The app keeps the cap for
-real use, where a background window at 30 fps is fine.
+GPUI 0.3.11 caps an inactive window at 30 fps (and Low Power Mode too). A run without turning
+that off runs every phase at a steady 30 fps: power saving, not stalls. The app keeps the cap
+for real use, where a background window at 30 fps is fine.
 
----
+## The rules that keep it fast
 
-# Performance of the frozen Swift app (for reference)
-
-# Performance under heavy parallel use (the Swift app)
-
-The requirement: 10 to 20 threads working at once, with huge histories, and no visible freezes, hangs or crashes; every click instant, or a loading indicator for what's asynchronous. A lower framerate is acceptable. Measure with `scripts/perf-run.sh <results> YH_PERF_FRONT=1` (see CLAUDE.md), on an M1 Max.
-
-## How the transcript works, and why
-
-A thread's transcript is `TranscriptListView`: a list in AppKit (an `NSScrollView` with its rows laid out by hand), each row's content a small SwiftUI view in a hosting view of its own. Each thread's list is a card in `TranscriptDeck`, kept made while you're away and parked out of the window, where it does nothing. Don't put the transcript back in a `LazyVStack`, and don't put anything that changes often back in the window's own hosting view. That arrangement is what froze and crashed the app.
-
-**The freeze and crash.** A `LazyVStack` with `scrollPosition` could go back and forth for good: its row heights are estimates until measured, and moving your place changes what it measures next. Caught in a log, 100 times a second for 37 s: offset 6016 → -28 → 6016, content height 8174 → 10557 → 8174. It ran inside the window's layout pass, and with hover state and scroll position requests feeding it, it could also run forever inside SwiftUI's update flush, at 100% CPU, where nothing of the app's can stop it (one run: over 7 minutes, until killed). Every pass changed the window's preferences, the toolbar answered by asking for another pass, and AppKit ended the app with "more Update Constraints in Window passes than there are views in the window". That's the signature of the crash in the wild on October 30. Going to the top of a thread while a turn streamed did it in 2 runs of 3.
-
-**In the list, every step is finite.** A row is measured when it comes near the screen, once per width and content. Your place is the row at the top of the screen, and the position follows that row when heights above it change. Scrolling moves a layer, with nothing in SwiftUI running. A row's update touches that row. Rows can't draw blank: what's mounted comes from the geometry.
-
-## Fixed, and how it was shown
-
-| Problem | Cause | Evidence |
-|---|---|---|
-| Freezes of seconds to forever, then a crash | The lazy stack and the window's layout, above | Crashed 2 of 3 runs; none in the runs below |
-| Freezes of seconds to minutes (the 29.6 s hang in 0.0.13) | Hover animation on whole rows. Content moving under a resting pointer flips hover, and `easeOut` can't merge, so animations stacked on the row's frame | 0 of 6 foreground runs froze with the fix; the same build without it froze on its first run |
-| Main thread blocked 1 s or more with many threads opening | Bulk reads held the one reader connection that quick lookups use | Start of 20 threads: 941-1027 ms to 238 ms; test `aBigReadDoesNotHoldUpQuickLookups` |
-| Saves stalling long threads | Every save snapshotted every row on the main thread | Saves send changed rows only |
-| Expanding a turn of hundreds of tools | All rows made at once, animated | Rows of the list now, made as they come near the screen |
-| Hitch on the first blank found | The check drew the window to a PNG on the main thread | Only when asked for from the Debug menu now |
-| Sidebar rows sliding | Sorted by last activity, so every turn start and end moved them | Stable order by creation; stalls over 250 ms 6 to 1 in two runs each |
-
-## Where it stands
-
-M1 Max, the full `extreme` preset (2 GB, 20 huge threads of 16,000 to 32,000 rows), all 20 streaming, window in front and full screen, pointer moving over it.
-
-| Measured | Result |
-|---|---|
-| 15-minute soak of random actions (1,783 of them) | No crash, no stall over 1 s, worst 561 ms; 63-68 fps from the first two minutes to the last (the old list degraded over a soak like this) |
-| Streaming, nothing else going on | 111 fps, worst frame 137 ms |
-| 20 turns ending at once | 82 fps, worst frame 103 ms |
-| Scrolling while streaming | 82 fps, worst frame 132 ms |
-| Memory | About 2 GB with all 20 histories loaded, 409 MB a minute after the turns end |
-| Launch to the first huge thread on screen | 2 s (31,626 rows) |
-
-Clicks, median ms under that load: when the click is answered (first frame), then done (the frame after).
-
-| Click | Answered | Done |
-|---|---|---|
-| Typing a key | 10 | 20 |
-| Open or close a turn's work | 8 | 23 |
-| Open a tool call's long output | 55 | 62 |
-| Go to another thread (with the right sidebar open and first visits among them) | 117 | 256 |
-| Back to a thread from a project page | 276 | 296 |
-| Right sidebar tabs | 8-154 | 17-212 |
-| Search (⌘K) | 102 | 126 |
-| Find (⌘F) | 83 | 108 |
-| Jump to top, to end | 51-108 | 87-125 |
-| One step of a live window resize | 74 | 83 |
-
-With the right sidebar closed, going to a thread is answered in 17-50 ms, and takes 36-56 ms in all if you've been there and it hasn't changed (first visit under load: about 150 ms, rows included).
-
-Still the slowest, and what to go after next: coming back from a project page (the thread's view is made again), and the first visit to a thread (each row is a hosting view to make; making them ahead of time in idle moments would answer it). Memory with every huge history loaded is high, because a running thread keeps all its rows in memory.
+- **The transcript is GPUI's `list`, bottom-aligned**; a change splices exactly the rows it
+  touched, and only spliced rows are measured again. Off-screen rows cost nothing.
+- **Views that change rarely are cached** (`AnyView::cached`); nothing that changes often lives
+  in a view that's always there. A view that grows is cached at the height it measured.
+- **Parsing and I/O off the main thread**; Claude's events applied at most once a frame, deltas
+  joined.
+- **Hold only recent rows** (160 a thread, earlier pages read while scrolling up; six
+  transcripts kept made); parked transcripts don't redraw.
+- **Answer the click, then do the work**: the next frame shows the selection, what's slow
+  follows.
+- **Animate only what fades; hover never changes layout.**
+- **Never send events to the window from inside an entity update** (GPUI dispatches them
+  synchronously, and it re-enters); hold off App Nap in test runs.
 
 ## Traps in testing this
 
-- **A window that can't be seen says nothing.** With the display off, the screen locked or another Space in front, frames all but stop while the main thread sits idle, events are held and applied in batches, and clicks seem to take seconds. For a whole day that read as "clicks take 830 ms, depending on the order of phases": every such run had `windowVisible: false`, and `pmset -g log` shows the display going off and on through them. A run now prints `INVALID` for this: trust nothing with those lines. A Mac left alone locks its screen after a while, whatever `caffeinate` says.
-- **`screencapture` asks.** It puts a privacy dialog on the screen, even when `CGPreflightScreenCaptureAccess()` says it's allowed. Use the app's own drawing, which can't show glass.
-- **Wheel events have to come in by the front door.** A wheel event handed straight to the window skips the app's monitors, so a code block under it keeps it (`TranscriptWheelRouter`).
-- **30-second phases mislead.** A send waits for its history, so with huge threads most of a short phase measures loading. Phases now time from when every thread is streaming.
-- **`sample` from the watchdog lands after a stall**, so it can show an idle main thread. Time Profiler only sees running code, so blocked time is missing from it. Use `YH_PERF_FREEZE_AFTER=0.6` and the main thread answer times.
+- **A window that can't be seen says nothing.** With the display off, the screen locked or
+  another Space in front, frames all but stop while the main thread sits idle, and clicks seem
+  to take seconds. A run prints `PERF INVALID` when the screen is locked or the
+  display asleep (and `valid: false` in `phases.json`): trust nothing with those lines. `pmset -g log | grep "Display is turned"`
+  shows the display going off; a Mac left alone locks its screen after a while, whatever
+  `caffeinate` says, so check long runs at the end too.
+- **App Nap looks like a freeze.** A background app nobody watches gets its timers and display
+  link slowed down; test runs hold it off, and `YH_BACKGROUND=1` keeps a parked window drawing.
+- **`screencapture` asks.** It puts a privacy dialog on the screen, even when
+  `CGPreflightScreenCaptureAccess()` says it's allowed. Use the app's own drawing
+  (`FEATURES=snapshots`, `YH_SNAPSHOT`).
+- **Events come in by the front door.** Probes send real events through the window, as the
+  window server would; an event handed straight to a view skips what a real one goes through.
+- **Look at the sequence, not the median.** `clicks.json` and the phases over time: frames
+  gone with the main thread idle isn't the app, and a sudden step in click times isn't load
+  building up.
+- **Compare before believing.** A slowdown counts once a baseline build (`PERF_APP`) doesn't
+  show it under the same conditions; a fix counts once the same test fails without it, over
+  several runs, as a freeze can be one run in three.
+- **A frozen run never exits.** `perf-run.sh` has no time limit: run long ones in the
+  background and watch for `PERF stall` lines.
