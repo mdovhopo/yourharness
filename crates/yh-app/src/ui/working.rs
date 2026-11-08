@@ -149,12 +149,17 @@ impl Render for WorkingTimer {
         // At the end of the transcript, where Claude's next words go, as the Swift app's typing
         // row: a still mark (an animation would draw every frame), what it's doing, the clock.
         // Laid over the list's bottom padding, so it never moves the rows.
+        // Read back from the end, rows pass under it: then it's a pill of its own, as the jump
+        // buttons are, so its words never sit on top of theirs.
+        let floating = j.next;
         let indicator = self.shown.clone().map(|(label, elapsed)| {
             div()
                 .flex()
+                .flex_none()
                 .items_center()
                 .gap(px(space::S))
                 .h(px(22.))
+                .when(floating, |d| d.px(px(10.)).rounded_full().bg(theme.canvas).border_1().border_color(theme.separator).shadow_sm())
                 .text_size(px(ts::FOOTNOTE))
                 .child(crate::ui::icons::sparkles().size(px(14.)).text_color(theme.accent))
                 .child(div().text_color(theme.secondary).child(label))
@@ -189,6 +194,6 @@ impl Render for WorkingTimer {
             .gap(px(8.))
             .pr(px(28.))
             .child(buttons)
-            .child(div().w_full().h(px(22.)).flex().justify_center().pl(px(28.)).child(div().w_full().max_w(px(764.)).px(px(6.)).children(indicator)))
+            .child(div().w_full().h(px(22.)).flex().justify_center().pl(px(28.)).child(div().w_full().max_w(px(764.)).px(px(6.)).flex().children(indicator)))
     }
 }
