@@ -114,6 +114,14 @@ const SIDE_BROWSER_PROMPT: &str = "You can look at the thread's browser, built i
 /// The side chat's view of the workspace's memory.
 const SIDE_MEMORY_PROMPT: &str = "This workspace has a memory kept by YourHarness: mcp__memory__search finds what earlier sessions learned and mcp__memory__read reads it. You can't change it from here.";
 
+/// `YH_RUNTIME_LOG=1`: each thread's `claude` started and ended (effort changes, `gh stack`'s
+/// instructions), printed as `RUNTIME …`.
+fn runtime_log(text: String) {
+    if std::env::var("YH_RUNTIME_LOG").as_deref() == Ok("1") {
+        eprintln!("RUNTIME {text}");
+    }
+}
+
 /// When `gh stack` is installed: how GitHub's stacked PRs are made here.
 const STACKS_PROMPT: &str = "The user works with GitHub's stacked pull requests through the `gh stack` extension. For a stack (or stacked PRs): `gh stack init --base <trunk> [branches…]` starts one or adopts existing branches, bottom first; `gh stack add <branch>` adds a branch on top (run it on the top branch, then commit there); `gh stack submit --auto --open` pushes and opens or updates the PRs; `gh stack sync` rebases and pushes after changes below; `gh stack view --json` shows the stack. Pass flags so nothing prompts. Don't merge a stack unless asked: YourHarness shows the stack with its merge buttons.";
 
@@ -1376,6 +1384,21 @@ impl Workspace {
             m.effort = effort.clone();
             r.insert("effort".into(), effort.map(Value::from).unwrap_or(Value::Null));
         });
+        // As the Swift app's `restartSession`: a turn under way (or jobs it left running) is
+        // never ended for it, its `claude` starts over once it's over; an idle one ends now, the
+        // next message starting it with the new effort.
+        let Some(thread) = self.thread(id) else { return };
+        let effort = self.effort_of(thread.read(cx));
+        let busy = thread.read(cx).running || !thread.read(cx).jobs.running.is_empty();
+        if let Some(rt) = self.runtimes.get_mut(id).filter(|rt| rt.effort != effort) {
+            if busy {
+                rt.restart_when_idle = true;
+                runtime_log(format!("{id}: effort now {effort:?} while working, its claude starts over once the turn ends"));
+            } else {
+                runtime_log(format!("{id}: effort now {effort:?}, its idle claude ends"));
+                self.end_runtime(id, cx);
+            }
+        }
     }
 
     /// The project's permission mode; running threads switch at once.
@@ -1546,8 +1569,10 @@ impl Workspace {
             // steering in, `/mcp` while it works): the process starts over once it's idle.
             if running {
                 rt.restart_when_idle = true;
+                runtime_log(format!("{id}: effort now {effort:?} while working, its claude starts over once the turn ends"));
                 return Ok(());
             }
+            runtime_log(format!("{id}: effort now {effort:?}, its claude starts over"));
         }
         self.end_runtime(&id, cx);
         thread.update(cx, |t, _| t.received_init = false);
@@ -1720,8 +1745,9 @@ impl Workspace {
         if self.library.setting("diagramInstructions").and_then(|v| v.as_bool()).unwrap_or(true) {
             prompt.push(DIAGRAM_PROMPT.to_string());
         }
-        // `gh stack` installed: how GitHub's stacked PRs are made here (checked aside at launch).
-        if self.stacks_installed == Some(true) {
+        // `gh stack` installed: how GitHub's stacked PRs are made here (checked aside at launch;
+        // until that answers, by its folder, as a thread may start before it does).
+        if self.stacks_installed.unwrap_or_else(yh_core::github::stack_extension_on_disk) {
             prompt.push(STACKS_PROMPT.to_string());
         }
         let options = LaunchOptions {
@@ -1737,9 +1763,11 @@ impl Workspace {
             servers,
             extra_args: vec![],
         };
+        let stacks = options.append_system_prompt.as_deref().is_some_and(|p| p.contains(STACKS_PROMPT));
         let (tx, rx) = flume::unbounded();
         let mut process = ClaudeProcess::spawn(options, tx)?;
         process.initialize();
+        runtime_log(format!("{id}: claude started, pid {}, effort {effort:?}, gh stack instructions {}", process.pid, if stacks { "in" } else { "not in" }));
         self.generation += 1;
         let generation = self.generation;
         self.runtimes.insert(id.clone(), Runtime { process, generation, effort, idle: None, restart_when_idle: false });
@@ -1921,6 +1949,7 @@ impl Workspace {
         // Effort changed mid-turn: the process starts over now, unless jobs it left run on.
         let restart = self.runtimes.get(&id).is_some_and(|rt| rt.restart_when_idle) && thread.read(cx).jobs.running.is_empty() && !waiting_on_jobs;
         if restart {
+            runtime_log(format!("{id}: turn over, its claude ends for the new effort"));
             self.end_runtime(&id, cx);
         }
         let weak = thread.downgrade();

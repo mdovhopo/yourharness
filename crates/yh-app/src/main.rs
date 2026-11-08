@@ -565,16 +565,79 @@ fn main() {
                 .filter_map(|p| p.split_once(',').and_then(|(x, y)| Some((x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?))))
                 .collect();
             let delay: f64 = env("YH_DRAFT_DELAY").and_then(|v| v.parse().ok()).unwrap_or(1.0) + 0.5;
+            // `YH_CLICK_WINDOW=<title>`: in that window instead (`Settings`), found by its title.
+            let in_window = env("YH_CLICK_WINDOW");
             cx.spawn(async move |cx| {
                 cx.background_executor().timer(Duration::from_secs_f64(delay)).await;
                 for (x, y) in points {
-                    if let Ok(ns) = window.update(cx, |_, window, _| crate::platform::ns_window(window)) {
+                    if let Some(ns) = input_target(window, in_window.as_deref(), cx) {
                         crate::platform::mouse_move(ns, x, y);
                         crate::platform::click(ns, x, y);
                         eprintln!("CLICK {x},{y}");
                     }
                     cx.background_executor().timer(Duration::from_secs(1)).await;
                 }
+            })
+            .detach();
+        }
+        // `YH_WHEEL=<x,y,dy,count>[;…]`: `count` pixel wheel events of `dy` (positive scrolls
+        // up, as a trackpad does) at that window point, through the window as a real wheel goes,
+        // after `YH_DRAFT_DELAY` (+0.5 s after `YH_HOVER`); after each step it prints where the
+        // open transcript and every capped box that can scroll stand (`WHEEL …`).
+        if let Some(steps) = env("YH_WHEEL") {
+            let steps: Vec<(f32, f32, i32, u32)> = steps
+                .split(';')
+                .filter_map(|s| {
+                    let v: Vec<&str> = s.split(',').map(str::trim).collect();
+                    Some((v.first()?.parse().ok()?, v.get(1)?.parse().ok()?, v.get(2)?.parse().ok()?, v.get(3).and_then(|c| c.parse().ok()).unwrap_or(1)))
+                })
+                .collect();
+            let delay: f64 = env("YH_DRAFT_DELAY").and_then(|v| v.parse().ok()).unwrap_or(1.0) + 0.5;
+            let root = root.clone();
+            let in_window = env("YH_CLICK_WINDOW");
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(Duration::from_secs_f64(delay)).await;
+                let report = |label: String, cx: &mut gpui_kit::AsyncApp| {
+                    let _ = window.update(cx, |_, _, cx| {
+                        let top = root.read(cx).workspace.read(cx).selected_thread().map(|t| t.read(cx).list.logical_scroll_top());
+                        let top = top.map_or("none".to_string(), |t| format!("row {} +{:.0}", t.item_ix, f32::from(t.offset_in_item)));
+                        let boxes: Vec<String> = crate::ui::rows::box_offsets().iter().map(|(k, at, max)| format!("{:04x}:{at:.0}/{max:.0}", k & 0xffff)).collect();
+                        eprintln!("WHEEL {label}: transcript at {top}; boxes [{}]", boxes.join(" "));
+                    });
+                };
+                report("start".into(), cx);
+                for (n, (x, y, dy, count)) in steps.into_iter().enumerate() {
+                    if let Some(ns) = input_target(window, in_window.as_deref(), cx) {
+                        crate::platform::mouse_move(ns, x, y);
+                    }
+                    for _ in 0..count {
+                        if let Some(ns) = input_target(window, in_window.as_deref(), cx) {
+                            crate::platform::wheel(ns, x, y, dy);
+                        }
+                        cx.background_executor().timer(Duration::from_millis(30)).await;
+                    }
+                    cx.background_executor().timer(Duration::from_millis(400)).await;
+                    report(format!("step {} at {x},{y} {dy}x{count}", n + 1), cx);
+                }
+                eprintln!("WHEEL done");
+            })
+            .detach();
+        }
+        // `YH_AX_DUMP=<seconds>`: then the window's accessibility tree, as VoiceOver reads it,
+        // printed as `AX …` lines (read from inside the app: no permission, no prompt). Asked
+        // once to wake GPUI's tree up, then read 1.5 s later.
+        if let Some(delay) = env("YH_AX_DUMP").and_then(|v| v.parse::<f64>().ok()) {
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(Duration::from_secs_f64(delay)).await;
+                let _ = window.update(cx, |_, window, _| crate::platform::accessibility_tree(crate::platform::ns_window(window), 50));
+                cx.background_executor().timer(Duration::from_millis(1500)).await;
+                let _ = window.update(cx, |_, window, _| {
+                    let lines = crate::platform::accessibility_tree(crate::platform::ns_window(window), 4000);
+                    for line in &lines {
+                        eprintln!("AX {line}");
+                    }
+                    eprintln!("AX done: {} elements", lines.len());
+                });
             })
             .detach();
         }
@@ -1082,4 +1145,18 @@ fn snapshot(window: &mut gpui_kit::Window, file: &str) {
 #[cfg(not(feature = "snapshots"))]
 fn snapshot(_: &mut gpui_kit::Window, _: &str) {
     eprintln!("snapshot failed: build with --features snapshots");
+}
+
+/// The NSWindow test input goes to: the main window, or the one whose title starts with
+/// `title` (`YH_CLICK_WINDOW`).
+#[allow(deprecated)]
+fn input_target(main: gpui_kit::AnyWindowHandle, title: Option<&str>, cx: &mut gpui_kit::AsyncApp) -> Option<cocoa::base::id> {
+    match title {
+        Some(title) => cx.update(|cx| {
+            cx.windows()
+                .into_iter()
+                .find_map(|w| w.update(cx, |_, window, _| window.window_title().starts_with(title).then(|| platform::ns_window(window))).ok().flatten())
+        }),
+        None => main.update(cx, |_, window, _| platform::ns_window(window)).ok(),
+    }
 }

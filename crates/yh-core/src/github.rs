@@ -381,6 +381,17 @@ pub struct GitHubStacks {
 
 pub const STACK_INSTALL_COMMAND: &str = "gh extension install github/gh-stack";
 
+/// Whether gh-stack is in gh's extensions folder (`$GH_DATA_DIR`, `$XDG_DATA_HOME/gh` or
+/// `~/.local/share/gh`, then `extensions/gh-stack`): a quick look for before `gh extension list`
+/// has answered, so a thread started at launch isn't told less than the next one.
+pub fn stack_extension_on_disk() -> bool {
+    let data = std::env::var_os("GH_DATA_DIR")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("XDG_DATA_HOME").map(|d| std::path::PathBuf::from(d).join("gh")))
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/share/gh")));
+    data.is_some_and(|d| d.join("extensions").join("gh-stack").exists())
+}
+
 impl GitHubStacks {
     pub fn new(path_env: Option<&str>) -> GitHubStacks {
         GitHubStacks { cli: Cli::new("gh", path_env) }

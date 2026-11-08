@@ -319,7 +319,7 @@ pub fn version_button(updater: &Entity<Updater>, workspace: &Entity<Workspace>, 
     Popover::new("version-popover")
         .anchor(gpui_kit::Anchor::BottomLeft)
         .default_open(std::env::var("YH_OPEN_VERSION").is_ok())
-        .trigger(Button::new("version-button").xsmall().ghost().child(div().text_size(px(text::CAPTION)).text_color(theme.tertiary).child(label.clone())).tooltip(format!("YourHarness {label}")))
+        .trigger(Button::new("version-button").xsmall().ghost().child(div().text_size(px(text::CAPTION)).text_color(theme.tertiary).child(label.clone())).accessibility_label(format!("YourHarness {label}")).tooltip(format!("YourHarness {label}")))
         .content(move |_, _, cx| {
             let u = updater.read(cx);
             let current = u.current.clone();

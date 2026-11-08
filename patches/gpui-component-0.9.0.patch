@@ -1,0 +1,18 @@
+--- gpui-component/src/button/button.rs	2026-11-08 18:49:20
++++ gpui-component/src/button/button.rs	2026-11-08 18:49:35
+@@ -768,7 +768,14 @@
+         let accessibility_label = self
+             .accessibility_label
+             .clone()
+-            .or_else(|| self.label.clone());
++            .or_else(|| self.label.clone())
++            // YourHarness patch: an icon-only button is named by its tooltip, as AppKit's are,
++            // instead of having no name for VoiceOver to read.
++            .or_else(|| {
++                (self.label.is_none() && children.is_empty())
++                    .then(|| self.tooltip.as_ref().map(|(tooltip, _)| tooltip.clone()))
++                    .flatten()
++            });
+         // Like an HTML `title`, the tooltip describes the button.
+         let description = self.tooltip.as_ref().map(|(tooltip, _)| tooltip.clone());
+         let content = h_flex()

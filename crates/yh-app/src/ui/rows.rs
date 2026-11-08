@@ -1509,6 +1509,17 @@ fn box_scroll(key: u64) -> BoxScroll {
     })
 }
 
+/// Each capped box that can scroll: (key, how far down it is, how far it can go), for
+/// `YH_WHEEL`'s report.
+pub fn box_offsets() -> Vec<(u64, f32, f32)> {
+    BOX_SCROLLS.with(|s| {
+        let mut all: Vec<(u64, f32, f32)> =
+            s.borrow().iter().map(|(k, (h, _))| (*k, -f32::from(h.offset().y), f32::from(h.max_offset().y))).filter(|b| b.2 > 0.).collect();
+        all.sort_by_key(|b| b.0);
+        all
+    })
+}
+
 /// A box capped at `max` tall whose content scrolls inside it. A vertical wheel moves the box
 /// while it can go that way, and the transcript once it's at its end (the Swift app's
 /// `TranscriptWheelRouter`): GPUI hands the event to every scroll under the pointer, so the box

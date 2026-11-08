@@ -1,0 +1,12 @@
+--- gpui-pre/src/view.rs	2026-11-08 18:49:20
++++ gpui-pre/src/view.rs	2026-11-08 18:49:35
+@@ -554,6 +554,9 @@
+                     && element_state.cache_key.opacity.to_bits() == opacity.to_bits()
+                     && !window.dirty_views.contains(&entity_id)
+                     && !window.refreshing
++                    // YourHarness patch: a reused prepaint pushes no accessibility nodes, so a
++                    // cached view vanished from VoiceOver's tree; while it listens, draw anew.
++                    && !window.a11y.is_active()
+                 {
+                     let prepaint_start = window.prepaint_index();
+                     window.reuse_prepaint(element_state.prepaint_range.clone());

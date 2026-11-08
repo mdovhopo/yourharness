@@ -21,8 +21,9 @@ and what each chunk covers. The SwiftUI app this replaces is frozen in `legacy/Y
     `composer.rs` (with the permission, question and plan cards).
   - `platform.rs` (AppKit), `probe.rs` (the perf run), `theme.rs`.
 - `patches/`, `scripts/vendor.sh`: GPUI crates we patch, unpacked into `vendor/` (not
-  committed). Today only `gpui-pre-macos`: `GPUI_KEEP_DRAWING=1` draws a window parked off
-  screen.
+  committed). `gpui-pre-macos`: `GPUI_KEEP_DRAWING=1` draws a window parked off screen;
+  `gpui-pre`: cached views draw anew while VoiceOver listens (a reused one dropped out of its
+  tree); `gpui-component`: an icon-only button is named by its tooltip.
 - UI building blocks come from **gpui-kit** (GPUI 0.3.11 + gpui-component, Apache-2.0):
   inputs, selects, popovers, dialogs, tables, charts, menus. Zed's own crates (ui, editor,
   markdown) are reference code only: GPL, and tied to Zed.
@@ -57,7 +58,14 @@ Launch options: `YH_DATA_DIR`, `YH_CLAUDE_HISTORY=1` (also list Claude Code's ow
 themselves, every waiting one by its own id; `YH_ANSWER_DELAY=<s>` answers that much later, so the cards
 show and pile up: parallel sub-agents print `PERMISSIONS waiting: 2`). Also `YH_CLICK=<x,y>[;<x,y>…]` (clicks
 in window points through the window, a second apart, after `YH_DRAFT_DELAY` + 0.5 s: the composer's pickers,
-the plan card's Approve menu), `YH_DROP=<x,y>` with `YH_DROP_FILES=<a:b>` (files dragged in from Finder
+the plan card's Approve menu; `YH_CLICK_WINDOW=<title>` sends them, and `YH_WHEEL`'s, to that window instead:
+`Settings`), `YH_WHEEL=<x,y,dy,count>[;…]` (`count` pixel wheel events of `dy`, positive scrolling up, at that point
+through the window as a real wheel goes, same delay; after each step `WHEEL …` prints the open transcript's top row
+and every capped tool box that can scroll, `key:offset/max`: for the 320 pt boxes and sideways code blocks),
+`YH_AX_DUMP=<s>` (the window's accessibility tree as VoiceOver reads it, from inside the app so no permission
+prompt, printed as `AX …` lines; never dump another app's tree from outside, which needs Accessibility access),
+`YH_RUNTIME_LOG=1` (each thread's `claude` started and ended, `RUNTIME …`: its effort, whether `gh stack`'s
+instructions are in its prompt, an effort change mid-turn starting it over once the turn ends), `YH_DROP=<x,y>` with `YH_DROP_FILES=<a:b>` (files dragged in from Finder
 through GPUI's file-drop events after `YH_DRAFT_DELAY`, held `YH_DROP_HOLD` s (2) so a snapshot shows the
 overlay, then dropped), `YH_PREVIEW_MEDIA=1|draft` (the thread's last pictures, or what waits in the composer,
 in Quick Look, printing `PREVIEW PASS`; it shows on screen briefly), `YH_OPEN_BROWSER_WINDOW=1` (the open

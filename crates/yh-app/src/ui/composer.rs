@@ -683,7 +683,7 @@ impl Composer {
         let (secondary, error) = (theme.secondary, theme.error);
         let model_menu = {
             let (w, id, models, current) = (w.clone(), id.clone(), models.clone(), current_model.clone());
-            Button::new("model").ghost().small().flex_none().icon(icons::sparkles().size(px(13.)).text_color(secondary)).child(picker_label(model_name.clone(), secondary)).tooltip("Model").dropdown_caret(true).dropdown_menu(move |mut menu, window, cx| {
+            Button::new("model").ghost().small().flex_none().icon(icons::sparkles().size(px(13.)).text_color(secondary)).child(picker_label(model_name.clone(), secondary)).accessibility_label(format!("Model: {model_name}")).tooltip("Model").dropdown_caret(true).dropdown_menu(move |mut menu, window, cx| {
                 menu = menu.min_w(px(260.)).label("Claude Code");
                 let pick = |value: Option<String>| {
                     let (w, id) = (w.clone(), id.clone());
@@ -721,7 +721,7 @@ impl Composer {
             let (w, id, current) = (w.clone(), id.clone(), effort.clone());
             let efforts = efforts.clone();
             let label = effort.as_deref().map(effort_label).unwrap_or("Auto").to_string();
-            Button::new("effort").ghost().small().flex_none().icon(icons::gauge().size(px(13.)).text_color(secondary)).when(!compact, |b| b.child(picker_label(label, secondary))).tooltip("Reasoning effort").dropdown_caret(!compact).dropdown_menu(move |mut menu, _, _| {
+            Button::new("effort").ghost().small().flex_none().icon(icons::gauge().size(px(13.)).text_color(secondary)).accessibility_label(format!("Reasoning effort: {label}")).when(!compact, |b| b.child(picker_label(label, secondary))).tooltip("Reasoning effort").dropdown_caret(!compact).dropdown_menu(move |mut menu, _, _| {
                 menu = menu.min_w(px(240.)).label("Reasoning Effort");
                 {
                     let (w, id) = (w.clone(), id.clone());
@@ -744,7 +744,7 @@ impl Composer {
             let help = if mode == "auto" && !auto_ok { format!("{model_name} doesn't support Auto, so Claude asks before changes") } else { format!("Permissions for {project_name}") };
             let model_name = model_name.clone();
             let mode_icon = if mode == "bypass" { icons::shield().text_color(error) } else if mode == "auto" { icons::shield_check().text_color(secondary) } else { icons::shield().text_color(secondary) };
-            Button::new("mode").ghost().small().flex_none().icon(mode_icon.size(px(13.))).when(!compact, |b| b.child(picker_label(mode_label.to_string(), secondary))).tooltip(help).dropdown_caret(!compact).dropdown_menu(move |mut menu, _, _| {
+            Button::new("mode").ghost().small().flex_none().icon(mode_icon.size(px(13.))).accessibility_label(format!("Permissions: {mode_label}")).when(!compact, |b| b.child(picker_label(mode_label.to_string(), secondary))).tooltip(help).dropdown_caret(!compact).dropdown_menu(move |mut menu, _, _| {
                 menu = menu.min_w(px(280.)).label(format!("Permissions · {project_name}"));
                 for (value, _) in MODES {
                     let (w, project) = (w.clone(), project.clone());

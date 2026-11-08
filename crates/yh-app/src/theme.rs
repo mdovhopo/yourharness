@@ -174,6 +174,8 @@ pub fn apply_appearance(appearance: WindowAppearance, window: &mut Window, cx: &
     colors.button_primary_hover = accent.opacity(0.9);
     colors.button_primary_active = accent.opacity(0.8);
     colors.button_primary_foreground = gpui_kit::white();
+    // A switch's knob is white in both modes, as macOS's (it took the near-black canvas in dark).
+    colors.switch_thumb = gpui_kit::white();
     // Buttons read tokens made from the colours.
     theme.tokens = gpui_kit::component::theme::ThemeTokens::from(&theme.colors);
 }

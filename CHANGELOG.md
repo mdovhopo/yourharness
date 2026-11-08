@@ -76,6 +76,9 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 - Changing the effort while Claude works no longer ends the turn: it applies once Claude is idle.
 - A thread whose worktree was removed runs in its project's folder again.
 - A sub-agent's steps and report are kept across relaunches; several MCP questions at once each wait their turn, and a page-mode one closes when you finish on the page.
+- The first thread you start right after launch is told how `gh stack` makes stacked PRs too, not only the ones after it.
+- VoiceOver reads the sidebar, the thread's header and the composer: the thread list and the footer's buttons were missing from what it saw, icon-only buttons now say what they do, and the Model, effort and Permissions pickers say their current choice.
+- Switches have a white knob in dark mode, as macOS's do.
 
 ## [0.0.16] - 2026-11-04
 

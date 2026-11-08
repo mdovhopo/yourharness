@@ -28,3 +28,5 @@ opt-level = 2
 [patch.crates-io]
 # scripts/vendor.sh: crates.io's copy plus patches/ (see there for what each patch does).
 gpui-pre-macos = { path = "vendor/gpui-pre-macos" }
+gpui-pre = { path = "vendor/gpui-pre" }
+gpui-component = { path = "vendor/gpui-component" }

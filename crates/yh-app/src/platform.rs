@@ -908,3 +908,77 @@ pub fn set_open_panel_message(message: &str) {
 pub fn open_notification_settings() {
     let _ = std::process::Command::new("open").arg("x-apple.systempreferences:com.apple.Notifications-Settings.extension").spawn();
 }
+
+/// The window's accessibility tree as VoiceOver reads it, from inside the app (no
+/// Accessibility permission needed, so no prompt): each element's role, subrole, label,
+/// title, help and value, indented by depth, up to `limit` elements. For `YH_AX_DUMP`.
+pub fn accessibility_tree(w: id, limit: usize) -> Vec<String> {
+    unsafe fn string(v: id) -> Option<String> {
+        unsafe {
+            if v == nil {
+                return None;
+            }
+            let is_string: bool = msg_send![v, isKindOfClass: class!(NSString)];
+            let v: id = if is_string { v } else { msg_send![v, description] };
+            let p: *const std::ffi::c_char = msg_send![v, UTF8String];
+            if p.is_null() {
+                return None;
+            }
+            let s = std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned();
+            (!s.is_empty()).then_some(s)
+        }
+    }
+    unsafe fn walk(e: id, depth: usize, out: &mut Vec<String>, limit: usize) {
+        unsafe {
+            if out.len() >= limit || depth > 60 {
+                return;
+            }
+            let ask = |sel: objc::runtime::Sel| -> Option<String> {
+                let responds: bool = msg_send![e, respondsToSelector: sel];
+                if !responds {
+                    return None;
+                }
+                let v: id = if sel == sel!(accessibilityRole) {
+                    msg_send![e, accessibilityRole]
+                } else if sel == sel!(accessibilitySubrole) {
+                    msg_send![e, accessibilitySubrole]
+                } else if sel == sel!(accessibilityLabel) {
+                    msg_send![e, accessibilityLabel]
+                } else if sel == sel!(accessibilityTitle) {
+                    msg_send![e, accessibilityTitle]
+                } else if sel == sel!(accessibilityHelp) {
+                    msg_send![e, accessibilityHelp]
+                } else {
+                    msg_send![e, accessibilityValue]
+                };
+                string(v)
+            };
+            let mut line = format!("{}{}", "  ".repeat(depth), ask(sel!(accessibilityRole)).unwrap_or("?".into()));
+            if let Some(s) = ask(sel!(accessibilitySubrole)) {
+                line += &format!(" ({s})");
+            }
+            for (name, sel) in [("label", sel!(accessibilityLabel)), ("title", sel!(accessibilityTitle)), ("help", sel!(accessibilityHelp)), ("value", sel!(accessibilityValue))] {
+                if let Some(v) = ask(sel) {
+                    line += &format!(" {name}={:?}", v.chars().take(80).collect::<String>());
+                }
+            }
+            out.push(line);
+            let responds: bool = msg_send![e, respondsToSelector: sel!(accessibilityChildren)];
+            if !responds {
+                return;
+            }
+            let children: id = msg_send![e, accessibilityChildren];
+            if children == nil {
+                return;
+            }
+            let n: usize = msg_send![children, count];
+            for i in 0..n {
+                let c: id = msg_send![children, objectAtIndex: i];
+                walk(c, depth + 1, out, limit);
+            }
+        }
+    }
+    let mut out = vec![];
+    unsafe { walk(w, 0, &mut out, limit) };
+    out
+}
