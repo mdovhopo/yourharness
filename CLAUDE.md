@@ -181,7 +181,26 @@ the real one).
 Every feature ends with a real Claude turn on Haiku that uses it (a throwaway `YH_PROJECT`,
 `YH_MODEL=haiku`), checked by snapshot or the saved data, then a push. Full perf runs
 (`scripts/perf-run.sh <results>`: the `extreme` preset, a fake `claude` streaming 20 huge threads,
-the probe's phases; `YH_PERF_PHASES`, `YH_PERF_SECONDS`, `SKIP_BUILD=1`, `FORCE=1` on battery)
+the probe's phases; `YH_PERF_PHASES`, `YH_PERF_SECONDS`, `SKIP_BUILD=1`, `FORCE=1` on battery,
+`PERF_APP=<path.app>` for a copy of its own; each run gets a fresh `test-harness-root/perf-run-<time>-<pid>`
+data clone, printed as `data:`, to delete after). Before a release, run the two
+release checks: `YH_PERF_PHASES=stream-all-everything` (every kind of click in turn while 20
+threads stream, each timed into clicks.json by kind and summed up as `PERF click <kind>: n ·
+median · worst` and `PERF slow click` over 100 ms: typing, a long draft, every right sidebar tab
+with the browser shown and hidden, a long file opened and wheeled in Files, the right sidebar's
+edge dragged, ⌘K, ⌘F with ⌘G, jumps, folded work and its biggest output, earlier turns, pin and
+settle with ⌘Z, collapse, the project, Memory and Usage pages, Settings opened and closed, ⌘N,
+the jobs strip, a live window resize, the sidebar hidden; `YH_PERF_ONLY=<groups>` for some, named
+in `probe::GROUPS`) and `YH_PERF_PHASES=stream-all-chaos` (any of those in any order, plus stop
+and send, on the full preset, 120 s or more; each action is logged first as `PERF chaos <n> <action>
+in <thread>`, so a crash says what led to it, and `YH_PERF_CHAOS_SEED=<n>` plays a run again).
+After each action the state is checked, and what's off prints as `PERF WRONG: …` (a pin or settle
+not undone by ⌘Z, a page left over a thread chosen, ⌘N not landing on a blank in the right project,
+an open thread with no transcript, Find marks left after closing, Spotlight or Settings left open,
+the keyboard on nothing drawn); a release needs none, and no panic. Shortcuts go in as key
+events through the window (one that doesn't land is `WRONG`, and its action is dispatched
+instead: the keyboard left on a field or page that's gone reaches nothing); `PERF stall` lines name the action they came after. The fake `claude`
+also leaves background jobs running, for the jobs strip. Full runs
 take ten minutes, so they're kept for the end of big chunks: the user allows one more at most
 and one when the rewrite is whole. Judge by frames on time, worst frames and clicks (docs/
 performance.md), not averages; no `INVALID` lines; `PERF stall` lines say when and in what

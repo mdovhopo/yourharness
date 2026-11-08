@@ -135,6 +135,51 @@ pub fn click(w: id, x: f32, y: f32) {
     }
 }
 
+/// The left button pressed (`Down`), moved with it held (`Drag`) or let go (`Up`) at a
+/// point in window coordinates, through the window as a real drag: for dragging an edge.
+#[derive(Clone, Copy)]
+pub enum Press {
+    Down,
+    Drag,
+    Up,
+}
+
+pub fn mouse_button(w: id, x: f32, y: f32, press: Press) {
+    const NS_LEFT_MOUSE_DRAGGED: u64 = 6;
+    let kind = match press {
+        Press::Down => NSLeftMouseDown,
+        Press::Drag => NS_LEFT_MOUSE_DRAGGED,
+        Press::Up => NSLeftMouseUp,
+    };
+    unsafe {
+        let event = mouse_event(w, kind, window_point(w, x, y), if matches!(press, Press::Drag) { 0 } else { 1 });
+        if event != nil {
+            let _: () = msg_send![w, sendEvent: event];
+        }
+    }
+}
+
+/// A shortcut through the window, as typed: `key` with its virtual key code (GPUI reads the
+/// key from the code when ⌘ is down), with ⌘ and, if asked, ⇧.
+pub fn shortcut(w: id, key: &str, code: u16, shift: bool) {
+    const COMMAND: u64 = 1 << 20;
+    const SHIFT: u64 = 1 << 17;
+    let flags = COMMAND | if shift { SHIFT } else { 0 };
+    unsafe {
+        let number: isize = msg_send![w, windowNumber];
+        let s = NSString::alloc(nil).init_str(key);
+        for kind in [NSKeyDown, NSKeyUp] {
+            let event: id = msg_send![class!(NSEvent), keyEventWithType: kind location: NSPoint::new(0., 0.)
+                modifierFlags: flags timestamp: uptime() windowNumber: number context: nil
+                characters: s charactersIgnoringModifiers: s isARepeat: NO keyCode: code];
+            if event != nil {
+                let _: () = msg_send![w, sendEvent: event];
+            }
+        }
+        let _: () = msg_send![s, release];
+    }
+}
+
 pub fn mouse_move(w: id, x: f32, y: f32) {
     unsafe {
         let _: () = msg_send![w, setAcceptsMouseMovedEvents: YES];

@@ -165,6 +165,8 @@ impl JobsStrip {
                     .child(
                         div()
                             .id(SharedString::from(format!("job-{}", job.id)))
+                            .relative()
+                            .when(crate::probe::enabled(), |d| d.child(crate::probe::tracker("job".into())))
                             .flex_1()
                             .min_w_0()
                             .flex()

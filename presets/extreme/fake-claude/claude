@@ -119,6 +119,38 @@ def subagent(rate):
     emit({"type": "system", "subtype": "task_notification", "task_id": task, "tool_use_id": tid, "status": "completed", "summary": sentence(20)})
     emit({"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tid, "content": sentence(40), "is_error": False}]}})
 
+jobs_dir = os.path.join(os.environ.get("TMPDIR", "/tmp"), f"yh-fake-jobs-{os.getpid()}")
+jobs = []
+
+def background_job(rate):
+    # A command left running (`run_in_background`): the jobs strip above the composer shows it,
+    # its output read from a file, until a later step says it ended.
+    mid, tid, task = "msg_" + uuid.uuid4().hex, "toolu_" + uuid.uuid4().hex, "b" + uuid.uuid4().hex[:8]
+    tool_input = {"command": f"swift build --target {rng.choice(words)}", "description": sentence(4), "run_in_background": True}
+    os.makedirs(jobs_dir, exist_ok=True)
+    path = os.path.join(jobs_dir, task + ".output")
+    with open(path, "w") as f:
+        f.write("\n".join(sentence(8) for _ in range(rng.randint(5, 40))) + "\n")
+    begin(mid)
+    stream(mid, {"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": tid, "name": "Bash", "input": {}}})
+    emit({"type": "assistant", "message": {"id": mid, "model": "claude-haiku-5-5", "content": [{"type": "tool_use", "id": tid, "name": "Bash", "input": tool_input}]}})
+    stream(mid, {"type": "content_block_stop", "index": 0})
+    emit({"type": "system", "subtype": "task_started", "task_id": task, "tool_use_id": tid, "description": tool_input["description"],
+          "is_backgrounded": True, "task_type": "local_bash"})
+    emit({"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tid, "is_error": False,
+          "content": f"Command running in background with ID: {task}. Output is being written to: {path}. You will be notified when it completes."}]}})
+    jobs.append((task, tid, path))
+
+def end_job(task, tid, path):
+    with open(path, "a") as f:
+        f.write("Build complete\n")
+    emit({"type": "system", "subtype": "task_notification", "task_id": task, "tool_use_id": tid, "status": "completed",
+          "output_file": path, "summary": f'Background command "{task}" completed (exit code 0)'})
+
+def end_jobs(keep=0):
+    while len(jobs) > keep:
+        end_job(*jobs.pop(0))
+
 def compact():
     status("compacting")
     time.sleep(0.2)
@@ -136,6 +168,9 @@ def turn(seconds, rate, subagents=True):
         if step % 2 == 0: reply(rate)
         if step % 12 == 0 and subagents: subagent(rate)
         if step % 40 == 0: compact()
+        if step % 6 == 3: background_job(rate)
+        if step % 6 == 0: end_jobs(keep=1)
+    end_jobs()
     reply(rate, long=True)
     elapsed = int((time.time() - started) * 1000)
     emit({"type": "result", "subtype": "success", "is_error": False, "duration_ms": elapsed, "num_turns": step, "result": "Done.",
@@ -165,3 +200,6 @@ for line in sys.stdin:
         worker = threading.Thread(target=turn, args=(seconds, rate, "nosubagents" not in text), daemon=True)
         worker.start()
 if worker: worker.join()
+for name in os.listdir(jobs_dir) if os.path.isdir(jobs_dir) else []:
+    os.remove(os.path.join(jobs_dir, name))
+if os.path.isdir(jobs_dir): os.rmdir(jobs_dir)

@@ -215,7 +215,7 @@ impl Sidebar {
         self.workspace.read(cx).library.set_setting(key, &Value::from(list.into_iter().map(|s| Value::from(s.as_str())).collect::<Vec<_>>()));
     }
 
-    fn set_collapsed(&mut self, project: &str, on: bool, cx: &mut Context<Self>) {
+    pub fn set_collapsed(&mut self, project: &str, on: bool, cx: &mut Context<Self>) {
         let changed = if on { self.collapsed.insert(project.to_string()) } else { self.collapsed.remove(project) };
         if changed {
             self.save_set(COLLAPSED, &self.collapsed, cx);

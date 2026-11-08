@@ -933,6 +933,19 @@ pub fn open_on(workspace: Entity<Workspace>, tab: Tab, window: &mut Window, cx: 
     open_window(workspace, Some(tab), cx);
 }
 
+/// Whether Settings' window is open.
+pub fn is_open() -> bool {
+    WINDOW.with(|w| w.borrow().is_some())
+}
+
+/// Closes Settings' window as its close button does (the perf probe).
+pub fn close_window(cx: &mut App) {
+    let open = WINDOW.with(|w| w.borrow().clone());
+    if let Some((handle, _)) = open {
+        let _ = handle.update(cx, |_, window, _| crate::platform::perform_close(window));
+    }
+}
+
 /// Settings in a window of its own, as the Swift app's Settings scene: one at a time, brought
 /// forward (on `tab`, when given) if it's open.
 pub fn open_window(workspace: Entity<Workspace>, tab: Option<Tab>, cx: &mut App) {
@@ -951,7 +964,8 @@ pub fn open_window(workspace: Entity<Workspace>, tab: Option<Tab>, cx: &mut App)
             return;
         }
     }
-    let background = std::env::var("YH_BACKGROUND").as_deref() == Ok("1");
+    // A perf run opens it too, and must never take your focus.
+    let background = std::env::var("YH_BACKGROUND").as_deref() == Ok("1") || std::env::var("YH_PERF").is_ok();
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(680.), px(640.)), cx))),
         titlebar: Some(TitlebarOptions { title: Some("Settings".into()), ..Default::default() }),

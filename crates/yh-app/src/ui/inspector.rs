@@ -667,6 +667,13 @@ impl Inspector {
         self.workspace.update(cx, |ws, cx| ws.send(&chat, &text, false, cx));
     }
 
+    /// The open file's line count in the Files tab, once read (the perf probe).
+    pub fn open_file_lines(&self, cx: &App) -> Option<usize> {
+        let folder = self.folder(cx)?;
+        let f = self.folders.get(&folder).and_then(|s| s.files.get(s.current))?;
+        f.lines().map(|l| l.len())
+    }
+
     fn folder(&self, cx: &App) -> Option<String> {
         let t = self.thread.as_ref()?;
         Some(self.workspace.read(cx).folder_of(t.read(cx)))
