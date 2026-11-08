@@ -198,7 +198,7 @@ pub fn banner(updater: &Entity<Updater>, workspace: &Entity<Workspace>, notes: &
     let body = match u.phase.clone() {
         Phase::Available(r) => row
             .child(icon(crate::ui::icons::download(), theme.accent))
-            .child(div().flex_1().min_w_0().flex().flex_col().child(strong(format!("Version {}", r.version))).child(whats_new("update-notes", u.current.clone(), r.version.clone())))
+            .child(div().flex_1().min_w_0().flex().flex_col().items_start().child(strong(format!("Version {}", r.version))).child(whats_new("update-notes", u.current.clone(), r.version.clone())))
             .child(Button::new("update-action").xsmall().primary().label("Update").tooltip(format!("Download {}. Nothing changes until you restart.", r.version)).on_click(move |_, _, cx| u1.update(cx, |u, cx| u.download(cx))))
             .into_any_element(),
         Phase::Downloading(r, p) => div()
@@ -216,7 +216,7 @@ pub fn banner(updater: &Entity<Updater>, workspace: &Entity<Workspace>, notes: &
         Phase::Ready(v) => {
             let ws = workspace.clone();
             row.child(icon(Icon::new(IconName::CircleCheck), theme.success))
-                .child(div().flex_1().min_w_0().flex().flex_col().child(strong(format!("{v} is ready"))).child(small("Restart to use it".into())))
+                .child(div().flex_1().min_w_0().flex().flex_col().items_start().child(strong(format!("{v} is ready"))).child(small("Restart to use it".into())))
                 .child(Button::new("update-action").xsmall().primary().label("Restart").tooltip(format!("Quit and open {v}")).on_click(move |_, window, cx| {
                     let n = working(&ws, cx);
                     u1.update(cx, |u, cx| u.confirm_restart(n, window, cx))
@@ -226,7 +226,7 @@ pub fn banner(updater: &Entity<Updater>, workspace: &Entity<Workspace>, notes: &
         Phase::Failed(e, release) => row
             .items_start()
             .child(icon(Icon::new(IconName::TriangleAlert), theme.warning))
-            .child(div().flex_1().min_w_0().flex().flex_col().child(strong(if release.is_none() { "Couldn't check for updates".into() } else { "Couldn't update".into() })).child(small(e).line_clamp(3)))
+            .child(div().flex_1().min_w_0().flex().flex_col().items_start().child(strong(if release.is_none() { "Couldn't check for updates".into() } else { "Couldn't update".into() })).child(small(e).line_clamp(3)))
             .child(if release.is_some() {
                 Button::new("update-action").xsmall().outline().label("Retry").on_click(move |_, _, cx| u1.update(cx, |u, cx| u.download(cx))).into_any_element()
             } else {
@@ -238,7 +238,7 @@ pub fn banner(updater: &Entity<Updater>, workspace: &Entity<Workspace>, notes: &
         _ => {
             let (Some(from), Some(current)) = (u.updated_from.clone(), u.current.clone()) else { return None };
             row.child(icon(crate::ui::icons::sparkles(), theme.accent))
-                .child(div().flex_1().min_w_0().flex().flex_col().child(strong(format!("Updated to {current}"))).child(whats_new("updated-notes", Some(from), current)))
+                .child(div().flex_1().min_w_0().flex().flex_col().items_start().child(strong(format!("Updated to {current}"))).child(whats_new("updated-notes", Some(from), current)))
                 .child(dismiss("updated-dismiss", "Hide this", Box::new(move |cx| u2.update(cx, |u, cx| u.dismiss_updated(cx)))))
                 .into_any_element()
         }
