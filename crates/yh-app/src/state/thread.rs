@@ -31,6 +31,9 @@ pub struct Subagent {
     /// When it started (seconds since 1970), and how long it ran, as the CLI counts it.
     pub started_at: f64,
     pub duration_ms: Option<u64>,
+    /// What it had used before it was continued (`SendMessage`): the CLI counts a continued
+    /// run afresh, so its numbers go on from these.
+    base: yh_core::claude::SubagentUsage,
 }
 
 /// One thing a sub-agent did: a message (`tool` None) or a tool call with its result.
@@ -59,6 +62,7 @@ impl Subagent {
             tool_uses: None,
             started_at: yh_core::library::now_ms() / 1000.0,
             duration_ms: None,
+            base: Default::default(),
         }
     }
 
@@ -121,13 +125,22 @@ impl Subagent {
             tool_uses: r.tool_uses,
             started_at: r.started_at,
             duration_ms: r.duration_ms,
+            base: Default::default(),
         }
     }
 
     fn apply(&mut self, usage: yh_core::claude::SubagentUsage) {
-        self.tokens = usage.tokens.or(self.tokens);
-        self.tool_uses = usage.tool_uses.or(self.tool_uses);
-        self.duration_ms = usage.duration_ms.or(self.duration_ms);
+        let plus = |n: Option<u64>, base: Option<u64>| n.map(|n| n + base.unwrap_or(0));
+        self.tokens = plus(usage.tokens, self.base.tokens).or(self.tokens);
+        self.tool_uses = plus(usage.tool_uses, self.base.tool_uses).or(self.tool_uses);
+        self.duration_ms = plus(usage.duration_ms, self.base.duration_ms).or(self.duration_ms);
+    }
+
+    /// Continued after it ended (`SendMessage` to it): working again, its numbers going on.
+    fn resume(&mut self) {
+        self.base = yh_core::claude::SubagentUsage { tokens: self.tokens, tool_uses: self.tool_uses.or((self.steps > 0).then_some(self.steps as u64)), duration_ms: self.duration_ms };
+        self.status = "running".into();
+        self.activity = None;
     }
 }
 
@@ -245,6 +258,15 @@ pub fn is_plan_tool(name: &str, input: &str) -> bool {
 
 /// Tools whose call is a sub-agent: shown as a card of its own.
 pub const AGENT_TOOLS: &[&str] = &["Agent", "Task"];
+
+/// A call that runs a sub-agent: an Agent (or Task) call, or one whose tool isn't known yet
+/// but already has a run.
+fn is_agent_entry(e: &Entry) -> bool {
+    match e.data.tool_name.as_deref() {
+        Some(name) => AGENT_TOOLS.contains(&name),
+        None => e.sub.is_some(),
+    }
+}
 
 fn item_type(data: &EntryData) -> ItemType {
     match data.kind {
@@ -423,6 +445,9 @@ pub struct ThreadState {
     pub subagents_version: u64,
     /// The sub-agent you picked in the right sidebar (its Agent tool call's id).
     pub inspected_subagent: Option<String>,
+    /// Calls that continued a sub-agent (`SendMessage` to it), by the Agent call that started
+    /// it: the CLI reports the continued run under the new call, the run is the same.
+    agent_alias: HashMap<String, String>,
     /// Each held row's place in its turn, as `items`.
     pub folds: Vec<Fold>,
     /// The finished turns' work, as `Fold::Summary` numbers them.
@@ -502,6 +527,7 @@ impl ThreadState {
             tools: HashMap::new(),
             subagents_version: 0,
             inspected_subagent: None,
+            agent_alias: HashMap::new(),
             folds: vec![],
             turns: vec![],
             open_turns: Default::default(),
@@ -1092,14 +1118,14 @@ impl ThreadState {
                 changed
             }
             Event::SubagentProgress { tool_id, activity, usage } => {
+                let tool_id = self.agent_alias.get(&tool_id).cloned().unwrap_or(tool_id);
                 if let Some(a) = &activity {
                     self.jobs.agent_activity(&tool_id, a);
                 }
                 if let Some((e, pos)) = self.tools.get(&tool_id).cloned() {
                     {
                         let mut b = e.borrow_mut();
-                        let is_agent = b.sub.is_some() || b.data.tool_name.as_deref().is_some_and(|n| AGENT_TOOLS.contains(&n));
-                        if !is_agent {
+                        if !is_agent_entry(&b) {
                             return false;
                         }
                         let sub = b.sub.get_or_insert_with(|| Subagent::new(String::new()));
@@ -1338,6 +1364,17 @@ impl ThreadState {
                 self.jobs.running.len() != jobs_before
             }
             Event::SubagentStarted { tool_id, description, task_id, background } => {
+                // A sub-agent continued (`SendMessage` to it): the same task under a new call.
+                // Its steps keep coming under the call that started it; the run goes on there.
+                let original = task_id.as_deref().and_then(|t| self.agent_call_of(t)).filter(|call| *call != tool_id);
+                let resumed = original.is_some();
+                let tool_id = match original {
+                    Some(call) => {
+                        self.agent_alias.insert(tool_id, call.clone());
+                        call
+                    }
+                    None => tool_id,
+                };
                 // In the background it goes on after the turn: the thread isn't done.
                 if background {
                     self.jobs.start_agent(task_id.clone(), tool_id.clone(), description.clone());
@@ -1345,6 +1382,10 @@ impl ThreadState {
                 if let Some((e, pos)) = self.tools.get(&tool_id).cloned() {
                     {
                         let mut b = e.borrow_mut();
+                        // A task the CLI started for a call that isn't an agent's: none of ours.
+                        if !is_agent_entry(&b) {
+                            return background;
+                        }
                         // Keep what it already did when the start comes after its first steps.
                         match &mut b.sub {
                             Some(sub) => sub.description = description,
@@ -1352,18 +1393,31 @@ impl ThreadState {
                         }
                         if let Some(sub) = &mut b.sub {
                             sub.task_id = task_id.or(sub.task_id.take());
+                            if resumed {
+                                sub.resume();
+                            }
+                        }
+                        if resumed {
+                            self.dirty.insert(b.seq);
                         }
                     }
                     e.borrow_mut().version += 1;
+                    self.subagents_version += 1;
                     self.touch_pos(pos);
                 }
                 background
             }
             Event::SubagentFinished { tool_id, status, summary, usage } => {
+                let tool_id = self.agent_alias.get(&tool_id).cloned().unwrap_or(tool_id);
                 let was_background = self.jobs.finish_agent(&tool_id);
                 if let Some((e, pos)) = self.tools.get(&tool_id).cloned() {
                     {
                         let mut b = e.borrow_mut();
+                        // A job's end the CLI no longer knew as one (a watch from before a
+                        // restart): never made a sub-agent of it.
+                        if !is_agent_entry(&b) {
+                            return was_background;
+                        }
                         let sub = b.sub.get_or_insert_with(|| Subagent::new(String::new()));
                         sub.status = status;
                         sub.activity = None;
@@ -1512,9 +1566,20 @@ impl ThreadState {
     /// The Agent call of a sub-agent, by its task ID: a background one from the jobs, a
     /// foreground one from its call's start.
     fn agent_call_of(&self, task_id: &str) -> Option<String> {
-        self.jobs.agent_call(task_id).or_else(|| {
-            self.tools.iter().find(|(_, (e, _))| e.borrow().sub.as_ref().is_some_and(|s| s.task_id.as_deref() == Some(task_id))).map(|(id, _)| id.clone())
-        })
+        self.jobs
+            .agent_call(task_id)
+            .or_else(|| self.tools.iter().find(|(_, (e, _))| e.borrow().sub.as_ref().is_some_and(|s| s.task_id.as_deref() == Some(task_id))).map(|(id, _)| id.clone()))
+            // One from before a restart: its call's result names it ("agentId: a5b8…").
+            .or_else(|| {
+                let named = format!("agentId: {task_id}");
+                self.tools
+                    .iter()
+                    .find(|(_, (e, _))| {
+                        let b = e.borrow();
+                        b.data.tool_name.as_deref().is_some_and(|n| AGENT_TOOLS.contains(&n)) && b.data.tool_result.as_deref().is_some_and(|r| r.contains(&named))
+                    })
+                    .map(|(id, _)| id.clone())
+            })
     }
 
     /// A background sub-agent that ended without word: its call says it stopped.
@@ -1568,7 +1633,9 @@ impl ThreadState {
         let mut found: Vec<(usize, String, EntryRef)> = self
             .tools
             .iter()
-            .filter(|(_, (e, _))| e.borrow().sub.is_some() || e.borrow().data.tool_name.as_deref().is_some_and(|n| AGENT_TOOLS.contains(&n)))
+            // Agent calls only: a watch or command the CLI once reported as a task, or a call
+            // that continued an agent, may carry a run from older versions.
+            .filter(|(_, (e, _))| is_agent_entry(&e.borrow()))
             .map(|(id, (e, _))| (e.borrow().seq, id.clone(), e.clone()))
             .collect();
         found.sort_by_key(|(seq, _, _)| *seq);

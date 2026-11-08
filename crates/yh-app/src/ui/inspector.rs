@@ -1433,7 +1433,17 @@ impl Inspector {
             }
             v
         };
-        let tools = log.iter().filter(|s| s.tool.is_some() && s.tool.as_deref() != Some("SubagentHandback")).count();
+        // What the CLI counted when the log holds fewer (steps it didn't stream, or older ones).
+        let logged = log.iter().filter(|s| s.tool.is_some() && s.tool.as_deref() != Some("SubagentHandback")).count();
+        let tools = sub.as_ref().and_then(|s| s.tool_uses).map_or(logged, |n| (n as usize).max(logged));
+        // While it works: what it's doing now and how long it's gone (since it was last started
+        // or continued), as of the last word from it, which redraws this.
+        let working_now = (status == "running").then(|| {
+            let since = thread.read(cx).jobs.agents.iter().find(|j| j.tool_id.as_deref() == Some(selected.0.as_str())).map(|j| j.started.elapsed().as_secs());
+            let since = since.unwrap_or_else(|| (yh_core::library::now_ms() / 1000.0 - sub.as_ref().map_or(0.0, |s| s.started_at)).max(0.0) as u64);
+            let doing = sub.as_ref().and_then(|s| s.activity.clone()).unwrap_or_else(|| if logged == 0 { "Starting…".into() } else { "Working…".into() });
+            format!("{doing} · {}", crate::state::jobs::clock(since))
+        });
         // Stop: `stop_task` on its task, the thread carries on.
         let task_id = sub.as_ref().filter(|_| status == "running").and_then(|s| s.task_id.clone());
         // `YH_SUBAGENT_STOP=<seconds>`: the probe presses Stop that long after it first shows.
@@ -1496,7 +1506,10 @@ impl Inspector {
                                     .text_size(px(text::FOOTNOTE))
                                     .text_color(theme.secondary)
                                     .child(status_icon(&status, theme))
-                                    .child(format!("{} · {tools} tool{}", status_text(&status), if tools == 1 { "" } else { "s" }))
+                                    .child(match tools {
+                                        0 if status == "running" => status_text(&status).to_string(),
+                                        n => format!("{} · {n} tool{}", status_text(&status), if n == 1 { "" } else { "s" }),
+                                    })
                                     .when_some(
                                         {
                                             let kind: Vec<String> = agent_type.into_iter().chain(input["run_in_background"].as_bool().filter(|b| *b).map(|_| "in the background".to_string())).collect();
@@ -1504,7 +1517,10 @@ impl Inspector {
                                         },
                                         |d, t| d.child(div().child(format!("· {t}"))),
                                     ),
-                            ),
+                            )
+                            .when_some(working_now, |d, now| {
+                                d.child(div().text_size(px(text::FOOTNOTE)).text_color(theme.accent).overflow_hidden().whitespace_nowrap().text_ellipsis().child(now))
+                            }),
                     )
                     .when_some(stop, |d, b| d.child(b)),
             );

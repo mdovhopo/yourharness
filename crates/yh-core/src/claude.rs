@@ -745,7 +745,9 @@ impl Parser {
                     task_id: object["task_id"].as_str().map(str::to_string),
                     background: object["is_backgrounded"] == true,
                 }],
-                "task_notification" if object["task_id"].as_str().is_some_and(|id| self.jobs.remove(id)) => vec![Event::JobFinished {
+                // Kept after its first word: a watch can send more than one, and a later one taken
+                // for a sub-agent's end made a sub-agent of the watch.
+                "task_notification" if object["task_id"].as_str().is_some_and(|id| self.jobs.contains(id)) => vec![Event::JobFinished {
                     task_id: object["task_id"].as_str().unwrap_or("").into(),
                     status: object["status"].as_str().unwrap_or("completed").into(),
                     summary: object["summary"].as_str().map(str::to_string),
@@ -1091,6 +1093,39 @@ mod tests {
             })
             .collect();
         assert_eq!(ends, [("agent".to_string(), "stopped".to_string()), ("b7y5k2xv8".into(), "stopped".into()), ("b02xabzjz".into(), "stopped".into()), ("bq3issmvi".into(), "completed".into())]);
+    }
+
+    /// A real capture (sanitized), on Haiku: a background agent and a Monitor in one turn; once
+    /// the agent has reported, Claude continues it with SendMessage.
+    const AGENT_CONTINUED: &str = include_str!("../fixtures/subagent-continued.jsonl");
+
+    #[test]
+    fn a_continued_sub_agent_is_the_same_task_under_a_new_call() {
+        let events = events(AGENT_CONTINUED);
+        let starts: Vec<(&str, Option<&str>)> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::SubagentStarted { tool_id, task_id, .. } => Some((tool_id.as_str(), task_id.as_deref())),
+                _ => None,
+            })
+            .collect();
+        // Same task, the second under the SendMessage call.
+        assert_eq!(starts, [("toolu_01ABBbqctL9fMrL5KzTiCNJF", Some("a5b835a75db029f79")), ("toolu_01U1R8RmBgRnSyPxWU3McfoR", Some("a5b835a75db029f79"))]);
+        // Its steps still come under the call that started it.
+        assert!(events.iter().any(|e| matches!(e, Event::Assistant { parent: Some(p), blocks, .. } if p == "toolu_01ABBbqctL9fMrL5KzTiCNJF" && blocks.iter().any(|b| matches!(b, Block::Tool { input, .. } if input.contains("sleep(15)"))))));
+        // The Monitor is a job, never a sub-agent; its end is the job's.
+        assert!(events.iter().any(|e| matches!(e, Event::JobStarted { task_id, background: true, .. } if task_id == "bhn2l28tp")));
+        assert!(events.iter().any(|e| matches!(e, Event::JobFinished { task_id, .. } if task_id == "bhn2l28tp")));
+        assert!(!events.iter().any(|e| matches!(e, Event::SubagentFinished { tool_id, .. } if tool_id == "toolu_01MeNPPw5rnKyguAF9EHBQo9")));
+        // A watch's second word is still the watch's.
+        let mut parser = Parser::default();
+        let lines = [
+            r#"{"type":"system","subtype":"task_started","task_id":"w1","task_type":"local_bash","tool_use_id":"t1","description":"Usage","is_backgrounded":true}"#,
+            r#"{"type":"system","subtype":"task_notification","task_id":"w1","tool_use_id":"t1","status":"completed","summary":"five-hour usage at 85%"}"#,
+            r#"{"type":"system","subtype":"task_notification","task_id":"w1","tool_use_id":"t1","status":"stopped","summary":"five-hour usage at 93%"}"#,
+        ];
+        let events: Vec<Event> = lines.iter().flat_map(|l| parser.parse(&serde_json::from_str(l).unwrap())).collect();
+        assert!(!events.iter().any(|e| matches!(e, Event::SubagentFinished { .. })));
     }
 
     #[test]

@@ -258,7 +258,8 @@ fn turn_details(state: &ThreadState, work: &TurnWork) -> String {
             if b.data.kind != Kind::Tool {
                 continue;
             }
-            if item.ty == ItemType::Agent || b.sub.is_some() {
+            // A run on a call that isn't an agent's (a watch from older versions) is no agent.
+            if item.ty == ItemType::Agent || (b.sub.is_some() && b.data.tool_name.is_none()) {
                 agents += 1;
                 continue;
             }
