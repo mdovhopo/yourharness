@@ -1048,6 +1048,14 @@ fn main() {
                             ("inspector", _) => window.dispatch_action(Box::new(ToggleInspector), cx),
                             ("settings", _) => window.dispatch_action(Box::new(OpenSettings), cx),
                             ("close", _) => platform::perform_close(window),
+                            // `key:<keystroke>` (`cmd-k`, `alt-cmd-down`): typed into the window as
+                            // a real key goes, so a shortcut that doesn't land shows.
+                            ("key", ks) => match gpui_kit::Keystroke::parse_with_os(ks, gpui_kit::OperatingSystem::Mac) {
+                                Ok(ks) => {
+                                    window.dispatch_keystroke(ks, cx);
+                                }
+                                Err(_) => eprintln!("ACTION bad key {ks}"),
+                            },
                             (other, _) => eprintln!("ACTION unknown {other}"),
                         }
                     });

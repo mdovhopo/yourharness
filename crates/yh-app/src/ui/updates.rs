@@ -200,7 +200,21 @@ pub fn banner(updater: &Entity<Updater>, workspace: &Entity<Workspace>, notes: &
     let dismiss = |id: &'static str, tip: &'static str, f: Box<dyn Fn(&mut App)>| {
         Button::new(id).xsmall().ghost().icon(Icon::new(IconName::CircleX).size(px(13.)).text_color(theme.secondary)).tooltip(tip).on_click(move |_, _, cx| f(cx))
     };
-    let whats_new = |id: &'static str, after: Option<Version>, through: Version| notes_button(SharedString::from(format!("{id}-button")), "What's New", notes, after, through, None).xsmall();
+    // A link under the title, lined up with it (a ghost button's padding pushed it right and
+    // drew it as plain text).
+    let whats_new = |id: &'static str, after: Option<Version>, through: Version| {
+        let notes = notes.clone();
+        div()
+            .id(SharedString::from(format!("{id}-button")))
+            .text_size(px(text::CAPTION))
+            .text_color(theme.accent)
+            .cursor_pointer()
+            .hover(|s| s.opacity(0.8))
+            .role(gpui_kit::Role::Link)
+            .aria_label("What's New")
+            .child("What's New")
+            .on_click(move |_, window, cx| open_notes(&notes, after.clone(), through.clone(), window, cx))
+    };
     let (u1, u2) = (updater.clone(), updater.clone());
     let row = div().flex().items_center().gap(px(space::S));
     let body = match u.phase.clone() {

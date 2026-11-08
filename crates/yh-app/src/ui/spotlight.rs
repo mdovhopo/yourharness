@@ -125,9 +125,18 @@ fn tilde(path: &str) -> String {
     }
 }
 
-/// The index marks matches with `[` `]`: plain text, one line.
+/// The index marks matches with `[` `]`: plain text, one line, without the markdown marks
+/// (`**bold**`, `` `code` ``, headings, bullets) a reply's raw text keeps.
 fn plain(snippet: &str) -> String {
-    snippet.replace(['[', ']'], "").split_whitespace().collect::<Vec<_>>().join(" ")
+    snippet
+        .replace(['[', ']'], "")
+        .replace("**", "")
+        .replace("__", "")
+        .replace('`', "")
+        .split_whitespace()
+        .filter(|w| !matches!(*w, "#" | "##" | "###" | "####" | "-" | "*" | ">"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn first_match(snippet: &str) -> Option<String> {
@@ -581,4 +590,13 @@ impl Render for Spotlight {
 
 fn hint(icon: Icon, label: &'static str, theme: &Theme) -> impl IntoElement {
     div().flex().items_center().gap(px(space::XS + 1.)).child(icon.size(px(12.)).text_color(theme.tertiary)).child(label)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn snippets_drop_markdown() {
+        assert_eq!(super::plain("The formatter used the machine's **local [time] zone**, so"), "The formatter used the machine's local time zone, so");
+        assert_eq!(super::plain("## Heading\n- run `cargo test`"), "Heading run cargo test");
+    }
 }
