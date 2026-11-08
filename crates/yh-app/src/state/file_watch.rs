@@ -84,9 +84,15 @@ mod tests {
         let (_watch, rx) = FolderWatch::start(&root).unwrap();
         std::thread::sleep(Duration::from_millis(300));
         std::fs::write(root.join("sub/new.txt"), "x").unwrap();
-        let batch = rx.recv_timeout(Duration::from_secs(5)).expect("a batch");
-        let names: Vec<String> = batch.iter().filter_map(|p| relative(&root, p)).collect();
-        assert!(names.iter().any(|n| n == "sub/new.txt"), "{names:?}");
+        // FSEvents may first report the folder made before the watch began: read batches
+        // until the file's shows up.
+        let until = std::time::Instant::now() + Duration::from_secs(10);
+        let mut names: Vec<String> = vec![];
+        while !names.iter().any(|n| n == "sub/new.txt") {
+            let left = until.saturating_duration_since(std::time::Instant::now());
+            let batch = rx.recv_timeout(left).unwrap_or_else(|_| panic!("no batch with the file: {names:?}"));
+            names.extend(batch.iter().filter_map(|p| relative(&root, p)));
+        }
         assert_eq!(parent_of("sub/new.txt"), "sub");
         assert_eq!(parent_of("top.txt"), "");
         assert_eq!(relative(&root, &root.join(".git/index")), None);
