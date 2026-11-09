@@ -3311,7 +3311,7 @@ impl Workspace {
             return Ok(Some(id));
         }
         let thread_id = match &action {
-            A::Send { thread, .. } | A::Stop { thread } | A::Respond { thread, .. } | A::Withdraw { thread, .. } | A::SendNow { thread, .. } | A::Answer { thread, .. } | A::SkipQuestion { thread, .. } | A::ApprovePlan { thread, .. } | A::KeepPlanning { thread, .. } | A::AnswerQuestion { thread, .. } | A::SetModel { thread, .. } | A::SetEffort { thread, .. } | A::SetMode { thread, .. } | A::Rename { thread, .. } | A::Pin { thread, .. } | A::Settle { thread, .. } | A::Delete { thread } => thread.clone(),
+            A::AskAside { thread, .. } | A::Send { thread, .. } | A::Stop { thread } | A::Respond { thread, .. } | A::Withdraw { thread, .. } | A::SendNow { thread, .. } | A::Answer { thread, .. } | A::SkipQuestion { thread, .. } | A::ApprovePlan { thread, .. } | A::KeepPlanning { thread, .. } | A::AnswerQuestion { thread, .. } | A::SetModel { thread, .. } | A::SetEffort { thread, .. } | A::SetMode { thread, .. } | A::Rename { thread, .. } | A::Pin { thread, .. } | A::Settle { thread, .. } | A::Delete { thread } => thread.clone(),
             A::NewThread { .. } => unreachable!("taken above"),
         };
         let Some(thread) = self.thread(&thread_id) else { return Err("No such thread.".into()) };
@@ -3329,6 +3329,7 @@ impl Workspace {
                 }
             }
             A::Stop { .. } => self.stop(&thread, &Default::default(), cx),
+            A::AskAside { text, .. } => self.ask_aside(&thread_id, &text, cx),
             A::Respond { request_id, allow, .. } => {
                 request(&request_id, cx).ok_or("That request isn't waiting any more.")?;
                 self.respond_to(&thread, &request_id, if allow { Decision::allow() } else { Decision::deny() }, cx);

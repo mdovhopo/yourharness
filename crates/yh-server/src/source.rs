@@ -7,7 +7,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde_json::{Map, Value};
 use yh_core::library::ThreadMeta;
 
-use yh_proto::{INPUT_LIMIT, ModelOption, Project, RESULT_LIMIT, Row, SubagentInfo, Thread, trim};
+use yh_proto::{INPUT_LIMIT, LimitWindow, ModelOption, Project, RESULT_LIMIT, Row, SearchHit, SlashCommand, SubagentInfo, Thread, trim};
 
 pub struct Source {
     c: Connection,
@@ -89,8 +89,7 @@ impl Source {
 
     /// The models the CLI last listed (the app keeps them as `claudeModels`).
     pub fn models(&self) -> rusqlite::Result<Vec<ModelOption>> {
-        let json: Option<Vec<u8>> = self.c.query_row("SELECT value FROM settings WHERE key = 'claudeModels'", [], |r| r.get(0)).optional()?;
-        let list: Value = json.and_then(|j| serde_json::from_slice(&j).ok()).unwrap_or_default();
+        let list: Value = self.setting("claudeModels")?.unwrap_or_default();
         Ok(list
             .as_array()
             .into_iter()
@@ -98,6 +97,63 @@ impl Source {
             .filter_map(yh_core::claude::ModelInfo::from_json)
             .map(|m| ModelOption { id: m.value, name: m.display_name, efforts: m.efforts, auto: m.supports_auto_mode })
             .collect())
+    }
+
+    /// Each project's slash commands as the CLI last listed them (`slashCommands`), the app's own
+    /// first (`/btw`, `/mcp`), terminal-only ones left out.
+    pub fn commands(&self) -> rusqlite::Result<std::collections::BTreeMap<String, Vec<SlashCommand>>> {
+        let all = self.setting("slashCommands")?.unwrap_or_default();
+        let app = [
+            SlashCommand { name: "btw".into(), hint: "<question>".into(), description: "Ask a side question. Claude sees this thread; nothing is added to it.".into() },
+            SlashCommand { name: "mcp".into(), hint: String::new(), description: "See your MCP servers.".into() },
+        ];
+        let mut out = std::collections::BTreeMap::new();
+        for (project, list) in all.as_object().into_iter().flatten() {
+            let mut commands: Vec<SlashCommand> = app.to_vec();
+            for c in list.as_array().into_iter().flatten().filter_map(yh_core::claude::SlashCommand::from_json) {
+                if ["color", "focus", "heapdump"].contains(&c.name.as_str()) || commands.iter().any(|x| x.name == c.name) {
+                    continue;
+                }
+                commands.push(SlashCommand { name: c.name, hint: c.hint, description: c.description });
+            }
+            out.insert(project.clone(), commands);
+        }
+        Ok(out)
+    }
+
+    /// Usage limits as last saved (`rateLimit`).
+    pub fn limits(&self) -> rusqlite::Result<Vec<LimitWindow>> {
+        let saved = self.setting("rateLimit")?.unwrap_or_default();
+        Ok(yh_core::limits::from_saved(&saved).map(|info| limit_windows(&info)).unwrap_or_default())
+    }
+
+    fn setting(&self, key: &str) -> rusqlite::Result<Option<Value>> {
+        let json: Option<Vec<u8>> = self.c.query_row("SELECT value FROM settings WHERE key = ?", [key], |r| r.get(0)).optional()?;
+        Ok(json.and_then(|j| serde_json::from_slice(&j).ok()))
+    }
+
+    /// Transcript rows with these words (every word, the last as a prefix), best first.
+    pub fn search(&self, query: &str, limit: i64) -> rusqlite::Result<Vec<SearchHit>> {
+        let Some(expression) = yh_core::db::match_expression(query) else { return Ok(vec![]) };
+        let mut s = self.c.prepare_cached(
+            "SELECT e.thread_id, e.seq, snippet(entries_fts, 0, '[', ']', '…', 12)
+             FROM entries_fts JOIN entries e ON e.rowid = entries_fts.rowid
+             WHERE entries_fts MATCH ?1 ORDER BY bm25(entries_fts) LIMIT ?2",
+        )?;
+        let rows = s.query_map(params![expression, limit], |r| Ok(SearchHit { thread: r.get(0)?, seq: r.get(1)?, snippet: r.get(2)? }))?;
+        rows.collect()
+    }
+
+    /// Where a thread's `claude` runs: its own folder, else its project's.
+    pub fn folder_of(&self, thread: &str) -> rusqlite::Result<Option<String>> {
+        let found: Option<(String, Vec<u8>)> = self.c.query_row("SELECT project_id, json FROM threads WHERE id = ?", [thread], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+        let Some((project, json)) = found else { return Ok(None) };
+        let exists = |p: &String| std::path::Path::new(p).is_dir();
+        if let Some(own) = object(&json).get("workingDirectory").and_then(Value::as_str).map(str::to_string).filter(exists) {
+            return Ok(Some(own));
+        }
+        let project: Option<Vec<u8>> = self.c.query_row("SELECT json FROM projects WHERE id = ?", [project], |r| r.get(0)).optional()?;
+        Ok(project.and_then(|j| object(&j).get("path").and_then(Value::as_str).map(str::to_string)).filter(exists))
     }
 
     /// A row's whole tool input and result: the columns, or their blobs when they're long.
@@ -235,4 +291,9 @@ fn object(json: &[u8]) -> Map<String, Value> {
         Ok(Value::Object(o)) => o,
         _ => Map::new(),
     }
+}
+
+/// A `rate_limit_info`'s windows as the wire says them.
+pub fn limit_windows(info: &Value) -> Vec<LimitWindow> {
+    yh_core::limits::windows(info).into_iter().map(|w| LimitWindow { name: w.name, used: w.utilization, resets_at: w.resets_at }).collect()
 }

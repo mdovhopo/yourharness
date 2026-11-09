@@ -432,6 +432,8 @@ impl LiveState {
 #[derive(Default)]
 pub struct ThreadRun {
     pub live: LiveState,
+    /// Keep every row (a thread whose rows aren't saved: a side chat): nothing to read them back from.
+    pub keep_all: bool,
 
     /// The rows held, by number.
     rows: BTreeMap<usize, TranscriptRow>,
@@ -1206,6 +1208,9 @@ impl ThreadRun {
     /// Lets go of rows nothing will change: not being written, saved, not one of the turn's
     /// blocks, not a call waiting for its result, not a sub-agent or job still running.
     fn let_go(&mut self) {
+        if self.keep_all {
+            return;
+        }
         if !self.added.is_empty() || !self.changed.is_empty() || !self.streamed.is_empty() {
             return;
         }

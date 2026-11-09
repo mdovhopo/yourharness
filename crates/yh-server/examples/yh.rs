@@ -79,7 +79,10 @@ fn print(m: &ToApp, began: &mut bool) -> bool {
             }
         }
         ToApp::Done { id, error, thread } => println!("DONE {id} {}{}", error.as_deref().unwrap_or("ok"), thread.as_deref().map(|t| format!(" thread={t}")).unwrap_or_default()),
-        ToApp::Options { models, modes } => println!("OPTIONS models=[{}] modes=[{}]", models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>().join(","), modes.join(",")),
+        ToApp::Limits { windows } => println!("LIMITS {}", windows.iter().map(|w| format!("{} {:.0}%", w.name, w.used * 100.)).collect::<Vec<_>>().join(", ")),
+        ToApp::SearchResults { query, hits } => println!("SEARCH {query:?} {} hits{}", hits.len(), hits.first().map(|h| format!(": {}", h.snippet)).unwrap_or_default()),
+        ToApp::Files { query, files, .. } => println!("FILES {query:?} {}", files.join(", ")),
+        ToApp::Options { models, modes, .. } => println!("OPTIONS models=[{}] modes=[{}]", models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>().join(","), modes.join(",")),
         ToApp::Subagent { seq, run, .. } => println!("SUBAGENT #{seq} {:?} {} steps={} report={}", run.info.description, run.info.status, run.steps.len(), run.report.is_some()),
         ToApp::Media { seq, index, media_type, data, error, .. } => println!("MEDIA #{seq}.{index} {} {} {}", media_type.as_deref().unwrap_or("-"), data.as_ref().map_or(0, |d| d.len()), error.as_deref().unwrap_or("")),
         ToApp::Diagram { key, drawing, error } => println!("DIAGRAM {key} {}", drawing.as_ref().map(|d| format!("{} {}x{} paths={} labels={}", d.kind, d.width, d.height, d.paths.len(), d.labels.len())).unwrap_or_else(|| error.clone().unwrap_or_default())),
@@ -107,7 +110,7 @@ fn main() {
             send(&mut ws, FromApp::SubscribeApp);
             let mut thread = rest.first().cloned();
             if let Some(t) = &thread {
-                send(&mut ws, FromApp::SubscribeThread { thread: t.clone(), limit: Some(5) });
+                send(&mut ws, FromApp::SubscribeThread { thread: t.clone(), limit: Some(5), known: None });
             }
             loop {
                 let Some(m) = next(&mut ws) else { continue };
@@ -115,7 +118,7 @@ fn main() {
                 if let (None, ToApp::ThreadUpserted { thread: t }) = (&thread, &m) {
                     if t.running {
                         thread = Some(t.id.clone());
-                        send(&mut ws, FromApp::SubscribeThread { thread: t.id.clone(), limit: Some(5) });
+                        send(&mut ws, FromApp::SubscribeThread { thread: t.id.clone(), limit: Some(5), known: None });
                     }
                 }
             }
@@ -124,7 +127,7 @@ fn main() {
             let Some(thread) = rest.first().cloned() else { usage() };
             let now = rest.iter().any(|a| a == "--now");
             let text = rest[1..].iter().filter(|a| *a != "--now").cloned().collect::<Vec<_>>().join(" ");
-            send(&mut ws, FromApp::SubscribeThread { thread: thread.clone(), limit: Some(3) });
+            send(&mut ws, FromApp::SubscribeThread { thread: thread.clone(), limit: Some(3), known: None });
             send(&mut ws, FromApp::Send { id: id(), thread, text, now, images: vec![] });
             let until = Instant::now() + Duration::from_secs(600);
             while Instant::now() < until {
@@ -147,7 +150,7 @@ fn main() {
                 Some(r) => r.clone(),
                 // The first waiting, from the thread's live state.
                 None => {
-                    send(&mut ws, FromApp::SubscribeThread { thread: thread.clone(), limit: Some(1) });
+                    send(&mut ws, FromApp::SubscribeThread { thread: thread.clone(), limit: Some(1), known: None });
                     let until = Instant::now() + Duration::from_secs(30);
                     loop {
                         if Instant::now() > until {

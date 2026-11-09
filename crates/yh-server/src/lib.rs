@@ -67,6 +67,8 @@ pub enum Action {
     SetModel { thread: String, model: Option<String> },
     SetEffort { thread: String, effort: Option<String> },
     SetMode { thread: String, mode: String },
+    /// A question on the side of `thread`, in its side chat (as `/btw`).
+    AskAside { thread: String, text: String },
     Rename { thread: String, title: String },
     Pin { thread: String, on: bool },
     Settle { thread: String, on: bool },
@@ -77,6 +79,12 @@ pub enum Action {
 pub struct Asked {
     pub action: Action,
     pub reply: flume::Sender<Result<Option<String>, String>>,
+}
+
+impl Shared {
+    fn options(&self) -> ToApp {
+        ToApp::Options { models: self.models.lock().unwrap().clone(), modes: MODES.iter().map(|m| m.to_string()).collect(), commands: self.commands.lock().unwrap().clone() }
+    }
 }
 
 /// The permission modes a project can have, as the Mac's picker lists them.
@@ -210,8 +218,13 @@ struct Shared {
     listing: Mutex<(Vec<Project>, Vec<Thread>)>,
     /// Each thread's live state, as the engine last said it.
     live: Mutex<HashMap<String, Live>>,
-    /// The models to choose from, as last read.
+    /// The models to choose from and each project's slash commands, as last read.
     models: Mutex<Vec<wire::ModelOption>>,
+    commands: Mutex<std::collections::BTreeMap<String, Vec<wire::SlashCommand>>>,
+    /// Usage limits as last heard (from the engine, or as saved).
+    limits: Mutex<Vec<wire::LimitWindow>>,
+    /// Folders' files for `@`, kept 30 seconds.
+    files: Mutex<HashMap<String, (Instant, Arc<Vec<String>>)>>,
     actions: Option<flume::Sender<Asked>>,
     engine: Option<yh_engine::EngineHandle>,
     /// Each watched thread's newest rows as the engine told them.
@@ -312,6 +325,17 @@ fn follow(told: flume::Receiver<yh_engine::Output>, shared: &Shared, source: &So
         for output in first.into_iter().chain(told.try_iter()) {
             match output {
                 yh_engine::Output::Thread(u) => {
+                    for e in &u.events {
+                        if let yh_core::claude::Event::Limits(info) = e {
+                            let windows = source::limit_windows(info);
+                            let mut held = shared.limits.lock().unwrap();
+                            if !windows.is_empty() && *held != windows {
+                                *held = windows.clone();
+                                drop(held);
+                                shared.send(&ToApp::Limits { windows }, |c| c.app);
+                            }
+                        }
+                    }
                     if let Some(m) = shared.mirrors.lock().unwrap().get_mut(&u.thread) {
                         let seqs = changed.entry(u.thread.clone()).or_default();
                         for change in u.changes {
@@ -464,13 +488,28 @@ fn poll(source: Source, shared: &Shared) {
 /// Reads projects and threads again and tells app subscribers what changed: the whole list
 /// when projects or the order changed, else each thread that did.
 fn refresh_listing(source: &Source, shared: &Shared, changed_at: &HashMap<String, Instant>, first: bool) {
+    let mut options_changed = false;
     if let Ok(models) = source.models() {
         let mut held = shared.models.lock().unwrap();
-        if *held != models {
-            *held = models.clone();
+        options_changed |= *held != models;
+        *held = models;
+    }
+    if let Ok(commands) = source.commands() {
+        let mut held = shared.commands.lock().unwrap();
+        options_changed |= *held != commands;
+        *held = commands;
+    }
+    if options_changed && !first {
+        shared.send(&shared.options(), |c| c.app);
+    }
+    // Saved limits, until the engine says newer.
+    if let Ok(limits) = source.limits() {
+        let mut held = shared.limits.lock().unwrap();
+        if held.is_empty() && !limits.is_empty() {
+            *held = limits.clone();
             drop(held);
             if !first {
-                shared.send(&ToApp::Options { models, modes: MODES.iter().map(|m| m.to_string()).collect() }, |c| c.app);
+                shared.send(&ToApp::Limits { windows: limits }, |c| c.app);
             }
         }
     }
@@ -576,8 +615,8 @@ fn answer(id: u64, message: FromApp, shared: &Shared, source: &Source) -> Vec<To
         FromApp::SubscribeApp => {
             set(&|c| c.app = true);
             let (projects, threads) = shared.listing.lock().unwrap().clone();
-            let models = shared.models.lock().unwrap().clone();
-            vec![ToApp::Threads { projects, threads }, ToApp::Options { models, modes: MODES.iter().map(|m| m.to_string()).collect() }]
+            let limits = shared.limits.lock().unwrap().clone();
+            vec![ToApp::Threads { projects, threads }, shared.options(), ToApp::Limits { windows: limits }]
         }
         FromApp::ToolResult { thread, seq } => match source.whole(&thread, seq) {
             Ok((input, result)) => vec![ToApp::ToolResult { thread, seq, input, result }],
@@ -623,11 +662,29 @@ fn answer(id: u64, message: FromApp, shared: &Shared, source: &Source) -> Vec<To
                 Err(error) => vec![ToApp::Media { thread, seq, index, media_type: None, data: None, error: Some(error) }],
             }
         }
+        FromApp::Search { query } => match source.search(&query, 40) {
+            Ok(hits) => vec![ToApp::SearchResults { query, hits }],
+            Err(e) => failed(e),
+        },
+        FromApp::Files { thread, query } => {
+            let folder = match source.folder_of(&thread) {
+                Ok(Some(f)) => f,
+                Ok(None) => return vec![ToApp::Files { thread, query, files: vec![] }],
+                Err(e) => return failed(e),
+            };
+            let cached = shared.files.lock().unwrap().get(&folder).filter(|(at, _)| at.elapsed() < Duration::from_secs(30)).map(|(_, f)| f.clone());
+            let all = cached.unwrap_or_else(|| {
+                let listed = Arc::new(yh_core::files::list(std::path::Path::new(&folder)));
+                shared.files.lock().unwrap().insert(folder.clone(), (Instant::now(), listed.clone()));
+                listed
+            });
+            vec![ToApp::Files { thread, query: query.clone(), files: yh_core::files::matches(&all, &query, 20) }]
+        }
         FromApp::Diagram { key, source } => match diagram::draw(&source) {
             Ok(drawing) => vec![ToApp::Diagram { key, drawing: Some(drawing), error: None }],
             Err(error) => vec![ToApp::Diagram { key, drawing: None, error: Some(error) }],
         },
-        FromApp::SubscribeThread { thread, limit } => {
+        FromApp::SubscribeThread { thread, limit, known } => {
             let limit = limit.unwrap_or(DEFAULT_ROWS).clamp(1, MAX_ROWS);
             // With the engine: its snapshot, in order with its changes, comes from `follow`.
             if let Some(engine) = &shared.engine {
@@ -635,7 +692,7 @@ fn answer(id: u64, message: FromApp, shared: &Shared, source: &Source) -> Vec<To
                     c.thread = Some(thread.clone());
                     c.ready = false;
                 });
-                engine.send(yh_engine::Command::Snapshot { thread, limit: limit as usize, tag: id });
+                engine.send(yh_engine::Command::Snapshot { thread, limit: limit as usize, tag: id, known: known.map(|k| k.max(0) as usize) });
                 return vec![];
             }
             // Watch first, then read: a row written in between comes twice, and `rev` sorts it out.
@@ -717,6 +774,7 @@ fn to_action(m: FromApp) -> Result<Action, String> {
         F::NewThread { project, text, .. } => Action::NewThread { project, text },
         F::SetModel { thread, model, .. } => Action::SetModel { thread, model },
         F::SetEffort { thread, effort, .. } => Action::SetEffort { thread, effort },
+        F::AskAside { thread, text, .. } => Action::AskAside { thread, text },
         F::SetMode { thread, mode, .. } => {
             if !MODES.contains(&mode.as_str()) {
                 return Err(format!("No permission mode named {mode}."));
@@ -727,7 +785,7 @@ fn to_action(m: FromApp) -> Result<Action, String> {
         F::Pin { thread, on, .. } => Action::Pin { thread, on },
         F::Settle { thread, on, .. } => Action::Settle { thread, on },
         F::Delete { thread, .. } => Action::Delete { thread },
-        F::SubscribeApp | F::SubscribeThread { .. } | F::UnsubscribeThread | F::Page { .. } | F::ToolResult { .. } | F::Subagent { .. } | F::Media { .. } | F::Diagram { .. } | F::Unknown => return Err("Not an action.".into()),
+        F::SubscribeApp | F::SubscribeThread { .. } | F::UnsubscribeThread | F::Page { .. } | F::ToolResult { .. } | F::Subagent { .. } | F::Media { .. } | F::Diagram { .. } | F::Search { .. } | F::Files { .. } | F::Unknown => return Err("Not an action.".into()),
     })
 }
 

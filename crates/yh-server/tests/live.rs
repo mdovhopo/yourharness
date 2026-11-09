@@ -114,7 +114,7 @@ fn streams_what_claude_writes_and_takes_actions() {
     c.send(FromApp::SubscribeApp);
     c.expect("threads", |m| matches!(m, ToApp::Threads { .. }));
     c.expect("options", |m| matches!(m, ToApp::Options { modes, .. } if modes.len() == 5));
-    c.send(FromApp::SubscribeThread { thread: "t1".into(), limit: None });
+    c.send(FromApp::SubscribeThread { thread: "t1".into(), limit: None, known: None });
     let ToApp::Snapshot { count, rows, .. } = c.expect("snapshot", |m| matches!(m, ToApp::Snapshot { .. })) else { unreachable!() };
     assert_eq!((count, rows.len(), rows[0].text.as_str()), (1, 1, "earlier"));
     c.expect("idle", |m| matches!(m, ToApp::Live { live, .. } if !live.running));
@@ -130,7 +130,7 @@ fn streams_what_claude_writes_and_takes_actions() {
     // A second client starts watching mid-reply.
     let mut d = Client::connect(&url).unwrap();
     d.expect("hello", |m| matches!(m, ToApp::Hello { .. }));
-    d.send(FromApp::SubscribeThread { thread: "t1".into(), limit: None });
+    d.send(FromApp::SubscribeThread { thread: "t1".into(), limit: None, known: None });
     let ToApp::Snapshot { rows, .. } = d.expect("mid-reply snapshot", |m| matches!(m, ToApp::Snapshot { .. })) else { unreachable!() };
     let snapshot_rev = rows.iter().map(|r| r.rev).max().unwrap();
     assert_eq!(rows.last().map(|r| r.text.as_str()), Some("Hel"));
@@ -194,7 +194,7 @@ fn serves_threads_and_rows_live() {
     assert_eq!(projects[0].name, "shop");
     assert_eq!((threads[0].title.as_str(), threads[0].active), ("Fix checkout", false));
 
-    c.send(FromApp::SubscribeThread { thread: "t1".into(), limit: Some(1) });
+    c.send(FromApp::SubscribeThread { thread: "t1".into(), limit: Some(1), known: None });
     let ToApp::Snapshot { first_seq, count, rows, .. } = c.expect("snapshot", |m| matches!(m, ToApp::Snapshot { .. })) else { unreachable!() };
     assert_eq!((first_seq, count, rows.len(), rows[0].text.as_str()), (1, 2, 1, "Hello"));
 

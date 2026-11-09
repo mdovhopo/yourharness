@@ -102,7 +102,7 @@ pub enum Command {
     /// The thread's newest `limit` rows as saved now, everything changed saved first, told to
     /// subscribers in order with the changes (`Output::Snapshot`): what's told after it changes
     /// what it holds. `tag` comes back with it (the client that asked).
-    Snapshot { thread: String, limit: usize, tag: u64 },
+    Snapshot { thread: String, limit: usize, tag: u64, known: Option<usize> },
 }
 
 impl Command {
@@ -371,6 +371,7 @@ impl Engine {
     fn run_of(&mut self, thread: &str) -> &mut ThreadRun {
         let db = self.db.clone();
         let run = self.runs.entry(thread.to_string()).or_default();
+        run.keep_all = !ids::saved(thread);
         if run.live.total.is_none() {
             run.live.total = Some(db.as_ref().filter(|_| ids::saved(thread)).map_or(0, |db| db.transcript_count(thread)));
         }
@@ -606,13 +607,18 @@ impl Engine {
                 }
                 self.subscribers.push(to);
             }
-            Command::Snapshot { thread, limit, tag } => {
+            Command::Snapshot { thread, limit, tag, known } => {
                 // Changes made so far go out first, so the snapshot comes after them.
                 self.told(&thread);
                 self.save(&thread);
                 self.flush();
                 let count = self.run_of(&thread).live.total.unwrap_or(0);
-                let first_seq = count.saturating_sub(limit);
+                // Reconnecting: from a little before what the client holds (which it keeps), but
+                // never more than a page: far behind, it gets the newest page and starts over.
+                let first_seq = match known {
+                    Some(k) if k <= count => k.saturating_sub(40).max(count.saturating_sub(limit)),
+                    _ => count.saturating_sub(limit),
+                };
                 let mut rows: Vec<TranscriptRow> = match &self.db {
                     Some(db) if ids::saved(&thread) => db.read_rows(&thread, first_seq, count - first_seq).into_iter().enumerate().filter_map(|(i, r)| from_db(first_seq + i, r)).collect(),
                     _ => vec![],

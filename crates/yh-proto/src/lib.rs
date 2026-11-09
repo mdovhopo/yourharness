@@ -12,7 +12,38 @@ use serde::{Deserialize, Serialize};
 /// actions, whole tool output, photos with a message, `options`, and `done` once the app took
 /// the action (with the thread it made).
 /// 4: a row's sub-agent summary, a sub-agent's whole run, a row's pictures, a diagram drawn.
-pub const PROTOCOL: u32 = 4;
+/// 5: search across threads, files for `@`, slash commands in `options`, usage limits, asking on
+/// the side, and a snapshot from what the client already holds.
+pub const PROTOCOL: u32 = 5;
+
+/// A slash command the composer offers: `/name hint`, and what it does.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SlashCommand {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub hint: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+}
+
+/// A usage window: how much of it is used (0 to 1) and when it starts over.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct LimitWindow {
+    /// `five_hour`, `seven_day`, `seven_day_opus`…
+    pub name: String,
+    pub used: f64,
+    /// Seconds since 1970.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resets_at: Option<f64>,
+}
+
+/// Where a search found its words: a thread's row, the words around them in `[brackets]`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SearchHit {
+    pub thread: String,
+    pub seq: i64,
+    pub snippet: String,
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Project {
@@ -278,8 +309,15 @@ pub enum ToApp {
     /// An action was taken (`error`: why not), for the action that carried this `id`; `thread`:
     /// the one it made (`new_thread`).
     Done { id: String, #[serde(skip_serializing_if = "Option::is_none")] error: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] thread: Option<String> },
-    /// The models and permission modes to choose from: after `threads`, and when they change.
-    Options { models: Vec<ModelOption>, modes: Vec<String> },
+    /// The models and permission modes to choose from, and each project's slash commands: after
+    /// `threads`, and when they change.
+    Options { models: Vec<ModelOption>, modes: Vec<String>, #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")] commands: std::collections::BTreeMap<String, Vec<SlashCommand>> },
+    /// Usage limits as Claude last reported them: after `options`, and when they change.
+    Limits { windows: Vec<LimitWindow> },
+    /// What `search` found, best first.
+    SearchResults { query: String, hits: Vec<SearchHit> },
+    /// A thread's files matching `query`, for `@`.
+    Files { thread: String, query: String, files: Vec<String> },
     /// A sub-agent's whole run, asked for with `subagent`.
     Subagent { thread: String, seq: i64, run: SubagentRun },
     /// A row's picture (`index`: which of its pictures), asked for with `media`: base64, or why not.
@@ -296,7 +334,9 @@ pub enum ToApp {
 pub enum FromApp {
     SubscribeApp,
     /// Watch this thread (one at a time): answered with a `snapshot`, then `rows_changed`.
-    SubscribeThread { thread: String, #[serde(default)] limit: Option<i64> },
+    /// `known`: how many rows the client holds already (reconnecting): the snapshot then starts
+    /// a little before them, and the client keeps what it has before that.
+    SubscribeThread { thread: String, #[serde(default)] limit: Option<i64>, #[serde(default)] known: Option<i64> },
     UnsubscribeThread,
     /// Rows before `before_seq`, at most `limit`.
     Page { thread: String, before_seq: i64, #[serde(default)] limit: Option<i64> },
@@ -344,6 +384,12 @@ pub enum FromApp {
     /// A Mermaid block's source, laid out and drawn as the Mac draws it: answered with `diagram`
     /// under the same `key`.
     Diagram { key: String, source: String },
+    /// Words across every thread's transcript: answered with `search_results`.
+    Search { query: String },
+    /// A thread's files matching `query` (for `@`): answered with `files`.
+    Files { thread: String, query: String },
+    /// A question on the side of `thread`, as `/btw` asks it: in its side chat (`side:<thread>`).
+    AskAside { #[serde(default)] id: Option<String>, thread: String, text: String },
     #[serde(other)]
     Unknown,
 }
@@ -353,7 +399,7 @@ impl FromApp {
     pub fn action_id(&self) -> Option<&str> {
         use FromApp::*;
         match self {
-            Send { id, .. } | Stop { id, .. } | Respond { id, .. } | Withdraw { id, .. } | SendNow { id, .. } | Answer { id, .. } | SkipQuestion { id, .. } | ApprovePlan { id, .. } | KeepPlanning { id, .. } | AnswerQuestion { id, .. } | NewThread { id, .. } | SetModel { id, .. } | SetEffort { id, .. } | SetMode { id, .. } | Rename { id, .. } | Pin { id, .. } | Settle { id, .. } | Delete { id, .. } => id.as_deref(),
+            Send { id, .. } | Stop { id, .. } | Respond { id, .. } | Withdraw { id, .. } | SendNow { id, .. } | AskAside { id, .. } | Answer { id, .. } | SkipQuestion { id, .. } | ApprovePlan { id, .. } | KeepPlanning { id, .. } | AnswerQuestion { id, .. } | NewThread { id, .. } | SetModel { id, .. } | SetEffort { id, .. } | SetMode { id, .. } | Rename { id, .. } | Pin { id, .. } | Settle { id, .. } | Delete { id, .. } => id.as_deref(),
             _ => None,
         }
     }
@@ -376,7 +422,7 @@ mod tests {
         let m: FromApp = serde_json::from_str(r#"{"type":"sing","text":"hi"}"#).unwrap();
         assert_eq!(m, FromApp::Unknown);
         let m: FromApp = serde_json::from_str(r#"{"type":"subscribe_thread","thread":"t","extra":1}"#).unwrap();
-        assert_eq!(m, FromApp::SubscribeThread { thread: "t".into(), limit: None });
+        assert_eq!(m, FromApp::SubscribeThread { thread: "t".into(), limit: None, known: None });
     }
 
     #[test]
