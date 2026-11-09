@@ -6,6 +6,8 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-11-10
+
 ### Added
 - Settings → Phone: let your iPhone or iPad on the same Wi‑Fi follow and run your threads. Pair a phone by scanning the QR code shown there; each phone gets a key of its own, and Forget cuts one off. Traffic isn't encrypted on the network yet, so use it on networks you trust. The phone app itself isn't released yet. It listens on port 47878, or the next free one when another app has it.
 - Phones over Tailscale: with Tailscale on the Mac and the phone, the phone reaches your Mac from anywhere, not just on its Wi‑Fi. It tries the Wi‑Fi and Tailscale addresses at once and keeps whichever answers. Only devices logged in to Tailscale as you get in, and the way is encrypted. Settings → Phone shows Tailscale's state, and Over Tailscale Only keeps phones off the Wi‑Fi altogether.
