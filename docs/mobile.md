@@ -267,6 +267,19 @@ connected device and opens it. Once, before the first run:
 7. On the Mac: Settings → Phone → Let phones connect; on the phone: Pair with Your Mac → Scan the
    Mac's Code (allow the camera), then allow Local Network when iOS asks. Both on the same Wi‑Fi.
 
+### TestFlight
+
+`scripts/testflight.sh` archives a Release build signed for distribution (automatic signing,
+your team from the Apple Development certificate) and uploads it with the account Xcode is
+signed in to, or an App Store Connect API key (`ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_KEY_PATH`)
+for CI. The version is the repo's `VERSION`, the build number the commit count, so each upload
+goes up. Builds are for internal testers only (`testFlightInternalTestingOnly`: no Beta App
+Review; external testers would need it, and a reviewer can't use the app without a Mac running
+YourHarness). `ITSAppUsesNonExemptEncryption` is false, so no export-compliance question per
+build. The icon is Next's (night blue) for local builds and TestFlight; only the App Store build
+takes `APP_ICON=AppIcon` (graphite). `DRY=1` stops at the exported `.ipa`. Checked 2026-11-10:
+the dry run signs with an App Store profile for `com.mdovhopo.yourharness.mobile`.
+
 ## Post-MVP
 
 Recorded here so the MVP stays small. Roughly in order; Tailscale last.
