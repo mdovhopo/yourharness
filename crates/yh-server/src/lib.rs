@@ -51,19 +51,42 @@ pub struct Options {
 /// What a client asks of the app: taken on the app's main thread, as a click would be.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
-    Send { thread: String, text: String, now: bool },
+    /// `images`: (media type, bytes).
+    Send { thread: String, text: String, now: bool, images: Vec<(String, Vec<u8>)> },
     Stop { thread: String },
     Respond { thread: String, request_id: String, allow: bool },
     Withdraw { thread: String, message: String },
     SendNow { thread: String, message: String },
+    Answer { thread: String, request_id: String, answers: std::collections::BTreeMap<String, String> },
+    SkipQuestion { thread: String, request_id: String },
+    ApprovePlan { thread: String, request_id: String, mode: String, feedback: Option<String> },
+    KeepPlanning { thread: String, request_id: String, feedback: Option<String> },
+    AnswerQuestion { thread: String, request_id: String, accept: bool },
+    NewThread { project: String, text: Option<String> },
+    SetModel { thread: String, model: Option<String> },
+    SetEffort { thread: String, effort: Option<String> },
+    SetMode { thread: String, mode: String },
+    Rename { thread: String, title: String },
+    Pin { thread: String, on: bool },
+    Settle { thread: String, on: bool },
+    Delete { thread: String },
 }
+
+/// An action and where the app says how it went: the thread it made, or why it couldn't.
+pub struct Asked {
+    pub action: Action,
+    pub reply: flume::Sender<Result<Option<String>, String>>,
+}
+
+/// The permission modes a project can have, as the Mac's picker lists them.
+pub const MODES: &[&str] = &["auto", "ask", "acceptEdits", "plan", "bypass"];
 
 /// Where the server meets the app: the engine (what it says of every thread, its snapshots),
 /// and where actions go. Without them it serves only what's saved, as the development server
 /// did.
 pub struct Links {
     pub engine: yh_engine::EngineHandle,
-    pub actions: flume::Sender<Action>,
+    pub actions: flume::Sender<Asked>,
 }
 
 /// A row as the wire carries it, its text and tool output trimmed.
@@ -102,7 +125,7 @@ pub fn live_of(s: &yh_core::thread_run::LiveState) -> Live {
         running: s.running,
         activity: s.activity.clone(),
         requests: s.permissions.iter().map(|p| wire::Request { id: p.id.clone(), tool: p.tool.clone(), description: p.description.clone(), input: wire::trim(p.input.clone(), wire::INPUT_LIMIT) }).collect(),
-        questions: s.elicitations.iter().map(|e| wire::Question { id: e.id.clone(), server: e.server.clone(), message: e.message.clone() }).collect(),
+        questions: s.elicitations.iter().map(|e| wire::Question { id: e.id.clone(), server: e.server.clone(), message: e.message.clone(), mode: e.mode.clone(), url: e.url.clone() }).collect(),
         queue: s.queue.iter().map(|q| wire::Queued { id: q.id.clone(), text: q.text.clone() }).collect(),
         context_tokens: s.composer.context_tokens,
         context_window: s.composer.context_window,
@@ -123,7 +146,9 @@ struct Shared {
     listing: Mutex<(Vec<Project>, Vec<Thread>)>,
     /// Each thread's live state, as the engine last said it.
     live: Mutex<HashMap<String, Live>>,
-    actions: Option<flume::Sender<Action>>,
+    /// The models to choose from, as last read.
+    models: Mutex<Vec<wire::ModelOption>>,
+    actions: Option<flume::Sender<Asked>>,
     engine: Option<yh_engine::EngineHandle>,
     /// The `rev` streamed rows take: above anything saved, so a client keeps the newest copy.
     rev: std::sync::atomic::AtomicI64,
@@ -372,6 +397,16 @@ fn poll(source: Source, shared: &Shared) {
 /// Reads projects and threads again and tells app subscribers what changed: the whole list
 /// when projects or the order changed, else each thread that did.
 fn refresh_listing(source: &Source, shared: &Shared, changed_at: &HashMap<String, Instant>, first: bool) {
+    if let Ok(models) = source.models() {
+        let mut held = shared.models.lock().unwrap();
+        if *held != models {
+            *held = models.clone();
+            drop(held);
+            if !first {
+                shared.send(&ToApp::Options { models, modes: MODES.iter().map(|m| m.to_string()).collect() }, |c| c.app);
+            }
+        }
+    }
     let (Ok(projects), Ok(mut threads)) = (source.projects(), source.threads()) else { return };
     let now = Instant::now();
     let live = shared.live.lock().unwrap();
@@ -474,8 +509,13 @@ fn answer(id: u64, message: FromApp, shared: &Shared, source: &Source) -> Vec<To
         FromApp::SubscribeApp => {
             set(&|c| c.app = true);
             let (projects, threads) = shared.listing.lock().unwrap().clone();
-            vec![ToApp::Threads { projects, threads }]
+            let models = shared.models.lock().unwrap().clone();
+            vec![ToApp::Threads { projects, threads }, ToApp::Options { models, modes: MODES.iter().map(|m| m.to_string()).collect() }]
         }
+        FromApp::ToolResult { thread, seq } => match source.whole(&thread, seq) {
+            Ok((input, result)) => vec![ToApp::ToolResult { thread, seq, input, result }],
+            Err(e) => failed(e),
+        },
         FromApp::SubscribeThread { thread, limit } => {
             let limit = limit.unwrap_or(DEFAULT_ROWS).clamp(1, MAX_ROWS);
             // With the engine: its snapshot, in order with its changes, comes from `follow`.
@@ -517,26 +557,106 @@ fn answer(id: u64, message: FromApp, shared: &Shared, source: &Source) -> Vec<To
                 Err(e) => failed(e),
             }
         }
-        FromApp::Send { .. } | FromApp::Stop { .. } | FromApp::Respond { .. } | FromApp::Withdraw { .. } | FromApp::SendNow { .. } => {
-            let id = message.action_id().map(str::to_string);
-            let action = match message {
-                FromApp::Send { thread, text, now, .. } => Action::Send { thread, text, now },
-                FromApp::Stop { thread, .. } => Action::Stop { thread },
-                FromApp::Respond { thread, request_id, allow, .. } => Action::Respond { thread, request_id, allow },
-                FromApp::Withdraw { thread, message, .. } => Action::Withdraw { thread, message },
-                FromApp::SendNow { thread, message, .. } => Action::SendNow { thread, message },
-                _ => unreachable!("an action"),
-            };
-            let error = match &shared.actions {
-                Some(actions) => actions.send(action).err().map(|_| "The app is gone.".to_string()),
-                None => Some("This server only reads.".to_string()),
+        action => {
+            let id = action.action_id().map(str::to_string);
+            let (error, made) = match to_action(action) {
+                Err(e) => (Some(e), None),
+                Ok(action) => match &shared.actions {
+                    None => (Some("This server only reads.".to_string()), None),
+                    Some(actions) => {
+                        let (reply, answer) = flume::bounded(1);
+                        if actions.send(Asked { action, reply }).is_err() {
+                            (Some("The app is gone.".to_string()), None)
+                        } else {
+                            // Taken on the app's main thread, as a click: answered within a frame or two.
+                            match answer.recv_timeout(Duration::from_secs(10)) {
+                                Ok(Ok(made)) => (None, made),
+                                Ok(Err(e)) => (Some(e), None),
+                                Err(_) => (Some("The app didn't answer.".to_string()), None),
+                            }
+                        }
+                    }
+                },
             };
             match id {
-                Some(id) => vec![ToApp::Done { id, error }],
+                Some(id) => vec![ToApp::Done { id, error, thread: made }],
                 None => error.map(|message| vec![ToApp::Error { message }]).unwrap_or_default(),
             }
         }
-        FromApp::Unknown => vec![],
+    }
+}
+
+/// A client's action as the app takes it; its pictures decoded.
+fn to_action(m: FromApp) -> Result<Action, String> {
+    use FromApp as F;
+    Ok(match m {
+        F::Send { thread, text, now, images, .. } => {
+            let images = images.into_iter().map(|i| decode_base64(&i.data).map(|bytes| (i.media_type, bytes)).ok_or_else(|| "A picture couldn't be read.".to_string())).collect::<Result<_, _>>()?;
+            Action::Send { thread, text, now, images }
+        }
+        F::Stop { thread, .. } => Action::Stop { thread },
+        F::Respond { thread, request_id, allow, .. } => Action::Respond { thread, request_id, allow },
+        F::Withdraw { thread, message, .. } => Action::Withdraw { thread, message },
+        F::SendNow { thread, message, .. } => Action::SendNow { thread, message },
+        F::Answer { thread, request_id, answers, .. } => Action::Answer { thread, request_id, answers },
+        F::SkipQuestion { thread, request_id, .. } => Action::SkipQuestion { thread, request_id },
+        F::ApprovePlan { thread, request_id, mode, feedback, .. } => Action::ApprovePlan { thread, request_id, mode, feedback },
+        F::KeepPlanning { thread, request_id, feedback, .. } => Action::KeepPlanning { thread, request_id, feedback },
+        F::AnswerQuestion { thread, request_id, accept, .. } => Action::AnswerQuestion { thread, request_id, accept },
+        F::NewThread { project, text, .. } => Action::NewThread { project, text },
+        F::SetModel { thread, model, .. } => Action::SetModel { thread, model },
+        F::SetEffort { thread, effort, .. } => Action::SetEffort { thread, effort },
+        F::SetMode { thread, mode, .. } => {
+            if !MODES.contains(&mode.as_str()) {
+                return Err(format!("No permission mode named {mode}."));
+            }
+            Action::SetMode { thread, mode }
+        }
+        F::Rename { thread, title, .. } => Action::Rename { thread, title },
+        F::Pin { thread, on, .. } => Action::Pin { thread, on },
+        F::Settle { thread, on, .. } => Action::Settle { thread, on },
+        F::Delete { thread, .. } => Action::Delete { thread },
+        F::SubscribeApp | F::SubscribeThread { .. } | F::UnsubscribeThread | F::Page { .. } | F::ToolResult { .. } | F::Unknown => return Err("Not an action.".into()),
+    })
+}
+
+/// Standard base64 (padding optional, whitespace skipped); None if it isn't.
+fn decode_base64(text: &str) -> Option<Vec<u8>> {
+    let value = |c: u8| -> Option<u32> {
+        Some(match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            _ => return None,
+        } as u32)
+    };
+    let digits: Vec<u8> = text.bytes().filter(|b| !b.is_ascii_whitespace() && *b != b'=').collect();
+    let mut out = Vec::with_capacity(digits.len() * 3 / 4);
+    for chunk in digits.chunks(4) {
+        let mut n = 0u32;
+        for (i, c) in chunk.iter().enumerate() {
+            n |= value(*c)? << (18 - 6 * i);
+        }
+        let bytes = [(n >> 16) as u8, (n >> 8) as u8, n as u8];
+        match chunk.len() {
+            4 => out.extend_from_slice(&bytes),
+            3 => out.extend_from_slice(&bytes[..2]),
+            2 => out.push(bytes[0]),
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn decodes_base64() {
+        assert_eq!(super::decode_base64("aGVsbG8=").unwrap(), b"hello");
+        assert_eq!(super::decode_base64("aGVsbG8gd29ybGQ").unwrap(), b"hello world");
+        assert!(super::decode_base64("a$b").is_none());
     }
 }
 

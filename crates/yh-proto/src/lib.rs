@@ -8,12 +8,18 @@
 use serde::{Deserialize, Serialize};
 
 /// 2: `live`, `done`, the actions, a thread's `running` and `waiting`.
-pub const PROTOCOL: u32 = 2;
+/// 3: answering questions and plans, MCP questions, new threads, model, effort and mode, thread
+/// actions, whole tool output, photos with a message, `options`, and `done` once the app took
+/// the action (with the thread it made).
+pub const PROTOCOL: u32 = 3;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Project {
     pub id: String,
     pub name: String,
+    /// Its permission mode: `auto`, `ask`, `acceptEdits`, `plan`, `bypass`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -28,6 +34,9 @@ pub struct Thread {
     pub settled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// The effort chosen for it, when one was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
     /// Working now (`running`), or its rows changed in the last few seconds.
     pub active: bool,
     /// A turn is under way, as the engine says.
@@ -85,12 +94,37 @@ pub struct Request {
     pub input: String,
 }
 
-/// An MCP server's question mid-call (answered on the Mac for now).
+/// An MCP server's question mid-call: `form` (accepted with its defaults, or declined) or `url`
+/// (a page to visit, on the Mac).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Question {
     pub id: String,
     pub server: String,
     pub message: String,
+    #[serde(default)]
+    pub mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+/// A model a thread can use, as the Mac's picker lists it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ModelOption {
+    /// What the app keeps (`opus`, an alias, or a full ID).
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub efforts: Vec<String>,
+    /// Whether the `auto` permission mode works with it.
+    #[serde(default)]
+    pub auto: bool,
+}
+
+/// A picture sent with a message: JPEG or PNG, base64.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Image {
+    pub media_type: String,
+    pub data: String,
 }
 
 /// Your message waiting for Claude's current step.
@@ -139,8 +173,13 @@ pub enum ToApp {
     PageRows { thread: String, rows: Vec<Row> },
     /// The subscribed thread's live state: after `snapshot`, and whenever it changes.
     Live { thread: String, live: Live },
-    /// An action was taken (`error`: why not), for the action that carried this `id`.
-    Done { id: String, #[serde(skip_serializing_if = "Option::is_none")] error: Option<String> },
+    /// An action was taken (`error`: why not), for the action that carried this `id`; `thread`:
+    /// the one it made (`new_thread`).
+    Done { id: String, #[serde(skip_serializing_if = "Option::is_none")] error: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] thread: Option<String> },
+    /// The models and permission modes to choose from: after `threads`, and when they change.
+    Options { models: Vec<ModelOption>, modes: Vec<String> },
+    /// A row's whole tool input and result, asked for with `tool_result`.
+    ToolResult { thread: String, seq: i64, #[serde(skip_serializing_if = "Option::is_none")] input: Option<String>, #[serde(skip_serializing_if = "Option::is_none")] result: Option<String> },
     Error { message: String },
 }
 
@@ -155,7 +194,7 @@ pub enum FromApp {
     Page { thread: String, before_seq: i64, #[serde(default)] limit: Option<i64> },
     /// Your message, as typed in the app's composer: it starts a turn, or steers into the one
     /// under way (`now`: stops it for this message). Commands the app answers (`/model`…) work.
-    Send { #[serde(default)] id: Option<String>, thread: String, text: String, #[serde(default)] now: bool },
+    Send { #[serde(default)] id: Option<String>, thread: String, text: String, #[serde(default)] now: bool, #[serde(default, skip_serializing_if = "Vec::is_empty")] images: Vec<Image> },
     /// Stop, as ⌘. does: queued messages go back to the Mac's composer.
     Stop { #[serde(default)] id: Option<String>, thread: String },
     /// Allows or denies a request waiting on you, by its id.
@@ -164,6 +203,31 @@ pub enum FromApp {
     Withdraw { #[serde(default)] id: Option<String>, thread: String, message: String },
     /// A queued message, right away: the turn is stopped for it.
     SendNow { #[serde(default)] id: Option<String>, thread: String, message: String },
+    /// Answers Claude's question (`AskUserQuestion`): each question's text, and its answer (the
+    /// options chosen, joined with ", ", or what was written).
+    Answer { #[serde(default)] id: Option<String>, thread: String, request_id: String, answers: std::collections::BTreeMap<String, String> },
+    /// Declines Claude's question: it carries on with its best judgment.
+    SkipQuestion { #[serde(default)] id: Option<String>, thread: String, request_id: String },
+    /// Approves Claude's plan into a permission mode (which becomes the project's); `feedback`
+    /// follows as your next message.
+    ApprovePlan { #[serde(default)] id: Option<String>, thread: String, request_id: String, mode: String, #[serde(default)] feedback: Option<String> },
+    /// Keeps planning, with what to change.
+    KeepPlanning { #[serde(default)] id: Option<String>, thread: String, request_id: String, #[serde(default)] feedback: Option<String> },
+    /// An MCP server's question: accepted (a form with its defaults) or declined.
+    AnswerQuestion { #[serde(default)] id: Option<String>, thread: String, request_id: String, accept: bool },
+    /// A new thread in a project (`text`: its first message); `done` names it.
+    NewThread { #[serde(default)] id: Option<String>, project: String, #[serde(default)] text: Option<String> },
+    SetModel { #[serde(default)] id: Option<String>, thread: String, #[serde(default)] model: Option<String> },
+    SetEffort { #[serde(default)] id: Option<String>, thread: String, #[serde(default)] effort: Option<String> },
+    /// The permission mode of the thread's project.
+    SetMode { #[serde(default)] id: Option<String>, thread: String, mode: String },
+    Rename { #[serde(default)] id: Option<String>, thread: String, title: String },
+    Pin { #[serde(default)] id: Option<String>, thread: String, on: bool },
+    /// On its project's Settled shelf (`on`), or back.
+    Settle { #[serde(default)] id: Option<String>, thread: String, on: bool },
+    Delete { #[serde(default)] id: Option<String>, thread: String },
+    /// A row's whole tool input and result: answered with `tool_result`.
+    ToolResult { thread: String, seq: i64 },
     #[serde(other)]
     Unknown,
 }
@@ -171,8 +235,9 @@ pub enum FromApp {
 impl FromApp {
     /// The id an action carries, for its `done`.
     pub fn action_id(&self) -> Option<&str> {
+        use FromApp::*;
         match self {
-            FromApp::Send { id, .. } | FromApp::Stop { id, .. } | FromApp::Respond { id, .. } | FromApp::Withdraw { id, .. } | FromApp::SendNow { id, .. } => id.as_deref(),
+            Send { id, .. } | Stop { id, .. } | Respond { id, .. } | Withdraw { id, .. } | SendNow { id, .. } | Answer { id, .. } | SkipQuestion { id, .. } | ApprovePlan { id, .. } | KeepPlanning { id, .. } | AnswerQuestion { id, .. } | NewThread { id, .. } | SetModel { id, .. } | SetEffort { id, .. } | SetMode { id, .. } | Rename { id, .. } | Pin { id, .. } | Settle { id, .. } | Delete { id, .. } => id.as_deref(),
             _ => None,
         }
     }
@@ -207,12 +272,16 @@ mod tests {
     #[test]
     fn actions_as_a_client_writes_them() {
         let m: FromApp = serde_json::from_str(r#"{"type":"send","id":"a1","thread":"t","text":"hi"}"#).unwrap();
-        assert_eq!(m, FromApp::Send { id: Some("a1".into()), thread: "t".into(), text: "hi".into(), now: false });
+        assert_eq!(m, FromApp::Send { id: Some("a1".into()), thread: "t".into(), text: "hi".into(), now: false, images: vec![] });
         assert_eq!(m.action_id(), Some("a1"));
         let m: FromApp = serde_json::from_str(r#"{"type":"respond","thread":"t","request_id":"r","allow":true}"#).unwrap();
         assert_eq!(m, FromApp::Respond { id: None, thread: "t".into(), request_id: "r".into(), allow: true });
-        let s = serde_json::to_string(&ToApp::Done { id: "a1".into(), error: None }).unwrap();
+        let s = serde_json::to_string(&ToApp::Done { id: "a1".into(), error: None, thread: None }).unwrap();
         assert_eq!(s, r#"{"type":"done","id":"a1"}"#);
+        let m: FromApp = serde_json::from_str(r#"{"type":"answer","id":"a2","thread":"t","request_id":"r","answers":{"Which?":"Rust"}}"#).unwrap();
+        assert_eq!(m.action_id(), Some("a2"));
+        let m: FromApp = serde_json::from_str(r#"{"type":"new_thread","project":"p","text":"hi"}"#).unwrap();
+        assert_eq!(m, FromApp::NewThread { id: None, project: "p".into(), text: Some("hi".into()) });
     }
 
     /// A first-version client's thread (no `running`, `waiting`) still reads.

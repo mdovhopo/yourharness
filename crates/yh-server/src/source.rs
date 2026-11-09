@@ -3,11 +3,11 @@
 
 use std::path::Path;
 
-use rusqlite::{Connection, OpenFlags, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde_json::{Map, Value};
 use yh_core::library::ThreadMeta;
 
-use yh_proto::{INPUT_LIMIT, Project, RESULT_LIMIT, Row, Thread, trim};
+use yh_proto::{INPUT_LIMIT, ModelOption, Project, RESULT_LIMIT, Row, Thread, trim};
 
 pub struct Source {
     c: Connection,
@@ -41,7 +41,8 @@ impl Source {
             r.map(|(id, json)| {
                 let o = object(&json);
                 let name = o.get("name").and_then(Value::as_str).unwrap_or("Project").to_string();
-                Project { id, name }
+                let mode = Some(o.get("permissionMode").and_then(Value::as_str).unwrap_or("auto").to_string());
+                Project { id, name, mode }
             })
         })
         .collect()
@@ -65,6 +66,7 @@ impl Source {
                     pinned: m.pinned,
                     settled: m.settled_at.is_some(),
                     model: m.model,
+                    effort: m.effort,
                     active: false,
                     running: false,
                     waiting: false,
@@ -83,6 +85,37 @@ impl Source {
         let mut s = self.c.prepare_cached(&format!("SELECT thread_id, {COLUMNS} FROM entries WHERE rev > ? ORDER BY rev LIMIT ?"))?;
         let rows = s.query_map(params![rev, limit], |r| Ok(Change { thread: r.get(0)?, row: row(r, 1)? }))?;
         rows.collect()
+    }
+
+    /// The models the CLI last listed (the app keeps them as `claudeModels`).
+    pub fn models(&self) -> rusqlite::Result<Vec<ModelOption>> {
+        let json: Option<Vec<u8>> = self.c.query_row("SELECT value FROM settings WHERE key = 'claudeModels'", [], |r| r.get(0)).optional()?;
+        let list: Value = json.and_then(|j| serde_json::from_slice(&j).ok()).unwrap_or_default();
+        Ok(list
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(yh_core::claude::ModelInfo::from_json)
+            .map(|m| ModelOption { id: m.value, name: m.display_name, efforts: m.efforts, auto: m.supports_auto_mode })
+            .collect())
+    }
+
+    /// A row's whole tool input and result: the columns, or their blobs when they're long.
+    pub fn whole(&self, thread: &str, seq: i64) -> rusqlite::Result<(Option<String>, Option<String>)> {
+        let found: Option<(Option<String>, Option<String>, Option<String>, Option<String>)> = self
+            .c
+            .query_row("SELECT tool_input, tool_input_blob, tool_result, tool_result_blob FROM entries WHERE thread_id = ? AND seq = ?", params![thread, seq], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })
+            .optional()?;
+        let Some((input, input_blob, result, result_blob)) = found else { return Ok((None, None)) };
+        let whole = |head: Option<String>, blob: Option<String>| -> rusqlite::Result<Option<String>> {
+            match blob {
+                Some(hash) => Ok(yh_core::db::blob(&self.c, &hash)?.map(|b| String::from_utf8_lossy(&b).into_owned()).or(head)),
+                None => Ok(head),
+            }
+        };
+        Ok((whole(input, input_blob)?, whole(result, result_blob)?))
     }
 
     /// How many rows a transcript has (they're numbered from 0 without gaps).

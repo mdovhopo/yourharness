@@ -604,7 +604,9 @@ fn subagent_calls(c: &Connection, thread: &str) -> rusqlite::Result<Vec<Subagent
     Ok(calls)
 }
 
-fn blob(c: &Connection, hash: &str) -> rusqlite::Result<Option<Vec<u8>>> {
+/// A blob's bytes by its hash (a whole tool result or input), from any connection to the
+/// database, read-only ones too.
+pub fn blob(c: &Connection, hash: &str) -> rusqlite::Result<Option<Vec<u8>>> {
     let found: Option<(i64, i64, Vec<u8>)> = c
         .query_row("SELECT codec, size, data FROM blobs WHERE hash = ?", [hash], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
         .optional()?;

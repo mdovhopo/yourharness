@@ -6,6 +6,7 @@
 //! cargo run -p yh-server --example yh -- <url> stop <thread>
 //! cargo run -p yh-server --example yh -- <url> allow|deny <thread> [request id]   (the first waiting)
 //! cargo run -p yh-server --example yh -- <url> withdraw|send-now <thread> <message id>
+//! cargo run -p yh-server --example yh -- <url> raw '<any message as JSON>'
 //! ```
 //!
 //! Prints what it gets, one line a message: `THREAD`, `SNAPSHOT`, `ROWS`, `LIVE`, `DONE`. `watch`
@@ -77,7 +78,9 @@ fn print(m: &ToApp, began: &mut bool) -> bool {
                 return true;
             }
         }
-        ToApp::Done { id, error } => println!("DONE {id} {}", error.as_deref().unwrap_or("ok")),
+        ToApp::Done { id, error, thread } => println!("DONE {id} {}{}", error.as_deref().unwrap_or("ok"), thread.as_deref().map(|t| format!(" thread={t}")).unwrap_or_default()),
+        ToApp::Options { models, modes } => println!("OPTIONS models=[{}] modes=[{}]", models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>().join(","), modes.join(",")),
+        ToApp::ToolResult { seq, input, result, .. } => println!("TOOL #{seq} input={} result={}", input.as_ref().map_or(0, |s| s.chars().count()), result.as_ref().map_or(0, |s| s.chars().count())),
         ToApp::Error { message } => println!("ERROR {message}"),
     }
     false
@@ -119,7 +122,7 @@ fn main() {
             let now = rest.iter().any(|a| a == "--now");
             let text = rest[1..].iter().filter(|a| *a != "--now").cloned().collect::<Vec<_>>().join(" ");
             send(&mut ws, FromApp::SubscribeThread { thread: thread.clone(), limit: Some(3) });
-            send(&mut ws, FromApp::Send { id: id(), thread, text, now });
+            send(&mut ws, FromApp::Send { id: id(), thread, text, now, images: vec![] });
             let until = Instant::now() + Duration::from_secs(600);
             while Instant::now() < until {
                 if let Some(m) = next(&mut ws) {
@@ -165,6 +168,18 @@ fn main() {
             let m = if command == "withdraw" { FromApp::Withdraw { id: id(), thread, message } } else { FromApp::SendNow { id: id(), thread, message } };
             send(&mut ws, m);
             wait_done(&mut ws);
+        }
+        // Any message, as JSON: `yh <url> raw '{"type":"pin","id":"x","thread":"t","on":true}'`;
+        // prints what comes back for two seconds.
+        "raw" => {
+            let Some(json) = rest.first() else { usage() };
+            ws.send(Message::text(json.clone())).unwrap();
+            let until = Instant::now() + Duration::from_secs(2);
+            while Instant::now() < until {
+                if let Some(m) = next(&mut ws) {
+                    print(&m, &mut began);
+                }
+            }
         }
         _ => usage(),
     }

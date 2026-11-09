@@ -1838,7 +1838,16 @@ struct Question {
 }
 
 /// What Claude hears when you skip its question.
-const SKIP_MESSAGE: &str = "The user chose not to answer. Continue with your best judgment, or ask in chat.";
+/// What Claude is told when you keep planning, with what you wrote (or nothing).
+pub(crate) fn keep_planning_message(feedback: &str) -> String {
+    if feedback.trim().is_empty() {
+        "The user wants to keep planning. Ask what to change.".to_string()
+    } else {
+        format!("The user wants changes to the plan before you start: {}", feedback.trim())
+    }
+}
+
+pub(crate) const SKIP_MESSAGE: &str = "The user chose not to answer. Continue with your best judgment, or ask in chat.";
 
 /// Claude asks (`AskUserQuestion`): pick options or write your own; Skip declines.
 pub struct QuestionCard {
@@ -2083,11 +2092,7 @@ impl PlanCard {
     /// ⌘⌫: keep planning, with what's written as feedback.
     fn keep_planning(&self, cx: &mut App) {
         let feedback = self.feedback.read(cx).value().trim().to_string();
-        let message = if feedback.is_empty() {
-            "The user wants to keep planning. Ask what to change.".to_string()
-        } else {
-            format!("The user wants changes to the plan before you start: {feedback}")
-        };
+        let message = keep_planning_message(&feedback);
         let Some(ws) = self.workspace.upgrade() else { return };
         if let Some(t) = ws.read(cx).selected_thread() {
             ws.update(cx, |ws, cx| ws.respond(&t, Decision::Deny { message }, cx));

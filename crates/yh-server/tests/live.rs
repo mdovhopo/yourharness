@@ -97,12 +97,23 @@ fn streams_what_claude_writes_and_takes_actions() {
     db.save_rows("t1", 1, vec![(0, row("u0", "user", "earlier"))]);
     db.flush();
     let engine = yh_engine::start(Some(db.clone()));
-    let (actions, app) = flume::unbounded();
+    let (actions, asked) = flume::unbounded::<yh_server::Asked>();
+    // The app: takes each action and says how it went; a new thread is named "t2".
+    let (seen, app) = flume::unbounded();
+    std::thread::spawn(move || {
+        for a in asked {
+            let made = matches!(a.action, yh_server::Action::NewThread { .. }).then(|| "t2".to_string());
+            let answer = if a.action == (yh_server::Action::Delete { thread: "nope".into() }) { Err("No such thread.".to_string()) } else { Ok(made) };
+            seen.send(a.action).unwrap();
+            a.reply.send(answer).unwrap();
+        }
+    });
     let url = start_with(&dir, None, Some(yh_server::Links { engine: engine.clone(), actions }));
     let mut c = Client::connect(&url).unwrap();
     c.expect("hello", |m| matches!(m, ToApp::Hello { .. }));
     c.send(FromApp::SubscribeApp);
     c.expect("threads", |m| matches!(m, ToApp::Threads { .. }));
+    c.expect("options", |m| matches!(m, ToApp::Options { modes, .. } if modes.len() == 5));
     c.send(FromApp::SubscribeThread { thread: "t1".into(), limit: None });
     let ToApp::Snapshot { count, rows, .. } = c.expect("snapshot", |m| matches!(m, ToApp::Snapshot { .. })) else { unreachable!() };
     assert_eq!((count, rows.len(), rows[0].text.as_str()), (1, 1, "earlier"));
@@ -136,8 +147,26 @@ fn streams_what_claude_writes_and_takes_actions() {
     c.expect("the request", |m| matches!(m, ToApp::Live { live, .. } if live.requests.first().is_some_and(|r| r.id == "r1")));
     c.expect("waiting", |m| matches!(m, ToApp::ThreadUpserted { thread } if thread.waiting));
     c.send(FromApp::Respond { id: Some("a1".into()), thread: t(), request_id: "r1".into(), allow: true });
-    c.expect("done", |m| matches!(m, ToApp::Done { id, error: None } if id == "a1"));
+    c.expect("done", |m| matches!(m, ToApp::Done { id, error: None, .. } if id == "a1"));
     assert_eq!(app.recv_timeout(Duration::from_secs(1)).unwrap(), yh_server::Action::Respond { thread: t(), request_id: "r1".into(), allow: true });
+
+    // Protocol 3: an answer to Claude's question, a new thread (named in `done`), a picture with
+    // a message, an action the app refuses, a mode it doesn't know.
+    let answers: std::collections::BTreeMap<String, String> = [("Which?".to_string(), "Rust".to_string())].into();
+    c.send(FromApp::Answer { id: Some("a4".into()), thread: t(), request_id: "r2".into(), answers: answers.clone() });
+    c.expect("answered", |m| matches!(m, ToApp::Done { id, error: None, .. } if id == "a4"));
+    assert_eq!(app.recv_timeout(Duration::from_secs(1)).unwrap(), yh_server::Action::Answer { thread: t(), request_id: "r2".into(), answers });
+    c.send(FromApp::NewThread { id: Some("a5".into()), project: "p1".into(), text: Some("hi".into()) });
+    c.expect("made", |m| matches!(m, ToApp::Done { id, error: None, thread: Some(t) } if id == "a5" && t == "t2"));
+    app.recv_timeout(Duration::from_secs(1)).unwrap();
+    c.send(FromApp::Send { id: Some("a6".into()), thread: t(), text: "look".into(), now: false, images: vec![yh_server::wire::Image { media_type: "image/png".into(), data: "aGVsbG8=".into() }] });
+    c.expect("sent", |m| matches!(m, ToApp::Done { id, error: None, .. } if id == "a6"));
+    assert_eq!(app.recv_timeout(Duration::from_secs(1)).unwrap(), yh_server::Action::Send { thread: t(), text: "look".into(), now: false, images: vec![("image/png".into(), b"hello".to_vec())] });
+    c.send(FromApp::Delete { id: Some("a7".into()), thread: "nope".into() });
+    c.expect("refused", |m| matches!(m, ToApp::Done { id, error: Some(e), .. } if id == "a7" && e == "No such thread."));
+    app.recv_timeout(Duration::from_secs(1)).unwrap();
+    c.send(FromApp::SetMode { id: Some("a8".into()), thread: t(), mode: "yolo".into() });
+    c.expect("unknown mode", |m| matches!(m, ToApp::Done { id, error: Some(_), .. } if id == "a8"));
 
     engine.send(Command::Events { thread: t(), events: vec![yh_core::claude::Event::Done { is_error: false, text: String::new() }] });
     c.expect("over", |m| matches!(m, ToApp::Live { live, .. } if !live.running));
@@ -146,7 +175,7 @@ fn streams_what_claude_writes_and_takes_actions() {
     let mut r = Client::connect(&start_with(&dir, None, None)).unwrap();
     r.expect("hello", |m| matches!(m, ToApp::Hello { .. }));
     r.send(FromApp::Stop { id: Some("a3".into()), thread: t() });
-    r.expect("refused", |m| matches!(m, ToApp::Done { id, error: Some(_) } if id == "a3"));
+    r.expect("refused", |m| matches!(m, ToApp::Done { id, error: Some(_), .. } if id == "a3"));
 }
 
 #[test]

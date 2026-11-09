@@ -3252,7 +3252,7 @@ impl Workspace {
 /// `YH_SERVER=<port>` (`1`: 7878): the server for the app's clients (`yh_server`, the phone app),
 /// on loopback, its token `YH_SERVER_TOKEN` or made up. Prints `SERVER <url>` and writes it to
 /// `server.json` in the data folder (only you can read it). Its actions come back here.
-fn start_server(engine: &yh_engine::EngineHandle) -> Option<flume::Receiver<yh_server::Action>> {
+fn start_server(engine: &yh_engine::EngineHandle) -> Option<flume::Receiver<yh_server::Asked>> {
     let asked = std::env::var("YH_SERVER").ok()?;
     let port: u16 = if asked == "1" { 7878 } else { asked.parse().ok()? };
     let token = std::env::var("YH_SERVER_TOKEN").ok().filter(|t| !t.is_empty()).unwrap_or_else(|| yh_core::library::new_uuid().replace('-', "").to_lowercase());
@@ -3286,21 +3286,102 @@ fn start_server(engine: &yh_engine::EngineHandle) -> Option<flume::Receiver<yh_s
 }
 
 impl Workspace {
-    /// What a client of the server asked (the phone): taken as the same click here would be.
-    fn remote_action(&mut self, action: yh_server::Action, cx: &mut Context<Self>) {
+    /// What a client of the server asked (the phone): taken as the same click here would be, and
+    /// answered with how it went.
+    fn remote_action(&mut self, asked: yh_server::Asked, cx: &mut Context<Self>) {
         if std::env::var("YH_DATA_DIR").is_ok() {
-            eprintln!("REMOTE {action:?}");
+            let mut line = format!("{:?}", asked.action);
+            line.truncate(300);
+            eprintln!("REMOTE {line}");
+        }
+        let result = self.take_remote(asked.action, cx);
+        let _ = asked.reply.send(result);
+    }
+
+    fn take_remote(&mut self, action: yh_server::Action, cx: &mut Context<Self>) -> Result<Option<String>, String> {
+        use yh_server::Action as A;
+        if let A::NewThread { project, text } = &action {
+            if self.project(project).is_none() {
+                return Err("No such project.".into());
+            }
+            let id = self.new_thread(project, cx);
+            if let (Some(text), Some(thread)) = (text.as_deref().filter(|t| !t.trim().is_empty()), self.thread(&id)) {
+                self.send(&thread, text, false, cx);
+            }
+            return Ok(Some(id));
         }
         let thread_id = match &action {
-            yh_server::Action::Send { thread, .. } | yh_server::Action::Stop { thread } | yh_server::Action::Respond { thread, .. } | yh_server::Action::Withdraw { thread, .. } | yh_server::Action::SendNow { thread, .. } => thread.clone(),
+            A::Send { thread, .. } | A::Stop { thread } | A::Respond { thread, .. } | A::Withdraw { thread, .. } | A::SendNow { thread, .. } | A::Answer { thread, .. } | A::SkipQuestion { thread, .. } | A::ApprovePlan { thread, .. } | A::KeepPlanning { thread, .. } | A::AnswerQuestion { thread, .. } | A::SetModel { thread, .. } | A::SetEffort { thread, .. } | A::SetMode { thread, .. } | A::Rename { thread, .. } | A::Pin { thread, .. } | A::Settle { thread, .. } | A::Delete { thread } => thread.clone(),
+            A::NewThread { .. } => unreachable!("taken above"),
         };
-        let Some(thread) = self.thread(&thread_id) else { return };
+        let Some(thread) = self.thread(&thread_id) else { return Err("No such thread.".into()) };
+        let request = |id: &str, cx: &App| thread.read(cx).run.permissions.iter().find(|p| p.id == id).cloned();
         match action {
-            yh_server::Action::Send { text, now, .. } => self.send(&thread, &text, now, cx),
-            yh_server::Action::Stop { .. } => self.stop(&thread, &Default::default(), cx),
-            yh_server::Action::Respond { request_id, allow, .. } => self.respond_to(&thread, &request_id, if allow { Decision::allow() } else { Decision::deny() }, cx),
-            yh_server::Action::Withdraw { message, .. } => self.withdraw(&thread, &message, false, cx),
-            yh_server::Action::SendNow { message, .. } => self.send_now(&thread, &message, cx),
+            A::Send { text, now, images, .. } => {
+                if images.is_empty() {
+                    self.send(&thread, &text, now, cx);
+                } else {
+                    let names: Vec<String> = images.iter().filter_map(|(_, bytes)| yh_core::attachments::save(&self.data_dir, &thread_id, bytes)).collect();
+                    if names.len() != images.len() {
+                        return Err("A picture couldn't be read.".into());
+                    }
+                    self.send_with_images(&thread, &text, names, now, cx);
+                }
+            }
+            A::Stop { .. } => self.stop(&thread, &Default::default(), cx),
+            A::Respond { request_id, allow, .. } => {
+                request(&request_id, cx).ok_or("That request isn't waiting any more.")?;
+                self.respond_to(&thread, &request_id, if allow { Decision::allow() } else { Decision::deny() }, cx);
+            }
+            A::Withdraw { message, .. } => self.withdraw(&thread, &message, false, cx),
+            A::SendNow { message, .. } => self.send_now(&thread, &message, cx),
+            A::Answer { request_id, answers, .. } => {
+                let p = request(&request_id, cx).ok_or("That question isn't waiting any more.")?;
+                let mut input: Value = serde_json::from_str(&p.input).unwrap_or(serde_json::json!({}));
+                input["answers"] = Value::Object(answers.into_iter().map(|(q, a)| (q, Value::from(a))).collect());
+                self.respond_to(&thread, &request_id, Decision::Allow { updated_input: Some(input.to_string()), mode: None }, cx);
+            }
+            A::SkipQuestion { request_id, .. } => {
+                request(&request_id, cx).ok_or("That question isn't waiting any more.")?;
+                self.respond_to(&thread, &request_id, Decision::Deny { message: crate::ui::composer::SKIP_MESSAGE.into() }, cx);
+            }
+            A::ApprovePlan { request_id, mode, feedback, .. } => {
+                request(&request_id, cx).ok_or("That plan isn't waiting any more.")?;
+                let project = thread.read(cx).meta.project_id.clone();
+                self.set_mode(&project, &mode, cx);
+                self.respond_to(&thread, &request_id, Decision::Allow { updated_input: None, mode: Some(control_mode(&mode).into()) }, cx);
+                if let Some(feedback) = feedback.filter(|f| !f.trim().is_empty()) {
+                    self.send(&thread, &feedback, false, cx);
+                }
+            }
+            A::KeepPlanning { request_id, feedback, .. } => {
+                request(&request_id, cx).ok_or("That plan isn't waiting any more.")?;
+                let message = crate::ui::composer::keep_planning_message(feedback.as_deref().unwrap_or(""));
+                self.respond_to(&thread, &request_id, Decision::Deny { message }, cx);
+            }
+            A::AnswerQuestion { request_id, accept, .. } => {
+                let asked = thread.read(cx).run.elicitations.iter().find(|e| e.id == request_id).cloned().ok_or("That question isn't waiting any more.")?;
+                let content = (accept && asked.mode == "form").then(|| crate::ui::composer::elicit_defaults(&asked.schema));
+                self.answer_elicitation_id(&thread, &request_id, if accept { "accept" } else { "decline" }, content, cx);
+            }
+            A::SetModel { model, .. } => self.set_model(&thread_id, model, cx),
+            A::SetEffort { effort, .. } => self.set_effort(&thread_id, effort, cx),
+            A::SetMode { mode, .. } => {
+                let project = thread.read(cx).meta.project_id.clone();
+                self.set_mode(&project, &mode, cx);
+            }
+            A::Rename { title, .. } => {
+                let title = title.trim();
+                if title.is_empty() {
+                    return Err("A title can't be empty.".into());
+                }
+                self.rename(&thread_id, title, cx);
+            }
+            A::Pin { on, .. } => self.set_pinned(&thread_id, on, cx),
+            A::Settle { on, .. } => self.set_settled(&thread_id, on, cx),
+            A::Delete { .. } => self.delete(&thread_id, cx),
+            A::NewThread { .. } => unreachable!("taken above"),
         }
+        Ok(None)
     }
 }
