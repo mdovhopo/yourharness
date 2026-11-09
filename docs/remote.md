@@ -1,6 +1,6 @@
 # Remote: the foundation
 
-Status: in progress. F0 is done (`yh_core::thread_run`); the rest is planned.
+Status: in progress. F0 is done (`yh_core::thread_run`), and F1's first step (`yh-engine`: turns on the engine's thread); the rest is planned.
 
 ## Goal
 
@@ -223,6 +223,18 @@ The largest phase, landed in three steps so each can ship:
    session resume and import, limits, keep awake.
 3. **Around:** scans, PR counts and merge links, the in-app MCP servers (`threads`, `harness`,
    `memory`) and `BrowserHost`, memory changes, settings that change what the engine does.
+
+**Step 1, as built:** `yh_engine::start` runs one engine thread that owns every thread's
+`ThreadRun` and `claude`. The window's `ThreadState` holds a copy of its `LiveState` and applies
+the `RowChange`s it's told, at most once a frame (`Workspace::on_outputs`). The engine starts a
+`claude` when a message or a request needs one and asks the app how (`Output::NeedsLaunch`,
+answered with `Command::Launch`: the folder, model, tools and prompt are still the app's), so
+launch options are made only when a process really starts. It lets idle processes go, starts
+one over for a new effort once its turn is over, saves rows as they settle, and reads rows it
+let go of back from the database (`Database::find_row`). Every request the UI makes of a turn
+(send, steer, stop, allow, answer, withdraw, send now, `/mcp`, stop a job, quit) is a
+`Command`. Both golden tests run through it: the engine alone, and the app's thread built from
+what the engine tells.
 
 After step 3, no file in `yh-app` reaches `Library` or `ClaudeProcess` directly. A test
 enforces it by grepping for them.

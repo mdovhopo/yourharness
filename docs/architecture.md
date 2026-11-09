@@ -16,7 +16,10 @@ flowchart TB
     UI --> State
     State --> Mac
   end
+  Engine["crates/yh-engine · no GPUI: every thread's run and claude, on its own thread"]
   Core["crates/yh-core · no GPUI"]
+  State --> Engine
+  Engine --> Core
   State --> Core
   Core --> Claude["claude (stream-json)"]
   Core --> Tools["git, gh, glab"]
@@ -42,6 +45,10 @@ flowchart TB
     `cookies.rs`, `dev_servers.rs`, `agents.rs`, `shell_env.rs`, `updates.rs`.
 
   Long or blocking work runs on background threads and hands results back through channels.
+- **yh-engine** runs every thread's `ThreadRun` and its `claude` on a thread of its own: the
+  app sends it `Command`s (send, stop, allow…) and applies the `ThreadUpdate`s it gets back, at
+  most once a frame. It asks the app how to start a `claude` when one is needed
+  (`NeedsLaunch`), lets idle ones go, and saves rows (docs/remote.md).
 - **yh-app/state** owns what the app knows, as GPUI entities with no drawing. `workspace.rs`
   holds projects, threads, the selection, each thread's `claude` and every request the UI makes
   (send, stop, allow, pin, rename, settle…), and tells views what changed with

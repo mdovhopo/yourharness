@@ -137,7 +137,7 @@ pub fn clock(seconds: u64) -> String {
 }
 
 /// A thread's jobs. `version` goes up with every change the strip shows.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Jobs {
     /// Still running, oldest first.
     pub running: Vec<Job>,

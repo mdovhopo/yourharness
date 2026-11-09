@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/yh-core", "crates/yh-app"]
+members = ["crates/yh-core", "crates/yh-engine", "crates/yh-app"]
 
 [workspace.package]
 edition = "2024"
@@ -8,6 +8,7 @@ publish = false
 
 [workspace.dependencies]
 yh-core = { path = "crates/yh-core" }
+yh-engine = { path = "crates/yh-engine" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] } # as GPUI has it: a process without GPUI writes JSON the same
 rusqlite = { version = "0.37", features = ["bundled"] }

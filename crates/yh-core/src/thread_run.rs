@@ -304,7 +304,7 @@ pub struct Permission {
 }
 
 /// What the composer shows of a thread beyond its rows.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct ComposerState {
     /// Tokens in the context after Claude's latest message, and the model's window.
     pub context_tokens: Option<u64>,
@@ -375,8 +375,10 @@ impl Outcome {
     }
 }
 
-#[derive(Default)]
-pub struct ThreadRun {
+/// What a run knows beyond its rows: told whole after every change, for whoever shows the
+/// thread to hold a copy of.
+#[derive(Clone, Default)]
+pub struct LiveState {
     pub running: bool,
     /// What the CLI is doing between messages, when it says ("Compacting the conversation…").
     pub activity: Option<String>,
@@ -404,6 +406,33 @@ pub struct ThreadRun {
     /// Goes up whenever a sub-agent's log changes, for the right sidebar.
     pub subagents_version: u64,
 
+}
+
+impl LiveState {
+    /// The request the composer shows: the oldest waiting.
+    pub fn permission(&self) -> Option<&Permission> {
+        self.permissions.first()
+    }
+
+    pub fn waiting_for_you(&self) -> bool {
+        !self.permissions.is_empty()
+    }
+
+    /// The MCP question the composer shows: the oldest waiting.
+    pub fn elicitation(&self) -> Option<&Elicitation> {
+        self.elicitations.first()
+    }
+
+    /// Queued messages still waiting for Claude, oldest first: (id, text, attachments).
+    pub fn queued_messages(&self) -> Vec<(String, String, usize)> {
+        self.queue.iter().map(|q| (q.id.clone(), q.text.clone(), q.attachments.len())).collect()
+    }
+}
+
+#[derive(Default)]
+pub struct ThreadRun {
+    pub live: LiveState,
+
     /// The rows held, by number.
     rows: BTreeMap<usize, TranscriptRow>,
     /// The turn's streamed blocks (`message:index`) and tool calls (by id), by row number.
@@ -429,40 +458,22 @@ pub struct ThreadRun {
 
 impl ThreadRun {
     pub fn new(session_id: Option<String>, context_tokens: Option<u64>, context_window: Option<u64>) -> ThreadRun {
-        ThreadRun { session_id, composer: ComposerState { context_tokens, context_window, ..Default::default() }, ..Default::default() }
-    }
-
-    /// The request the composer shows: the oldest waiting.
-    pub fn permission(&self) -> Option<&Permission> {
-        self.permissions.first()
-    }
-
-    pub fn waiting_for_you(&self) -> bool {
-        !self.permissions.is_empty()
-    }
-
-    /// The MCP question the composer shows: the oldest waiting.
-    pub fn elicitation(&self) -> Option<&Elicitation> {
-        self.elicitations.first()
+        let composer = ComposerState { context_tokens, context_window, ..Default::default() };
+        ThreadRun { live: LiveState { session_id, composer, ..Default::default() }, ..Default::default() }
     }
 
     /// Takes a request off the list once answered.
     pub fn answered(&mut self, request_id: &str) -> Option<Permission> {
-        let i = self.permissions.iter().position(|p| p.id == request_id)?;
-        Some(self.permissions.remove(i))
+        let i = self.live.permissions.iter().position(|p| p.id == request_id)?;
+        Some(self.live.permissions.remove(i))
     }
 
     /// Your queued messages go back into the composer: when `claude` is gone with them unread.
     pub fn restore_queued(&mut self) {
-        for q in std::mem::take(&mut self.queue) {
-            self.composer.restore_on_withdraw.remove(&q.id);
-            self.composer.restored.push((q.id, q.text, q.attachments));
+        for q in std::mem::take(&mut self.live.queue) {
+            self.live.composer.restore_on_withdraw.remove(&q.id);
+            self.live.composer.restored.push((q.id, q.text, q.attachments));
         }
-    }
-
-    /// Queued messages still waiting for Claude, oldest first: (id, text, attachments).
-    pub fn queued_messages(&self) -> Vec<(String, String, usize)> {
-        self.queue.iter().map(|q| (q.id.clone(), q.text.clone(), q.attachments.len())).collect()
     }
 
     /// Rows held now, for tests and checks.
@@ -492,8 +503,8 @@ impl ThreadRun {
     /// Puts a new row at the end.
     fn append(&mut self, data: EntryData) -> usize {
         let kind = data.kind;
-        let seq = self.total.unwrap_or(0);
-        self.total = Some(seq + 1);
+        let seq = self.live.total.unwrap_or(0);
+        self.live.total = Some(seq + 1);
         self.dirty.insert(seq);
         self.added.insert(seq);
         let id = data.id.clone();
@@ -540,7 +551,7 @@ impl ThreadRun {
     /// Claude picks it up: never in both places.
     pub fn add_user(&mut self, text: &str, images: &[String], id: &str, queued: bool, delivery: Option<&str>) {
         if queued {
-            self.queue.push(Queued { id: id.to_string(), text: text.to_string(), attachments: images.to_vec() });
+            self.live.queue.push(Queued { id: id.to_string(), text: text.to_string(), attachments: images.to_vec() });
             return;
         }
         let mut data = EntryData::new(id, Kind::User, text);
@@ -548,7 +559,7 @@ impl ThreadRun {
         let seq = self.append(data);
         self.row_mut(seq).delivery = delivery.map(str::to_string);
         // Jobs started from here on are what Claude waits on.
-        self.jobs.turn = Some(id.to_string());
+        self.live.jobs.turn = Some(id.to_string());
     }
 
     pub fn notice(&mut self, text: &str) {
@@ -573,28 +584,28 @@ impl ThreadRun {
     /// The CLI says where your message is. True when the composer has to show it (a queued
     /// message picked up or taken back).
     fn lifecycle(&mut self, id: &str, state: &str) -> bool {
-        let Some(at) = self.queue.iter().position(|q| q.id == id) else { return false };
+        let Some(at) = self.live.queue.iter().position(|q| q.id == id) else { return false };
         match state {
             "started" | "completed" => {
                 // Claude has it now: into the transcript, where it entered the conversation.
-                let q = self.queue.remove(at);
-                let delivery = if self.composer.sending_now.remove(id) {
+                let q = self.live.queue.remove(at);
+                let delivery = if self.live.composer.sending_now.remove(id) {
                     Some("interrupted")
-                } else if self.running {
+                } else if self.live.running {
                     Some("steered")
                 } else {
                     // Picked up after the turn ended or was stopped for it: a turn of its own.
                     None
                 };
-                self.running = true;
+                self.live.running = true;
                 self.add_user(&q.text, &q.attachments, &q.id, false, delivery);
                 true
             }
             "cancelled" => {
-                let q = self.queue.remove(at);
-                self.composer.sending_now.remove(id);
-                if self.composer.restore_on_withdraw.remove(id) {
-                    self.composer.restored.push((q.id, q.text, q.attachments));
+                let q = self.live.queue.remove(at);
+                self.live.composer.sending_now.remove(id);
+                if self.live.composer.restore_on_withdraw.remove(id) {
+                    self.live.composer.restored.push((q.id, q.text, q.attachments));
                 }
                 true
             }
@@ -606,20 +617,20 @@ impl ThreadRun {
     pub fn apply(&mut self, event: Event, src: &dyn RowSource) -> Outcome {
         match event {
             Event::Session { id } => {
-                self.session_id = Some(id);
-                self.received_init = true;
+                self.live.session_id = Some(id);
+                self.live.received_init = true;
                 Outcome::default()
             }
             Event::Status(status) => {
                 let activity = (status == "compacting").then(|| "Compacting the conversation…".to_string());
-                let changed = activity != self.activity;
-                self.activity = activity;
+                let changed = activity != self.live.activity;
+                self.live.activity = activity;
                 Outcome::chrome(changed)
             }
             Event::SubagentProgress { tool_id, activity, usage } => {
                 let tool_id = self.agent_alias.get(&tool_id).cloned().unwrap_or(tool_id);
                 if let Some(a) = &activity {
-                    self.jobs.agent_activity(&tool_id, a);
+                    self.live.jobs.agent_activity(&tool_id, a);
                 }
                 if let Some(seq) = self.tool(&tool_id, src) {
                     let r = self.row_mut(seq);
@@ -631,7 +642,7 @@ impl ThreadRun {
                         sub.activity = activity;
                     }
                     sub.apply(usage);
-                    self.subagents_version += 1;
+                    self.live.subagents_version += 1;
                     self.show(seq);
                 }
                 Outcome::default()
@@ -650,21 +661,21 @@ impl ThreadRun {
                 Outcome::default()
             }
             Event::ContextUsage(tokens) => {
-                self.composer.context_tokens = Some(tokens);
+                self.live.composer.context_tokens = Some(tokens);
                 Outcome::default()
             }
             Event::ContextWindows(windows) => {
-                self.composer.context_window = windows.iter().map(|(_, w)| *w).max();
+                self.live.composer.context_window = windows.iter().map(|(_, w)| *w).max();
                 Outcome::default()
             }
             Event::ConversationReset => {
                 self.notice("Context cleared. Claude starts fresh from here.");
-                self.composer.context_tokens = None;
+                self.live.composer.context_tokens = None;
                 Outcome::chrome(true)
             }
             Event::McpServers(servers) => {
-                let changed = self.composer.mcp_servers != servers;
-                self.composer.mcp_servers = servers;
+                let changed = self.live.composer.mcp_servers != servers;
+                self.live.composer.mcp_servers = servers;
                 Outcome::chrome(changed)
             }
             Event::TitleChanged(_) | Event::Skills(_) => Outcome::default(),
@@ -691,9 +702,9 @@ impl ThreadRun {
                 self.row_mut(seq).live = true;
                 self.blocks.insert(key, seq);
                 // Claude woken by a job's end: a turn with no message of yours.
-                let woke = !self.running && self.jobs.version > 0;
+                let woke = !self.live.running && self.live.jobs.version > 0;
                 if woke {
-                    self.running = true;
+                    self.live.running = true;
                 }
                 Outcome::chrome(woke)
             }
@@ -823,9 +834,9 @@ impl ThreadRun {
                         touches_plan |= d.tool_name.as_deref().is_some_and(|n| crate::plan::is_plan_tool(n, d.tool_input.as_deref().unwrap_or("")));
                     }
                 }
-                let jobs_before = self.jobs.running.len();
+                let jobs_before = self.live.jobs.running.len();
                 for r in results {
-                    self.jobs.tool_result(&r.id, &r.text);
+                    self.live.jobs.tool_result(&r.id, &r.text);
                     let Some(seq) = self.tool(&r.id, src) else { continue };
                     if let Some(full) = r.full {
                         self.full_results.insert(r.id.clone(), full);
@@ -840,7 +851,7 @@ impl ThreadRun {
                 if touches_plan {
                     return Outcome { chrome: true, plan: true, pulls, ..Default::default() };
                 }
-                Outcome { chrome: self.jobs.running.len() != jobs_before, pulls, ..Default::default() }
+                Outcome { chrome: self.live.jobs.running.len() != jobs_before, pulls, ..Default::default() }
             }
             Event::SubagentStarted { tool_id, description, task_id, background } => {
                 // A sub-agent continued (`SendMessage` to it): the same task under a new call.
@@ -856,7 +867,7 @@ impl ThreadRun {
                 };
                 // In the background it goes on after the turn: the thread isn't done.
                 if background {
-                    self.jobs.start_agent(task_id.clone(), tool_id.clone(), description.clone());
+                    self.live.jobs.start_agent(task_id.clone(), tool_id.clone(), description.clone());
                 }
                 if let Some(seq) = self.tool(&tool_id, src) {
                     let r = self.row_mut(seq);
@@ -880,13 +891,13 @@ impl ThreadRun {
                     } else {
                         self.show(seq);
                     }
-                    self.subagents_version += 1;
+                    self.live.subagents_version += 1;
                 }
                 Outcome::chrome(background)
             }
             Event::SubagentFinished { tool_id, status, summary, usage } => {
                 let tool_id = self.agent_alias.get(&tool_id).cloned().unwrap_or(tool_id);
-                let was_background = self.jobs.finish_agent(&tool_id);
+                let was_background = self.live.jobs.finish_agent(&tool_id);
                 if let Some(seq) = self.tool(&tool_id, src) {
                     let r = self.row_mut(seq);
                     // A job's end the CLI no longer knew as one (a watch from before a
@@ -908,18 +919,18 @@ impl ThreadRun {
             Event::Elicitation { request_id, server, message, mode, schema, url, elicitation_id } => {
                 // Several servers (or calls) can ask at once: each waits its turn.
                 let asked = Elicitation { id: request_id, server, message, mode, schema, url, elicitation_id };
-                match self.elicitations.iter_mut().find(|e| e.id == asked.id) {
+                match self.live.elicitations.iter_mut().find(|e| e.id == asked.id) {
                     Some(e) => *e = asked,
-                    None => self.elicitations.push(asked),
+                    None => self.live.elicitations.push(asked),
                 }
                 Outcome::chrome(true)
             }
             Event::Permission { request_id, tool, description, input } => {
                 // The same request again (a resumed stream) replaces itself; a new one waits its turn.
                 let asked = Permission { id: request_id, tool, description, input };
-                match self.permissions.iter_mut().find(|p| p.id == asked.id) {
+                match self.live.permissions.iter_mut().find(|p| p.id == asked.id) {
                     Some(p) => *p = asked,
-                    None => self.permissions.push(asked),
+                    None => self.live.permissions.push(asked),
                 }
                 Outcome::chrome(true)
             }
@@ -932,9 +943,9 @@ impl ThreadRun {
                 // Stopped for a message sent now, which carries that on itself; stopped by you,
                 // a plain note (the CLI ends it as `error_during_execution`); anything else, the
                 // CLI's error.
-                let for_message = !self.composer.sending_now.is_empty();
+                let for_message = !self.live.composer.sending_now.is_empty();
                 if is_error && !for_message {
-                    if self.interrupt_requested {
+                    if self.live.interrupt_requested {
                         self.notice("Interrupted");
                     } else if text.is_empty() || (text.starts_with("error_") && !text.contains(' ')) {
                         let why = if text.is_empty() { String::new() } else { format!(" ({text})") };
@@ -943,8 +954,8 @@ impl ThreadRun {
                         self.error_notice(&text);
                     }
                 }
-                self.stopped_by_you = self.interrupt_requested || for_message;
-                self.interrupt_requested = false;
+                self.live.stopped_by_you = self.live.interrupt_requested || for_message;
+                self.live.interrupt_requested = false;
                 Outcome::chrome(true)
             }
             Event::JobStarted { task_id, tool_id, description, background, parent_task } => {
@@ -962,17 +973,17 @@ impl ThreadRun {
                 });
                 // A sub-agent's: the Sub-agents panel lists it under that agent.
                 if owner.is_some() {
-                    self.subagents_version += 1;
+                    self.live.subagents_version += 1;
                 }
-                self.jobs.start(task_id, tool_id, tool.as_deref(), description, background, owner);
+                self.live.jobs.start(task_id, tool_id, tool.as_deref(), description, background, owner);
                 Outcome::chrome(true)
             }
             Event::JobFinished { task_id, status, summary, output_file } => {
-                if self.jobs.running.iter().any(|j| j.id == task_id && j.owner_task.is_some()) {
-                    self.subagents_version += 1;
+                if self.live.jobs.running.iter().any(|j| j.id == task_id && j.owner_task.is_some()) {
+                    self.live.subagents_version += 1;
                 }
                 let code = summary.as_deref().and_then(crate::claude::job_exit_code);
-                match self.jobs.finish(&task_id, &status, code, output_file) {
+                match self.live.jobs.finish(&task_id, &status, code, output_file) {
                     Some((note, true)) => self.error_notice(&note),
                     Some((note, false)) => self.notice(&note),
                     None => {}
@@ -980,18 +991,18 @@ impl ThreadRun {
                 Outcome::chrome(true)
             }
             Event::JobOutput { task_id, text } => {
-                self.jobs.saw(&task_id, &text);
+                self.live.jobs.saw(&task_id, &text);
                 Outcome::default()
             }
             Event::JobsRunning(ids) => {
-                let notes = self.jobs.keep_only(&ids);
+                let notes = self.live.jobs.keep_only(&ids);
                 for note in &notes {
                     self.notice(note);
                 }
                 Outcome::chrome(!notes.is_empty())
             }
             Event::AgentsRunning(ids) => {
-                let gone = self.jobs.keep_agents(&ids);
+                let gone = self.live.jobs.keep_agents(&ids);
                 for (tool, note) in &gone {
                     self.agent_stopped(tool, src);
                     self.notice(note);
@@ -1003,13 +1014,13 @@ impl ThreadRun {
                 self.end_turn(src);
                 // Whatever still waited never reached Claude: back to the composer.
                 self.restore_queued();
-                self.composer.sending_now.clear();
-                self.interrupt_requested = false;
-                self.elicitations.clear();
+                self.live.composer.sending_now.clear();
+                self.live.interrupt_requested = false;
+                self.live.elicitations.clear();
                 let mut session_reset = false;
-                if code != 0 && !self.received_init && self.session_id.is_some() {
+                if code != 0 && !self.live.received_init && self.live.session_id.is_some() {
                     // Its session couldn't be resumed (gone, or another folder's): start afresh.
-                    self.session_id = None;
+                    self.live.session_id = None;
                     session_reset = true;
                     self.error_notice("Couldn't resume the previous session. Your next message starts a new one.");
                 } else if code != 0 {
@@ -1017,7 +1028,7 @@ impl ThreadRun {
                     let detail = detail[detail.len().saturating_sub(3)..].join("\n");
                     self.error_notice(format!("Claude exited (code {code}). {detail}").trim_end());
                 }
-                self.received_init = false;
+                self.live.received_init = false;
                 Outcome { chrome: true, session_reset, ..Default::default() }
             }
         }
@@ -1043,8 +1054,8 @@ impl ThreadRun {
     /// Its `claude` is going: the jobs it ran go with it, the thread says which, and the
     /// sub-agents among them show as stopped. True when there were any.
     pub fn cut_off_jobs(&mut self, outcome: &str, src: &dyn RowSource) -> bool {
-        let agents: Vec<String> = self.jobs.agents.iter().filter_map(|j| j.tool_id.clone()).collect();
-        let notes = self.jobs.cut_off(outcome);
+        let agents: Vec<String> = self.live.jobs.agents.iter().filter_map(|j| j.tool_id.clone()).collect();
+        let notes = self.live.jobs.cut_off(outcome);
         for tool in &agents {
             self.agent_stopped(tool, src);
         }
@@ -1057,7 +1068,7 @@ impl ThreadRun {
     /// The Agent call of a sub-agent, by its task ID: a background one from the jobs, a
     /// foreground one from its call's start, one from before a restart from its call's result.
     fn agent_call_of(&self, task_id: &str, src: &dyn RowSource) -> Option<String> {
-        self.jobs
+        self.live.jobs
             .agent_call(task_id)
             .or_else(|| self.rows.values().find(|r| r.sub.as_ref().is_some_and(|s| s.task_id.as_deref() == Some(task_id))).map(|r| r.data.id.clone()))
             .or_else(|| {
@@ -1077,7 +1088,7 @@ impl ThreadRun {
         let Some(sub) = r.sub.as_mut().filter(|s| s.status == "running") else { return };
         sub.status = "stopped".into();
         sub.activity = None;
-        self.subagents_version += 1;
+        self.live.subagents_version += 1;
         self.touch(seq);
     }
 
@@ -1097,7 +1108,7 @@ impl ThreadRun {
             let extra = sub.log.len() - SUBAGENT_LOG;
             sub.log.drain(..extra);
         }
-        self.subagents_version += 1;
+        self.live.subagents_version += 1;
         self.touch(seq);
     }
 
@@ -1108,9 +1119,9 @@ impl ThreadRun {
             self.touch(seq);
         }
         self.blocks.clear();
-        self.running = false;
-        self.activity = None;
-        self.permissions.clear();
+        self.live.running = false;
+        self.live.activity = None;
+        self.live.permissions.clear();
         // How long the turn took goes on the message that started it: the newest one, held
         // or not.
         let held = self.rows.values().rev().find(|r| r.starts_turn()).map(|r| r.seq);
@@ -1190,7 +1201,7 @@ impl ThreadRun {
             return;
         }
         let in_turn: HashSet<usize> = self.blocks.values().copied().collect();
-        let running_tools: HashSet<&str> = self.jobs.running.iter().chain(self.jobs.agents.iter()).filter_map(|j| j.tool_id.as_deref()).collect();
+        let running_tools: HashSet<&str> = self.live.jobs.running.iter().chain(self.live.jobs.agents.iter()).filter_map(|j| j.tool_id.as_deref()).collect();
         let keep = |r: &TranscriptRow| {
             r.live
                 || in_turn.contains(&r.seq)
@@ -1268,7 +1279,7 @@ mod tests {
     /// The same as the app's thread does with a step (`ThreadState`'s golden test), saving and
     /// letting go of rows after each, the mirror standing in for the window's rows.
     fn golden(steps: Vec<Step>) -> String {
-        let mut run = ThreadRun { total: Some(0), ..Default::default() };
+        let mut run = ThreadRun { live: LiveState { total: Some(0), ..Default::default() }, ..Default::default() };
         let mut mirror = Mirror::default();
         let mut saved: Vec<(usize, Row)> = vec![];
         for step in steps {
@@ -1277,11 +1288,11 @@ mod tests {
                     run.apply(e, &mirror);
                 }
                 Step::User { id, text, queued } => {
-                    let running = run.running;
+                    let running = run.live.running;
                     run.add_user(text, &[], id, queued && running, None);
-                    run.running = true;
+                    run.live.running = true;
                 }
-                Step::Interrupt => run.interrupt_requested = true,
+                Step::Interrupt => run.live.interrupt_requested = true,
                 Step::ChangedFiles { message, files } => run.set_changed_files(message, files.into_iter().map(str::to_string).collect(), &mirror),
             }
             mirror.apply(run.take_changes());
@@ -1298,11 +1309,11 @@ mod tests {
         }
         let ids = |v: Vec<String>| v.join(",");
         let state = vec![
-            format!("running {} activity {:?} session {:?} meta session {:?} stopped by you {}", run.running, run.activity, run.session_id, None::<String>, run.stopped_by_you),
-            format!("permissions [{}] elicitations [{}]", ids(run.permissions.iter().map(|p| format!("{}:{}", p.id, p.description)).collect()), ids(run.elicitations.iter().map(|e| e.id.clone()).collect())),
-            format!("queue [{}] restored [{}]", ids(run.queue.iter().map(|q| q.id.clone()).collect()), ids(run.composer.restored.iter().map(|r| r.0.clone()).collect())),
-            format!("context {:?}/{:?} mcp {:?}", run.composer.context_tokens, run.composer.context_window, run.composer.mcp_servers),
-            format!("jobs running {} agents {} ended {} total {:?}", run.jobs.running.len(), run.jobs.agents.len(), run.jobs.ended.len(), run.total),
+            format!("running {} activity {:?} session {:?} meta session {:?} stopped by you {}", run.live.running, run.live.activity, run.live.session_id, None::<String>, run.live.stopped_by_you),
+            format!("permissions [{}] elicitations [{}]", ids(run.live.permissions.iter().map(|p| format!("{}:{}", p.id, p.description)).collect()), ids(run.live.elicitations.iter().map(|e| e.id.clone()).collect())),
+            format!("queue [{}] restored [{}]", ids(run.live.queue.iter().map(|q| q.id.clone()).collect()), ids(run.live.composer.restored.iter().map(|r| r.0.clone()).collect())),
+            format!("context {:?}/{:?} mcp {:?}", run.live.composer.context_tokens, run.live.composer.context_window, run.live.composer.mcp_servers),
+            format!("jobs running {} agents {} ended {} total {:?}", run.live.jobs.running.len(), run.live.jobs.agents.len(), run.live.jobs.ended.len(), run.live.total),
         ];
         golden::describe(&saved, &state)
     }
@@ -1338,7 +1349,7 @@ mod tests {
 
     #[test]
     fn streams_text_as_what_it_gained() {
-        let mut run = ThreadRun { total: Some(0), ..Default::default() };
+        let mut run = ThreadRun { live: LiveState { total: Some(0), ..Default::default() }, ..Default::default() };
         run.apply(Event::BlockStart { message: "m".into(), index: 0, parent: None, kind: BlockKind::Text }, &NoRows);
         assert!(matches!(run.take_changes().as_slice(), [RowChange::Added(r)] if r.live && r.data.text.is_empty()));
         for word in ["Hello", ", world"] {
@@ -1359,8 +1370,8 @@ mod tests {
 
     #[test]
     fn holds_only_what_it_may_still_change() {
-        let mut run = ThreadRun { total: Some(0), ..Default::default() };
-        run.running = true;
+        let mut run = ThreadRun { live: LiveState { total: Some(0), ..Default::default() }, ..Default::default() };
+        run.live.running = true;
         run.add_user("go", &[], "u", false, None);
         run.apply(Event::Assistant { message: "m".into(), parent: None, blocks: vec![Block::Tool { id: "a".into(), name: "Agent".into(), input: "{}".into() }] }, &NoRows);
         run.apply(Event::SubagentStarted { tool_id: "a".into(), description: "bg".into(), task_id: Some("k".into()), background: true }, &NoRows);
@@ -1410,7 +1421,7 @@ mod tests {
         sub.task_id = Some("k".into());
         row.sub = Some(sub);
         let src = One(row);
-        let mut run = ThreadRun { total: Some(9), ..Default::default() };
+        let mut run = ThreadRun { live: LiveState { total: Some(9), ..Default::default() }, ..Default::default() };
         // Continued under a new call: the run goes on in the old one.
         run.apply(Event::SubagentStarted { tool_id: "b".into(), description: "again".into(), task_id: Some("k".into()), background: true }, &src);
         match run.take_changes().as_slice() {

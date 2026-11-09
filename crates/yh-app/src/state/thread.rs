@@ -2,14 +2,12 @@
 //! earlier pages are read when you scroll up to them. A streamed delta changes its entry in
 //! place and tells the list to measure just that row again (`ListState::splice`).
 
-use yh_core::claude::Event;
-use yh_core::db::Row;
 use yh_core::library::{EntryData, Kind, ThreadMeta};
-use yh_core::thread_run::{RowChange, RowSource, TextPatch, ThreadRun, TranscriptRow};
+use yh_core::thread_run::{ComposerState, LiveState, RowChange, TextPatch, TranscriptRow};
 pub use yh_core::plan::is_plan_tool;
 pub use yh_core::thread_run::{Elicitation, Permission, SubStep, Subagent, AGENT_TOOLS};
 use yh_core::markdown::Markdown;
-use gpui_kit::{px, Context, ListAlignment, ListOffset, ListState};
+use gpui_kit::{px, ListAlignment, ListOffset, ListState};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -49,6 +47,7 @@ fn entry(data: EntryData, seq: usize) -> EntryRef {
 
 impl Entry {
     /// As the run holds it.
+    #[cfg(test)]
     fn transcript_row(&self) -> TranscriptRow {
         TranscriptRow { seq: self.seq, data: self.data.clone(), live: self.live, sub: self.sub.clone(), date: self.date, delivery: self.delivery.clone() }
     }
@@ -199,10 +198,6 @@ impl ThreadState {
         self.run.elicitation()
     }
 
-    /// Takes a request off the list once answered.
-    pub fn answered(&mut self, request_id: &str) -> Option<Permission> {
-        self.run.answered(request_id)
-    }
 }
 
 pub struct ThreadState {
@@ -210,9 +205,9 @@ pub struct ThreadState {
     pub title: String,
     pub items: Vec<Item>,
     pub list: ListState,
-    /// Its `claude`'s events made into rows and live state (requests, the queue, jobs,
-    /// context): the rows here are built from what it tells (`sync`).
-    pub run: ThreadRun,
+    /// Its run's live state (requests, the queue, jobs, context) as the engine last told it;
+    /// the rows here are built from the changes it tells (`apply_update`).
+    pub run: LiveState,
     /// A turn ended while you were elsewhere.
     pub unread: bool,
     /// The checklist Claude keeps with its task tools, from the rows held.
@@ -269,7 +264,8 @@ pub struct ThreadState {
 
 impl ThreadState {
     pub fn new(meta: ThreadMeta) -> Self {
-        let run = ThreadRun::new(meta.session_id.clone(), meta.context_tokens, meta.context_window);
+        let composer = ComposerState { context_tokens: meta.context_tokens, context_window: meta.context_window, ..Default::default() };
+        let run = LiveState { session_id: meta.session_id.clone(), composer, ..Default::default() };
         ThreadState {
             title: meta.title.clone(),
             meta,
@@ -402,8 +398,11 @@ impl ThreadState {
     /// Applies what the run changed to the rows held: new rows at the end, changed ones in
     /// place, each measured again. A change to a row not held (let go of, or in an earlier
     /// page) is nothing to show.
-    fn sync(&mut self) {
-        for change in self.run.take_changes() {
+    fn apply_changes(&mut self, changes: Vec<RowChange>) {
+        // Your messages changed (a turn's end, the files it changed): their turns' summaries
+        // are worked out again.
+        let mut turns_changed = false;
+        for change in changes {
             match change {
                 RowChange::Added(row) => self.push(row),
                 RowChange::Changed { seq, text, input, row } => {
@@ -412,6 +411,7 @@ impl ThreadState {
                         let mut b = e.borrow_mut();
                         match row {
                             Some(r) => {
+                                turns_changed |= r.data.kind == Kind::User;
                                 b.data = r.data;
                                 b.live = r.live;
                                 b.sub = r.sub;
@@ -431,6 +431,34 @@ impl ThreadState {
                 }
             }
         }
+        if turns_changed {
+            let summaries: Vec<i64> = self.turns.iter().map(|t| t.items[0]).collect();
+            self.turns.clear();
+            self.refresh_folds();
+            for pos in summaries {
+                self.touch_pos(pos);
+            }
+        }
+    }
+
+    /// What the engine told of this thread: its live state now, and its rows' changes.
+    /// `plan`: the checklist is worked out again; `ended`: a turn ended or its `claude` went.
+    pub fn apply_update(&mut self, changes: Vec<RowChange>, live: LiveState, plan: bool, session_reset: bool, ended: bool) {
+        let was_running = self.run.running;
+        self.run = live;
+        self.apply_changes(changes);
+        if session_reset {
+            self.meta.session_id = None;
+        }
+        if plan {
+            self.refresh_plan();
+        }
+        if ended || was_running != self.run.running {
+            self.folds_dirty = true;
+        }
+        if self.folds_dirty {
+            self.refresh_folds();
+        }
     }
 
     /// The row has to be measured again.
@@ -438,11 +466,6 @@ impl ThreadState {
         if let Some(ix) = self.index(pos) {
             self.list.splice(ix..ix + 1, 1);
         }
-    }
-
-    /// Rows changed since the last call, for saving: (row number, row).
-    pub fn take_saves(&mut self) -> Vec<(usize, Row)> {
-        self.run.take_saves()
     }
 
     /// The first held row's number, if any: history is read from before it.
@@ -511,24 +534,9 @@ impl ThreadState {
         self.touch_pos(pos);
     }
 
-    /// Your message, as sent: `id` is what the CLI's lifecycle events name it by. Sent while
-    /// Claude works (`queued`), it waits above the composer and joins the transcript where
-    /// Claude picks it up: never in both places.
-    pub fn add_user(&mut self, text: &str, images: &[String], id: &str, queued: bool, delivery: Option<&str>) {
-        self.run.add_user(text, images, id, queued, delivery);
-        self.sync();
-        self.refresh_folds();
-    }
-
     /// Queued messages still waiting for Claude, oldest first: (id, text, attachments).
     pub fn queued_messages(&self) -> Vec<(String, String, usize)> {
         self.run.queued_messages()
-    }
-
-    pub fn notice(&mut self, text: &str) {
-        self.run.notice(text);
-        self.sync();
-        self.refresh_folds();
     }
 
     /// What running foreground commands printed last, by tool call: rows whose line changed
@@ -599,34 +607,12 @@ impl ThreadState {
         !rows.is_empty()
     }
 
-    /// The files git saw a turn change, on the message that started it (by its id): saved, and
-    /// its summary says them.
-    pub fn set_changed_files(&mut self, message: &str, files: Vec<String>) {
-        let src = Held { items: &self.items, tools: &self.tools };
-        self.run.set_changed_files(message, files, &src);
-        self.sync();
-        // Its turn's summary counts them: worked out again.
-        let summaries: Vec<i64> = self.turns.iter().map(|t| t.items[0]).collect();
-        self.turns.clear();
-        self.refresh_folds();
-        for pos in summaries {
-            self.touch_pos(pos);
-        }
-    }
-
     /// The message that started the turn going now, and its tool calls' inputs so far.
     pub fn turn_start_and_inputs(&self) -> Option<(String, String)> {
         let start = self.items.iter().rposition(|i| i.ty == ItemType::User && starts_turn(&i.entries[0].borrow()))?;
         let id = self.items[start].entries[0].borrow().data.id.clone();
         let inputs: Vec<String> = self.items[start..].iter().flat_map(|i| i.entries.iter()).filter_map(|e| e.borrow().data.tool_input.clone()).collect();
         Some((id, inputs.join("\n")))
-    }
-
-    /// A notice in the error colour (saved as such: `notice_style` "error").
-    pub fn error_notice(&mut self, text: &str) {
-        self.run.error_notice(text);
-        self.sync();
-        self.refresh_folds();
     }
 
     /// Opens or closes a finished turn's work, by its first folded row.
@@ -831,44 +817,6 @@ impl ThreadState {
         self.plan = plan;
     }
 
-    /// Applies one event from this thread's `claude`. True when what the sidebar shows changed.
-    pub fn apply(&mut self, event: Event, _cx: &mut Context<Self>) -> bool {
-        self.apply_plain(event)
-    }
-
-    fn apply_plain(&mut self, event: Event) -> bool {
-        let ends = matches!(event, Event::Done { .. } | Event::Exit { .. });
-        let src = Held { items: &self.items, tools: &self.tools };
-        let outcome = self.run.apply(event, &src);
-        self.sync();
-        if outcome.session_reset {
-            self.meta.session_id = None;
-        }
-        if outcome.pulls {
-            crate::state::pulls::note_activity(self.id());
-        }
-        if outcome.plan {
-            self.refresh_plan();
-        }
-        if ends {
-            self.folds_dirty = true;
-        }
-        if self.folds_dirty {
-            self.refresh_folds();
-        }
-        outcome.chrome
-    }
-
-    /// Its `claude` is going: the jobs it ran go with it, the thread says which, and the
-    /// sub-agents among them show as stopped. True when there were any.
-    pub fn cut_off_jobs(&mut self, outcome: &str) -> bool {
-        let src = Held { items: &self.items, tools: &self.tools };
-        let any = self.run.cut_off_jobs(outcome, &src);
-        self.sync();
-        self.refresh_folds();
-        any
-    }
-
     /// The thread's sub-agents, oldest first: (Agent tool call id, its entry). The held rows'
     /// as they are (live, running ones among them), and the rest's as saved, summarized
     /// (`saved_runs`) unless read whole (`run_detail`).
@@ -945,50 +893,10 @@ impl ThreadState {
 
 }
 
-/// The rows a thread holds, as where its run finds rows it let go of.
-struct Held<'a> {
-    items: &'a [Item],
-    tools: &'a HashMap<String, (EntryRef, i64)>,
-}
-
-impl RowSource for Held<'_> {
-    fn tool(&self, id: &str) -> Option<TranscriptRow> {
-        self.tools.get(id).map(|(e, _)| e.borrow().transcript_row())
-    }
-
-    fn by_id(&self, id: &str) -> Option<TranscriptRow> {
-        self.items.iter().flat_map(|i| i.entries.iter()).find(|e| e.borrow().data.id == id).map(|e| e.borrow().transcript_row())
-    }
-
-    fn agent_call(&self, task_id: &str) -> Option<String> {
-        let named = format!("agentId: {task_id}");
-        self.tools
-            .iter()
-            .find(|(_, (e, _))| e.borrow().sub.as_ref().is_some_and(|s| s.task_id.as_deref() == Some(task_id)))
-            .or_else(|| {
-                self.tools.iter().find(|(_, (e, _))| {
-                    let b = e.borrow();
-                    b.data.tool_name.as_deref().is_some_and(|n| AGENT_TOOLS.contains(&n)) && b.data.tool_result.as_deref().is_some_and(|r| r.contains(&named))
-                })
-            })
-            .map(|(id, _)| id.clone())
-    }
-
-    fn has_command(&self, id: &str) -> bool {
-        self.items.iter().rev().flat_map(|i| i.entries.iter()).any(|e| {
-            let b = e.borrow();
-            b.data.kind == Kind::Command && b.data.id == id
-        })
-    }
-
-    fn last_turn_start(&self) -> Option<TranscriptRow> {
-        self.items.iter().rev().filter(|i| i.ty == ItemType::User).map(|i| i.entries[0].clone()).find(|e| starts_turn(&e.borrow())).map(|e| e.borrow().transcript_row())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use yh_core::db::Row;
     use yh_core::db::SubagentCall;
     use yh_core::subagent_record::{SubagentEntry, SubagentRecord, SubagentSummary};
 
@@ -1013,38 +921,47 @@ mod tests {
         }
     }
 
-    /// The recorded sessions and the synthetic one, as the thread saves them
-    /// (`yh_core::golden`): the reducer, wherever it lives, must save exactly this.
-    fn golden(steps: Vec<yh_core::golden::Step>) -> String {
+    /// The recorded sessions and the synthetic one through the engine, as the app sends them,
+    /// into a database of its own, the thread built from what the engine tells
+    /// (`yh_core::golden`): what's saved must be exactly what the golden files say.
+    fn golden(name: &str, steps: Vec<yh_core::golden::Step>) -> String {
         use yh_core::golden::Step;
+        use yh_engine::{Command, Output};
+        let dir = std::env::temp_dir().join(format!("yh-app-golden-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = std::sync::Arc::new(yh_core::db::Database::open(&dir).unwrap());
+        let engine = yh_engine::start(Some(db.clone()));
         let mut t = ThreadState::new(ThreadMeta::new("T".into(), "P".into(), "t".into()));
-        t.run.total = Some(0);
         t.in_deck = true;
-        let mut saved: Vec<(usize, Row)> = vec![];
+        t.loaded = true;
+        let id = t.id().to_string();
+        engine.send(Command::Open { thread: id.clone(), session_id: None, context_tokens: None, context_window: None });
         for step in steps {
             match step {
-                Step::Event(e) => {
-                    t.apply_plain(e);
-                }
-                Step::User { id, text, queued } => {
-                    let running = t.run.running;
-                    t.add_user(text, &[], id, queued && running, None);
-                    t.run.running = true;
-                }
-                Step::Interrupt => t.run.interrupt_requested = true,
-                Step::ChangedFiles { message, files } => t.set_changed_files(message, files.into_iter().map(str::to_string).collect()),
+                Step::Event(e) => engine.send(Command::Events { thread: id.clone(), events: vec![e] }),
+                Step::User { id: message, text, .. } => engine.send(Command::Send { thread: id.clone(), text: text.into(), attachments: vec![], message_id: message.into(), now: false, effort: None, deliver: None }),
+                Step::Interrupt => engine.send(Command::Stop { thread: id.clone() }),
+                Step::ChangedFiles { message, files } => engine.send(Command::ChangedFiles { thread: id.clone(), message: message.into(), files: files.into_iter().map(str::to_string).collect() }),
             }
-            // Saved as it goes, as the workspace saves: the newest version of each row wins.
-            for (seq, row) in t.take_saves() {
-                saved.retain(|(s, _)| *s != seq);
-                saved.push((seq, row));
+            // Saved after every step, as the golden files were made.
+            engine.send(Command::Save { thread: id.clone() });
+        }
+        let (done, finished) = flume::bounded(1);
+        engine.send(Command::Quit { done });
+        finished.recv_timeout(std::time::Duration::from_secs(10)).expect("the engine quits");
+        for output in engine.outputs.try_iter() {
+            if let Output::Thread(u) = output {
+                t.apply_update(u.changes, u.live, u.plan, u.session_reset, u.turn_ended.is_some());
             }
         }
-        // The rows shown, built from what the run told, are what was saved.
+        let saved: Vec<(usize, Row)> = db.read_rows(&id, 0, 100_000).into_iter().enumerate().collect();
+        let _ = std::fs::remove_dir_all(&dir);
+        // The rows shown, built from what the engine told, are what was saved.
         for (seq, row) in &saved {
             let (e, _) = t.locate(*seq).expect("a saved row not shown");
             let shown = e.borrow().transcript_row().row(None);
-            assert_eq!((&shown.text, &shown.tool_input, &shown.tool_result, &shown.delivery, &shown.changed_files), (&row.text, &row.tool_input, &row.tool_result, &row.delivery, &row.changed_files), "row {seq}");
+            assert_eq!((&shown.text, &shown.tool_input, &shown.tool_result, &shown.delivery, &shown.changed_files), (&row.text, &row.tool_input, &row.tool_result, &row.delivery, &row.changed_files), "{name} row {seq}");
         }
         let ids = |v: Vec<String>| v.join(",");
         let state = vec![
@@ -1062,9 +979,9 @@ mod tests {
     fn saves_what_the_golden_files_say() {
         for (name, text) in yh_core::golden::SESSIONS {
             let steps = yh_core::golden::session_events(text).into_iter().map(yh_core::golden::Step::Event).collect();
-            yh_core::golden::check(name, &golden(steps));
+            yh_core::golden::check(name, &golden(name, steps));
         }
-        yh_core::golden::check("synthetic", &golden(yh_core::golden::synthetic()));
+        yh_core::golden::check("synthetic", &golden("synthetic", yh_core::golden::synthetic()));
     }
 
     #[test]

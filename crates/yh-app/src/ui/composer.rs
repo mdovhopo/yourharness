@@ -595,6 +595,9 @@ impl Composer {
             return;
         }
         let restored = thread.update(cx, |t, _| std::mem::take(&mut t.run.composer.restored));
+        // Taken: the engine hands them back no more.
+        let ids = restored.iter().map(|(id, ..)| id.clone()).collect();
+        self.workspace.update(cx, |ws, cx| ws.took_restored(&thread, ids, cx));
         let key = thread.read(cx).id().to_string();
         let dir = self.workspace.read(cx).data_dir.clone();
         let mut draft = self.input.read(cx).value().to_string();

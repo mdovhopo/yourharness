@@ -379,10 +379,54 @@ impl Database {
         })
     }
 
+    /// A thread's newest row matching `query`, with its number: (seq, row). For a run that let
+    /// go of a row an event names again.
+    pub fn find_row(&self, thread: &str, query: RowQuery) -> Option<(usize, Row)> {
+        self.before_reading(thread);
+        self.read(|c| {
+            let seq: Option<i64> = match query {
+                RowQuery::AgentCallNaming(task) => c
+                    .query_row(
+                        "SELECT seq FROM entries WHERE thread_id = ?1 AND kind = 'tool' AND tool_name IN ('Agent', 'Task') AND tool_result LIKE ?2 ORDER BY seq DESC LIMIT 1",
+                        params![thread, format!("%agentId: {task}%")],
+                        |r| r.get(0),
+                    )
+                    .optional()?,
+                RowQuery::Command(id) => c
+                    .query_row("SELECT seq FROM entries WHERE thread_id = ?1 AND kind = 'commandOutput' AND id = ?2 ORDER BY seq DESC LIMIT 1", params![thread, id], |r| r.get(0))
+                    .optional()?,
+                RowQuery::LastTurnStart => c
+                    .query_row(
+                        "SELECT seq FROM entries WHERE thread_id = ?1 AND kind = 'user' AND (delivery IS NULL OR delivery != 'steered') ORDER BY seq DESC LIMIT 1",
+                        params![thread],
+                        |r| r.get(0),
+                    )
+                    .optional()?,
+            };
+            let Some(seq) = seq else { return Ok(None) };
+            Ok(read_rows(c, thread, seq as usize, 1)?.into_iter().next().map(|row| (seq as usize, row)))
+        })
+        .unwrap_or_else(|e| {
+            eprintln!("harness.sqlite: looking in {thread}: {e}");
+            None
+        })
+    }
+
     /// A whole tool result kept as a blob.
     pub fn blob_string(&self, hash: &str) -> Option<String> {
         self.read(|c| blob(c, hash)).ok().flatten().map(|b| String::from_utf8_lossy(&b).into_owned())
     }
+}
+
+/// What `find_row` looks for.
+#[derive(Clone, Copy, Debug)]
+pub enum RowQuery<'a> {
+    /// An Agent call whose result names this sub-agent ("agentId: a5b8…").
+    AgentCallNaming(&'a str),
+    /// A command's output, by its id.
+    Command(&'a str),
+    /// Your newest message that started a turn.
+    LastTurnStart,
 }
 
 #[derive(Clone, Debug)]
