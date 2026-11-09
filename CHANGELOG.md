@@ -6,6 +6,8 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-09
+
 ### Fixed
 - Files: a file's lines scroll sideways when they're wider than the panel, and their text can be selected and copied.
 - Mermaid diagrams whose quoted labels run over more than one line are drawn again instead of shown as code.
