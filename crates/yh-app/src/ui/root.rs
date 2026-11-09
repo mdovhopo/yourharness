@@ -417,7 +417,7 @@ impl RootView {
         let top = t.list.logical_scroll_top();
         let b = window.bounds();
         let state = serde_json::json!({
-            "thread": t.id(), "title": t.title, "rows": t.items.len(), "before": t.before, "total": t.total,
+            "thread": t.id(), "title": t.title, "rows": t.items.len(), "before": t.before, "total": t.run.total,
             "scrollTop": {"item": top.item_ix, "offset": f32::from(top.offset_in_item)},
             "window": [f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height)],
             "fullScreen": window.is_fullscreen(), "active": window.is_window_active(),
@@ -1123,7 +1123,7 @@ fn drop_overlay(theme: &Theme) -> impl IntoElement {
 /// Over a new thread's composer: where the work happens. None once it has rows (or is loading
 /// them).
 fn start_prompt(ws: &crate::state::workspace::Workspace, t: &crate::state::thread::ThreadState) -> Option<(String, String)> {
-    if !t.loaded || t.running || !t.items.is_empty() || t.before > 0 || t.total.unwrap_or(0) > 0 || t.id().contains(':') && !t.id().starts_with("new:") {
+    if !t.loaded || t.run.running || !t.items.is_empty() || t.before > 0 || t.run.total.unwrap_or(0) > 0 || t.id().contains(':') && !t.id().starts_with("new:") {
         return None;
     }
     let project = ws.project(&t.meta.project_id);

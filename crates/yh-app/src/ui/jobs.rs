@@ -53,9 +53,9 @@ impl JobsStrip {
         self.expanded.clear();
         self.last_lines.clear();
         self.outputs.clear();
-        self.seen = thread.read(cx).jobs.version;
+        self.seen = thread.read(cx).run.jobs.version;
         self._observe = Some(cx.observe(&thread, |this, thread, cx| {
-            let version = thread.read(cx).jobs.version;
+            let version = thread.read(cx).run.jobs.version;
             if version != this.seen {
                 this.seen = version;
                 this.follow(cx);
@@ -72,10 +72,10 @@ impl JobsStrip {
         // `YH_JOBS_EXPAND=1`: every job drawn open, for checking its live output in a snapshot.
         if std::env::var("YH_JOBS_EXPAND").as_deref() == Ok("1") {
             if let Some(t) = &self.thread {
-                self.expanded.extend(t.read(cx).jobs.running.iter().map(|j| j.id.clone()));
+                self.expanded.extend(t.read(cx).run.jobs.running.iter().map(|j| j.id.clone()));
             }
         }
-        let running = self.thread.as_ref().is_some_and(|t| t.read(cx).jobs.any_running());
+        let running = self.thread.as_ref().is_some_and(|t| t.read(cx).run.jobs.any_running());
         if !running {
             self.ticker = None;
             return;
@@ -127,18 +127,18 @@ impl JobsStrip {
     fn output_files(&self, cx: &App) -> Option<Vec<(String, String, bool)>> {
         let thread = self.thread.as_ref()?.read(cx);
         // Sub-agents alone: nothing to read, but their clocks tick.
-        if !thread.jobs.any_running() {
+        if !thread.run.jobs.any_running() {
             return None;
         }
         // A foreground command's file is never told: where the session's others go.
-        let folder = thread.jobs.folder.clone().or_else(|| thread.session_id.as_ref().map(|s| jobs::output_folder(&self.workspace.read(cx).folder_of(thread), s)));
+        let folder = thread.run.jobs.folder.clone().or_else(|| thread.run.session_id.as_ref().map(|s| jobs::output_folder(&self.workspace.read(cx).folder_of(thread), s)));
         Some(
             thread
-                .jobs
+                .run.jobs
                 .running
                 .iter()
                 // A running sub-agent's commands show as a count on its row: nothing to read.
-                .filter(|j| !thread.jobs.in_agent(j))
+                .filter(|j| !thread.run.jobs.in_agent(j))
                 .filter_map(|j| {
                     let path = j.output_file.clone().or_else(|| folder.as_ref().map(|f| format!("{f}/{}.output", j.id)))?;
                     Some((j.id.clone(), path, self.expanded.contains(&j.id)))
@@ -210,7 +210,7 @@ impl JobsStrip {
                     .on_click(move |_, _, cx| {
                         t.update(cx, |t, cx| {
                             t.inspected_subagent = Some(tool.clone());
-                            t.subagents_version += 1;
+                            t.run.subagents_version += 1;
                             cx.notify();
                         });
                         ws.update(cx, |ws, cx| ws.show_panel(crate::state::workspace::Panel::Subagents, cx));
@@ -343,25 +343,25 @@ impl Render for JobsStrip {
         let Some(thread) = self.thread.clone() else { return div() };
         let theme = Theme::get(cx);
         let t = thread.read(cx);
-        if !t.jobs.any_running() {
+        if !t.run.jobs.any_running() {
             return div();
         }
         // Sub-agents started since your latest message report back to Claude, as the jobs do.
-        let agents_waiting = t.jobs.agents.iter().any(|j| j.turn == t.jobs.turn);
-        let header = if (t.jobs.waiting() > 0 || agents_waiting) && !t.running {
+        let agents_waiting = t.run.jobs.agents.iter().any(|j| j.turn == t.run.jobs.turn);
+        let header = if (t.run.jobs.waiting() > 0 || agents_waiting) && !t.run.running {
             "Claude is waiting on"
-        } else if t.jobs.background().next().is_some() || !t.jobs.agents.is_empty() {
+        } else if t.run.jobs.background().next().is_some() || !t.run.jobs.agents.is_empty() {
             "Running in the background"
         } else {
             "Running"
         };
         // A running sub-agent's commands are on its row, not rows of their own.
-        let jobs: Vec<Job> = t.jobs.running.iter().filter(|j| !t.jobs.in_agent(j)).cloned().collect();
+        let jobs: Vec<Job> = t.run.jobs.running.iter().filter(|j| !t.run.jobs.in_agent(j)).cloned().collect();
         let agents: Vec<(Job, usize)> = t
-            .jobs
+            .run.jobs
             .agents
             .iter()
-            .map(|a| (a.clone(), t.jobs.running.iter().filter(|j| j.owner_task.as_deref() == Some(a.id.as_str())).count()))
+            .map(|a| (a.clone(), t.run.jobs.running.iter().filter(|j| j.owner_task.as_deref() == Some(a.id.as_str())).count()))
             .collect();
         let mut strip = div()
             .w_full()

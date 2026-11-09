@@ -189,7 +189,7 @@ pub fn ask_import(workspace: Entity<Workspace>, file: PathBuf, window: &mut Wind
     };
     let ws = workspace.read(cx);
     let current = yh_core::state_archive::contents(&ws.data_dir);
-    let working = ws.threads.iter().filter(|t| t.read(cx).running).count();
+    let working = ws.threads.iter().filter(|t| t.read(cx).run.running).count();
     let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let view = cx.new(|_| ImportSheet { workspace, opened: Some(opened), name, current, working, keep_copy: true, busy: None, problem: None });
     if std::env::var("YH_STATE_IMPORT_ASK").is_ok() {

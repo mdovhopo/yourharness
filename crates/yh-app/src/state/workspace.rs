@@ -438,7 +438,7 @@ impl Workspace {
         }
         let ids: Vec<String> = self.threads.iter().filter(|t| t.read(cx).meta.project_id == id).map(|t| t.read(cx).id().to_string()).collect();
         for thread in ids {
-            if !self.thread(&thread).is_some_and(|t| t.read(cx).running) {
+            if !self.thread(&thread).is_some_and(|t| t.read(cx).run.running) {
                 self.end_runtime(&thread, cx);
             }
         }
@@ -467,7 +467,7 @@ impl Workspace {
     }
 
     pub fn running_count(&self, cx: &App) -> usize {
-        self.threads.iter().filter(|t| t.read(cx).running).count()
+        self.threads.iter().filter(|t| t.read(cx).run.running).count()
     }
 
     /// The default model or effort from Settings (`YH_MODEL`/`YH_EFFORT` in test runs).
@@ -574,8 +574,8 @@ impl Workspace {
                     page.entries.pop();
                     dropped += 1;
                 }
-                if t.total.is_none() {
-                    t.total = Some(page.total.saturating_sub(dropped));
+                if t.run.total.is_none() {
+                    t.run.total = Some(page.total.saturating_sub(dropped));
                 }
                 t.prepend(page.entries, page.from);
                 t.loaded = true;
@@ -666,7 +666,7 @@ impl Workspace {
         self.save_rows(thread, cx);
         thread.update(cx, |t, cx| {
             t.in_deck = false;
-            if t.running {
+            if t.run.running {
                 t.trim(200);
             } else {
                 t.unload();
@@ -681,7 +681,7 @@ impl Workspace {
         // An untouched blank in the project is used again instead of piling up blanks.
         let blank = self.threads.iter().find(|t| {
             let t = t.read(cx);
-            t.meta.project_id == project_id && t.meta.settled_at.is_none() && t.session_id.is_none() && t.title == "New thread" && !t.running && t.items.is_empty() && t.total.unwrap_or(0) == 0
+            t.meta.project_id == project_id && t.meta.settled_at.is_none() && t.run.session_id.is_none() && t.title == "New thread" && !t.run.running && t.items.is_empty() && t.run.total.unwrap_or(0) == 0
         });
         if let Some(blank) = blank {
             let id = blank.read(cx).id().to_string();
@@ -1044,7 +1044,7 @@ impl Workspace {
         self.threads.iter().any(|t| {
             let t = t.read(cx);
             // The cheap checks first: a folder is looked up only for threads that worked lately.
-            t.id() != id && (t.running || since.is_some_and(|s| t.meta.updated_at > s)) && overlaps(&real_path(&self.folder_of(t)), folder)
+            t.id() != id && (t.run.running || since.is_some_and(|s| t.meta.updated_at > s)) && overlaps(&real_path(&self.folder_of(t)), folder)
         })
     }
 
@@ -1105,7 +1105,7 @@ impl Workspace {
 
     /// Keep Awake follows whether Claude works anywhere; its one timer is for a deadline.
     pub fn note_working(&mut self, cx: &mut Context<Self>) {
-        let busy = |t: &ThreadState| t.running || t.jobs.agents_running() > 0;
+        let busy = |t: &ThreadState| t.run.running || t.run.jobs.agents_running() > 0;
         let working = self.threads.iter().any(|t| busy(t.read(cx))) || self.by_id.values().any(|t| busy(t.read(cx)));
         self.keep_awake.set_working(working);
         // App Nap held off while Claude works (test runs hold it off for good, `hold_off_app_nap`).
@@ -1230,7 +1230,7 @@ impl Workspace {
         });
         if let Some(t) = self.thread(id) {
             t.update(cx, |t, cx| {
-                t.session_id = None;
+                t.run.session_id = None;
                 cx.notify();
             });
         }
@@ -1259,12 +1259,12 @@ impl Workspace {
                 let id = t.id().to_string();
                 let record = self.library.thread_record(&id).unwrap_or_default();
                 let ok = t.meta.settled_at.is_none()
-                    && !t.running
+                    && !t.run.running
                     && !t.waiting_for_you()
                     && self.selected.as_deref() != Some(id.as_str())
                     && record.get("autoSettle").and_then(|v| v.as_bool()) != Some(false)
                     && record.get("reactivatedAt").is_none_or(|v| v.is_null())
-                    && (t.session_id.is_some() || t.title != "New thread")
+                    && (t.run.session_id.is_some() || t.title != "New thread")
                     && t.meta.updated_at < cutoff;
                 ok.then_some(id)
             })
@@ -1292,7 +1292,7 @@ impl Workspace {
                 let id = t.id().to_string();
                 let record = self.library.thread_record(&id)?;
                 let ok = t.meta.settled_at.is_none()
-                    && !t.running
+                    && !t.run.running
                     && !t.waiting_for_you()
                     && self.selected.as_deref() != Some(id.as_str())
                     && record.get("autoSettle").and_then(|v| v.as_bool()) != Some(false)
@@ -1340,7 +1340,7 @@ impl Workspace {
             let _ = this.update(cx, |ws, cx| {
                 for id in settle {
                     // Still as it was when looked at.
-                    let still = ws.thread(&id).is_some_and(|t| t.read(cx).meta.settled_at.is_none() && !t.read(cx).running) && ws.selected.as_deref() != Some(id.as_str());
+                    let still = ws.thread(&id).is_some_and(|t| t.read(cx).meta.settled_at.is_none() && !t.read(cx).run.running) && ws.selected.as_deref() != Some(id.as_str());
                     if still {
                         if std::env::var("YH_DATA_DIR").is_ok() {
                             eprintln!("SETTLED merged {id}");
@@ -1439,7 +1439,7 @@ impl Workspace {
         // next message starting it with the new effort.
         let Some(thread) = self.thread(id) else { return };
         let effort = self.effort_of(thread.read(cx));
-        let busy = thread.read(cx).running || thread.read(cx).jobs.any_running();
+        let busy = thread.read(cx).run.running || thread.read(cx).run.jobs.any_running();
         if let Some(rt) = self.runtimes.get_mut(id).filter(|rt| rt.effort != effort) {
             if busy {
                 rt.restart_when_idle = true;
@@ -1509,14 +1509,14 @@ impl Workspace {
         }
         let (id, running, title, chosen) = {
             let t = thread.read(cx);
-            (t.id().to_string(), t.running, t.title.clone(), t.meta.title_chosen)
+            (t.id().to_string(), t.run.running, t.title.clone(), t.meta.title_chosen)
         };
         // The next row's number: its rows so far, before the first new one.
-        if thread.read(cx).total.is_none() {
+        if thread.read(cx).run.total.is_none() {
             let total = self.library.db.as_ref().map_or(0, |db| db.transcript_count(&id));
-            thread.update(cx, |t, _| t.total = Some(total));
+            thread.update(cx, |t, _| t.run.total = Some(total));
         }
-        let first_message = thread.read(cx).total == Some(0);
+        let first_message = thread.read(cx).run.total == Some(0);
         let message_id = yh_core::library::new_uuid();
         let delivery = running.then_some(if now { "interrupted" } else { "steered" });
         // Kept with the message as 0.0.x kept them: images by name, then files.
@@ -1532,7 +1532,7 @@ impl Workspace {
         };
         thread.update(cx, |t, cx| {
             t.add_user(&text, &attachments, &message_id, running && !now, delivery);
-            t.running = true;
+            t.run.running = true;
             t.meta.turn_in_progress = true;
             t.meta.draft = None;
             if title == "New thread" && !chosen {
@@ -1558,7 +1558,7 @@ impl Workspace {
             thread.update(cx, |t, cx| {
                 // The reason itself, in error colour.
                 t.error_notice(&error);
-                t.running = false;
+                t.run.running = false;
                 cx.notify();
             });
             self.turn_ended(thread, cx);
@@ -1625,7 +1625,7 @@ impl Workspace {
             runtime_log(format!("{id}: effort now {effort:?}, its claude starts over"));
         }
         self.end_runtime(&id, cx);
-        thread.update(cx, |t, _| t.received_init = false);
+        thread.update(cx, |t, _| t.run.received_init = false);
         let t = thread.read(cx);
         let project = self.project(&t.meta.project_id).cloned();
         let cwd = self.folder_of(t);
@@ -1637,7 +1637,7 @@ impl Workspace {
         // its thread's browser and the memory, read-only.
         if let Some(parent) = t.id().strip_prefix(SIDE).map(str::to_string) {
             let parent_thread = self.thread(&parent);
-            let fork = parent_thread.as_ref().and_then(|p| p.read(cx).session_id.clone());
+            let fork = parent_thread.as_ref().and_then(|p| p.read(cx).run.session_id.clone());
             let mut extra = vec!["--tools".to_string(), "Read,Glob,Grep,Bash,WebFetch,WebSearch".into(), "--strict-mcp-config".into(), "--no-session-persistence".into()];
             if fork.is_some() {
                 extra.push("--fork-session".into());
@@ -1802,7 +1802,7 @@ impl Workspace {
         }
         let options = LaunchOptions {
             cwd,
-            session_id: t.session_id.clone(),
+            session_id: t.run.session_id.clone(),
             model: self.model_of(t),
             mode: cli_mode(project.as_ref().map_or("auto", |p| p.mode.as_str())).map(str::to_string),
             effort: effort.clone(),
@@ -1831,7 +1831,7 @@ impl Workspace {
         rt.process.terminate();
         if let Some(thread) = self.thread(id) {
             self.cut_off_jobs(&thread, "stopped when Claude was restarted", cx);
-            if thread.read(cx).running {
+            if thread.read(cx).run.running {
                 thread.update(cx, |t, cx| {
                     t.apply(Event::Exit { code: 0, tail: String::new() }, cx);
                     cx.notify();
@@ -1866,7 +1866,7 @@ impl Workspace {
                 // A turn ends with its result, or with `claude` exiting mid-turn; an exit after a
                 // finished turn (the idle process going) doesn't end it again.
                 let had_done = batch.iter().any(|e| matches!(e, Event::Done { .. }));
-                let was_running = thread.read_with(cx, |t, _| t.running);
+                let was_running = thread.read_with(cx, |t, _| t.run.running);
                 let ended = had_done || (was_running && batch.iter().any(|e| matches!(e, Event::Exit { .. })));
                 let exited = batch.iter().any(|e| matches!(e, Event::Exit { .. }));
                 let count = batch.len();
@@ -1898,7 +1898,7 @@ impl Workspace {
                         }
                     }
                 });
-                let agents_before = thread.read_with(cx, |t, _| t.jobs.agents_running());
+                let agents_before = thread.read_with(cx, |t, _| t.run.jobs.agents_running());
                 let chrome = thread.update(cx, |t, cx| {
                     let mut chrome = false;
                     for event in batch {
@@ -1920,11 +1920,11 @@ impl Workspace {
                         ws.runtimes.remove(&id2);
                     }
                     // Sub-agents came or went: Keep Awake follows them as it follows turns.
-                    if thread2.read(cx).jobs.agents_running() != agents_before {
+                    if thread2.read(cx).run.jobs.agents_running() != agents_before {
                         ws.note_working(cx);
                     }
                     // A message sent now (after a stop) starts its own turn right after the stop's end.
-                    let restarted = !exited && thread2.read(cx).running;
+                    let restarted = !exited && thread2.read(cx).run.running;
                     if ended && !restarted {
                         ws.turn_ended(&thread2, cx);
                         ws.composer_turn_ended(&thread2, cx);
@@ -1959,14 +1959,14 @@ impl Workspace {
     /// The turn is over: saved, unread if you were elsewhere, its `claude` let go of later.
     fn turn_ended(&mut self, thread: &Entity<ThreadState>, cx: &mut Context<Self>) {
         let id = thread.read(cx).id().to_string();
-        thread.update(cx, |t, _| t.running = false);
+        thread.update(cx, |t, _| t.run.running = false);
         self.finish_turn_changes(thread, cx);
         self.note_working(cx);
         let selected = self.selected.as_deref() == Some(id.strip_prefix(SIDE).unwrap_or(&id));
         // Waiting on jobs it started, Claude isn't done: it's back when they report. Stopped by
         // you: you're there, nothing to tell. A side chat never notifies.
-        let waiting_on_jobs = thread.read(cx).jobs.waiting() > 0;
-        let stopped = thread.update(cx, |t, _| std::mem::take(&mut t.stopped_by_you));
+        let waiting_on_jobs = thread.read(cx).run.jobs.waiting() > 0;
+        let stopped = thread.update(cx, |t, _| std::mem::take(&mut t.run.stopped_by_you));
         if !waiting_on_jobs && !stopped && !id.starts_with(SIDE) {
             let body = Self::last_reply(thread.read(cx));
             self.notify_about(crate::state::notify::Kind::Finished, thread, body, cx);
@@ -1976,13 +1976,13 @@ impl Workspace {
             self.refine_title(thread, cx);
         }
         let (title, session) = thread.update(cx, |t, _| {
-            t.running = false;
+            t.run.running = false;
             t.meta.turn_in_progress = false;
             t.meta.updated_at = yh_core::library::now_ms();
             if !selected {
                 t.unread = true;
             }
-            (t.title.clone(), t.session_id.clone())
+            (t.title.clone(), t.run.session_id.clone())
         });
         self.library.update_thread(&id, |r| {
             r.remove("turnInProgress");
@@ -2002,7 +2002,7 @@ impl Workspace {
             .detach();
         }
         // Effort changed mid-turn: the process starts over now, unless jobs it left run on.
-        let restart = self.runtimes.get(&id).is_some_and(|rt| rt.restart_when_idle) && !thread.read(cx).jobs.any_running() && !waiting_on_jobs;
+        let restart = self.runtimes.get(&id).is_some_and(|rt| rt.restart_when_idle) && !thread.read(cx).run.jobs.any_running() && !waiting_on_jobs;
         if restart {
             runtime_log(format!("{id}: turn over, its claude ends for the new effort"));
             self.end_runtime(&id, cx);
@@ -2017,10 +2017,10 @@ impl Workspace {
                 let again = this
                     .update(cx, |ws, cx| {
                         // Jobs and sub-agents it left running end with its `claude`: kept while they run, looked at again later.
-                        if weak.upgrade().is_some_and(|t| t.read(cx).jobs.any_running()) {
+                        if weak.upgrade().is_some_and(|t| t.read(cx).run.jobs.any_running()) {
                             return true;
                         }
-                        let waiting = weak.upgrade().is_some_and(|t| t.read(cx).running || t.read(cx).waiting_for_you());
+                        let waiting = weak.upgrade().is_some_and(|t| t.read(cx).run.running || t.read(cx).waiting_for_you());
                         if !waiting {
                             ws.end_runtime(&id, cx);
                         }
@@ -2099,7 +2099,7 @@ impl Workspace {
                 });
                 // The turn already ended: now.
                 let replied = thread.read(cx).items.iter().any(|i| i.ty == crate::state::thread::ItemType::Text);
-                if generated.needs_refinement && !thread.read(cx).running && replied {
+                if generated.needs_refinement && !thread.read(cx).run.running && replied {
                     ws.refine_title(&thread, cx);
                 }
                 ws.library.update_thread(&id, |r| {
@@ -2123,7 +2123,7 @@ impl Workspace {
     /// never sends it; what waited on you is dropped; the turn ends as "Interrupted", quietly.
     /// `removing`: queued messages the composer is already taking away for good.
     pub fn stop(&mut self, thread: &Entity<ThreadState>, removing: &std::collections::HashSet<String>, cx: &mut Context<Self>) {
-        if !thread.read(cx).running {
+        if !thread.read(cx).run.running {
             return;
         }
         let queued = thread.read(cx).queued_messages();
@@ -2133,9 +2133,9 @@ impl Workspace {
             }
         }
         thread.update(cx, |t, cx| {
-            t.interrupt_requested = true;
-            t.permissions.clear();
-            t.elicitations.clear();
+            t.run.interrupt_requested = true;
+            t.run.permissions.clear();
+            t.run.elicitations.clear();
             if let Some(ask) = t.sign_in.take() {
                 ask.cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
                 if let Some(decision) = ask.decision {
@@ -2181,7 +2181,7 @@ impl Workspace {
     /// A control request to the thread's `claude` (started in its folder if it isn't running),
     /// and its reply: `mcp_status`, `mcp_toggle`, `mcp_authenticate`…
     pub fn mcp(&mut self, thread: &Entity<ThreadState>, request: Value, cx: &mut Context<Self>) -> Task<Result<Value, String>> {
-        if let Err(e) = self.ensure_runtime(thread, thread.read(cx).running, cx) {
+        if let Err(e) = self.ensure_runtime(thread, thread.read(cx).run.running, cx) {
             return Task::ready(Err(e));
         }
         let id = thread.read(cx).id().to_string();
@@ -2193,7 +2193,7 @@ impl Workspace {
     /// Starts the thread's `claude` over (between turns), so it reads the MCP config again; the
     /// next message resumes its session.
     pub fn restart_runtime(&mut self, thread: &Entity<ThreadState>, cx: &mut Context<Self>) {
-        if !thread.read(cx).running {
+        if !thread.read(cx).run.running {
             let id = thread.read(cx).id().to_string();
             self.end_runtime(&id, cx);
         }
@@ -2213,7 +2213,7 @@ impl Workspace {
             rt.process.respond_elicitation(request_id, action, content);
         }
         thread.update(cx, |t, cx| {
-            t.elicitations.retain(|e| e.id != request_id);
+            t.run.elicitations.retain(|e| e.id != request_id);
             cx.notify();
         });
         cx.notify();
@@ -2223,7 +2223,7 @@ impl Workspace {
     fn elicitation_completed(&mut self, thread: &Entity<ThreadState>, server: &str, elicitation_id: &str, cx: &mut Context<Self>) {
         let done: Vec<String> = thread
             .read(cx)
-            .elicitations
+            .run.elicitations
             .iter()
             .filter(|e| e.server == server && e.elicitation_id.as_deref() == Some(elicitation_id))
             .map(|e| e.id.clone())
@@ -2244,7 +2244,7 @@ impl Workspace {
     fn answer_for_tests(&mut self, thread: &Entity<ThreadState>, cx: &mut Context<Self>) {
         // `YH_MCP_ELICIT_ANSWER=accept|decline`: what an MCP server asks, answered with its defaults.
         if let Ok(answer) = std::env::var("YH_MCP_ELICIT_ANSWER") {
-            let waiting = thread.read(cx).elicitations.clone();
+            let waiting = thread.read(cx).run.elicitations.clone();
             if waiting.len() > 1 {
                 eprintln!("MCP elicitations waiting: {}", waiting.len());
             }
@@ -2275,7 +2275,7 @@ impl Workspace {
 
     fn answer_waiting(&mut self, thread: &Entity<ThreadState>, answer: &str, cx: &mut Context<Self>) {
         // Every request waiting, by its own id (parallel sub-agents ask at once).
-        let waiting: Vec<_> = thread.read(cx).permissions.clone();
+        let waiting: Vec<_> = thread.read(cx).run.permissions.clone();
         if waiting.len() > 1 {
             eprintln!("PERMISSIONS waiting: {}", waiting.len());
         }
@@ -2353,7 +2353,7 @@ impl Workspace {
         let chat = make_thread(meta, cx.entity().downgrade(), cx);
         chat.update(cx, |t, _| {
             t.loaded = true;
-            t.total = Some(0);
+            t.run.total = Some(0);
         });
         self.by_id.insert(format!("{SIDE}{parent}"), chat.clone());
         self.side_chats.insert(parent.to_string(), chat.clone());
@@ -2411,7 +2411,7 @@ impl Workspace {
     /// The thread's changed rows into harness.sqlite (in the background).
     pub fn save_rows(&self, thread: &Entity<ThreadState>, cx: &mut Context<Self>) {
         let Some(db) = self.library.db.clone() else { return };
-        let (id, total, rows) = thread.update(cx, |t, _| (t.id().to_string(), t.total, t.take_changes()));
+        let (id, total, rows) = thread.update(cx, |t, _| (t.id().to_string(), t.run.total, t.take_saves()));
         if rows.is_empty() || id.starts_with("new:") || id.starts_with("cc:") || id.starts_with(SIDE) || id.starts_with(MEMORY_AGENT) || id.starts_with(SETTINGS) {
             return;
         }
@@ -2464,7 +2464,7 @@ impl Workspace {
     }
 
     pub fn thread_for_session(&self, session: &str, cx: &App) -> Option<Entity<ThreadState>> {
-        self.threads.iter().find(|t| t.read(cx).session_id.as_deref().is_some_and(|s| s.eq_ignore_ascii_case(session))).cloned()
+        self.threads.iter().find(|t| t.read(cx).run.session_id.as_deref().is_some_and(|s| s.eq_ignore_ascii_case(session))).cloned()
     }
 
     /// A Claude Code session as a new thread of `project` that continues it in the folder it
@@ -2490,7 +2490,7 @@ impl Workspace {
         });
         if let Some(thread) = self.thread(&id) {
             thread.update(cx, |t, _| {
-                t.session_id = Some(session.clone());
+                t.run.session_id = Some(session.clone());
                 t.meta.session_id = Some(session.clone());
             });
             if let Some(db) = &self.library.db {
@@ -2544,7 +2544,7 @@ impl Workspace {
                 let t = make_thread(meta, cx.entity().downgrade(), cx);
                 t.update(cx, |t, _| {
                     t.loaded = true;
-                    t.total = Some(0);
+                    t.run.total = Some(0);
                 });
                 self.by_id.insert(id.clone(), t.clone());
                 t
@@ -2569,7 +2569,7 @@ impl Workspace {
         let t = make_thread(meta, cx.entity().downgrade(), cx);
         t.update(cx, |t, _| {
             t.loaded = true;
-            t.total = Some(0);
+            t.run.total = Some(0);
         });
         self.by_id.insert(id, t.clone());
         Some(t)
@@ -2618,13 +2618,13 @@ impl Workspace {
                                 id: t.id().to_string(),
                                 title: t.title.clone(),
                                 project_id: t.meta.project_id.clone(),
-                                running: t.running,
+                                running: t.run.running,
                                 waiting: t.waiting_for_you(),
                                 unread: t.unread,
                                 pinned: t.meta.pinned,
                                 settled: t.meta.settled_at.is_some(),
                                 updated_at: t.meta.updated_at,
-                                session_id: t.session_id.clone(),
+                                session_id: t.run.session_id.clone(),
                             }
                         })
                         .collect(),
@@ -2806,7 +2806,7 @@ impl Workspace {
         for thread in cut {
             let (id, session) = {
                 let t = thread.read(cx);
-                (t.id().to_string(), t.session_id.clone())
+                (t.id().to_string(), t.run.session_id.clone())
             };
             let db = db.clone();
             let weak = thread.downgrade();
@@ -2822,14 +2822,14 @@ impl Workspace {
                     });
                     let Some(thread) = weak.upgrade() else { return };
                     // Talked to meanwhile: what's there now counts.
-                    if thread.read(cx).running {
+                    if thread.read(cx).run.running {
                         return;
                     }
                     let open = ws.selected.as_deref() == Some(id.as_str());
                     thread.update(cx, |t, cx| {
                         t.meta.turn_in_progress = false;
                         t.unload();
-                        t.total = Some(count);
+                        t.run.total = Some(count);
                         cx.notify();
                     });
                     if open {
@@ -2873,7 +2873,7 @@ impl Workspace {
 
     /// Its `claude` is going: the jobs it ran go with it, and the thread says which.
     fn cut_off_jobs(&mut self, thread: &Entity<ThreadState>, outcome: &str, cx: &mut Context<Self>) {
-        if !thread.read(cx).jobs.any_running() {
+        if !thread.read(cx).run.jobs.any_running() {
             return;
         }
         thread.update(cx, |t, cx| {
@@ -2889,9 +2889,9 @@ impl Workspace {
     pub fn quit_question(&self, cx: &App) -> Option<(String, String)> {
         // Worded by who started what: a running sub-agent's commands count with it.
         let commands: Vec<String> =
-            self.threads.iter().flat_map(|t| { let j = &t.read(cx).jobs; j.background().filter(|c| !j.in_agent(c)).map(|c| c.description.clone()).collect::<Vec<_>>() }).collect();
-        let agents: Vec<String> = self.threads.iter().flat_map(|t| t.read(cx).jobs.agents.iter().map(|j| j.description.clone()).collect::<Vec<_>>()).collect();
-        let theirs: usize = self.threads.iter().map(|t| t.read(cx).jobs.agents_commands()).sum();
+            self.threads.iter().flat_map(|t| { let j = &t.read(cx).run.jobs; j.background().filter(|c| !j.in_agent(c)).map(|c| c.description.clone()).collect::<Vec<_>>() }).collect();
+        let agents: Vec<String> = self.threads.iter().flat_map(|t| t.read(cx).run.jobs.agents.iter().map(|j| j.description.clone()).collect::<Vec<_>>()).collect();
+        let theirs: usize = self.threads.iter().map(|t| t.read(cx).run.jobs.agents_commands()).sum();
         quit_words(&commands, &agents, theirs)
     }
 }
@@ -3223,9 +3223,9 @@ impl Workspace {
     /// A note in the error colour from the app, saved with its rows.
     fn composer_error(&mut self, thread: &Entity<ThreadState>, text: &str, cx: &mut Context<Self>) {
         let id = thread.read(cx).id().to_string();
-        if thread.read(cx).total.is_none() {
+        if thread.read(cx).run.total.is_none() {
             let total = self.library.db.as_ref().map_or(0, |db| db.transcript_count(&id));
-            thread.update(cx, |t, _| t.total = Some(total));
+            thread.update(cx, |t, _| t.run.total = Some(total));
         }
         thread.update(cx, |t, cx| {
             t.error_notice(text);
@@ -3237,9 +3237,9 @@ impl Workspace {
     /// A note in the thread from the app (`Model set to Haiku`), saved with its rows.
     fn composer_notice(&mut self, thread: &Entity<ThreadState>, text: &str, cx: &mut Context<Self>) {
         let id = thread.read(cx).id().to_string();
-        if thread.read(cx).total.is_none() {
+        if thread.read(cx).run.total.is_none() {
             let total = self.library.db.as_ref().map_or(0, |db| db.transcript_count(&id));
-            thread.update(cx, |t, _| t.total = Some(total));
+            thread.update(cx, |t, _| t.run.total = Some(total));
         }
         thread.update(cx, |t, cx| {
             t.notice(text);
@@ -3294,7 +3294,7 @@ impl Workspace {
     fn composer_turn_ended(&mut self, thread: &Entity<ThreadState>, cx: &mut Context<Self>) {
         let (id, tokens, window) = {
             let t = thread.read(cx);
-            (t.id().to_string(), t.composer.context_tokens, t.composer.context_window)
+            (t.id().to_string(), t.run.composer.context_tokens, t.run.composer.context_window)
         };
         thread.update(cx, |t, _| {
             t.meta.context_tokens = tokens;
@@ -3326,8 +3326,8 @@ impl Workspace {
             let _ = this.update(cx, |_, cx| {
                 if let Some(t) = weak.upgrade() {
                     t.update(cx, |t, cx| {
-                        if t.composer.mcp_servers != servers {
-                            t.composer.mcp_servers = servers;
+                        if t.run.composer.mcp_servers != servers {
+                            t.run.composer.mcp_servers = servers;
                             cx.notify();
                         }
                     });
@@ -3340,15 +3340,15 @@ impl Workspace {
 
     /// The `/mcp` sheet heard the servers: the chip follows.
     pub fn note_mcp_servers(&mut self, thread: &Entity<ThreadState>, servers: Vec<(String, String, String)>, cx: &mut Context<Self>) {
-        if thread.read(cx).composer.mcp_servers != servers {
-            thread.update(cx, |t, _| t.composer.mcp_servers = servers);
+        if thread.read(cx).run.composer.mcp_servers != servers {
+            thread.update(cx, |t, _| t.run.composer.mcp_servers = servers);
             cx.notify();
         }
     }
 
     /// The thread's context window: as its last turn reported, else what was seen for its model.
     pub fn context_window_of(&self, thread: &ThreadState) -> Option<u64> {
-        thread.composer.context_window.or_else(|| {
+        thread.run.composer.context_window.or_else(|| {
             let model = self.model_of(thread)?;
             let all = self.library.setting("contextWindows")?;
             let all = all.as_object()?;
@@ -3362,7 +3362,7 @@ impl Workspace {
         let id = thread.read(cx).id().to_string();
         thread.update(cx, |t, _| {
             if to_composer {
-                t.composer.restore_on_withdraw.insert(message.to_string());
+                t.run.composer.restore_on_withdraw.insert(message.to_string());
             }
         });
         match self.runtimes.get_mut(&id) {
@@ -3382,7 +3382,7 @@ impl Workspace {
     /// A queued message, right away: Claude is stopped, and the CLI hands it the message.
     pub fn send_now(&mut self, thread: &Entity<ThreadState>, message: &str, cx: &mut Context<Self>) {
         thread.update(cx, |t, cx| {
-            t.composer.sending_now.insert(message.to_string());
+            t.run.composer.sending_now.insert(message.to_string());
             cx.notify();
         });
         self.interrupt(thread, cx);

@@ -40,7 +40,7 @@ impl TranscriptView {
             })));
         }
         let observe = cx.observe(&thread, |this, thread, cx| {
-            let running = thread.read(cx).running;
+            let running = thread.read(cx).run.running;
             if this.was_running && !running {
                 this.load_links(cx);
             }
@@ -48,7 +48,7 @@ impl TranscriptView {
             this.follow_jobs(cx);
             cx.notify()
         });
-        let was_running = thread.read(cx).running;
+        let was_running = thread.read(cx).run.running;
         if !thread.read(cx).loaded {
             cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(SLOW_LOAD).await;
@@ -100,12 +100,12 @@ impl TranscriptView {
     /// (tool call, its output file) for each foreground command running; empty when none.
     fn foreground_files(&self, cx: &gpui_kit::App) -> Vec<(String, String)> {
         let t = self.thread.read(cx);
-        if !t.jobs.running.iter().any(|j| !j.background) {
+        if !t.run.jobs.running.iter().any(|j| !j.background) {
             return vec![];
         }
         // A foreground command's file is never told: where the session's others go.
-        let folder = t.jobs.folder.clone().or_else(|| t.session_id.as_ref().map(|s| jobs::output_folder(&self.workspace.read(cx).folder_of(t), s)));
-        t.jobs
+        let folder = t.run.jobs.folder.clone().or_else(|| t.run.session_id.as_ref().map(|s| jobs::output_folder(&self.workspace.read(cx).folder_of(t), s)));
+        t.run.jobs
             .running
             .iter()
             .filter(|j| !j.background)
@@ -124,7 +124,7 @@ impl TranscriptView {
     fn follow_jobs(&mut self, cx: &mut Context<Self>) {
         let (running, unread_open) = {
             let t = self.thread.read(cx);
-            (!t.jobs.running.is_empty(), t.open_job_files().iter().any(|(tool, _)| !t.job_outputs.contains_key(tool)))
+            (!t.run.jobs.running.is_empty(), t.open_job_files().iter().any(|(tool, _)| !t.job_outputs.contains_key(tool)))
         };
         if !running && !unread_open {
             self.job_ticker = None;
@@ -173,7 +173,7 @@ impl TranscriptView {
                 if changed {
                     cx.notify();
                 }
-                !t.jobs.running.is_empty()
+                !t.run.jobs.running.is_empty()
             });
             // None left: done, so the next job starts it again.
             if !still {
@@ -306,7 +306,7 @@ impl Render for TranscriptView {
         }
         // While Claude works, room at the end for the working indicator laid over it (its own
         // view, `ui::working`, so its clock never redraws the list).
-        let bottom = if t.running { 40. } else { 16. };
+        let bottom = if t.run.running { 40. } else { 16. };
         root.child(list(t.list.clone(), move |ix, window, cx| rows::render_item(&thread, ix, window, cx)).size_full().pb(px(bottom)))
             // As macOS shows one: over the list's right edge while it scrolls or is hovered.
             .child(gpui_kit::base::Scrollbar::vertical(&t.list).mode(crate::platform::scroll_bar_mode()))

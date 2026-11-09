@@ -515,7 +515,7 @@ fn main() {
                 let _ = cx.update(|cx| {
                     workspace.update(cx, |ws, cx| {
                         if let Some(t) = ws.selected_thread() {
-                            eprintln!("queue: sending while running={}", t.read(cx).running);
+                            eprintln!("queue: sending while running={}", t.read(cx).run.running);
                             ws.send(&t, &text, false, cx);
                         }
                     })
@@ -547,7 +547,7 @@ fn main() {
             cx.spawn(async move |cx| {
                 cx.background_executor().timer(Duration::from_secs_f64(delay)).await;
                 let _ = window.update(cx, |_, window, cx| {
-                    let running = root.read(cx).workspace.read(cx).selected_thread().is_some_and(|t| t.read(cx).running);
+                    let running = root.read(cx).workspace.read(cx).selected_thread().is_some_and(|t| t.read(cx).run.running);
                     eprintln!("STOP pressed (running={running})");
                     window.dispatch_action(Box::new(Stop), cx);
                 });
@@ -567,7 +567,7 @@ fn main() {
                 for text in seq.split('|').map(str::trim).filter(|t| !t.is_empty()) {
                     for _ in 0..200 {
                         cx.background_executor().timer(Duration::from_millis(300)).await;
-                        let busy = cx.update(|cx| workspace.read(cx).selected_thread().is_some_and(|t| t.read(cx).running));
+                        let busy = cx.update(|cx| workspace.read(cx).selected_thread().is_some_and(|t| t.read(cx).run.running));
                         if !busy {
                             break;
                         }

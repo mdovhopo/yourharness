@@ -440,7 +440,7 @@ impl Probe {
             let t = t.clone();
             let message = format!("PERF seconds={} rate={rate}", seconds.round());
             self.ws_update(move |ws, cx| {
-                if !t.read(cx).running {
+                if !t.read(cx).run.running {
                     ws.send(&t, &message, false, cx);
                 }
             });
@@ -449,7 +449,7 @@ impl Probe {
             list.iter().zip(&marks).all(|(t, mark)| {
                 p.read(|_, _, cx| {
                     let t = t.read(cx);
-                    t.running && t.items.len() > mark + 1 && t.items.last().is_some_and(|i| i.ty != ItemType::User)
+                    t.run.running && t.items.len() > mark + 1 && t.items.last().is_some_and(|i| i.ty != ItemType::User)
                 })
             })
         };
@@ -1145,7 +1145,7 @@ impl Probe {
     /// by clicking it.
     async fn g_jobs(&mut self) {
         let Some(t) = self.selected_thread() else { return };
-        if self.page_open() || self.read(|_, _, cx| t.read(cx).jobs.running.is_empty()) {
+        if self.page_open() || self.read(|_, _, cx| t.read(cx).run.jobs.running.is_empty()) {
             return;
         }
         self.painted().await;

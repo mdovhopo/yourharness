@@ -1,6 +1,6 @@
 # Remote: the foundation
 
-Status: plan. Nothing here is built yet.
+Status: in progress. F0 is done (`yh_core::thread_run`); the rest is planned.
 
 ## Goal
 
@@ -112,9 +112,12 @@ were typing. Whether they should be per device is a question for later.
 - **The window** keeps `Entry` as now, made from the changes it gets.
 - **Cost:** the open turn's rows are held twice. That's a few rows per running thread, against the
   160 to 300 the window holds. Check `footprint` with 20 streaming threads.
-- **Risk to check in F0:** does the reducer ever reach back past the open turn? A sub-agent
-  continued in a later turn (`agent_alias`) and a tool result arriving after a restart are the
-  likely cases. If it does, the engine keeps a small index of earlier calls instead of the rows.
+- **What F0 found:** the reducer does reach back past the open turn: a background sub-agent or
+  job finishing in a later turn, a sub-agent continued after a restart (its call found by the
+  `agentId` in its result), `/compact`'s repeated command outputs, and the files a turn changed,
+  set after it ends. `ThreadRun` asks a `RowSource` for those rows. In-process that's the
+  window's held rows, the same reach as before; the engine's will be the database, which reaches
+  further (a row the window let go of no longer loses its update).
 
 ### Commands, changes, snapshots
 

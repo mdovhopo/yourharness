@@ -15,7 +15,7 @@ use yh_core::updates::{Notes, Version, RELEASES_PAGE};
 
 /// How many threads are working now, for Restart's question.
 pub fn working(ws: &Entity<Workspace>, cx: &App) -> usize {
-    ws.read(cx).threads.iter().filter(|t| t.read(cx).running).count()
+    ws.read(cx).threads.iter().filter(|t| t.read(cx).run.running).count()
 }
 
 /// Release notes, from `after` (exclusive) through `through`; without `after`, only `through`'s.
