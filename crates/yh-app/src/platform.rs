@@ -656,12 +656,18 @@ thread_local! {
 
 /// Opens files in Quick Look's panel (`QLPreviewPanel`), the arrow keys going through the
 /// others, as Finder's space bar does. The panel asks the responder chain for a controller,
-/// so the app's delegate is taught to be one, and feeds it from `PREVIEW`.
+/// so the app's delegate is taught to be one, and feeds it from `PREVIEW`. It opens on the next
+/// turn of the main run loop: its panel loads the first file in a run loop of its own, and GPUI's tasks run in there, so from inside an update (a click) they
+/// would find the app already borrowed and panic.
 pub fn quick_look(paths: Vec<String>, at: usize) {
-    use objc::runtime::{Class, Object, Sel, BOOL};
     if paths.is_empty() {
         return;
     }
+    run_on_main(Box::new(move || quick_look_now(paths, at)));
+}
+
+fn quick_look_now(paths: Vec<String>, at: usize) {
+    use objc::runtime::{Class, Object, Sel, BOOL};
     let at = at.min(paths.len() - 1);
     PREVIEW.with(|p| *p.borrow_mut() = (paths, at));
     extern "C" fn count(_: &Object, _: Sel, _: id) -> isize {
