@@ -7,7 +7,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde_json::{Map, Value};
 use yh_core::library::ThreadMeta;
 
-use yh_proto::{INPUT_LIMIT, ModelOption, Project, RESULT_LIMIT, Row, Thread, trim};
+use yh_proto::{INPUT_LIMIT, ModelOption, Project, RESULT_LIMIT, Row, SubagentInfo, Thread, trim};
 
 pub struct Source {
     c: Connection,
@@ -20,7 +20,7 @@ pub struct Change {
 }
 
 const COLUMNS: &str = "seq, rev, id, kind, text, tool_name, tool_input, tool_result, tool_result_length, tool_is_error,
-                       notice_style, attachments, date, turn_ended_at, changed_files";
+                       notice_style, attachments, date, turn_ended_at, changed_files, subagent, subagent_blob";
 
 impl Source {
     pub fn open(directory: &Path) -> Result<Source, String> {
@@ -83,8 +83,8 @@ impl Source {
     /// Rows written after `rev`, oldest first, at most `limit`.
     pub fn changes_since(&self, rev: i64, limit: i64) -> rusqlite::Result<Vec<Change>> {
         let mut s = self.c.prepare_cached(&format!("SELECT thread_id, {COLUMNS} FROM entries WHERE rev > ? ORDER BY rev LIMIT ?"))?;
-        let rows = s.query_map(params![rev, limit], |r| Ok(Change { thread: r.get(0)?, row: row(r, 1)? }))?;
-        rows.collect()
+        let rows = s.query_map(params![rev, limit], |r| Ok((r.get::<_, String>(0)?, row(r, 1)?)))?;
+        rows.map(|r| r.map(|(thread, raw)| Change { thread, row: self.finish(raw) })).collect()
     }
 
     /// The models the CLI last listed (the app keeps them as `claudeModels`).
@@ -129,13 +129,77 @@ impl Source {
     pub fn rows(&self, thread: &str, from: i64, to: i64) -> rusqlite::Result<Vec<Row>> {
         let mut s = self.c.prepare_cached(&format!("SELECT {COLUMNS} FROM entries WHERE thread_id = ? AND seq >= ? AND seq < ? ORDER BY seq"))?;
         let rows = s.query_map(params![thread, from, to], |r| row(r, 0))?;
-        rows.collect()
+        rows.map(|r| r.map(|raw| self.finish(raw))).collect()
+    }
+
+    /// A row read, its sub-agent's run summarized (read from its blob when it's kept apart).
+    fn finish(&self, (mut row, run): (Row, RawRun)) -> Row {
+        let bytes = match run {
+            RawRun::None => None,
+            RawRun::Inline(b) => Some(b),
+            RawRun::Blob(hash) => yh_core::db::blob(&self.c, &hash).ok().flatten(),
+        };
+        row.subagent = bytes.and_then(|b| yh_core::subagent_record::SubagentRecord::summary(&b)).map(|s| SubagentInfo {
+            description: s.description,
+            status: s.status,
+            agent_type: s.agent_type,
+            tool_uses: s.tool_uses,
+            tokens: s.tokens,
+            duration_ms: s.duration_ms,
+            activity: None,
+            background: s.is_background,
+        });
+        row
+    }
+
+    /// A row's sub-agent run whole, and its call's input, as saved.
+    pub fn subagent_run(&self, thread: &str, seq: i64) -> rusqlite::Result<Option<(yh_core::subagent_record::SubagentRecord, Option<String>)>> {
+        let found: Option<(Option<Vec<u8>>, Option<String>, Option<String>)> = self
+            .c
+            .query_row("SELECT subagent, subagent_blob, tool_input FROM entries WHERE thread_id = ? AND seq = ?", params![thread, seq], |r| Ok((bytes(r, 0)?, r.get(1)?, r.get(2)?)))
+            .optional()?;
+        let Some((inline, hash, input)) = found else { return Ok(None) };
+        let bytes = match (inline, hash) {
+            (Some(b), _) => Some(b),
+            (None, Some(h)) => yh_core::db::blob(&self.c, &h)?,
+            _ => None,
+        };
+        Ok(bytes.and_then(|b| yh_core::subagent_record::SubagentRecord::decode(&b)).map(|r| (r, input)))
+    }
+
+    /// A row's kind, tool, whole input and attachments: where its pictures are.
+    pub fn media_of(&self, thread: &str, seq: i64) -> rusqlite::Result<Option<(String, Option<String>, Option<String>, Vec<String>)>> {
+        let found: Option<(String, Option<String>, Option<String>, Option<String>, Option<String>)> = self
+            .c
+            .query_row("SELECT kind, tool_name, tool_input, tool_input_blob, attachments FROM entries WHERE thread_id = ? AND seq = ?", params![thread, seq], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+            .optional()?;
+        let Some((kind, tool, input, blob, attachments)) = found else { return Ok(None) };
+        let input = match blob {
+            Some(h) => yh_core::db::blob(&self.c, &h)?.map(|b| String::from_utf8_lossy(&b).into_owned()).or(input),
+            None => input,
+        };
+        let attachments = attachments.and_then(|a| serde_json::from_str(&a).ok()).unwrap_or_default();
+        Ok(Some((kind, tool, input, attachments)))
     }
 }
 
-fn row(r: &rusqlite::Row, at: usize) -> rusqlite::Result<Row> {
+/// A row's sub-agent run as read: in the row, in a blob, or none.
+enum RawRun {
+    None,
+    Inline(Vec<u8>),
+    Blob(String),
+}
+
+fn row(r: &rusqlite::Row, at: usize) -> rusqlite::Result<(Row, RawRun)> {
     let list = |s: Option<String>| -> Vec<String> { s.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default() };
-    Ok(Row {
+    let run = match (bytes(r, at + 15)?, r.get::<_, Option<String>>(at + 16)?) {
+        (Some(b), _) => RawRun::Inline(b),
+        (None, Some(h)) => RawRun::Blob(h),
+        _ => RawRun::None,
+    };
+    let row = Row {
         seq: r.get(at)?,
         rev: r.get(at + 1)?,
         id: r.get(at + 2)?,
@@ -151,6 +215,18 @@ fn row(r: &rusqlite::Row, at: usize) -> rusqlite::Result<Row> {
         date: r.get(at + 12)?,
         turn_ended_at: r.get(at + 13)?,
         changed_files: list(r.get(at + 14)?),
+        subagent: None,
+    };
+    Ok((row, run))
+}
+
+/// A column's bytes, kept as text or as a blob.
+fn bytes(r: &rusqlite::Row, i: usize) -> rusqlite::Result<Option<Vec<u8>>> {
+    use rusqlite::types::ValueRef;
+    Ok(match r.get_ref(i)? {
+        ValueRef::Blob(b) => Some(b.to_vec()),
+        ValueRef::Text(t) => Some(t.to_vec()),
+        _ => None,
     })
 }
 

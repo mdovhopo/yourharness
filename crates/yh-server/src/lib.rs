@@ -13,6 +13,7 @@
 //! database, and a bounded outbox: a client that falls behind is dropped, and reconnects for a
 //! fresh snapshot.
 
+pub mod diagram;
 pub mod source;
 pub use yh_proto as wire;
 
@@ -109,11 +110,74 @@ pub fn wire_row(r: &yh_core::thread_run::TranscriptRow, rev: i64) -> wire::Row {
         turn_ended_at: saved.turn_ended_at,
         attachments: d.attachments.clone(),
         changed_files: d.changed_files.clone().unwrap_or_default(),
+        subagent: r.sub.as_ref().map(|sub| subagent_info(sub, d.tool_input.as_deref())),
+    }
+}
+
+/// A live sub-agent run as its card shows it; what it was asked comes from its call's input.
+fn subagent_info(sub: &yh_core::thread_run::Subagent, input: Option<&str>) -> wire::SubagentInfo {
+    let input: serde_json::Value = input.and_then(|i| serde_json::from_str(i).ok()).unwrap_or_default();
+    wire::SubagentInfo {
+        description: sub.description.clone(),
+        status: sub.status.clone(),
+        agent_type: input["subagent_type"].as_str().map(str::to_string),
+        tool_uses: sub.tool_uses.or((sub.steps > 0).then_some(sub.steps as u64)),
+        tokens: sub.tokens,
+        duration_ms: sub.duration_ms,
+        activity: sub.activity.clone(),
+        background: input["run_in_background"] == true,
+    }
+}
+
+/// A sub-agent's whole run for its sheet: from what it is now (live) or as it was saved.
+fn subagent_run(sub: &yh_core::thread_run::Subagent, input: Option<&str>) -> wire::SubagentRun {
+    let prompt = input.and_then(|i| serde_json::from_str::<serde_json::Value>(i).ok()).and_then(|v| v["prompt"].as_str().map(str::to_string));
+    wire::SubagentRun {
+        info: subagent_info(sub, input),
+        prompt,
+        steps: sub
+            .log
+            .iter()
+            .map(|s| wire::SubagentStep { tool: s.tool.clone(), text: wire::trim(s.text.clone(), wire::INPUT_LIMIT), result: s.result.clone().map(|r| wire::trim(r, wire::RESULT_LIMIT)), is_error: s.is_error })
+            .collect(),
+        report: sub.report.clone(),
+    }
+}
+
+/// Claude's `show_media` tool (the app's `harness` server): its pictures are the row's.
+const MEDIA_TOOL: &str = "mcp__harness__show_media";
+const PICTURE_TYPES: &[(&str, &str)] = &[("png", "image/png"), ("jpg", "image/jpeg"), ("jpeg", "image/jpeg"), ("gif", "image/gif"), ("webp", "image/webp"), ("heic", "image/heic")];
+const MAX_PICTURE: u64 = 20 * 1024 * 1024;
+
+fn picture_type(name: &str) -> Option<&'static str> {
+    let ext = name.rsplit('.').next()?.to_lowercase();
+    PICTURE_TYPES.iter().find(|(e, _)| *e == ext).map(|(_, t)| *t)
+}
+
+/// A row's pictures, in order, as files on the Mac: your attachments (pictures kept in the
+/// app's attachments folder, by name) or what Claude showed you (`show_media`'s paths). Only
+/// pictures, and only what the row names: nothing else on the Mac can be asked for.
+pub fn pictures(data_dir: &std::path::Path, kind: &str, tool: Option<&str>, input: Option<&str>, attachments: &[String]) -> Vec<std::path::PathBuf> {
+    match kind {
+        "user" => attachments
+            .iter()
+            .filter(|n| picture_type(n).is_some() && !n.contains('/') && !n.contains(".."))
+            .map(|n| yh_core::attachments::path(data_dir, n))
+            .collect(),
+        "tool" if tool == Some(MEDIA_TOOL) => {
+            let v: serde_json::Value = input.and_then(|i| serde_json::from_str(i).ok()).unwrap_or_default();
+            let mut paths: Vec<String> = v["paths"].as_array().map(|a| a.iter().filter_map(|p| p.as_str().map(str::to_string)).collect()).unwrap_or_default();
+            if let Some(p) = v["path"].as_str() {
+                paths.push(p.to_string());
+            }
+            paths.into_iter().filter(|p| picture_type(p).is_some()).map(std::path::PathBuf::from).collect()
+        }
+        _ => vec![],
     }
 }
 
 /// A watched thread's newest rows as the engine told them, for streaming whole rows.
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct Mirror {
     rows: std::collections::BTreeMap<usize, yh_core::thread_run::TranscriptRow>,
     count: usize,
@@ -150,6 +214,10 @@ struct Shared {
     models: Mutex<Vec<wire::ModelOption>>,
     actions: Option<flume::Sender<Asked>>,
     engine: Option<yh_engine::EngineHandle>,
+    /// Each watched thread's newest rows as the engine told them.
+    mirrors: Mutex<HashMap<String, Mirror>>,
+    /// The data folder: where your attachments are.
+    data_dir: PathBuf,
     /// The `rev` streamed rows take: above anything saved, so a client keeps the newest copy.
     rev: std::sync::atomic::AtomicI64,
 }
@@ -191,7 +259,7 @@ pub fn serve(listener: TcpListener, directory: PathBuf, options: Options, links:
     };
     // Subscribed before anyone connects, so no change is missed.
     let told = engine.as_ref().map(|e| e.subscribe());
-    let shared = Arc::new(Shared { actions, engine, ..Default::default() });
+    let shared = Arc::new(Shared { actions, engine, data_dir: directory.clone(), ..Default::default() });
     let source = Source::open(&directory)?;
     shared.rev.store(source.max_rev().unwrap_or(0), std::sync::atomic::Ordering::SeqCst);
     // The list is read before anyone connects, so the first `threads` is never empty.
@@ -233,7 +301,6 @@ pub fn serve(listener: TcpListener, directory: PathBuf, options: Options, links:
 /// change (gathered, then sent whole at most every `STREAM_EVERY`), a thread's live state to the
 /// clients watching it, and the thread list's `running` and `waiting` when those change.
 fn follow(told: flume::Receiver<yh_engine::Output>, shared: &Shared, source: &Source) {
-    let mut mirrors: HashMap<String, Mirror> = HashMap::new();
     let mut changed: HashMap<String, std::collections::BTreeSet<usize>> = HashMap::new();
     let mut sent_at = Instant::now();
     loop {
@@ -245,7 +312,7 @@ fn follow(told: flume::Receiver<yh_engine::Output>, shared: &Shared, source: &So
         for output in first.into_iter().chain(told.try_iter()) {
             match output {
                 yh_engine::Output::Thread(u) => {
-                    if let Some(m) = mirrors.get_mut(&u.thread) {
+                    if let Some(m) = shared.mirrors.lock().unwrap().get_mut(&u.thread) {
                         let seqs = changed.entry(u.thread.clone()).or_default();
                         for change in u.changes {
                             apply(m, change, seqs);
@@ -261,7 +328,7 @@ fn follow(told: flume::Receiver<yh_engine::Output>, shared: &Shared, source: &So
                     // Above anything saved by now, so what streams after it wins.
                     let rev = shared.rev.fetch_max(source.max_rev().unwrap_or(0), std::sync::atomic::Ordering::SeqCst).max(source.max_rev().unwrap_or(0));
                     let wire_rows: Vec<wire::Row> = rows.iter().map(|r| wire_row(r, rev)).collect();
-                    mirrors.insert(thread.clone(), Mirror { rows: rows.into_iter().map(|r| (r.seq, r)).collect(), count });
+                    shared.mirrors.lock().unwrap().insert(thread.clone(), Mirror { rows: rows.into_iter().map(|r| (r.seq, r)).collect(), count });
                     let snapshot = ToApp::Snapshot { thread: thread.clone(), first_seq: first_seq as i64, count: count as i64, rows: wire_rows };
                     let live = live_of(&live);
                     shared.live.lock().unwrap().insert(thread.clone(), live.clone());
@@ -279,7 +346,7 @@ fn follow(told: flume::Receiver<yh_engine::Output>, shared: &Shared, source: &So
         }
         sent_at = Instant::now();
         for (thread, seqs) in changed.drain() {
-            let Some(m) = mirrors.get(&thread) else { continue };
+            let Some(m) = shared.mirrors.lock().unwrap().get(&thread).cloned() else { continue };
             let rows: Vec<wire::Row> = seqs
                 .iter()
                 .filter_map(|seq| m.rows.get(seq))
@@ -293,7 +360,7 @@ fn follow(told: flume::Receiver<yh_engine::Output>, shared: &Shared, source: &So
         }
         // Threads nobody watches any more aren't held.
         let watched: std::collections::HashSet<String> = shared.clients.lock().unwrap().values().filter_map(|c| c.thread.clone()).collect();
-        mirrors.retain(|t, _| watched.contains(t));
+        shared.mirrors.lock().unwrap().retain(|t, _| watched.contains(t));
     }
 }
 
@@ -516,6 +583,50 @@ fn answer(id: u64, message: FromApp, shared: &Shared, source: &Source) -> Vec<To
             Ok((input, result)) => vec![ToApp::ToolResult { thread, seq, input, result }],
             Err(e) => failed(e),
         },
+        FromApp::Subagent { thread, seq } => {
+            // Live (with what it's doing now) when the thread is watched, else as saved.
+            let live = shared.mirrors.lock().unwrap().get(&thread).and_then(|m| m.rows.get(&(seq as usize)).and_then(|r| r.sub.as_ref().map(|s| subagent_run(s, r.data.tool_input.as_deref()))));
+            let run = match live {
+                Some(run) => Some(run),
+                None => match source.subagent_run(&thread, seq) {
+                    Ok(found) => found.map(|(record, input)| subagent_run(&yh_core::thread_run::Subagent::from_record(record), input.as_deref())),
+                    Err(e) => return failed(e),
+                },
+            };
+            match run {
+                Some(run) => vec![ToApp::Subagent { thread, seq, run }],
+                None => vec![ToApp::Error { message: "That row has no sub-agent.".into() }],
+            }
+        }
+        FromApp::Media { thread, seq, index } => {
+            let held = shared.mirrors.lock().unwrap().get(&thread).and_then(|m| m.rows.get(&(seq as usize)).cloned());
+            let row = match held {
+                Some(r) => Some((r.row(None).kind, r.data.tool_name.clone(), r.data.tool_input.clone(), r.data.attachments.clone())),
+                None => match source.media_of(&thread, seq) {
+                    Ok(found) => found,
+                    Err(e) => return failed(e),
+                },
+            };
+            let answer = row
+                .and_then(|(kind, tool, input, attachments)| pictures(&shared.data_dir, &kind, tool.as_deref(), input.as_deref(), &attachments).into_iter().nth(index))
+                .ok_or_else(|| "No such picture.".to_string())
+                .and_then(|path| {
+                    let size = std::fs::metadata(&path).map_err(|_| "The picture isn't on the Mac any more.".to_string())?.len();
+                    if size > MAX_PICTURE {
+                        return Err("The picture is too big to send.".into());
+                    }
+                    let bytes = std::fs::read(&path).map_err(|_| "The picture couldn't be read.".to_string())?;
+                    Ok((picture_type(&path.to_string_lossy()).unwrap_or("image/png").to_string(), yh_core::attachments::base64(&bytes)))
+                });
+            match answer {
+                Ok((media_type, data)) => vec![ToApp::Media { thread, seq, index, media_type: Some(media_type), data: Some(data), error: None }],
+                Err(error) => vec![ToApp::Media { thread, seq, index, media_type: None, data: None, error: Some(error) }],
+            }
+        }
+        FromApp::Diagram { key, source } => match diagram::draw(&source) {
+            Ok(drawing) => vec![ToApp::Diagram { key, drawing: Some(drawing), error: None }],
+            Err(error) => vec![ToApp::Diagram { key, drawing: None, error: Some(error) }],
+        },
         FromApp::SubscribeThread { thread, limit } => {
             let limit = limit.unwrap_or(DEFAULT_ROWS).clamp(1, MAX_ROWS);
             // With the engine: its snapshot, in order with its changes, comes from `follow`.
@@ -616,7 +727,7 @@ fn to_action(m: FromApp) -> Result<Action, String> {
         F::Pin { thread, on, .. } => Action::Pin { thread, on },
         F::Settle { thread, on, .. } => Action::Settle { thread, on },
         F::Delete { thread, .. } => Action::Delete { thread },
-        F::SubscribeApp | F::SubscribeThread { .. } | F::UnsubscribeThread | F::Page { .. } | F::ToolResult { .. } | F::Unknown => return Err("Not an action.".into()),
+        F::SubscribeApp | F::SubscribeThread { .. } | F::UnsubscribeThread | F::Page { .. } | F::ToolResult { .. } | F::Subagent { .. } | F::Media { .. } | F::Diagram { .. } | F::Unknown => return Err("Not an action.".into()),
     })
 }
 

@@ -5,6 +5,7 @@
 mod flowchart;
 mod flowchart_layout;
 mod layered;
+pub mod paint;
 mod sequence;
 mod sequence_layout;
 mod text;

@@ -13,13 +13,9 @@ use gpui_kit::{
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
-use yh_core::diagrams::{
-    self, Arrow, ArrowHead, DiagramColor, FlowchartGeometry, Geometry, Line, LineStyle, Rect, SequenceGeometry, Shape, ShapeStyle,
-    TextMetrics, WrappedText,
-};
+use yh_core::diagrams::paint::{self as draw, Canvas, Ink, Role, Seg, FONT_SIZE, LINE_HEIGHT};
+use yh_core::diagrams::{self, Geometry, TextMetrics};
 
-const FONT_SIZE: f32 = 13.;
-const LINE_HEIGHT: f64 = 17.;
 const PADDING: f64 = 16.;
 /// How many laid-out diagrams are kept.
 const KEPT: usize = 48;
@@ -201,116 +197,9 @@ pub fn diagram_block(source: &str, ctx: &RowContext, n: usize, theme: &Theme, wi
     )
 }
 
-/// A piece of text over the diagram: its lines from (`x`, `y`), centred across `width` when
-/// it has one. Drawn as elements in the window, as `<text>` in an exported image.
-struct Label {
-    lines: Vec<String>,
-    x: f64,
-    y: f64,
-    width: Option<f64>,
-    size: f32,
-    line_height: f64,
-    weight: FontWeight,
-    color: Hsla,
-}
-
-/// A label's lines, centred in `frame` (with some room either side, as words may measure a
-/// little wider than the layout thought).
-fn centred(text: &WrappedText, frame: Rect, color: Hsla, bold: bool) -> Label {
-    let top = frame.y + frame.height / 2. - text.lines.len() as f64 * LINE_HEIGHT / 2.;
-    Label {
-        lines: text.lines.clone(),
-        x: frame.x - 20.,
-        y: top,
-        width: Some(frame.width + 40.),
-        size: FONT_SIZE,
-        line_height: LINE_HEIGHT,
-        weight: if bold { FontWeight::SEMIBOLD } else { FontWeight::NORMAL },
-        color,
-    }
-}
-
-/// Text at a point, left-aligned.
-fn at(text: String, x: f64, y: f64, color: Hsla, size: f32, bold: bool) -> Label {
-    Label { lines: vec![text], x, y, width: None, size, line_height: LINE_HEIGHT, weight: if bold { FontWeight::SEMIBOLD } else { FontWeight::NORMAL }, color }
-}
-
-fn labels(geometry: &Geometry, theme: &Theme) -> Vec<Label> {
-    let mut out = vec![];
-    match geometry {
-        Geometry::Flowchart(g) => {
-            for s in &g.subgraphs {
-                if !s.title.is_empty() {
-                    // A subgraph's title: left-aligned from its corner.
-                    out.push(Label {
-                        lines: s.title.lines.clone(),
-                        x: s.frame.x + 12.,
-                        y: s.frame.y + 6.,
-                        width: None,
-                        size: 12.,
-                        line_height: LINE_HEIGHT,
-                        weight: FontWeight::MEDIUM,
-                        color: theme.secondary,
-                    });
-                }
-            }
-            for n in &g.nodes {
-                out.push(centred(&n.label, n.frame, theme.text, false));
-            }
-            for e in &g.edges {
-                if let (Some(frame), false) = (e.label_frame, e.label.is_empty()) {
-                    out.push(centred(&e.label, frame, theme.secondary, false));
-                }
-            }
-        }
-        Geometry::Sequence(g) => {
-            for p in &g.participants {
-                let mut frame = p.header;
-                if p.participant.is_actor {
-                    frame = Rect::new(frame.x, frame.y + 18., frame.width, frame.height - 18.);
-                }
-                out.push(centred(&p.label, frame, theme.text, true));
-            }
-            for m in &g.messages {
-                if !m.label.is_empty() {
-                    out.push(centred(&m.label, m.label_frame, theme.text, false));
-                }
-                if let Some(number) = m.number {
-                    out.push(Label {
-                        lines: vec![number.to_string()],
-                        x: m.from_x - 8.,
-                        y: m.y - 8.,
-                        width: Some(16.),
-                        size: 9.,
-                        line_height: 16.,
-                        weight: FontWeight::BOLD,
-                        color: gpui_kit::white(),
-                    });
-                }
-            }
-            for note in &g.notes {
-                out.push(centred(&note.text, note.frame, theme.text, false));
-            }
-            for b in &g.blocks {
-                out.push(at(b.kind.name().to_string(), b.frame.x + 8., b.frame.y + 3., theme.secondary, 11.5, true));
-                let tab = tab_width(b.kind.name());
-                for (i, section) in b.sections.iter().enumerate() {
-                    let text = section.label.lines.join(" ");
-                    if text.is_empty() {
-                        continue;
-                    }
-                    let x = if i == 0 { b.frame.x + tab + 8. } else { b.frame.x + 8. };
-                    out.push(at(format!("[{text}]"), x, section.y + 3., theme.secondary, 11.5, false));
-                }
-            }
-        }
-    }
-    out
-}
-
 /// The labels as elements laid over the canvas, `scale` times their size.
 fn label_elements(geometry: &Geometry, theme: &Theme, scale: f32) -> Vec<AnyElement> {
-    labels(geometry, theme)
+    draw::labels(geometry)
         .into_iter()
         .map(|l| {
             let s = scale as f64;
@@ -323,16 +212,12 @@ fn label_elements(geometry: &Geometry, theme: &Theme, scale: f32) -> Vec<AnyElem
                 .flex_col()
                 .text_size(px(l.size * scale))
                 .line_height(px((l.line_height * s) as f32))
-                .font_weight(l.weight)
-                .text_color(l.color)
+                .font_weight(FontWeight(l.weight as f32))
+                .text_color(hsla(l.color, theme))
                 .children(l.lines.into_iter().map(|line| div().whitespace_nowrap().child(SharedString::from(line))))
                 .into_any_element()
         })
         .collect()
-}
-
-fn tab_width(name: &str) -> f64 {
-    name.len() as f64 * 7. + 16.
 }
 
 /// The diagram's lines and shapes, painted from its layout, `scale` times its size.
@@ -340,82 +225,32 @@ fn shapes(drawn: Rc<Drawn>, theme: Theme, scale: f32) -> impl IntoElement {
     canvas(
         |_, _, _| (),
         move |bounds, _, window, _| {
-            let mut p = Painter { origin: bounds.origin, scale, window };
-            match &drawn.geometry {
-                Geometry::Flowchart(g) => paint_flowchart(&mut p, g, &theme),
-                Geometry::Sequence(g) => paint_sequence(&mut p, g, &theme),
-            }
+            let mut p = Painter { origin: bounds.origin, scale, window, theme };
+            draw::paint(&mut p, &drawn.geometry);
         },
     )
     .absolute()
     .size_full()
 }
 
-/// A path in the diagram's own coordinates.
-enum Seg {
-    Move(f64, f64),
-    Line(f64, f64),
-    /// An elliptical arc (radii), clockwise, to a point.
-    Arc((f64, f64), (f64, f64)),
-    Close,
-}
-
-/// Where the shapes go: the window (`Painter`) or an SVG (`Svg`, for Copy Image and Save as PNG).
-trait Canvas {
-    /// Fills, then outlines (colour, width, dashed), a path.
-    fn path(&mut self, segs: &[Seg], fill: Option<Hsla>, stroke: Option<(Hsla, f32, bool)>);
-
-    fn polyline(&mut self, points: &[(f64, f64)], color: Hsla, width: f32, dashed: bool) {
-        if points.len() < 2 {
-            return;
-        }
-        let mut segs = vec![Seg::Move(points[0].0, points[0].1)];
-        segs.extend(points[1..].iter().map(|&(x, y)| Seg::Line(x, y)));
-        self.path(&segs, None, Some((color, width, dashed)));
-    }
-
-    fn polygon(&mut self, points: &[(f64, f64)], fill: Option<Hsla>, stroke: Option<(Hsla, f32, bool)>) {
-        if points.is_empty() {
-            return;
-        }
-        let mut segs = vec![Seg::Move(points[0].0, points[0].1)];
-        segs.extend(points[1..].iter().map(|&(x, y)| Seg::Line(x, y)));
-        segs.push(Seg::Close);
-        self.path(&segs, fill, stroke);
-    }
-
-    fn rounded(&mut self, r: Rect, radius: f64, fill: Option<Hsla>, stroke: Option<(Hsla, f32, bool)>) {
-        let radius = radius.min(r.width / 2.).min(r.height / 2.).max(0.);
-        if radius <= 0.5 {
-            return self.polygon(&[(r.x, r.y), (r.max_x(), r.y), (r.max_x(), r.max_y()), (r.x, r.max_y())], fill, stroke);
-        }
-        let k = (radius, radius);
-        let segs = [
-            Seg::Move(r.x + radius, r.y),
-            Seg::Line(r.max_x() - radius, r.y),
-            Seg::Arc(k, (r.max_x(), r.y + radius)),
-            Seg::Line(r.max_x(), r.max_y() - radius),
-            Seg::Arc(k, (r.max_x() - radius, r.max_y())),
-            Seg::Line(r.x + radius, r.max_y()),
-            Seg::Arc(k, (r.x, r.max_y() - radius)),
-            Seg::Line(r.x, r.y + radius),
-            Seg::Arc(k, (r.x + radius, r.y)),
-            Seg::Close,
-        ];
-        self.path(&segs, fill, stroke);
-    }
-
-    fn ellipse(&mut self, r: Rect, fill: Option<Hsla>, stroke: Option<(Hsla, f32, bool)>) {
-        let k = (r.width / 2., r.height / 2.);
-        let segs = [Seg::Move(r.x, r.mid_y()), Seg::Arc(k, (r.max_x(), r.mid_y())), Seg::Arc(k, (r.x, r.mid_y())), Seg::Close];
-        self.path(&segs, fill, stroke);
-    }
-}
-
 struct Painter<'a> {
     origin: Point<Pixels>,
     scale: f32,
     window: &'a mut Window,
+    theme: Theme,
+}
+
+/// A role's colour in this theme, at its alpha.
+fn hsla(ink: Ink, theme: &Theme) -> Hsla {
+    let base: Hsla = match ink.role {
+        Role::Text => theme.text,
+        Role::Secondary => theme.secondary,
+        Role::Canvas => theme.canvas,
+        Role::Card => theme.card,
+        Role::Accent => theme.accent,
+        Role::Rgb(r, g, b) => gpui_kit::Rgba { r, g, b, a: 1. }.into(),
+    };
+    base.opacity(ink.alpha)
 }
 
 impl Painter<'_> {
@@ -440,7 +275,10 @@ impl Painter<'_> {
 }
 
 impl Canvas for Painter<'_> {
-    fn path(&mut self, segs: &[Seg], fill: Option<Hsla>, stroke: Option<(Hsla, f32, bool)>) {
+    fn path(&mut self, segs: &[Seg], fill: Option<Ink>, stroke: Option<(Ink, f32, bool)>) {
+        let theme = self.theme;
+        let fill = fill.map(|i| hsla(i, &theme));
+        let stroke = stroke.map(|(i, w, d)| (hsla(i, &theme), w, d));
         if let Some(fill) = fill {
             let mut b = PathBuilder::fill();
             self.trace(&mut b, segs);
@@ -460,213 +298,12 @@ impl Canvas for Painter<'_> {
         }
     }
 }
-fn color(c: DiagramColor) -> Hsla {
-    gpui_kit::Rgba { r: c.red as f32, g: c.green as f32, b: c.blue as f32, a: c.alpha as f32 }.into()
-}
-
-/// The node's fill: the author's colour as a tint over the canvas, so pastels picked for a
-/// white page read in dark mode too and the label stays legible.
-fn fills(style: &ShapeStyle, theme: &Theme) -> (Hsla, Option<Hsla>, (Hsla, f32, bool)) {
-    let tint = style.fill.map(|f| color(f).opacity((f.alpha as f32).min(0.32)));
-    let stroke = style.stroke.map(color).unwrap_or(theme.text.opacity(0.22));
-    (theme.canvas, tint, (stroke, style.stroke_width.unwrap_or(1.) as f32, style.dashed))
-}
-
-fn paint_flowchart(p: &mut dyn Canvas, g: &FlowchartGeometry, theme: &Theme) {
-    for s in &g.subgraphs {
-        let fill = s.subgraph.style.fill.map(|f| color(f).opacity((f.alpha as f32).min(0.18))).unwrap_or(theme.text.opacity(0.035));
-        let stroke = s.subgraph.style.stroke.map(color).unwrap_or(theme.text.opacity(0.12));
-        p.rounded(s.frame, 8., Some(fill), Some((stroke, 1., s.subgraph.style.dashed)));
-    }
-    let edge_color = theme.text.opacity(0.5);
-    for e in &g.edges {
-        if e.edge.line == Line::Invisible || e.points.len() < 2 {
-            continue;
-        }
-        let points: Vec<(f64, f64)> = e.points.iter().map(|q| (q.x, q.y)).collect();
-        let width = if e.edge.line == Line::Thick { 2.5 } else { 1.2 };
-        p.polyline(&points, edge_color, width, e.edge.line == Line::Dotted);
-        let n = points.len();
-        end_mark(p, e.edge.end, points[n - 2], points[n - 1], edge_color);
-        end_mark(p, e.edge.start, points[1], points[0], edge_color);
-        if let (Some(frame), false) = (e.label_frame, e.label.is_empty()) {
-            p.rounded(frame, 4., Some(theme.card), None);
-        }
-    }
-    for n in &g.nodes {
-        let (base, tint, stroke) = fills(&n.node.style, theme);
-        let r = n.frame;
-        let draw = |p: &mut dyn Canvas, fill: Hsla, stroke: Option<(Hsla, f32, bool)>| match n.node.shape {
-            Shape::Rectangle => p.rounded(r, 2., Some(fill), stroke),
-            Shape::Rounded => p.rounded(r, 8., Some(fill), stroke),
-            Shape::Stadium => p.rounded(r, r.height / 2., Some(fill), stroke),
-            Shape::Subroutine => {
-                p.rounded(r, 2., Some(fill), stroke);
-                if let Some((c, w, _)) = stroke {
-                    p.polyline(&[(r.x + 8., r.y), (r.x + 8., r.max_y())], c, w, false);
-                    p.polyline(&[(r.max_x() - 8., r.y), (r.max_x() - 8., r.max_y())], c, w, false);
-                }
-            }
-            Shape::Cylinder => {
-                let ry = (r.height / 6.).min(8.);
-                p.rounded(Rect::new(r.x, r.y + ry, r.width, r.height - 2. * ry), 0., Some(fill), None);
-                p.ellipse(Rect::new(r.x, r.max_y() - 2. * ry, r.width, 2. * ry), Some(fill), stroke);
-                p.rounded(Rect::new(r.x, r.y + ry, r.width, r.height - 2. * ry), 0., Some(fill), None);
-                if let Some((c, w, d)) = stroke {
-                    p.polyline(&[(r.x, r.y + ry), (r.x, r.max_y() - ry)], c, w, d);
-                    p.polyline(&[(r.max_x(), r.y + ry), (r.max_x(), r.max_y() - ry)], c, w, d);
-                }
-                p.ellipse(Rect::new(r.x, r.y, r.width, 2. * ry), Some(fill), stroke);
-            }
-            Shape::Circle => p.ellipse(r, Some(fill), stroke),
-            Shape::DoubleCircle => {
-                p.ellipse(r, Some(fill), stroke);
-                p.ellipse(r.inset(4., 4.), None, stroke);
-            }
-            Shape::Diamond => p.polygon(&[(r.mid_x(), r.y), (r.max_x(), r.mid_y()), (r.mid_x(), r.max_y()), (r.x, r.mid_y())], Some(fill), stroke),
-            Shape::Hexagon => {
-                let d = (r.height / 2.).min(r.width / 4.);
-                p.polygon(
-                    &[(r.x + d, r.y), (r.max_x() - d, r.y), (r.max_x(), r.mid_y()), (r.max_x() - d, r.max_y()), (r.x + d, r.max_y()), (r.x, r.mid_y())],
-                    Some(fill),
-                    stroke,
-                )
-            }
-            Shape::Parallelogram => {
-                let d = (r.height * 0.35).min(r.width / 4.);
-                p.polygon(&[(r.x + d, r.y), (r.max_x(), r.y), (r.max_x() - d, r.max_y()), (r.x, r.max_y())], Some(fill), stroke)
-            }
-            Shape::ParallelogramAlt => {
-                let d = (r.height * 0.35).min(r.width / 4.);
-                p.polygon(&[(r.x, r.y), (r.max_x() - d, r.y), (r.max_x(), r.max_y()), (r.x + d, r.max_y())], Some(fill), stroke)
-            }
-            Shape::Trapezoid => {
-                let d = (r.height * 0.35).min(r.width / 4.);
-                p.polygon(&[(r.x + d, r.y), (r.max_x() - d, r.y), (r.max_x(), r.max_y()), (r.x, r.max_y())], Some(fill), stroke)
-            }
-            Shape::TrapezoidAlt => {
-                let d = (r.height * 0.35).min(r.width / 4.);
-                p.polygon(&[(r.x, r.y), (r.max_x(), r.y), (r.max_x() - d, r.max_y()), (r.x + d, r.max_y())], Some(fill), stroke)
-            }
-            Shape::Flag => {
-                let d = (r.height / 3.).min(r.width / 4.);
-                p.polygon(&[(r.x, r.y), (r.max_x(), r.y), (r.max_x(), r.max_y()), (r.x, r.max_y()), (r.x + d, r.mid_y())], Some(fill), stroke)
-            }
-        };
-        draw(p, base, None);
-        if let Some(tint) = tint {
-            draw(p, tint, None);
-        }
-        // The outline alone: fill none, drawn over.
-        draw(p, gpui_kit::transparent_black(), Some(stroke));
-    }
-}
-
-/// An arrowhead, circle or cross at the end of a line coming from `from` to `to`.
-fn end_mark(p: &mut dyn Canvas, mark: Arrow, from: (f64, f64), to: (f64, f64), c: Hsla) {
-    let (dx, dy) = (to.0 - from.0, to.1 - from.1);
-    let len = (dx * dx + dy * dy).sqrt().max(0.001);
-    let (ux, uy) = (dx / len, dy / len);
-    match mark {
-        Arrow::None => {}
-        Arrow::Arrow => head(p, to, (ux, uy), c, true),
-        Arrow::Circle => p.ellipse(Rect::new(to.0 - ux * 4. - 4., to.1 - uy * 4. - 4., 8., 8.), Some(c), None),
-        Arrow::Cross => {
-            let (cx, cy) = (to.0 - ux * 5., to.1 - uy * 5.);
-            let (nx, ny) = (-uy, ux);
-            let s = 4.;
-            p.polyline(&[(cx - (ux + nx) * s, cy - (uy + ny) * s), (cx + (ux + nx) * s, cy + (uy + ny) * s)], c, 1.5, false);
-            p.polyline(&[(cx - (ux - nx) * s, cy - (uy - ny) * s), (cx + (ux - nx) * s, cy + (uy - ny) * s)], c, 1.5, false);
-        }
-    }
-}
-
-/// A head at `tip` pointing along `(ux, uy)`: filled, or two open strokes.
-fn head(p: &mut dyn Canvas, tip: (f64, f64), (ux, uy): (f64, f64), c: Hsla, filled: bool) {
-    let (length, half) = (9., 4.5);
-    let base = (tip.0 - ux * length, tip.1 - uy * length);
-    let (nx, ny) = (-uy, ux);
-    let a = (base.0 + nx * half, base.1 + ny * half);
-    let b = (base.0 - nx * half, base.1 - ny * half);
-    if filled {
-        p.polygon(&[tip, a, b], Some(c), None);
-    } else {
-        p.polyline(&[a, tip, b], c, 1.3, false);
-    }
-}
-
-fn paint_sequence(p: &mut dyn Canvas, g: &SequenceGeometry, theme: &Theme) {
-    let line = theme.text.opacity(0.55);
-    for b in &g.blocks {
-        p.rounded(b.frame, 6., Some(theme.text.opacity(0.035)), Some((theme.text.opacity(0.18), 1., false)));
-        let tab = Rect::new(b.frame.x, b.frame.y, tab_width(b.kind.name()), LINE_HEIGHT + 6.);
-        p.rounded(tab, 4., Some(theme.text.opacity(0.06)), None);
-        for section in b.sections.iter().skip(1) {
-            p.polyline(&[(b.frame.x, section.y), (b.frame.max_x(), section.y)], theme.text.opacity(0.25), 1., true);
-        }
-    }
-    for part in &g.participants {
-        p.polyline(&[(part.center_x, g.lifeline_top), (part.center_x, g.lifeline_bottom)], theme.text.opacity(0.18), 1., true);
-    }
-    for a in &g.activations {
-        p.rounded(*a, 1., Some(theme.card), Some((theme.text.opacity(0.3), 1., false)));
-    }
-    for part in &g.participants {
-        let h = part.header;
-        if part.participant.is_actor {
-            // A stick figure over the name.
-            let (x, top) = (part.center_x, h.y + 1.);
-            let c = theme.text.opacity(0.6);
-            p.ellipse(Rect::new(x - 3.5, top, 7., 7.), None, Some((c, 1.2, false)));
-            p.polyline(&[(x, top + 7.), (x, top + 12.5)], c, 1.2, false);
-            p.polyline(&[(x - 5., top + 9.), (x + 5., top + 9.)], c, 1.2, false);
-            p.polyline(&[(x - 4., top + 17.), (x, top + 12.5), (x + 4., top + 17.)], c, 1.2, false);
-            let below = Rect::new(h.x, h.y + 18., h.width, h.height - 18.);
-            p.rounded(below, 6., Some(theme.canvas), Some((theme.text.opacity(0.22), 1., false)));
-        } else {
-            p.rounded(h, 6., Some(theme.canvas), Some((theme.text.opacity(0.22), 1., false)));
-        }
-    }
-    let note_fill: Hsla = gpui_kit::Hsla::from(gpui_kit::rgb(0xffcc00)).opacity(0.16);
-    let note_stroke: Hsla = gpui_kit::Hsla::from(gpui_kit::rgb(0xffcc00)).opacity(0.55);
-    for note in &g.notes {
-        p.rounded(note.frame, 3., Some(note_fill), Some((note_stroke, 1., false)));
-    }
-    for m in &g.messages {
-        let dotted = m.message.line == LineStyle::Dotted;
-        let filled = m.message.head == ArrowHead::Filled;
-        let mark = |p: &mut dyn Canvas, tip: (f64, f64), dir: (f64, f64)| match m.message.head {
-            ArrowHead::None => {}
-            ArrowHead::Filled | ArrowHead::Open => head(p, tip, dir, line, filled),
-            ArrowHead::Cross => {
-                let (x, y) = (tip.0 - dir.0 * 5., tip.1);
-                p.polyline(&[(x - 4., y - 4.), (x + 4., y + 4.)], line, 1.5, false);
-                p.polyline(&[(x - 4., y + 4.), (x + 4., y - 4.)], line, 1.5, false);
-            }
-        };
-        if m.is_self {
-            let (x, y, w) = (m.from_x, m.y, 32.);
-            p.polyline(&[(x, y), (x + w, y), (x + w, y + 20.), (x, y + 20.)], line, 1.2, dotted);
-            mark(p, (x, y + 20.), (-1., 0.));
-        } else {
-            p.polyline(&[(m.from_x, m.y), (m.to_x, m.y)], line, 1.2, dotted);
-            let dir = if m.to_x >= m.from_x { 1. } else { -1. };
-            mark(p, (m.to_x, m.y), (dir, 0.));
-            if m.message.bidirectional {
-                mark(p, (m.from_x, m.y), (-dir, 0.));
-            }
-        }
-        if m.number.is_some() {
-            p.ellipse(Rect::new(m.from_x - 8., m.y - 8., 16., 16.), Some(theme.accent), None);
-        }
-    }
-}
-
 // MARK: - Copy Image, Save as PNG
 
 /// Shapes as SVG paths, for an image of the diagram.
 struct Svg {
     out: String,
+    theme: Theme,
 }
 
 fn svg_color(c: Hsla) -> (String, f32) {
@@ -680,7 +317,10 @@ fn escape(text: &str) -> String {
 }
 
 impl Canvas for Svg {
-    fn path(&mut self, segs: &[Seg], fill: Option<Hsla>, stroke: Option<(Hsla, f32, bool)>) {
+    fn path(&mut self, segs: &[Seg], fill: Option<Ink>, stroke: Option<(Ink, f32, bool)>) {
+        let theme = self.theme;
+        let fill = fill.map(|i| hsla(i, &theme));
+        let stroke = stroke.map(|(i, w, d)| (hsla(i, &theme), w, d));
         use std::fmt::Write;
         let mut d = String::new();
         for seg in segs {
@@ -718,13 +358,10 @@ fn svg_of(drawn: &Drawn, theme: &Theme) -> String {
     let size = drawn.geometry.size();
     let (w, h) = (size.width + PADDING * 2., size.height + PADDING * 2.);
     let (bg, _) = svg_color(theme.canvas);
-    let mut svg = Svg { out: format!("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w:.0}\" height=\"{h:.0}\" viewBox=\"0 0 {w:.2} {h:.2}\">\n<rect width=\"100%\" height=\"100%\" fill=\"{bg}\"/>\n") };
-    match &drawn.geometry {
-        Geometry::Flowchart(g) => paint_flowchart(&mut svg, g, theme),
-        Geometry::Sequence(g) => paint_sequence(&mut svg, g, theme),
-    }
-    for l in labels(&drawn.geometry, theme) {
-        let (hex, a) = svg_color(l.color);
+    let mut svg = Svg { out: format!("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w:.0}\" height=\"{h:.0}\" viewBox=\"0 0 {w:.2} {h:.2}\">\n<rect width=\"100%\" height=\"100%\" fill=\"{bg}\"/>\n"), theme: *theme };
+    draw::paint(&mut svg, &drawn.geometry);
+    for l in draw::labels(&drawn.geometry) {
+        let (hex, a) = svg_color(hsla(l.color, theme));
         let (x, anchor) = match l.width {
             Some(width) => (l.x + width / 2., "middle"),
             None => (l.x, "start"),
@@ -738,7 +375,7 @@ fn svg_of(drawn: &Drawn, theme: &Theme) -> String {
                 x + PADDING,
                 baseline + PADDING,
                 l.size,
-                l.weight.0 as i32,
+                l.weight,
                 escape(line)
             );
         }

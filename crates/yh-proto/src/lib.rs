@@ -11,7 +11,8 @@ use serde::{Deserialize, Serialize};
 /// 3: answering questions and plans, MCP questions, new threads, model, effort and mode, thread
 /// actions, whole tool output, photos with a message, `options`, and `done` once the app took
 /// the action (with the thread it made).
-pub const PROTOCOL: u32 = 3;
+/// 4: a row's sub-agent summary, a sub-agent's whole run, a row's pictures, a diagram drawn.
+pub const PROTOCOL: u32 = 4;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Project {
@@ -81,6 +82,107 @@ pub struct Row {
     pub attachments: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub changed_files: Vec<String>,
+    /// A sub-agent's call (`Agent`, `Task`): its run summarized.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent: Option<SubagentInfo>,
+}
+
+/// A sub-agent's run as its card shows it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SubagentInfo {
+    pub description: String,
+    /// `running`, `completed`, `failed`, `stopped`.
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_uses: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    /// What it's doing now ("Reading a.txt").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<String>,
+    #[serde(default)]
+    pub background: bool,
+}
+
+/// One thing a sub-agent did: a message (`tool` none) or a tool call and its result.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SubagentStep {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    /// The message, or the call's input (JSON), trimmed to `INPUT_LIMIT` characters.
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
+    #[serde(default)]
+    pub is_error: bool,
+}
+
+/// A sub-agent's whole run: what it was asked, its steps (the newest few hundred) and its report.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SubagentRun {
+    pub info: SubagentInfo,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    #[serde(default)]
+    pub steps: Vec<SubagentStep>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<String>,
+}
+
+/// A diagram as shapes to draw: paths in the diagram's own points (y down), then labels.
+/// Colours are roles the client resolves in its own light or dark (`text` at an alpha, the
+/// `canvas` and `card` backgrounds, the `accent`), or an author's colour.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Drawing {
+    pub width: f64,
+    pub height: f64,
+    /// "Flowchart", or a sequence diagram's title.
+    pub kind: String,
+    pub paths: Vec<DrawnPath>,
+    pub labels: Vec<DrawnLabel>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct DrawnPath {
+    /// `M x y`, `L x y`, `A rx ry x y` (a clockwise elliptical arc to the point), `Z`.
+    pub d: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill: Option<Ink>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stroke: Option<Ink>,
+    #[serde(default)]
+    pub width: f32,
+    #[serde(default)]
+    pub dashed: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct DrawnLabel {
+    pub lines: Vec<String>,
+    pub x: f64,
+    pub y: f64,
+    /// Centred in this width from `x`; left-aligned from `x` without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<f64>,
+    pub size: f32,
+    pub line_height: f64,
+    /// 400 regular, 500 medium, 600 semibold.
+    pub weight: u16,
+    pub color: Ink,
+}
+
+/// A colour: a role and an alpha (`text`, `canvas`, `card`, `accent`), or red, green, blue, alpha.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Ink {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rgba: Option<[f32; 4]>,
+    pub alpha: f32,
 }
 
 /// A request waiting on you, as the app's card shows it: a tool to allow, Claude's question, or
@@ -178,6 +280,12 @@ pub enum ToApp {
     Done { id: String, #[serde(skip_serializing_if = "Option::is_none")] error: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] thread: Option<String> },
     /// The models and permission modes to choose from: after `threads`, and when they change.
     Options { models: Vec<ModelOption>, modes: Vec<String> },
+    /// A sub-agent's whole run, asked for with `subagent`.
+    Subagent { thread: String, seq: i64, run: SubagentRun },
+    /// A row's picture (`index`: which of its pictures), asked for with `media`: base64, or why not.
+    Media { thread: String, seq: i64, index: usize, #[serde(default, skip_serializing_if = "Option::is_none")] media_type: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] data: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] error: Option<String> },
+    /// A Mermaid diagram laid out and drawn, asked for with `diagram` (`error`: why it can't be).
+    Diagram { key: String, #[serde(default, skip_serializing_if = "Option::is_none")] drawing: Option<Drawing>, #[serde(default, skip_serializing_if = "Option::is_none")] error: Option<String> },
     /// A row's whole tool input and result, asked for with `tool_result`.
     ToolResult { thread: String, seq: i64, #[serde(skip_serializing_if = "Option::is_none")] input: Option<String>, #[serde(skip_serializing_if = "Option::is_none")] result: Option<String> },
     Error { message: String },
@@ -228,6 +336,14 @@ pub enum FromApp {
     Delete { #[serde(default)] id: Option<String>, thread: String },
     /// A row's whole tool input and result: answered with `tool_result`.
     ToolResult { thread: String, seq: i64 },
+    /// A sub-agent's whole run (its call's row): answered with `subagent`.
+    Subagent { thread: String, seq: i64 },
+    /// A row's picture: yours (an attachment) or one Claude showed (`show_media`), by its place
+    /// among the row's pictures. Answered with `media`.
+    Media { thread: String, seq: i64, index: usize },
+    /// A Mermaid block's source, laid out and drawn as the Mac draws it: answered with `diagram`
+    /// under the same `key`.
+    Diagram { key: String, source: String },
     #[serde(other)]
     Unknown,
 }
