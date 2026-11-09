@@ -86,6 +86,13 @@ files. Sub-agent records are left out of the MVP.
 - **Rules carried over from the Mac:** changes applied at most once a frame, splicing only the
   rows they touch; markdown parsed off the main thread and cached per row; only recent rows
   held; nothing that changes often in a view that's always there.
+- **Rows are measured, not self-sized** (`RowLayout.swift`, `TranscriptLayout.swift`): each copy
+  of a row is styled and measured once, in the background, into a height and the frames of its
+  pieces; the layout stacks those heights (a running sum, a binary search for what's on
+  screen) and cells only set frames. A page of earlier rows is measured before it's inserted,
+  so the scroll position is corrected exactly. The first version (compositional layout with
+  estimated heights, Auto Layout cells) spent 40% of the main thread solving sizes while
+  scrolling.
 
 ## Milestones
 
@@ -94,12 +101,34 @@ files. Sub-agent records are left out of the MVP.
 | ✅ **M0** | `yh-devserver`: the wire above, read-only, polling `rev`; tests against a temp database | `cargo test -p yh-devserver`; a WebSocket client sees rows arrive while a dev app runs a Haiku turn on the same scratch folder |
 | ✅ **M1** | App skeleton: XcodeGen project, connection, thread list live | Simulator screenshot shows the preset's threads; a new thread made on the Mac appears |
 | ✅ **M2** | Transcript: `UICollectionView`, row kinds, markdown, follow-bottom, paging | A Haiku turn on the Mac shows up on the phone as it runs, checked by screenshots |
-| **M3** | Speed and polish: the extreme preset's 20 huge threads, light and dark, Dynamic Type, VoiceOver names | No hitches in Instruments while a 32,000-row thread updates; a design pass |
+| ✅ **M3** | Speed and polish: the extreme preset's 20 huge threads, light and dark, Dynamic Type, VoiceOver names | No hitches in Instruments while a 32,000-row thread updates; a design pass |
 
 M0 to M2 were checked on 2026-11-09 with real Haiku turns in a test copy of the app: the phone
 opened the working thread on its own (`YH_SELECT=active`) and drew the reply as it grew, about
 once a second, following the bottom. `cargo run -p yh-devserver --example watch` prints what the
 phone gets, one line a message.
+
+M3, measured in the Simulator (iPhone 17 Pro, 60 Hz) on the extreme preset:
+
+| | Before (self-sizing cells) | After (measured rows) |
+|---|---|---|
+| Flinging up through "Huge 02" (32,297 rows), late frames | 8.5% | 1.2% |
+| Longest update applied | 45 ms | 5 ms |
+| Watching a thread while the Mac streams all 20 | 0.39% late, applies 6–10 ms | 0.17% late (none after opening), applies 3–4 ms |
+
+The Mac app streaming those 20 threads with the dev server reading alongside: 120 fps, 99.4% on
+time. Still slow: opening a thread's first frame (about 130 ms, nearly all the navigation push's
+own work, first time) and launch (about 100 ms). The Simulator isn't a phone: these need a
+check on a real ProMotion iPhone (120 Hz, an 8 ms frame) once there's a signed build.
+
+Test hooks: `YH_PERF=1` prints `PERF` lines every 5 s (frames, late frames, the worst frame,
+time spent applying the Mac's changes); `YH_SCROLL_PROBE=<s>` flings the open transcript upward
+that long, then prints how far it got; `YH_SELECT_DELAY=<s>` opens `YH_SELECT`'s thread that much
+after launch (`OPEN`, `SHOWN` lines). `scripts/mobile.sh --log <file>` keeps what the app prints.
+To see where the main thread's time goes: `xcrun xctrace record --template 'Time Profiler'
+--device <simulator id> --attach YourHarness --time-limit 15s --output <trace>`. To stream the
+20 threads, run the app's perf phase on the same clone: `YH_PERF=<dir> YH_PERF_PHASES=stream-all
+YH_NO_CLAUDE=1` with the preset's fake `claude` first in `YH_PATH` (as `scripts/perf-run.sh` does).
 
 ### Running it
 

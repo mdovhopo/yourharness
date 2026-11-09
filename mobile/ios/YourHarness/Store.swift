@@ -94,6 +94,16 @@ final class Store {
     // MARK: Messages
 
     private func apply(_ batch: [ToApp]) {
+        let rows = batch.reduce(0) { n, m in
+            switch m {
+            case .snapshot(_, _, _, let r), .rowsChanged(_, _, let r), .pageRows(_, let r): n + r.count
+            default: n
+            }
+        }
+        Perf.shared.measure(rows: rows) { applyNow(batch) }
+    }
+
+    private func applyNow(_ batch: [ToApp]) {
         var rowsByThread: [String: [RowModel]] = [:]
         for message in batch {
             switch message {
@@ -156,7 +166,13 @@ final class Store {
         }
         selectOnLoad = nil
         if let t = threads[wanted] ?? threads.values.first(where: { $0.title == wanted }) {
-            path = [t.id]
+            // `YH_SELECT_DELAY=<s>`: opened that much later, so its timings stand apart from launch's.
+            let delay = ProcessInfo.processInfo.environment["YH_SELECT_DELAY"].flatMap(Double.init) ?? 0
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(delay))
+                Perf.shared.log("OPEN \(t.title)")
+                path = [t.id]
+            }
         }
     }
 }

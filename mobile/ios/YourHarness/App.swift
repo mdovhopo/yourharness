@@ -4,6 +4,10 @@ import SwiftUI
 struct YourHarnessApp: App {
     @State private var store = Store()
 
+    init() {
+        Perf.shared.start()
+    }
+
     var body: some Scene {
         WindowGroup {
             RootView()
