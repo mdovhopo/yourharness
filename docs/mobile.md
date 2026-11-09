@@ -217,16 +217,24 @@ Recorded here so the MVP stays small. Roughly in order; Tailscale last.
    folder matching what follows. A tap writes it in. Hooks: `YH_PHONE_DRAFT=<text>` (in the field
    at launch; `/` or `look at @no` shows the list), `SUGGEST n: …` lines.
 5d. ✅ **Protocol 5, checked 2026-11-09 in the Simulator against the Mac test app**:
-   - **Search** from the thread list (`.searchable`): titles matched on the phone, then the Mac's
-     full-text index ("In Conversations", the words found in bold). `YH_PHONE_SEARCH=<words>`.
-   - **Usage limits** at the bottom of the list, as the Mac's footer has them; a window whose reset
-     time has passed says so instead of showing an old figure as current.
+   - **The dock** (iOS 26 tab bar): Threads, Usage, Mac (address, status, protocol; what the
+     server sheet was) and Search; hidden inside a thread, where the composer is.
+     `YH_PHONE_TAB=usage|mac|search`.
+   - **Search**, the dock's search tab: titles matched on the phone, then the Mac's full-text index
+     ("In Conversations", the words found in bold); a result opens its thread in Threads.
+     `YH_PHONE_SEARCH=<words>` (with `YH_PHONE_TAB=search`).
+   - **Usage limits** on the Usage tab, not on the thread list; a window whose reset time has
+     passed says so instead of showing an old figure as current.
    - **Can't reach your Mac**: until the phone has connected once, an empty state with the
      address, Try Again and Server Settings in place of an empty list.
    - **Side chats** (`/btw`, or the toolbar's bubbles): a sheet with the side chat's rows drawn by
      the same transcript, asked through `ask_aside`; the server follows a `side:<thread>` beside
-     the thread a client watches. Checked with a real Haiku turn from the phone.
-     `YH_PHONE_ASIDE=<question>`.
+     the thread a client watches, until the sheet closes (`unsubscribe_thread` with `thread`).
+     Checked with a real Haiku turn from the phone. `YH_PHONE_ASIDE=<question>`.
+   - **Only the open thread streams.** Measured with `yh <url> listen 40 [thread]` while another
+     thread wrote 300 words: a client with only the list open got no rows, 5 status updates
+     (1.7 KB); one with the thread open got 62 row updates (63 KB). Each update carries the whole
+     growing row; sending only what was appended would cut that, later.
    - **Resuming** after a reconnect: `subscribe_thread` with `known` (the rows held), the snapshot
      starting a little before them, merged by content (a restarted server numbers `rev`s anew),
      so only what changed is drawn again: `RESUME from 0: 0 changed, 2 new` after a Mac restart

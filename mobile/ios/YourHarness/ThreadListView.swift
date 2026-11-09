@@ -2,44 +2,23 @@ import SwiftUI
 
 struct ThreadListView: View {
     @Environment(Store.self) private var store
-    @State private var showsServer = false
     @State private var openShelves: Set<String> = []
     /// The thread being renamed, and the title being typed.
     @State private var renaming: ThreadInfo?
     @State private var title = ""
     @State private var deleting: ThreadInfo?
-    @State private var query = Self.env["YH_PHONE_SEARCH"] ?? ""
     private static let env = ProcessInfo.processInfo.environment
 
     var body: some View {
         Group {
             if store.state != .connected, !store.everConnected, store.sections.isEmpty, case .waiting = store.state {
-                Unreachable(showsServer: $showsServer)
-            } else if !query.trimmingCharacters(in: .whitespaces).isEmpty {
-                SearchResults(query: query)
+                Unreachable()
             } else {
                 list
             }
         }
         .navigationTitle("Threads")
         .navigationSubtitle(store.state == .connected ? store.serverName ?? "" : "")
-        .searchable(text: $query, prompt: "Titles and conversations")
-        .task(id: query) {
-            // Asked once typing pauses.
-            try? await Task.sleep(for: .milliseconds(300))
-            guard !Task.isCancelled else { return }
-            store.search(query)
-            if !query.isEmpty { Perf.shared.log("SEARCH \(query)") }
-        }
-        .onChange(of: store.searchHits) { _, hits in
-            if !hits.isEmpty { Perf.shared.log("SEARCH found \(hits.count): \(hits[0].snippet.prefix(60))") }
-        }
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button("Server", systemImage: "desktopcomputer") { showsServer = true }
-            }
-        }
-        .sheet(isPresented: $showsServer) { ServerSheet() }
     }
 
     private var list: some View {
@@ -75,11 +54,6 @@ struct ThreadListView: View {
                                 .accessibilityLabel("New thread in \(section.project.name)")
                         }
                     }
-                }
-            }
-            if !store.limits.isEmpty, !store.sections.isEmpty {
-                Section("Usage") {
-                    ForEach(store.limits) { LimitRow(window: $0) }
                 }
             }
         }
@@ -130,7 +104,6 @@ struct ThreadListView: View {
 
 /// The Mac can't be reached and never was this time: what to do about it.
 private struct Unreachable: View {
-    @Binding var showsServer: Bool
     @Environment(Store.self) private var store
 
     var body: some View {
@@ -142,7 +115,7 @@ private struct Unreachable: View {
         } actions: {
             Button("Try Again") { store.reconnect() }
                 .buttonStyle(.borderedProminent)
-            Button("Server Settings") { showsServer = true }
+            Button("Mac Settings") { store.tab = .mac }
         }
     }
 
@@ -152,40 +125,63 @@ private struct Unreachable: View {
     }
 }
 
-/// Threads whose titles match, then rows where the words were said, from the Mac's index.
-private struct SearchResults: View {
-    let query: String
+/// The dock's search: threads whose titles match, then rows where the words were said, from
+/// the Mac's index. A result opens its thread in Threads.
+struct SearchView: View {
     @Environment(Store.self) private var store
+    @State private var query = ProcessInfo.processInfo.environment["YH_PHONE_SEARCH"] ?? ""
 
     var body: some View {
+        results
+            .navigationTitle("Search")
+            .searchable(text: $query, prompt: "Titles and conversations")
+            .task(id: query) {
+                // Asked once typing pauses.
+                try? await Task.sleep(for: .milliseconds(300))
+                guard !Task.isCancelled else { return }
+                store.search(query)
+                if !query.isEmpty { Perf.shared.log("SEARCH \(query)") }
+            }
+            .onChange(of: store.searchHits) { _, hits in
+                if !hits.isEmpty { Perf.shared.log("SEARCH found \(hits.count): \(hits[0].snippet.prefix(60))") }
+            }
+    }
+
+    private var results: some View {
         let words = query.trimmingCharacters(in: .whitespaces)
         let titled = store.sections.flatMap { $0.live + $0.settled }.filter { $0.title.localizedCaseInsensitiveContains(words) }
         let hits = store.searchQuery == words ? store.searchHits : []
-        List {
+        return List {
             if !titled.isEmpty {
                 Section("Threads") {
                     ForEach(titled) { t in
-                        NavigationLink(value: t.id) { ThreadRow(thread: t) }
+                        Button { store.show(t.id) } label: { ThreadRow(thread: t).contentShape(.rect) }
+                            .buttonStyle(.plain)
                     }
                 }
             }
             if !hits.isEmpty {
                 Section("In Conversations") {
                     ForEach(hits) { hit in
-                        NavigationLink(value: hit.thread) {
+                        Button { store.show(hit.thread) } label: {
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(store.threads[hit.thread]?.title ?? "Thread").font(.subheadline.weight(.semibold)).lineLimit(1)
                                 Text(Self.marked(hit.snippet)).font(.subheadline).foregroundStyle(.secondary).lineLimit(3)
                             }
                             .padding(.vertical, 2)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(.rect)
                         }
+                        .buttonStyle(.plain)
                     }
                 }
             }
         }
         .listStyle(.insetGrouped)
         .overlay {
-            if titled.isEmpty, hits.isEmpty {
+            if words.isEmpty {
+                ContentUnavailableView("Search Threads", systemImage: "magnifyingglass", description: Text("Thread titles, and what was said in them, on your Mac."))
+            } else if titled.isEmpty, hits.isEmpty {
                 if store.canSearch, store.searchQuery == words, words.count >= 2 {
                     ContentUnavailableView.search(text: words)
                 } else if !store.canSearch, store.state == .connected {
@@ -336,47 +332,39 @@ struct ConnectionRow: View {
     }
 }
 
-struct ServerSheet: View {
+/// The dock's Mac page: where the phone connects, and how that's going.
+struct MacView: View {
     @Environment(Store.self) private var store
-    @Environment(\.dismiss) private var dismiss
     @State private var address = ""
 
     var body: some View {
-        NavigationStack {
-            Form {
-                Section {
-                    TextField(Store.defaultAddress, text: $address)
-                        .keyboardType(.URL)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .font(.body.monospaced())
-                } header: {
-                    Text("Mac address")
-                } footer: {
-                    Text("Start YourHarness on your Mac with YH_SERVER, and paste the address it prints, token and all. The Simulator reaches it at 127.0.0.1.")
+        Form {
+            Section {
+                LabeledContent("Status", value: status)
+                if let name = store.serverName, store.state == .connected {
+                    LabeledContent("Mac", value: name)
+                    LabeledContent("Protocol", value: "\(store.serverProtocol)")
                 }
-                Section {
-                    LabeledContent("Status", value: status)
-                    if let name = store.serverName, store.state == .connected {
-                        LabeledContent("Mac", value: name)
-                    }
+                if store.state != .connected {
+                    Button("Try Again") { store.reconnect() }
                 }
             }
-            .navigationTitle("Server")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Cancel", role: .cancel) { dismiss() } }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Connect", role: .confirm) {
-                        store.connect(to: address.trimmingCharacters(in: .whitespaces))
-                        dismiss()
-                    }
-                    .disabled(URL(string: address)?.scheme.map { ["ws", "wss"].contains($0) } != true)
-                }
+            Section {
+                TextField(Store.defaultAddress, text: $address)
+                    .keyboardType(.URL)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .font(.body.monospaced())
+                Button("Connect") { store.connect(to: address.trimmingCharacters(in: .whitespaces)) }
+                    .disabled(address == store.serverAddress || URL(string: address)?.scheme.map { ["ws", "wss"].contains($0) } != true)
+            } header: {
+                Text("Mac address")
+            } footer: {
+                Text("Start YourHarness on your Mac with YH_SERVER, and paste the address it prints, token and all. The Simulator reaches it at 127.0.0.1.")
             }
-            .onAppear { address = store.serverAddress }
         }
-        .presentationDetents([.medium])
+        .navigationTitle("Mac")
+        .onAppear { address = store.serverAddress }
     }
 
     private var status: String {
@@ -385,6 +373,30 @@ struct ServerSheet: View {
         case .connected: "Connected"
         case .waiting(let reason, _): reason
         }
+    }
+}
+
+/// The dock's Usage page: Claude's limits as the Mac last heard them.
+struct UsageView: View {
+    @Environment(Store.self) private var store
+
+    var body: some View {
+        List {
+            if !store.limits.isEmpty {
+                Section {
+                    ForEach(store.limits) { LimitRow(window: $0) }
+                } footer: {
+                    Text("As your Mac last heard from Claude. It hears again with each turn.")
+                }
+            }
+        }
+        .listStyle(.insetGrouped)
+        .overlay {
+            if store.limits.isEmpty {
+                ContentUnavailableView("No Usage Yet", systemImage: "gauge.with.dots.needle.33percent", description: Text(store.state == .connected ? "Your Mac hasn't heard Claude's limits yet. They come with its next turn." : "Connect to your Mac to see Claude's limits."))
+            }
+        }
+        .navigationTitle("Usage")
     }
 }
 

@@ -338,7 +338,8 @@ pub enum FromApp {
     /// `known`: how many rows the client holds already (reconnecting): the snapshot then starts
     /// a little before them, and the client keeps what it has before that.
     SubscribeThread { thread: String, #[serde(default)] limit: Option<i64>, #[serde(default)] known: Option<i64> },
-    UnsubscribeThread,
+    /// Stop watching: `thread` alone (a side chat closed; protocol 5), or everything watched.
+    UnsubscribeThread { #[serde(default, skip_serializing_if = "Option::is_none")] thread: Option<String> },
     /// Rows before `before_seq`, at most `limit`.
     Page { thread: String, before_seq: i64, #[serde(default)] limit: Option<i64> },
     /// Your message, as typed in the app's composer: it starts a turn, or steers into the one

@@ -723,7 +723,11 @@ fn answer(id: u64, message: FromApp, shared: &Shared, source: &Source) -> Vec<To
                 Err(e) => failed(e),
             }
         }
-        FromApp::UnsubscribeThread => {
+        FromApp::UnsubscribeThread { thread: Some(thread) } => {
+            set(&|c| c.watching.retain(|(t, _)| *t != thread));
+            vec![]
+        }
+        FromApp::UnsubscribeThread { thread: None } => {
             set(&|c| c.watching.clear());
             vec![]
         }
@@ -794,7 +798,7 @@ fn to_action(m: FromApp) -> Result<Action, String> {
         F::Pin { thread, on, .. } => Action::Pin { thread, on },
         F::Settle { thread, on, .. } => Action::Settle { thread, on },
         F::Delete { thread, .. } => Action::Delete { thread },
-        F::SubscribeApp | F::SubscribeThread { .. } | F::UnsubscribeThread | F::Page { .. } | F::ToolResult { .. } | F::Subagent { .. } | F::Media { .. } | F::Diagram { .. } | F::Search { .. } | F::Files { .. } | F::Unknown => return Err("Not an action.".into()),
+        F::SubscribeApp | F::SubscribeThread { .. } | F::UnsubscribeThread { .. } | F::Page { .. } | F::ToolResult { .. } | F::Subagent { .. } | F::Media { .. } | F::Diagram { .. } | F::Search { .. } | F::Files { .. } | F::Unknown => return Err("Not an action.".into()),
     })
 }
 

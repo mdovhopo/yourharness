@@ -14,6 +14,14 @@ final class Store {
     private var order: [String] = []
     /// The navigation stack: thread IDs.
     var path: [String] = []
+    /// The dock's tab (`YH_PHONE_TAB=usage|mac|search` at launch).
+    var tab = ProcessInfo.processInfo.environment["YH_PHONE_TAB"].flatMap(AppTab.init(rawValue:)) ?? .threads
+
+    /// A thread opened from anywhere: over the thread list.
+    func show(_ thread: String) {
+        tab = .threads
+        path = [thread]
+    }
     var serverAddress: String
     /// 1: the dev server, read-only; 2: the Mac app's server, which takes actions.
     var serverProtocol = 0
@@ -282,8 +290,7 @@ final class Store {
         guard aside === model else { return }
         aside = nil
         asideLive = nil
-        // The server goes on following it beside the thread until the thread closes: cheap,
-        // and its rows are dropped here.
+        connection.send(.unsubscribe(model.threadID))
     }
 
     /// A question asked beside the thread, without disturbing its turn.

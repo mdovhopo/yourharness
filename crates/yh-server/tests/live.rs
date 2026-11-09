@@ -157,6 +157,13 @@ fn streams_what_claude_writes_and_takes_actions() {
     c.expect("the side question", |m| matches!(m, ToApp::RowsChanged { thread, rows, .. } if thread == "side:t1" && rows[0].text == "why?"));
     engine.send(Command::Events { thread: t(), events: vec![delta("m", "!")] });
     c.expect("the thread still streams", |m| matches!(m, ToApp::RowsChanged { thread, rows, .. } if thread == "t1" && rows.iter().any(|r| r.text == "Hello, world!")));
+    // The side chat closed: its rows stop, the thread's go on.
+    c.send(FromApp::UnsubscribeThread { thread: Some("side:t1".into()) });
+    std::thread::sleep(Duration::from_millis(100));
+    engine.send(Command::Send { thread: "side:t1".into(), text: "and?".into(), attachments: vec![], message_id: "s2".into(), now: false, effort: None, deliver: None });
+    engine.send(Command::Events { thread: t(), events: vec![delta("m", "?")] });
+    let m = c.expect("only the thread", |m| matches!(m, ToApp::RowsChanged { .. }));
+    assert!(matches!(&m, ToApp::RowsChanged { thread, .. } if thread == "t1"), "{m:?}");
 
     // Protocol 3: an answer to Claude's question, a new thread (named in `done`), a picture with
     // a message, an action the app refuses, a mode it doesn't know.

@@ -7,6 +7,7 @@
 //! cargo run -p yh-server --example yh -- <url> allow|deny <thread> [request id]   (the first waiting)
 //! cargo run -p yh-server --example yh -- <url> withdraw|send-now <thread> <message id>
 //! cargo run -p yh-server --example yh -- <url> raw '<any message as JSON>'
+//! cargo run -p yh-server --example yh -- <url> listen <seconds> [thread]   (what a client gets: counts and bytes by type)
 //! ```
 //!
 //! Prints what it gets, one line a message: `THREAD`, `SNAPSHOT`, `ROWS`, `LIVE`, `DONE`. `watch`
@@ -185,6 +186,37 @@ fn main() {
                 if let Some(m) = next(&mut ws) {
                     print(&m, &mut began);
                 }
+            }
+        }
+        // What a client with the list open (and a thread, if named) is sent over a while, by
+        // message type: to check nothing streams that the client didn't ask for.
+        "listen" => {
+            let seconds: u64 = rest.first().and_then(|s| s.parse().ok()).unwrap_or(30);
+            send(&mut ws, FromApp::SubscribeApp);
+            if let Some(t) = rest.get(1) {
+                send(&mut ws, FromApp::SubscribeThread { thread: t.clone(), limit: Some(1), known: None });
+            }
+            let mut counts: std::collections::BTreeMap<String, (usize, usize)> = Default::default();
+            let until = Instant::now() + Duration::from_secs(seconds);
+            while Instant::now() < until {
+                match ws.read() {
+                    Ok(Message::Text(t)) => {
+                        let kind = serde_json::from_str::<serde_json::Value>(&t).ok().and_then(|v| v["type"].as_str().map(str::to_string)).unwrap_or_default();
+                        let thread = serde_json::from_str::<serde_json::Value>(&t).ok().and_then(|v| v["thread"].as_str().or(v["thread"]["id"].as_str()).map(str::to_string)).unwrap_or_default();
+                        let e = counts.entry(format!("{kind} {}", thread.chars().take(8).collect::<String>())).or_default();
+                        e.0 += 1;
+                        e.1 += t.len();
+                    }
+                    Ok(_) => {}
+                    Err(tungstenite::Error::Io(e)) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
+                    Err(e) => {
+                        eprintln!("closed: {e}");
+                        break;
+                    }
+                }
+            }
+            for (k, (n, bytes)) in counts {
+                println!("LISTEN {k}: {n} messages, {bytes} bytes");
             }
         }
         _ => usage(),

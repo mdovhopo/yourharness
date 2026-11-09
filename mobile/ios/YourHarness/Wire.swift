@@ -344,6 +344,8 @@ enum FromApp {
     case subscribeApp
     case subscribeThread(String, limit: Int, known: Int? = nil)
     case unsubscribeThread
+    /// Protocol 5: only this one (a side chat closed).
+    case unsubscribe(String)
     case page(String, beforeSeq: Int, limit: Int)
     // Protocol 2's actions; each carries an id its `done` answers.
     case send(id: String, thread: String, text: String, now: Bool, images: [OutgoingImage] = [])
@@ -416,6 +418,7 @@ enum FromApp {
         case .subscribeApp: ["type": "subscribe_app"]
         case .subscribeThread(let t, let limit, let known): ["type": "subscribe_thread", "thread": t, "limit": limit, "known": known.map { $0 as Any } ?? NSNull()]
         case .unsubscribeThread: ["type": "unsubscribe_thread"]
+        case .unsubscribe(let t): ["type": "unsubscribe_thread", "thread": t]
         case .page(let t, let before, let limit): ["type": "page", "thread": t, "before_seq": before, "limit": limit]
         case .send(let id, let t, let text, let now, let images):
             ["type": "send", "id": id, "thread": t, "text": text, "now": now,
