@@ -13,6 +13,9 @@ struct ComposerBar: View {
     @Binding var images: [OutgoingImage]
     @FocusState private var focused: Bool
     @State private var picked: [PhotosPickerItem] = []
+    @State private var dictation = Dictation()
+    /// What was in the field when dictation started: what's heard goes after it.
+    @State private var beforeDictation = ""
 
     private var live: Live? { store.live }
     private var running: Bool { live?.running ?? store.threads[threadID]?.isRunning ?? false }
@@ -106,13 +109,30 @@ struct ComposerBar: View {
                 .buttonBorderShape(.circle)
                 .accessibilityLabel("Attach pictures")
             }
-            TextField(running ? "Message (waits for Claude's step)" : "Message", text: $draft, axis: .vertical)
-                .lineLimit(1...6)
-                .focused($focused)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 9)
-                .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 20))
-                .submitLabel(.send)
+            HStack(alignment: .bottom, spacing: 4) {
+                TextField(listening ? "Listening…" : running ? "Message (waits for Claude's step)" : "Message", text: $draft, axis: .vertical)
+                    .lineLimit(1...6)
+                    .focused($focused)
+                    .submitLabel(.send)
+                    .padding(.vertical, 9)
+                // Voice input, always here: tap to dictate into the field, tap again to stop.
+                Button {
+                    if !listening { beforeDictation = draft.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    dictation.toggle()
+                } label: {
+                    Image(systemName: listening ? "waveform" : "mic")
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundStyle(listening ? Color.red : Color.secondary)
+                        .symbolEffect(.variableColor.iterative, isActive: listening)
+                        .frame(width: 32, height: 36)
+                        .contentShape(.rect)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(listening ? "Stop dictating" : "Dictate")
+            }
+            .padding(.leading, 14)
+            .padding(.trailing, 6)
+            .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 20))
             if empty, running {
                 Button {
                     store.stop(threadID)
@@ -126,6 +146,7 @@ struct ComposerBar: View {
                 .accessibilityLabel("Stop")
             } else {
                 Button {
+                    dictation.stop()
                     store.send(draft, to: threadID, images: images)
                     draft = ""
                     images = []
@@ -141,7 +162,25 @@ struct ComposerBar: View {
             }
         }
         .sensoryFeedback(.impact(weight: .light), trigger: running)
+        .sensoryFeedback(.start, trigger: listening)
+        .onChange(of: dictation.transcript) { _, heard in
+            guard !heard.isEmpty else { return }
+            draft = beforeDictation.isEmpty ? heard : beforeDictation + " " + heard
+        }
+        .onChange(of: dictation.state) { _, state in
+            if case .unavailable(let why) = state { store.actionError = why }
+        }
+        // `YH_PHONE_DICTATE_FILE=<audio>`: a recording's words written into the field, as dictating them would.
+        .task {
+            guard let path = ProcessInfo.processInfo.environment["YH_PHONE_DICTATE_FILE"] else { return }
+            try? await Task.sleep(for: .seconds(2))
+            let heard = await dictation.transcribe(file: URL(fileURLWithPath: path))
+            Perf.shared.log("PHONE dictated: \(heard ?? "(nothing)")")
+            if let heard { draft = heard }
+        }
     }
+
+    private var listening: Bool { dictation.state == .listening }
 }
 
 extension OutgoingImage {

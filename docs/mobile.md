@@ -222,6 +222,15 @@ Recorded here so the MVP stays small. Roughly in order; Tailscale last.
    opened at its own size to scroll and zoom. Wide ones too small to read say "Tap to zoom". A kind
    the Mac doesn't draw stays code. Test hooks: `YH_OPEN_ROW=Agent` (the newest sub-agent's sheet),
    `YH_OPEN_PICTURE=1`, `YH_OPEN_DIAGRAM=1`.
+5c. **Voice input** (built 2026-11-09, not yet heard): a mic in the message field, always there;
+   tap to dictate (Apple's speech recognition, on the device where it can be), the words written
+   into the field after what's there as you speak, tap again (or Send) to stop. Asks for the
+   microphone and Speech Recognition the first time. Checked so far: the mic shows and the
+   permission is asked with the app's wording. Not checked: words coming in. `simctl` can't grant
+   Speech Recognition, so a test can't get past the alert, and a live mic in the Simulator would
+   use the Mac's microphone (a macOS prompt). Check it by hand: open the Simulator window, Allow,
+   dictate; or on a real iPhone. `YH_PHONE_DICTATE_FILE=<audio>` transcribes a file into the field
+   once allowed (`say -o x.aiff "…"` makes one).
 6. **Richer transcript:** ✅ a tool row opens in a sheet (an edit as a line diff, a write's
    content, a command and its output, other inputs pretty-printed, the result's first 2000
    characters), thinking opens in full, your messages and replies copy with a long press
