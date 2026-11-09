@@ -6,6 +6,9 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+### Fixed
+- A thread shows as working again when you message it after YourHarness reopened mid-turn with background jobs left running. Claude Code answered the jobs first, which looked like the end of your turn.
+
 ## [0.1.1] - 2026-11-09
 
 ### Fixed

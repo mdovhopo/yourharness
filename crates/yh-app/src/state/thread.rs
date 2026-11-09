@@ -1185,15 +1185,19 @@ impl ThreadState {
     }
 
     /// Applies one event from this thread's `claude`. True when what the sidebar shows changed.
-    pub fn apply(&mut self, event: Event, cx: &mut Context<Self>) -> bool {
-        let changed = self.apply_event(event, cx);
+    pub fn apply(&mut self, event: Event, _cx: &mut Context<Self>) -> bool {
+        self.apply_plain(event)
+    }
+
+    fn apply_plain(&mut self, event: Event) -> bool {
+        let changed = self.apply_event(event);
         if self.folds_dirty {
             self.refresh_folds();
         }
         changed
     }
 
-    fn apply_event(&mut self, event: Event, _cx: &mut Context<Self>) -> bool {
+    fn apply_event(&mut self, event: Event) -> bool {
         match event {
             Event::Session { id } => {
                 self.session_id = Some(id);
@@ -1286,8 +1290,10 @@ impl ThreadState {
                 let e = self.append(data);
                 e.borrow_mut().live = true;
                 self.blocks.insert(key, e);
-                // Claude woken by a job's end: a turn with no message of yours.
-                let woke = !self.running && self.jobs.version > 0;
+                // A block while no turn is under way: one is. Claude woken by a job's end (a turn
+                // with no message of yours), or your message's turn after one the CLI ran first
+                // and ended (a job from before a restart reported as it resumed).
+                let woke = !self.running;
                 if woke {
                     self.running = true;
                 }
@@ -1305,6 +1311,8 @@ impl ThreadState {
                         let e = self.append(EntryData::new(key.clone(), k, ""));
                         e.borrow_mut().live = true;
                         self.blocks.insert(key, e.clone());
+                        // As for a block's start: Claude is writing, so a turn is under way.
+                        self.running = true;
                         e
                     }
                 };
@@ -1837,6 +1845,25 @@ mod tests {
             run: Some(SubagentSummary { description: description.into(), status: "completed".into(), tool_uses: Some(3), ..Default::default() }),
             ..Default::default()
         }
+    }
+
+    /// Resumed after a restart, the CLI first reports a job from before it (a turn of its own,
+    /// ended), then answers your message: that turn is under way, though no job is known.
+    #[test]
+    fn a_turn_after_one_the_cli_ended_first_is_under_way() {
+        let mut t = ThreadState::new(ThreadMeta::new("T".into(), "P".into(), "t".into()));
+        t.total = Some(0);
+        t.add_user("proceed", &[], "u", false, None);
+        t.running = true;
+        assert!(t.apply_plain(Event::Done { is_error: false, text: String::new() }));
+        assert!(!t.running);
+        let start = Event::BlockStart { message: "m".into(), index: 0, parent: None, kind: yh_core::claude::BlockKind::Thinking };
+        assert!(t.apply_plain(start), "the sidebar shows it working again");
+        assert!(t.running);
+        // A delta with no start (the start was missed) counts the same.
+        t.apply_plain(Event::Done { is_error: false, text: String::new() });
+        t.apply_plain(Event::Delta { message: "m2".into(), index: 0, parent: None, kind: DeltaKind::Text, text: "Hi".into() });
+        assert!(t.running);
     }
 
     #[test]
