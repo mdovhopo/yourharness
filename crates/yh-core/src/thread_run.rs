@@ -481,6 +481,11 @@ impl ThreadRun {
         self.rows.len()
     }
 
+    /// The rows held, by number, as they are now (newer than what's saved).
+    pub fn held_rows(&self) -> Vec<(usize, TranscriptRow)> {
+        self.rows.iter().map(|(seq, r)| (*seq, r.clone())).collect()
+    }
+
     // Rows.
 
     /// A row changed beyond its text: told whole, and saved.

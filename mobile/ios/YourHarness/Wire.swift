@@ -1,5 +1,5 @@
 // The messages the Mac and the phone trade (docs/mobile.md, "The wire"), mirroring
-// crates/yh-proto (protocol 2: live state and actions; yh-devserver speaks 1, read-only). JSON text frames tagged with `type`, keys in snake_case.
+// crates/yh-proto (protocol 2: live state and actions). JSON text frames tagged with `type`, keys in snake_case.
 // Unknown messages and fields are ignored.
 
 import Foundation

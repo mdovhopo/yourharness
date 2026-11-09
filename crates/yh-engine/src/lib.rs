@@ -99,6 +99,10 @@ pub enum Command {
     /// Everything said from now on goes to `to` too (the server); first, each thread's state as
     /// it stands.
     Subscribe { to: flume::Sender<Output> },
+    /// The thread's newest `limit` rows as saved now, everything changed saved first, told to
+    /// subscribers in order with the changes (`Output::Snapshot`): what's told after it changes
+    /// what it holds. `tag` comes back with it (the client that asked).
+    Snapshot { thread: String, limit: usize, tag: u64 },
 }
 
 impl Command {
@@ -106,6 +110,7 @@ impl Command {
         use Command::*;
         match self {
             Open { thread, .. } | Send { thread, .. } | Deliver { thread, .. } | Launch { thread, .. } | Interrupt { thread } | Stop { thread } | Respond { thread, .. } | AnswerElicitation { thread, .. } | Mcp { thread, .. } | End { thread, .. } | SetModel { thread, .. } | SetMode { thread, .. } | SetEffort { thread, .. } | Notice { thread, .. } | ChangedFiles { thread, .. } | CutOffJobs { thread, .. } | Withdraw { thread, .. } | SendNow { thread, .. } | StopJob { thread, .. } | TookRestored { thread, .. } | SetMcpServers { thread, .. } | SetSession { thread, .. } | Forget { thread } | Save { thread } | Events { thread, .. } => Some(thread),
+            Snapshot { thread, .. } => Some(thread),
             Quit { .. } | Subscribe { .. } => None,
         }
     }
@@ -175,6 +180,9 @@ pub enum Output {
     NeedsLaunch { thread: String },
     /// The thread's `claude` started (its process id) or ended.
     Runtime { thread: String, pid: Option<u32> },
+    /// What `Command::Snapshot` asked for (to subscribers only): rows `first_seq..count`, and
+    /// the live state, as of this point in what's told.
+    Snapshot { thread: String, tag: u64, first_seq: usize, count: usize, rows: Vec<TranscriptRow>, live: LiveState },
 }
 
 /// Where the app talks to the engine.
@@ -598,6 +606,32 @@ impl Engine {
                 }
                 self.subscribers.push(to);
             }
+            Command::Snapshot { thread, limit, tag } => {
+                // Changes made so far go out first, so the snapshot comes after them.
+                self.told(&thread);
+                self.save(&thread);
+                self.flush();
+                let count = self.run_of(&thread).live.total.unwrap_or(0);
+                let first_seq = count.saturating_sub(limit);
+                let mut rows: Vec<TranscriptRow> = match &self.db {
+                    Some(db) if ids::saved(&thread) => db.read_rows(&thread, first_seq, count - first_seq).into_iter().enumerate().filter_map(|(i, r)| from_db(first_seq + i, r)).collect(),
+                    _ => vec![],
+                };
+                // Rows it holds that aren't saved (a side chat's, a thread not made yet's) are
+                // as it holds them.
+                for (seq, r) in self.runs.get(&thread).map(|run| run.held_rows()).unwrap_or_default() {
+                    if seq >= first_seq {
+                        match rows.iter_mut().find(|x| x.seq == seq) {
+                            Some(x) => *x = r,
+                            None => rows.push(r),
+                        }
+                    }
+                }
+                rows.sort_by_key(|r| r.seq);
+                let live = self.run_of(&thread).live.clone();
+                let snapshot = Output::Snapshot { thread, tag, first_seq, count, rows, live };
+                self.subscribers.retain(|s| s.send(snapshot.clone()).is_ok());
+            }
             Command::Quit { .. } => {}
         }
     }
@@ -909,7 +943,7 @@ mod tests {
             match output {
                 Output::Thread(u) => live = Some(u.live),
                 Output::NeedsLaunch { .. } => asked_to_launch = true,
-                Output::Runtime { .. } => {}
+                Output::Runtime { .. } | Output::Snapshot { .. } => {}
             }
         }
         assert!(!asked_to_launch, "nothing was to go to Claude");

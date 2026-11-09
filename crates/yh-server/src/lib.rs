@@ -3,10 +3,12 @@
 //! or deny, withdraw, send now), over a WebSocket, in `yh_proto`'s messages. It runs inside
 //! YourHarness, off by default (`YH_SERVER`), loopback only, a token required.
 //!
-//! Rows and the thread list come from the database, as the phone's development server read
-//! them: one poller thread looks for rows written since the last `rev` and for changes to the
-//! list. What runs (working, requests waiting on you, the queue) comes from the engine
-//! (`yh_engine::Output`), as it happens. Actions go to the app (`Action`), which takes them as it
+//! The thread list comes from the database, as the phone's development server read it: one
+//! poller thread looks for changes to it. A watched thread's rows and what runs (working,
+//! requests waiting on you, the queue) come from the engine (`yh_engine::Output`), as Claude
+//! writes: the engine's snapshot when a client starts watching, told in order with its changes,
+//! then each row changed since, whole, at most every `STREAM_EVERY`. Without the engine (a
+//! read-only server over a data folder) rows come from the database as it's written. Actions go to the app (`Action`), which takes them as it
 //! takes a click. Each connection has a thread of its own, its own read-only connection to the
 //! database, and a bounded outbox: a client that falls behind is dropped, and reconnects for a
 //! fresh snapshot.
@@ -33,6 +35,10 @@ const LIST_EVERY: u32 = 5;
 /// A thread whose rows changed this recently shows as active.
 const ACTIVE_FOR: Duration = Duration::from_secs(4);
 const OUTBOX: usize = 4096;
+/// How often rows changed by the engine go out: often enough to read as streaming.
+const STREAM_EVERY: Duration = Duration::from_millis(50);
+/// Rows held per watched thread for streaming: changes to earlier ones are left to `page`.
+const MIRROR_ROWS: usize = 600;
 const DEFAULT_ROWS: i64 = 160;
 const MAX_ROWS: i64 = 1000;
 
@@ -52,11 +58,42 @@ pub enum Action {
     SendNow { thread: String, message: String },
 }
 
-/// Where the server meets the app: what the engine says (every thread's update), and where
-/// actions go. Without them it serves only what's saved, as the development server did.
+/// Where the server meets the app: the engine (what it says of every thread, its snapshots),
+/// and where actions go. Without them it serves only what's saved, as the development server
+/// did.
 pub struct Links {
-    pub engine: flume::Receiver<yh_engine::Output>,
+    pub engine: yh_engine::EngineHandle,
     pub actions: flume::Sender<Action>,
+}
+
+/// A row as the wire carries it, its text and tool output trimmed.
+pub fn wire_row(r: &yh_core::thread_run::TranscriptRow, rev: i64) -> wire::Row {
+    let saved = r.row(None);
+    let d = &r.data;
+    wire::Row {
+        seq: r.seq as i64,
+        rev,
+        id: saved.id,
+        kind: saved.kind,
+        text: saved.text,
+        tool_name: saved.tool_name,
+        tool_input: saved.tool_input.map(|s| wire::trim(s, wire::INPUT_LIMIT)),
+        tool_result: saved.tool_result.map(|s| wire::trim(s, wire::RESULT_LIMIT)),
+        tool_result_length: d.tool_result.as_ref().map(|t| d.result_len.max(t.chars().count()) as i64),
+        tool_is_error: saved.tool_is_error,
+        notice_style: saved.notice_style,
+        date: saved.date,
+        turn_ended_at: saved.turn_ended_at,
+        attachments: d.attachments.clone(),
+        changed_files: d.changed_files.clone().unwrap_or_default(),
+    }
+}
+
+/// A watched thread's newest rows as the engine told them, for streaming whole rows.
+#[derive(Default)]
+struct Mirror {
+    rows: std::collections::BTreeMap<usize, yh_core::thread_run::TranscriptRow>,
+    count: usize,
 }
 
 /// A thread's live state as the wire says it.
@@ -76,6 +113,8 @@ struct Client {
     outbox: flume::Sender<String>,
     app: bool,
     thread: Option<String>,
+    /// Its thread's snapshot was sent: changes go to it from now on.
+    ready: bool,
 }
 
 #[derive(Default)]
@@ -85,9 +124,24 @@ struct Shared {
     /// Each thread's live state, as the engine last said it.
     live: Mutex<HashMap<String, Live>>,
     actions: Option<flume::Sender<Action>>,
+    engine: Option<yh_engine::EngineHandle>,
+    /// The `rev` streamed rows take: above anything saved, so a client keeps the newest copy.
+    rev: std::sync::atomic::AtomicI64,
 }
 
 impl Shared {
+    /// Queues `messages` for one client, after `then` changes what it's sent from now on.
+    fn send_to(&self, id: u64, messages: &[ToApp], then: impl FnOnce(&mut Client)) {
+        let mut clients = self.clients.lock().unwrap();
+        let Some(c) = clients.get_mut(&id) else { return };
+        let ok = messages.iter().all(|m| c.outbox.try_send(serde_json::to_string(m).expect("messages serialize")).is_ok());
+        then(c);
+        if !ok {
+            eprintln!("client {id}: fell behind, dropped");
+            clients.remove(&id);
+        }
+    }
+
     /// Queues `message` for the clients `wants` picks; a client whose outbox is full is dropped.
     fn send(&self, message: &ToApp, wants: impl Fn(&Client) -> bool) {
         let text = serde_json::to_string(message).expect("messages serialize");
@@ -110,8 +164,11 @@ pub fn serve(listener: TcpListener, directory: PathBuf, options: Options, links:
         Some(l) => (Some(l.engine), Some(l.actions)),
         None => (None, None),
     };
-    let shared = Arc::new(Shared { actions, ..Default::default() });
+    // Subscribed before anyone connects, so no change is missed.
+    let told = engine.as_ref().map(|e| e.subscribe());
+    let shared = Arc::new(Shared { actions, engine, ..Default::default() });
     let source = Source::open(&directory)?;
+    shared.rev.store(source.max_rev().unwrap_or(0), std::sync::atomic::Ordering::SeqCst);
     // The list is read before anyone connects, so the first `threads` is never empty.
     refresh_listing(&source, &shared, &HashMap::new(), true);
     let options = Arc::new(options);
@@ -122,12 +179,13 @@ pub fn serve(listener: TcpListener, directory: PathBuf, options: Options, links:
             move || poll(source, &shared)
         })
         .map_err(|e| e.to_string())?;
-    if let Some(engine) = engine {
+    if let Some(told) = told {
+        let source = Source::open(&directory)?;
         std::thread::Builder::new()
             .name("live".into())
             .spawn({
                 let shared = shared.clone();
-                move || follow(engine, &shared)
+                move || follow(told, &shared, &source)
             })
             .map_err(|e| e.to_string())?;
     }
@@ -146,31 +204,121 @@ pub fn serve(listener: TcpListener, directory: PathBuf, options: Options, links:
     Ok(())
 }
 
-/// The engine's updates: a thread's live state to the clients watching it when it changes, and
-/// the thread list's `running` and `waiting` when those do.
-fn follow(engine: flume::Receiver<yh_engine::Output>, shared: &Shared) {
-    for output in engine {
-        let yh_engine::Output::Thread(u) = output else { continue };
-        let live = live_of(&u.live);
-        let was = shared.live.lock().unwrap().insert(u.thread.clone(), live.clone());
-        if was.as_ref() == Some(&live) {
+/// What the engine says: snapshots to the clients that asked, each watched thread's rows as they
+/// change (gathered, then sent whole at most every `STREAM_EVERY`), a thread's live state to the
+/// clients watching it, and the thread list's `running` and `waiting` when those change.
+fn follow(told: flume::Receiver<yh_engine::Output>, shared: &Shared, source: &Source) {
+    let mut mirrors: HashMap<String, Mirror> = HashMap::new();
+    let mut changed: HashMap<String, std::collections::BTreeSet<usize>> = HashMap::new();
+    let mut sent_at = Instant::now();
+    loop {
+        let first = match told.recv_timeout(STREAM_EVERY) {
+            Ok(o) => Some(o),
+            Err(flume::RecvTimeoutError::Timeout) => None,
+            Err(flume::RecvTimeoutError::Disconnected) => return,
+        };
+        for output in first.into_iter().chain(told.try_iter()) {
+            match output {
+                yh_engine::Output::Thread(u) => {
+                    if let Some(m) = mirrors.get_mut(&u.thread) {
+                        let seqs = changed.entry(u.thread.clone()).or_default();
+                        for change in u.changes {
+                            apply(m, change, seqs);
+                        }
+                        m.count = u.live.total.unwrap_or(m.count).max(m.count);
+                        while m.rows.len() > MIRROR_ROWS {
+                            m.rows.pop_first();
+                        }
+                    }
+                    tell_live(shared, &u.thread, live_of(&u.live));
+                }
+                yh_engine::Output::Snapshot { thread, tag, first_seq, count, rows, live } => {
+                    // Above anything saved by now, so what streams after it wins.
+                    let rev = shared.rev.fetch_max(source.max_rev().unwrap_or(0), std::sync::atomic::Ordering::SeqCst).max(source.max_rev().unwrap_or(0));
+                    let wire_rows: Vec<wire::Row> = rows.iter().map(|r| wire_row(r, rev)).collect();
+                    mirrors.insert(thread.clone(), Mirror { rows: rows.into_iter().map(|r| (r.seq, r)).collect(), count });
+                    let snapshot = ToApp::Snapshot { thread: thread.clone(), first_seq: first_seq as i64, count: count as i64, rows: wire_rows };
+                    let live = live_of(&live);
+                    shared.live.lock().unwrap().insert(thread.clone(), live.clone());
+                    shared.send_to(tag, &[snapshot, ToApp::Live { thread: thread.clone(), live }], |c| {
+                        if c.thread.as_deref() == Some(&thread) {
+                            c.ready = true;
+                        }
+                    });
+                }
+                _ => {}
+            }
+        }
+        if sent_at.elapsed() < STREAM_EVERY {
             continue;
         }
-        let thread = u.thread.clone();
-        shared.send(&ToApp::Live { thread: thread.clone(), live: live.clone() }, |c| c.thread.as_deref() == Some(&thread));
-        let flags = |l: &Live| (l.running, !l.requests.is_empty() || !l.questions.is_empty());
-        if was.as_ref().map(flags).unwrap_or((false, false)) != flags(&live) {
-            let changed = {
-                let mut listing = shared.listing.lock().unwrap();
-                listing.1.iter_mut().find(|t| t.id == thread).map(|t| {
-                    (t.running, t.waiting) = flags(&live);
-                    t.active |= t.running;
-                    t.clone()
-                })
-            };
-            if let Some(t) = changed {
-                shared.send(&ToApp::ThreadUpserted { thread: t }, |c| c.app);
+        sent_at = Instant::now();
+        for (thread, seqs) in changed.drain() {
+            let Some(m) = mirrors.get(&thread) else { continue };
+            let rows: Vec<wire::Row> = seqs
+                .iter()
+                .filter_map(|seq| m.rows.get(seq))
+                .map(|r| wire_row(r, shared.rev.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1))
+                .collect();
+            if rows.is_empty() {
+                continue;
             }
+            let message = ToApp::RowsChanged { thread: thread.clone(), count: m.count as i64, rows };
+            shared.send(&message, |c| c.ready && c.thread.as_deref() == Some(&thread));
+        }
+        // Threads nobody watches any more aren't held.
+        let watched: std::collections::HashSet<String> = shared.clients.lock().unwrap().values().filter_map(|c| c.thread.clone()).collect();
+        mirrors.retain(|t, _| watched.contains(t));
+    }
+}
+
+/// One change the engine told into a mirror; the row's number goes into `seqs`.
+fn apply(m: &mut Mirror, change: yh_core::thread_run::RowChange, seqs: &mut std::collections::BTreeSet<usize>) {
+    use yh_core::thread_run::{RowChange, TextPatch};
+    match change {
+        RowChange::Added(r) => {
+            m.count = m.count.max(r.seq + 1);
+            seqs.insert(r.seq);
+            m.rows.insert(r.seq, r);
+        }
+        RowChange::Changed { seq, text, input, row } => match row {
+            Some(r) => {
+                seqs.insert(seq);
+                m.rows.insert(seq, *r);
+            }
+            None => {
+                // A row older than what's held: its earlier text isn't here to add to.
+                let Some(r) = m.rows.get_mut(&seq) else { return };
+                text.apply_to(&mut r.data.text);
+                if input != TextPatch::Same {
+                    input.apply_to(r.data.tool_input.get_or_insert_with(String::new));
+                }
+                seqs.insert(seq);
+            }
+        },
+    }
+}
+
+/// A thread's live state to the clients watching it when it changed, and the list's `running`
+/// and `waiting` to the app subscribers when those did.
+fn tell_live(shared: &Shared, thread: &str, live: Live) {
+    let was = shared.live.lock().unwrap().insert(thread.to_string(), live.clone());
+    if was.as_ref() == Some(&live) {
+        return;
+    }
+    shared.send(&ToApp::Live { thread: thread.to_string(), live: live.clone() }, |c| c.thread.as_deref() == Some(thread));
+    let flags = |l: &Live| (l.running, !l.requests.is_empty() || !l.questions.is_empty());
+    if was.as_ref().map(flags).unwrap_or((false, false)) != flags(&live) {
+        let changed = {
+            let mut listing = shared.listing.lock().unwrap();
+            listing.1.iter_mut().find(|t| t.id == thread).map(|t| {
+                (t.running, t.waiting) = flags(&live);
+                t.active |= t.running;
+                t.clone()
+            })
+        };
+        if let Some(t) = changed {
+            shared.send(&ToApp::ThreadUpserted { thread: t }, |c| c.app);
         }
     }
 }
@@ -201,7 +349,8 @@ fn poll(source: Source, shared: &Shared) {
         let mut became_active = false;
         for (thread, mut rows) in threads {
             became_active |= changed_at.insert(thread.clone(), now).is_none_or(|t| now - t > ACTIVE_FOR);
-            let watched = shared.clients.lock().unwrap().values().any(|c| c.thread.as_deref() == Some(&thread));
+            // With the engine, its changes stream instead (`follow`).
+            let watched = shared.engine.is_none() && shared.clients.lock().unwrap().values().any(|c| c.thread.as_deref() == Some(&thread));
             if !watched {
                 continue;
             }
@@ -274,7 +423,7 @@ fn connection(id: u64, stream: TcpStream, shared: &Shared, options: &Options, di
     eprintln!("client {id}: connected from {peer}");
     let source = Source::open(directory)?;
     let (outbox, inbox) = flume::bounded(OUTBOX);
-    shared.clients.lock().unwrap().insert(id, Client { outbox, app: false, thread: None });
+    shared.clients.lock().unwrap().insert(id, Client { outbox, app: false, thread: None, ready: false });
     let hello = ToApp::Hello { protocol: wire::PROTOCOL, server: options.name.clone(), data: name_of(directory) };
     write(&mut ws, &hello)?;
     loop {
@@ -328,9 +477,21 @@ fn answer(id: u64, message: FromApp, shared: &Shared, source: &Source) -> Vec<To
             vec![ToApp::Threads { projects, threads }]
         }
         FromApp::SubscribeThread { thread, limit } => {
-            // Watch first, then read: a row written in between comes twice, and `rev` sorts it out.
-            set(&|c| c.thread = Some(thread.clone()));
             let limit = limit.unwrap_or(DEFAULT_ROWS).clamp(1, MAX_ROWS);
+            // With the engine: its snapshot, in order with its changes, comes from `follow`.
+            if let Some(engine) = &shared.engine {
+                set(&|c| {
+                    c.thread = Some(thread.clone());
+                    c.ready = false;
+                });
+                engine.send(yh_engine::Command::Snapshot { thread, limit: limit as usize, tag: id });
+                return vec![];
+            }
+            // Watch first, then read: a row written in between comes twice, and `rev` sorts it out.
+            set(&|c| {
+                c.thread = Some(thread.clone());
+                c.ready = true;
+            });
             let count = match source.count(&thread) {
                 Ok(n) => n,
                 Err(e) => return failed(e),
@@ -343,7 +504,10 @@ fn answer(id: u64, message: FromApp, shared: &Shared, source: &Source) -> Vec<To
             }
         }
         FromApp::UnsubscribeThread => {
-            set(&|c| c.thread = None);
+            set(&|c| {
+                c.thread = None;
+                c.ready = false;
+            });
             vec![]
         }
         FromApp::Page { thread, before_seq, limit } => {

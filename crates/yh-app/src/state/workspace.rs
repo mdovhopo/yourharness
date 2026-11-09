@@ -3175,6 +3175,7 @@ impl Workspace {
                     };
                     self.engine.send(launch);
                 }
+                Output::Snapshot { .. } => {}
                 Output::Runtime { thread, pid } => match pid {
                     Some(pid) => {
                         self.pids.insert(thread, pid);
@@ -3271,7 +3272,7 @@ fn start_server(engine: &yh_engine::EngineHandle) -> Option<flume::Receiver<yh_s
         let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600));
     }
     let (actions, remote) = flume::unbounded();
-    let links = yh_server::Links { engine: engine.subscribe(), actions };
+    let links = yh_server::Links { engine: engine.clone(), actions };
     let name = std::process::Command::new("scutil").args(["--get", "ComputerName"]).output().ok().and_then(|o| String::from_utf8(o.stdout).ok()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).unwrap_or_else(|| "Mac".into());
     std::thread::Builder::new()
         .name("server".into())

@@ -81,65 +81,72 @@ fn start_with(dir: &std::path::Path, token: Option<&str>, links: Option<yh_serve
     format!("ws://127.0.0.1:{port}/")
 }
 
-/// An engine update for `thread`: working or not, with a request waiting or not.
-fn update(thread: &str, running: bool, request: Option<&str>) -> yh_engine::Output {
-    let mut live = yh_core::thread_run::LiveState { running, ..Default::default() };
-    if let Some(id) = request {
-        live.permissions.push(yh_core::thread_run::Permission { id: id.into(), tool: "Bash".into(), description: "rm -rf build".into(), input: "{}".into() });
-    }
-    yh_engine::Output::Thread(yh_engine::ThreadUpdate {
-        thread: thread.into(),
-        changes: vec![],
-        live,
-        events: vec![],
-        chrome: true,
-        plan: false,
-        pulls: false,
-        session_reset: false,
-        agents_changed: false,
-        turn_ended: None,
-        batch: None,
-    })
+fn delta(message: &str, text: &str) -> yh_core::claude::Event {
+    yh_core::claude::Event::Delta { message: message.into(), index: 0, parent: None, kind: yh_core::claude::DeltaKind::Text, text: text.into() }
 }
 
-/// What the engine says reaches the client (a thread working, a request waiting), and what the
-/// client asks reaches the app, answered by its id.
+/// Through a real engine: a reply streams to the client as Claude writes it, whole rows each
+/// time; a client that starts watching mid-reply gets the engine's snapshot and the rest, the
+/// text exactly once; a request waiting on you shows, and the client's answer reaches the app.
 #[test]
-fn says_what_runs_and_takes_actions() {
-    let dir = temp_dir("actions");
-    let db = Database::open(&dir).unwrap();
+fn streams_what_claude_writes_and_takes_actions() {
+    use yh_engine::Command;
+    let dir = temp_dir("stream");
+    let db = std::sync::Arc::new(Database::open(&dir).unwrap());
     db.save_state(state("Fix checkout"));
+    db.save_rows("t1", 1, vec![(0, row("u0", "user", "earlier"))]);
     db.flush();
-    let (engine_tx, engine) = flume::unbounded();
+    let engine = yh_engine::start(Some(db.clone()));
     let (actions, app) = flume::unbounded();
-    let mut c = Client::connect(&start_with(&dir, None, Some(yh_server::Links { engine, actions }))).unwrap();
+    let url = start_with(&dir, None, Some(yh_server::Links { engine: engine.clone(), actions }));
+    let mut c = Client::connect(&url).unwrap();
     c.expect("hello", |m| matches!(m, ToApp::Hello { .. }));
     c.send(FromApp::SubscribeApp);
     c.expect("threads", |m| matches!(m, ToApp::Threads { .. }));
     c.send(FromApp::SubscribeThread { thread: "t1".into(), limit: None });
-    c.expect("idle live", |m| matches!(m, ToApp::Live { live, .. } if !live.running));
+    let ToApp::Snapshot { count, rows, .. } = c.expect("snapshot", |m| matches!(m, ToApp::Snapshot { .. })) else { unreachable!() };
+    assert_eq!((count, rows.len(), rows[0].text.as_str()), (1, 1, "earlier"));
+    c.expect("idle", |m| matches!(m, ToApp::Live { live, .. } if !live.running));
 
-    engine_tx.send(update("t1", true, None)).unwrap();
-    // The watched thread's live state first, then the list's.
-    c.expect("live working", |m| matches!(m, ToApp::Live { live, .. } if live.running));
-    c.expect("working", |m| matches!(m, ToApp::ThreadUpserted { thread } if thread.running && !thread.waiting));
-    engine_tx.send(update("t1", true, Some("r1"))).unwrap();
-    c.expect("the request", |m| matches!(m, ToApp::Live { live, .. } if live.requests.first().is_some_and(|r| r.id == "r1" && r.tool == "Bash")));
-    c.expect("waiting", |m| matches!(m, ToApp::ThreadUpserted { thread } if thread.waiting));
+    let t = || "t1".to_string();
+    engine.send(Command::Send { thread: t(), text: "go".into(), attachments: vec![], message_id: "u1".into(), now: false, effort: None, deliver: None });
+    c.expect("working", |m| matches!(m, ToApp::Live { live, .. } if live.running));
+    c.expect("your message", |m| matches!(m, ToApp::RowsChanged { rows, .. } if rows.iter().any(|r| r.seq == 1 && r.text == "go")));
+    let start = yh_core::claude::Event::BlockStart { message: "m".into(), index: 0, parent: None, kind: yh_core::claude::BlockKind::Text };
+    engine.send(Command::Events { thread: t(), events: vec![start, delta("m", "Hel")] });
+    c.expect("the reply begins", |m| matches!(m, ToApp::RowsChanged { rows, .. } if rows.iter().any(|r| r.seq == 2 && r.text == "Hel")));
 
-    c.send(FromApp::Respond { id: Some("a1".into()), thread: "t1".into(), request_id: "r1".into(), allow: true });
-    c.expect("done", |m| matches!(m, ToApp::Done { id, error: None } if id == "a1"));
-    assert_eq!(app.recv_timeout(Duration::from_secs(1)).unwrap(), yh_server::Action::Respond { thread: "t1".into(), request_id: "r1".into(), allow: true });
-    c.send(FromApp::Send { id: Some("a2".into()), thread: "t1".into(), text: "go on".into(), now: false });
-    c.expect("done", |m| matches!(m, ToApp::Done { id, .. } if id == "a2"));
-    assert_eq!(app.recv_timeout(Duration::from_secs(1)).unwrap(), yh_server::Action::Send { thread: "t1".into(), text: "go on".into(), now: false });
-
-    // A new client hears the state as it is now.
-    let mut d = Client::connect(&start_with(&dir, None, None)).unwrap();
+    // A second client starts watching mid-reply.
+    let mut d = Client::connect(&url).unwrap();
     d.expect("hello", |m| matches!(m, ToApp::Hello { .. }));
+    d.send(FromApp::SubscribeThread { thread: "t1".into(), limit: None });
+    let ToApp::Snapshot { rows, .. } = d.expect("mid-reply snapshot", |m| matches!(m, ToApp::Snapshot { .. })) else { unreachable!() };
+    let snapshot_rev = rows.iter().map(|r| r.rev).max().unwrap();
+    assert_eq!(rows.last().map(|r| r.text.as_str()), Some("Hel"));
+
+    engine.send(Command::Events { thread: t(), events: vec![delta("m", "lo, wor")] });
+    engine.send(Command::Events { thread: t(), events: vec![delta("m", "ld")] });
+    for (name, client) in [("first", &mut c), ("second", &mut d)] {
+        let ToApp::RowsChanged { rows, .. } = client.expect(name, |m| matches!(m, ToApp::RowsChanged { rows, .. } if rows.iter().any(|r| r.seq == 2 && r.text == "Hello, world"))) else { unreachable!() };
+        assert!(rows[0].rev > snapshot_rev, "streamed rows are newer than the snapshot");
+    }
+
+    let ask = yh_core::claude::Event::Permission { request_id: "r1".into(), tool: "Write".into(), description: "a.txt".into(), input: "{}".into() };
+    engine.send(Command::Events { thread: t(), events: vec![ask] });
+    c.expect("the request", |m| matches!(m, ToApp::Live { live, .. } if live.requests.first().is_some_and(|r| r.id == "r1")));
+    c.expect("waiting", |m| matches!(m, ToApp::ThreadUpserted { thread } if thread.waiting));
+    c.send(FromApp::Respond { id: Some("a1".into()), thread: t(), request_id: "r1".into(), allow: true });
+    c.expect("done", |m| matches!(m, ToApp::Done { id, error: None } if id == "a1"));
+    assert_eq!(app.recv_timeout(Duration::from_secs(1)).unwrap(), yh_server::Action::Respond { thread: t(), request_id: "r1".into(), allow: true });
+
+    engine.send(Command::Events { thread: t(), events: vec![yh_core::claude::Event::Done { is_error: false, text: String::new() }] });
+    c.expect("over", |m| matches!(m, ToApp::Live { live, .. } if !live.running));
+
     // Read-only without links: an action is refused.
-    d.send(FromApp::Stop { id: Some("a3".into()), thread: "t1".into() });
-    d.expect("refused", |m| matches!(m, ToApp::Done { id, error: Some(_) } if id == "a3"));
+    let mut r = Client::connect(&start_with(&dir, None, None)).unwrap();
+    r.expect("hello", |m| matches!(m, ToApp::Hello { .. }));
+    r.send(FromApp::Stop { id: Some("a3".into()), thread: t() });
+    r.expect("refused", |m| matches!(m, ToApp::Done { id, error: Some(_) } if id == "a3"));
 }
 
 #[test]

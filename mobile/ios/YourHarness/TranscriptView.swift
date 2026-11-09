@@ -223,7 +223,8 @@ final class TranscriptViewController: UIViewController, UICollectionViewDataSour
     /// Rows that grew or arrived while streaming: only they are touched, new ones inserted,
     /// changed ones reconfigured where they are.
     private func applyChanges(_ measured: [RowLayout]) {
-        guard let first = layouts.first?.seq else { return }
+        // Nothing shown yet (a thread opened empty): its rows start where the model's do.
+        let first = layouts.first?.seq ?? model.firstSeq
         let follow = followsBottom
         var heightsChanged = false
         var reconfigure: [IndexPath] = []

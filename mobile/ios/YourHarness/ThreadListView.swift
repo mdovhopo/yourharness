@@ -146,7 +146,7 @@ struct ServerSheet: View {
                 } header: {
                     Text("Mac address")
                 } footer: {
-                    Text("Run yh-devserver on your Mac. The Simulator reaches it at 127.0.0.1.")
+                    Text("Start YourHarness on your Mac with YH_SERVER, and paste the address it prints, token and all. The Simulator reaches it at 127.0.0.1.")
                 }
                 Section {
                     LabeledContent("Status", value: status)

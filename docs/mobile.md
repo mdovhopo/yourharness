@@ -1,6 +1,12 @@
 # Mobile: the phone app
 
-Status: MVP in progress on the `mobile` branch. Nothing here is merged into `main`.
+Status: the MVP works locally, on the `remote-foundation` branch (the `mobile` branch merged
+into it; the foundation's thread carries both). Nothing here is merged into `main`.
+
+**What works (checked 2026-11-09 in the Simulator with real Haiku turns):** the Mac's threads
+and transcripts live; sending from the phone, steering, stopping; permission and plan cards
+answered from the phone; Claude's reply streaming in word by word as the Mac's Claude Code
+writes it; "working" and "waiting on you" in the list.
 
 ## The MVP goal
 
@@ -9,11 +15,15 @@ Status: MVP in progress on the `mobile` branch. Nothing here is merged into `mai
 - Local network only. The Simulator shares the Mac's network, so it reaches the Mac at
   `127.0.0.1`. No Tailscale, no pairing yet: Tailscale is the last step, once everything
   else works (see [Post-MVP](#post-mvp)).
-- Read-only. Sending, stopping and answering cards need the engine and server from the remote
-  foundation ([remote.md](remote.md), F1 to F3). The MVP doesn't wait for them.
+- It started read-only, over a development server that read the database; acting and
+  streaming came with the foundation's engine and server ([remote.md](remote.md)), which the
+  phone now uses.
 - Performance and iOS-quality design count from the first screen, as they do on the Mac.
 
-## How it gets data before the foundation lands
+## How it got data before the foundation landed (history)
+
+This server is gone: `yh-server` replaced it, inside the Mac app, speaking the same messages
+plus live state, actions and streaming (see [The server](#the-server) below).
 
 A small development server, **`yh-devserver`** (`crates/yh-devserver`), reads a data folder's
 `harness.sqlite` read-only and serves it over a WebSocket. The app writes the database as it
@@ -130,13 +140,25 @@ To see where the main thread's time goes: `xcrun xctrace record --template 'Time
 20 threads, run the app's perf phase on the same clone: `YH_PERF=<dir> YH_PERF_PHASES=stream-all
 YH_NO_CLAUDE=1` with the preset's fake `claude` first in `YH_PATH` (as `scripts/perf-run.sh` does).
 
+## The server
+
+`yh-server` runs inside the Mac app when it's started with `YH_SERVER=<port>`: on `127.0.0.1`
+only, with a token (`YH_SERVER_TOKEN`, or made up and printed as `SERVER <url>`). The thread list
+comes from the database; a watched thread's rows come from the engine as Claude writes them:
+the engine's snapshot when the phone opens a thread, told in order with the changes that follow,
+then each changed row, whole, at most every 50 ms. The phone takes them as before (newest `rev`
+wins), so streaming needed no new message. `cargo run -p yh-server --example yh -- <url> watch`
+prints what a client gets.
+
 ### Running it
 
 ```sh
-scripts/preset.sh extreme                         # or any preset → test-harness-root/<name>
+scripts/preset.sh extreme                     # or any preset → test-harness-root/<name>
 cp -c -R test-harness-root/extreme /tmp/yh-mobile-data
-cargo run -p yh-devserver -- /tmp/yh-mobile-data  # ws://127.0.0.1:7878
-scripts/mobile.sh                                 # generate, build, boot a Simulator, install, launch
+# the Mac app (a test copy, never your real data) with its server:
+open -g -n --env YH_BACKGROUND=1 --env YH_DATA_DIR=/tmp/yh-mobile-data --env YH_PATH="$PATH" \
+  --env YH_SERVER=7878 --env YH_SERVER_TOKEN=phonetest --stderr /tmp/mac.log "<test app>"
+YH_SERVER="ws://127.0.0.1:7878/?token=phonetest" scripts/mobile.sh   # build, boot a Simulator, launch
 YH_SELECT=active scripts/mobile.sh --no-build --screenshot /tmp/phone.png
 ```
 
@@ -155,12 +177,14 @@ Recorded here so the MVP stays small. Roughly in order; Tailscale last.
    denied (no file, the step marked failed). Not checked by hand yet: stop, send now and
    withdraw (the same path as send). Still answered on the Mac: Claude's questions with choices
    (the protocol has allow or deny only) and MCP servers' questions. Not in the protocol yet: a
-   new thread in a project, model, effort and mode. `yh-devserver` (protocol 1) still serves a
-   data folder without the app, read-only. Test hooks: `YH_PHONE_SEND=<text>`,
+   new thread in a project, model, effort and mode. Test hooks: `YH_PHONE_SEND=<text>`,
    `YH_PHONE_ANSWER=allow|deny`, `YH_PHONE_ANSWER_DELAY=<s>` (3), doing what the buttons do;
    `DONE <action>` lines when the Mac answers.
-2. **Real streaming** (`TextAppended`), true `running` and "waiting on you" state.
-3. **A real phone on the local network:** `yh-devserver --lan` or the server with a token,
+2. ✅ **Real streaming**, true `running` and "waiting on you" state: rows from the engine as
+   Claude writes, whole, at most every 50 ms. Checked 2026-11-09: a Haiku reply sent from the
+   phone grew paragraph by paragraph on it, in a thread that started empty (which first showed
+   a bug: rows arriving with none shown were dropped).
+3. **A real phone on the local network:** the server on the LAN with its token,
    found by Bonjour, paired by QR code, the token in the Keychain.
 4. **Notifications:** APNs sent straight from the Mac with the app's key (no relay for personal
    use), Allow and Deny on the lock screen, a Live Activity for a running turn. Needs the
