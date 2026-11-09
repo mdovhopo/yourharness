@@ -8,7 +8,8 @@
 # YH_SELECT=<thread title or id, or `active`>, YH_APPEARANCE=light|dark, YH_PERF=1 (frame and
 # update timings as PERF lines), YH_SCROLL_PROBE=<s> (the open transcript flung upward that long).
 # --log writes what the app prints there. YH_SIM_NAME picks the Simulator
-# (made if missing). Screenshots come from simctl: the Simulator only, no screen recording.
+# (made if missing, as YH_SIM_TYPE: an iPhone 17 Pro, or e.g. iPad-Pro-13-inch-M5-12GB; `YH_SIM=ipad`
+# is that iPad). Screenshots come from simctl: the Simulator only, no screen recording.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 export DEVELOPER_DIR=${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}
@@ -24,7 +25,11 @@ while (( $# )); do
   shift
 done
 
+if [[ ${YH_SIM:-} == ipad ]]; then
+  : ${YH_SIM_NAME:="YH Mobile iPad Pro 13"} ${YH_SIM_TYPE:=iPad-Pro-13-inch-M5-12GB}
+fi
 NAME=${YH_SIM_NAME:-"YH Mobile iPhone 17 Pro"}
+TYPE=${YH_SIM_TYPE:-iPhone-17-Pro}
 UDID=$(xcrun simctl list devices available -j | python3 -c "
 import json, sys
 name = sys.argv[1]
@@ -37,7 +42,7 @@ if [[ -z $UDID ]]; then
 import json, sys
 ios = [r for r in json.load(sys.stdin)['runtimes'] if r['platform'] == 'iOS' and r['isAvailable'] and r['version'].startswith('26.')]
 print(sorted(ios, key=lambda r: [int(x) for x in r['version'].split('.')])[-1]['identifier'])")
-  UDID=$(xcrun simctl create "$NAME" com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro "$RUNTIME")
+  UDID=$(xcrun simctl create "$NAME" com.apple.CoreSimulator.SimDeviceType.$TYPE "$RUNTIME")
   echo "made Simulator $NAME ($RUNTIME)"
 fi
 

@@ -272,7 +272,12 @@ Recorded here so the MVP stays small. Roughly in order; Tailscale last.
    in a thread, opening a search hit at its row.
 7. **Shared Rust client core** (`yh-client`, `yh-ffi` through UniFFI): `yh-core`'s markdown
    so both apps render the same, an offline cache in SQLite; then **Android** in Compose over it.
-8. **iPad layout**, widgets, a share extension into a thread, Shortcuts.
+8. ✅ **iPad layout** (2026-11-09): the thread list beside the open thread (a split view in the
+   Threads tab, when the width is regular; the dock on top), every orientation. Checked on an iPad
+   Pro 13" Simulator: `YH_SIM=ipad scripts/mobile.sh …` makes and uses one. Found doing it: the
+   thread screen was an empty view until it appeared, and an empty view never appears in a split
+   view's detail, so it never opened its thread; it has a base view now. Still to come: widgets, a
+   share extension into a thread, Shortcuts.
 9. **Several Macs** in one list.
 10. **Tailscale:** the server on the tailnet's addresses, `tailscale whois`, `wss://` with
     `tailscale cert`, as [remote.md](remote.md) plans.

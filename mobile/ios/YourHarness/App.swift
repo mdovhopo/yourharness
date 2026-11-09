@@ -29,17 +29,31 @@ struct YourHarnessApp: App {
 /// The dock: threads, usage, the Mac, and search. A thread opens over it, the dock hidden.
 struct RootView: View {
     @Environment(Store.self) private var store
+    @Environment(\.horizontalSizeClass) private var sizeClass
 
     var body: some View {
         @Bindable var store = store
         TabView(selection: $store.tab) {
             Tab("Threads", systemImage: "bubble.left.and.bubble.right", value: .threads) {
-                NavigationStack(path: $store.path) {
-                    ThreadListView()
-                        .navigationDestination(for: String.self) { id in
-                            TranscriptScreen(threadID: id)
-                                .toolbar(.hidden, for: .tabBar)
+                if sizeClass == .regular {
+                    // iPad (or a wide window): the list beside the open thread.
+                    NavigationSplitView {
+                        ThreadListView(selection: Binding(get: { store.path.last }, set: { store.path = $0.map { [$0] } ?? [] }))
+                    } detail: {
+                        if let id = store.path.last {
+                            NavigationStack { TranscriptScreen(threadID: id) }.id(id)
+                        } else {
+                            ContentUnavailableView("No Thread Open", systemImage: "bubble.left.and.bubble.right", description: Text("Choose a thread from the list."))
                         }
+                    }
+                } else {
+                    NavigationStack(path: $store.path) {
+                        ThreadListView()
+                            .navigationDestination(for: String.self) { id in
+                                TranscriptScreen(threadID: id)
+                                    .toolbar(.hidden, for: .tabBar)
+                            }
+                    }
                 }
             }
             Tab("Usage", systemImage: "gauge.with.dots.needle.33percent", value: .usage) {

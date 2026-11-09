@@ -16,7 +16,8 @@ struct AsideSheet: View {
 
     var body: some View {
         NavigationStack {
-            Group {
+            ZStack {
+                Color.clear
                 if let model {
                     TranscriptRepresentable(model: model, store: store, bottomInset: 0)
                 }

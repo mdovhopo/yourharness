@@ -21,7 +21,10 @@ struct TranscriptScreen: View {
     private static let env = ProcessInfo.processInfo.environment
 
     var body: some View {
-        Group {
+        // Something always there, so it appears (and opens the thread) wherever it's placed:
+        // an empty view never appears in a split view's detail.
+        ZStack {
+            Color.clear
             if let model {
                 // Under the composer, so rows scroll beneath its glass; its height is the list's inset.
                 TranscriptRepresentable(model: model, store: store, bottomInset: composerHeight).ignoresSafeArea(.container, edges: .bottom)

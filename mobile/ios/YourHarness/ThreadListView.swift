@@ -21,8 +21,18 @@ struct ThreadListView: View {
         .navigationSubtitle(store.state == .connected ? store.serverName ?? "" : "")
     }
 
-    private var list: some View {
-        List {
+    /// The open thread, when the list stands beside it (iPad): a row is chosen, not pushed.
+    var selection: Binding<String?>?
+
+    @ViewBuilder private var list: some View {
+        if let selection {
+            styled(List(selection: selection) { rows })
+        } else {
+            styled(List { rows })
+        }
+    }
+
+    @ViewBuilder private var rows: some View {
             if store.state != .connected {
                 ConnectionRow(state: store.state, address: store.serverAddress)
             }
@@ -56,7 +66,11 @@ struct ThreadListView: View {
                     }
                 }
             }
-        }
+    }
+
+    /// The list's look, alerts and hooks, whichever way it chooses rows.
+    private func styled(_ content: some View) -> some View {
+        content
         .listStyle(.insetGrouped)
         .overlay {
             if store.state == .connected, store.sections.isEmpty {
