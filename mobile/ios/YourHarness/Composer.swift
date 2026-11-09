@@ -160,7 +160,8 @@ extension OutgoingImage {
     }
 }
 
-/// The thread's model and effort, and its project's permission mode, as the Mac's pickers set them.
+/// The thread's model and effort, and its project's permission mode, as the Mac's pickers set
+/// them: one quiet line ("Haiku 5.5 · Medium · Accept Edits"), each part a menu.
 private struct SettingsRow: View {
     let threadID: String
     @Environment(Store.self) private var store
@@ -169,7 +170,7 @@ private struct SettingsRow: View {
     private var model: ModelOption? { store.models.first { $0.id == thread?.model } }
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 4) {
             Menu {
                 Picker("Model", selection: Binding(get: { thread?.model ?? "" }, set: { store.setModel($0.isEmpty ? nil : $0, of: threadID) })) {
                     Text("Default").tag("")
@@ -179,9 +180,10 @@ private struct SettingsRow: View {
                     }
                 }
             } label: {
-                chip(model?.name ?? thread?.model.map(Self.short) ?? "Default model", symbol: "sparkles")
+                part(model?.name ?? thread?.model.map(Self.short) ?? "Default model")
             }
             .accessibilityLabel("Model")
+            dot
             let efforts = model?.efforts ?? ["low", "medium", "high", "xhigh", "max"]
             Menu {
                 Picker("Effort", selection: Binding(get: { thread?.effort ?? "" }, set: { store.setEffort($0.isEmpty ? nil : $0, of: threadID) })) {
@@ -189,9 +191,10 @@ private struct SettingsRow: View {
                     ForEach(efforts, id: \.self) { e in Text(Self.effortName(e)).tag(e) }
                 }
             } label: {
-                chip(thread?.effort.map(Self.effortName) ?? "Effort", symbol: "gauge.with.dots.needle.33percent")
+                part(thread?.effort.map(Self.effortName) ?? "Default effort")
             }
             .accessibilityLabel("Effort")
+            dot
             let mode = store.project(of: threadID)?.mode ?? "auto"
             Menu {
                 Picker("Permissions", selection: Binding(get: { mode }, set: { store.setMode($0, of: threadID) })) {
@@ -200,21 +203,28 @@ private struct SettingsRow: View {
                     }
                 }
             } label: {
-                chip(Self.modeName(mode), symbol: "shield")
+                part(Self.modeName(mode))
             }
             .accessibilityLabel("Permissions")
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 4)
+        .font(.footnote)
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 14)
     }
 
-    private func chip(_ text: String, symbol: String) -> some View {
-        Label(text, systemImage: symbol)
-            .font(.caption.weight(.medium))
-            .lineLimit(1)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .glassEffect(.regular.interactive(), in: .capsule)
+    private var dot: some View {
+        Text("·").foregroundStyle(.tertiary).accessibilityHidden(true)
+    }
+
+    /// A setting's name, a small chevron saying it opens a menu; no background.
+    private func part(_ text: String) -> some View {
+        HStack(spacing: 2) {
+            Text(text).lineLimit(1)
+            Image(systemName: "chevron.up.chevron.down").font(.system(size: 8, weight: .semibold)).foregroundStyle(.tertiary)
+        }
+        .padding(.vertical, 4)
+        .contentShape(.rect)
     }
 
     static func short(_ model: String) -> String { model.replacingOccurrences(of: "claude-", with: "").capitalized }
