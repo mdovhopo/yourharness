@@ -34,12 +34,17 @@ targets:
         INFOPLIST_KEY_NSLocalNetworkUsageDescription: YourHarness connects to your Mac to show its threads.
         INFOPLIST_KEY_NSMicrophoneUsageDescription: YourHarness listens while you dictate a message.
         INFOPLIST_KEY_NSSpeechRecognitionUsageDescription: YourHarness writes what you say into the message you're typing.
+        INFOPLIST_KEY_NSCameraUsageDescription: YourHarness reads your Mac's pairing code with the camera.
     info:
       path: YourHarness/Info.plist
       properties:
         # ws:// to the Mac on the local network (and 127.0.0.1 from the Simulator).
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
+        # yourharness://pair?… from the Mac's QR code: the Camera app opens the app with it.
+        CFBundleURLTypes:
+          - CFBundleURLName: com.mdovhopo.yourharness.mobile.pair
+            CFBundleURLSchemes: [yourharness]
 schemes:
   YourHarnessMobile:
     build:

@@ -111,6 +111,10 @@ pub enum Undo {
 }
 
 pub struct Workspace {
+    /// Phones on this network (Settings → Phone).
+    pub phones: crate::state::phones::Phones,
+    /// Where both servers send what clients ask.
+    remote_actions: flume::Sender<yh_server::Asked>,
     pub library: Arc<Library>,
     pub data_dir: PathBuf,
     pub projects: Vec<ProjectMeta>,
@@ -249,16 +253,35 @@ impl Workspace {
         })
         .detach();
         // The server for the app's clients (the phone): off unless asked for.
-        if let Some(remote) = start_server(&engine) {
-            cx.spawn(async move |this, cx| {
-                while let Ok(action) = remote.recv_async().await {
-                    if this.update(cx, |ws, cx| ws.remote_action(action, cx)).is_err() {
-                        break;
-                    }
+        // What clients ask (the phone), from either server: taken here as clicks would be.
+        let (remote_actions, remote) = flume::unbounded();
+        cx.spawn(async move |this, cx| {
+            while let Ok(action) = remote.recv_async().await {
+                if this.update(cx, |ws, cx| ws.remote_action(action, cx)).is_err() {
+                    break;
                 }
-            })
-            .detach();
-        }
+            }
+        })
+        .detach();
+        start_server(&engine, remote_actions.clone());
+        // Phones on this network (Settings → Phone): the paired list saved as it changes.
+        let (devices_changed, devices) = flume::unbounded::<Vec<yh_server::pairing::Device>>();
+        let phones = crate::state::phones::Phones::new(library.setting("phoneDevices"), library.setting("phonesPort").and_then(|v| v.as_u64()).map(|p| p as u16), devices_changed);
+        cx.spawn(async move |this, cx| {
+            while let Ok(first) = devices.recv_async().await {
+                let list = devices.try_iter().last().unwrap_or(first);
+                let saved = serde_json::Value::Array(list.iter().map(|d| d.to_json()).collect());
+                if this.update(cx, |ws, cx| {
+                    ws.library.set_setting("phoneDevices", &saved);
+                    cx.notify();
+                })
+                .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
         let mut workspace = Workspace {
             projects: library.projects.clone(),
             data_dir: data_directory(),
@@ -269,6 +292,8 @@ impl Workspace {
             engine,
             opened: Default::default(),
             pids: HashMap::new(),
+            phones,
+            remote_actions,
             models,
             limits: None,
             limits_updated_at: None,
@@ -358,6 +383,9 @@ impl Workspace {
         workspace.recover_cut_off_turns(cx);
         workspace.load_saved_limits();
         workspace.listen_for_notification_clicks(cx);
+        if workspace.phones_on() {
+            workspace.start_phones();
+        }
         workspace
     }
 
@@ -3261,7 +3289,7 @@ impl Workspace {
 /// `YH_SERVER=<port>` (`1`: 7878): the server for the app's clients (`yh_server`, the phone app),
 /// on loopback, its token `YH_SERVER_TOKEN` or made up. Prints `SERVER <url>` and writes it to
 /// `server.json` in the data folder (only you can read it). Its actions come back here.
-fn start_server(engine: &yh_engine::EngineHandle) -> Option<flume::Receiver<yh_server::Asked>> {
+fn start_server(engine: &yh_engine::EngineHandle, actions: flume::Sender<yh_server::Asked>) -> Option<()> {
     let asked = std::env::var("YH_SERVER").ok()?;
     let port: u16 = if asked == "1" { 7878 } else { asked.parse().ok()? };
     let token = std::env::var("YH_SERVER_TOKEN").ok().filter(|t| !t.is_empty()).unwrap_or_else(|| yh_core::library::new_uuid().replace('-', "").to_lowercase());
@@ -3280,23 +3308,66 @@ fn start_server(engine: &yh_engine::EngineHandle) -> Option<flume::Receiver<yh_s
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600));
     }
-    let (actions, remote) = flume::unbounded();
     let links = yh_server::Links { engine: engine.clone(), actions };
-    // `YH_SERVER_NAME`: what phones call this Mac (tests run two on one Mac); else its name.
-    let name = std::env::var("YH_SERVER_NAME").ok().filter(|s| !s.is_empty());
-    let name = name.unwrap_or_else(|| std::process::Command::new("scutil").args(["--get", "ComputerName"]).output().ok().and_then(|o| String::from_utf8(o.stdout).ok()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).unwrap_or_else(|| "Mac".into()));
+    let name = mac_name();
     std::thread::Builder::new()
         .name("server".into())
         .spawn(move || {
-            if let Err(e) = yh_server::serve(listener, data, yh_server::Options { token: Some(token), name }, Some(links)) {
+            if let Err(e) = yh_server::serve(listener, data, yh_server::Options { token: Some(token), name, pairing: None, stop: None }, Some(links)) {
                 eprintln!("SERVER stopped: {e}");
             }
         })
         .ok()?;
-    Some(remote)
+    Some(())
+}
+
+/// What phones call this Mac: `YH_SERVER_NAME` (tests run two on one Mac), else its name.
+pub fn mac_name() -> String {
+    let name = std::env::var("YH_SERVER_NAME").ok().filter(|s| !s.is_empty());
+    name.unwrap_or_else(|| std::process::Command::new("scutil").args(["--get", "ComputerName"]).output().ok().and_then(|o| String::from_utf8(o.stdout).ok()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).unwrap_or_else(|| "Mac".into()))
 }
 
 impl Workspace {
+    /// Phones on this network on or off (Settings → Phone), saved.
+    pub fn set_phones(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.library.set_setting("phonesEnabled", &Value::Bool(on));
+        if on {
+            self.start_phones();
+        } else {
+            self.phones.stop();
+        }
+        cx.notify();
+    }
+
+    /// Whether phones may connect (saved; `YH_PHONES=1` in tests).
+    pub fn phones_on(&self) -> bool {
+        std::env::var("YH_PHONES").as_deref() == Ok("1") || self.library.setting("phonesEnabled").and_then(|v| v.as_bool()).unwrap_or(false)
+    }
+
+    fn start_phones(&mut self) {
+        let links = yh_server::Links { engine: self.engine.clone(), actions: self.remote_actions.clone() };
+        self.phones.start(self.data_dir.clone(), mac_name(), links);
+        if std::env::var("YH_PHONES_LOG").as_deref() == Ok("1") {
+            if let Some(link) = self.phones.pairing_link(&mac_name()) {
+                eprintln!("PHONES pair {link}");
+            }
+        }
+    }
+
+    /// A new pairing code, the old one no longer working.
+    pub fn new_pairing_code(&mut self, cx: &mut Context<Self>) {
+        self.phones.pairing.new_code();
+        if std::env::var("YH_PHONES_LOG").as_deref() == Ok("1") {
+            eprintln!("PHONES pair {}", self.phones.pairing_link(&mac_name()).unwrap_or_default());
+        }
+        cx.notify();
+    }
+
+    pub fn forget_phone(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.phones.pairing.forget(id);
+        cx.notify();
+    }
+
     /// What a client of the server asked (the phone): taken as the same click here would be, and
     /// answered with how it went.
     fn remote_action(&mut self, asked: yh_server::Asked, cx: &mut Context<Self>) {

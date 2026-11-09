@@ -173,6 +173,49 @@ YH_SELECT=active scripts/mobile.sh --no-build --screenshot /tmp/phone.png
 Screenshots come from `xcrun simctl io booted screenshot`, which captures the Simulator only
 and never asks for screen recording. Never `screencapture`.
 
+### Phones on this network (pairing)
+
+Settings → Phone on the Mac: **Let phones connect** (saved as `phonesEnabled`) starts a second
+server on every network address (port 7878, `phonesPort`), stopped again when it's turned off.
+It shows the Mac's address and a QR code of a pairing link,
+`yourharness://pair?host=<ip>&port=<port>&code=<code>&name=<Mac>`. The code is random, works
+once, for 10 minutes; New Code replaces it. A phone connects with `?pair=<code>&device=<name>`,
+the server answers `hello` then `paired` with a token of the phone's own, and the phone keeps
+`ws://<ip>:<port>/?token=<token>` from then on. The Mac keeps only each token's SHA-256
+(`phoneDevices`), lists the phones paired with when each was last seen, and Forget ends a phone's
+connection and its token. The phone pairs by scanning the code with the Camera app (it opens
+`yourharness://`), with Scan the Mac's Code in the app (VisionKit), or by pasting the link on the
+Macs page; a new install starts on Pair with Your Mac. A used or old code says Couldn't Pair and
+leaves an earlier pairing with that Mac as it was. Not encrypted on the network yet (plain
+WebSocket): Tailscale is to carry it.
+
+Test hooks: `YH_PHONES=1` (on at launch, not saved), `YH_PHONES_LOG=1` (prints `PHONES pair
+<link>`), `YH_PHONES_BIND=127.0.0.1` (listens on loopback only: with the Mac's firewall on, listening
+on the network asks to accept incoming connections, which a test must never put on screen; this
+Mac's firewall is off, so the tests here used the network address), `YH_SETTINGS_TAB=phone`; on the
+phone `YH_PHONE_PAIR=<link>` (paired with at launch, as opening the link does; `simctl openurl`
+puts an "Open in YourHarness?" alert up instead). Checked 2026-11-09: the QR code decodes to the
+link (CoreImage's detector); the Simulator paired over 192.168.50.73, reconnected with its token
+after a restart, got Couldn't Pair for the used code with the earlier pairing kept; the Mac listed
+it after a restart. Server test: `a_phone_pairs_with_a_code_and_is_cut_off_when_forgotten`.
+
+### On your own iPhone or iPad
+
+`scripts/mobile-device.sh [device]` builds the app signed with your Apple team, installs it on a
+connected device and opens it. Once, before the first run:
+
+1. Xcode → Settings → Accounts → + → Apple ID, and sign in. A free account works (apps signed with
+   it run for 7 days, then run the script again); the paid Developer Program's account lasts a year.
+2. Select the account, Manage Certificates… → + → Apple Development.
+3. Connect the iPhone or iPad by cable, unlock it, tap Trust This Computer.
+4. On the device: Settings → Privacy & Security → Developer Mode → on (it restarts).
+5. `scripts/mobile-device.sh`. The team comes from your certificate (`TEAM=<id>` to pick one); if
+   the bundle ID is taken under a free team, `BUNDLE_ID=com.<you>.yourharness`.
+6. First launch: if iOS says the developer isn't trusted, Settings → General → VPN & Device
+   Management → your Apple ID → Trust.
+7. On the Mac: Settings → Phone → Let phones connect; on the phone: Pair with Your Mac → Scan the
+   Mac's Code (allow the camera), then allow Local Network when iOS asks. Both on the same Wi‑Fi.
+
 ## Post-MVP
 
 Recorded here so the MVP stays small. Roughly in order; Tailscale last.
@@ -207,8 +250,9 @@ Recorded here so the MVP stays small. Roughly in order; Tailscale last.
    `YH_PHONE_SET=model=…,effort=…,mode=…`, `YH_PHONE_QUEUE=<text>` with
    `YH_PHONE_QUEUE_ACTION=now|remove`, `YH_PHONE_PHOTO=1` (a made-up picture with
    `YH_PHONE_SEND`), `YH_PHONE_WHOLE=<seq>`, `YH_PHONE_THREAD_ACTIONS=pin,rename:<title>,settle,unsettle,delete`.
-3. **A real phone on the local network:** the server on the LAN with its token,
-   found by Bonjour, paired by QR code, the token in the Keychain.
+3. ✅ **A real phone on the local network** (2026-11-09): Settings → Phone, paired by QR code, a
+   token for each phone (see "Phones on this network"). Still to come: found by Bonjour when the
+   Mac's address changes, the token in the Keychain rather than the app's settings, encryption.
 4. **Notifications:** APNs sent straight from the Mac with the app's key (no relay for personal
    use), Allow and Deny on the lock screen, a Live Activity for a running turn. Needs the
    Apple Developer Program account.

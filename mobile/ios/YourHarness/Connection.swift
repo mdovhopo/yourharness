@@ -34,6 +34,11 @@ final class Connection {
         open()
     }
 
+    /// Where it connects next time (a pairing code swapped for the token it earned).
+    func retarget(_ url: URL) {
+        self.url = url
+    }
+
     /// Closed for good (the Mac removed from the list): late callbacks and retries dropped.
     func close() {
         generation += 1

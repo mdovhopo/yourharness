@@ -27,6 +27,8 @@ raw-window-handle = "0.6"
 resvg = "0.46"
 # The Files tab's folder watch (FSEvents): the version gpui-component already builds.
 notify = "8.2"
+# Settings → Phone: the pairing link as a QR code, drawn as squares.
+qrcode = { version = "0.14", default-features = false }
 # Only for the snapshots feature: the same GPUI gpui-kit pins, with its test support turned on.
 gpui = { package = "gpui-pre", version = "=0.3.11", optional = true }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.11", optional = true }

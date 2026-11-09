@@ -43,10 +43,22 @@ const MIRROR_ROWS: usize = 600;
 const DEFAULT_ROWS: i64 = 160;
 const MAX_ROWS: i64 = 1000;
 
+pub mod pairing;
+
 pub struct Options {
-    /// Required as `?token=` when set.
+    /// Required as `?token=` when set (or a paired phone's token, with `pairing`).
     pub token: Option<String>,
     pub name: String,
+    /// Phones paired with this Mac: their tokens let them in, and a pairing code pairs one more.
+    pub pairing: Option<Arc<pairing::Pairing>>,
+    /// Set to stop serving: no more connections, and the open ones close.
+    pub stop: Option<Arc<std::sync::atomic::AtomicBool>>,
+}
+
+impl Options {
+    fn stopped(&self) -> bool {
+        self.stop.as_ref().is_some_and(|s| s.load(std::sync::atomic::Ordering::Relaxed))
+    }
 }
 
 /// What a client asks of the app: taken on the app's main thread, as a click would be.
@@ -300,7 +312,8 @@ pub fn serve(listener: TcpListener, directory: PathBuf, options: Options, links:
         .name("poller".into())
         .spawn({
             let shared = shared.clone();
-            move || poll(source, &shared)
+            let options = options.clone();
+            move || poll(source, &shared, &options)
         })
         .map_err(|e| e.to_string())?;
     if let Some(told) = told {
@@ -309,13 +322,29 @@ pub fn serve(listener: TcpListener, directory: PathBuf, options: Options, links:
             .name("live".into())
             .spawn({
                 let shared = shared.clone();
-                move || follow(told, &shared, &source)
+                let options = options.clone();
+                move || follow(told, &shared, &source, &options)
             })
             .map_err(|e| e.to_string())?;
     }
     let mut next = 0u64;
-    for stream in listener.incoming() {
-        let Ok(stream) = stream else { continue };
+    // Not blocking, so a stop is seen within a moment.
+    listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+    loop {
+        if options.stopped() {
+            return Ok(());
+        }
+        let stream = match listener.accept() {
+            Ok((s, _)) => s,
+            Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+            Err(_) => continue,
+        };
+        if stream.set_nonblocking(false).is_err() {
+            continue;
+        }
         next += 1;
         let (id, shared, options, directory) = (next, shared.clone(), options.clone(), directory.clone());
         let _ = std::thread::Builder::new().name(format!("client {id}")).spawn(move || {
@@ -325,16 +354,18 @@ pub fn serve(listener: TcpListener, directory: PathBuf, options: Options, links:
             shared.clients.lock().unwrap().remove(&id);
         });
     }
-    Ok(())
 }
 
 /// What the engine says: snapshots to the clients that asked, each watched thread's rows as they
 /// change (gathered, then sent whole at most every `STREAM_EVERY`), a thread's live state to the
 /// clients watching it, and the thread list's `running` and `waiting` when those change.
-fn follow(told: flume::Receiver<yh_engine::Output>, shared: &Shared, source: &Source) {
+fn follow(told: flume::Receiver<yh_engine::Output>, shared: &Shared, source: &Source, options: &Options) {
     let mut changed: HashMap<String, std::collections::BTreeSet<usize>> = HashMap::new();
     let mut sent_at = Instant::now();
     loop {
+        if options.stopped() {
+            return;
+        }
         let first = match told.recv_timeout(STREAM_EVERY) {
             Ok(o) => Some(o),
             Err(flume::RecvTimeoutError::Timeout) => None,
@@ -457,12 +488,15 @@ fn tell_live(shared: &Shared, thread: &str, live: Live) {
     }
 }
 
-fn poll(source: Source, shared: &Shared) {
+fn poll(source: Source, shared: &Shared, options: &Options) {
     let mut rev = source.max_rev().unwrap_or(0);
     let mut changed_at: HashMap<String, Instant> = HashMap::new();
     let mut tick = 0u32;
     loop {
         std::thread::sleep(POLL);
+        if options.stopped() {
+            return;
+        }
         tick += 1;
         let changes = match source.changes_since(rev, 5000) {
             Ok(c) => c,
@@ -566,15 +600,39 @@ fn refresh_listing(source: &Source, shared: &Shared, changed_at: &HashMap<String
 
 fn connection(id: u64, stream: TcpStream, shared: &Shared, options: &Options, directory: &Path) -> Result<(), String> {
     let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
-    let token = options.token.clone();
-    let check = move |request: &Request, response: Response| -> Result<Response, ErrorResponse> {
-        let Some(token) = &token else { return Ok(response) };
-        let given = request.uri().query().unwrap_or("").split('&').find_map(|kv| kv.strip_prefix("token="));
-        if given == Some(token.as_str()) {
-            Ok(response)
-        } else {
-            Err(tungstenite::http::Response::builder().status(401).body(Some("wrong or missing token".into())).unwrap())
+    // In: the server's own token, a paired phone's, or a pairing code (`?pair=…&device=<name>`),
+    // which pairs this phone and answers with its token.
+    let mut device: Option<String> = None;
+    let mut paired: Option<(String, String)> = None;
+    let check = |request: &Request, response: Response| -> Result<Response, ErrorResponse> {
+        let query = request.uri().query().unwrap_or("");
+        let param = |name: &str| query.split('&').find_map(|kv| kv.strip_prefix(name).and_then(|v| v.strip_prefix('='))).map(percent_decode);
+        let refuse = |why: &str| Err(tungstenite::http::Response::builder().status(401).body(Some(why.to_string())).unwrap());
+        if options.token.is_none() && options.pairing.is_none() {
+            return Ok(response);
         }
+        if let Some(given) = param("token") {
+            if options.token.as_deref() == Some(given.as_str()) {
+                return Ok(response);
+            }
+            if let Some(id) = options.pairing.as_ref().and_then(|p| p.check(&given)) {
+                device = Some(id);
+                return Ok(response);
+            }
+            return refuse("This phone isn't paired with this Mac any more.");
+        }
+        if let (Some(code), Some(p)) = (param("pair"), options.pairing.as_ref()) {
+            let name = param("device").unwrap_or_default();
+            return match p.pair(&code, &name) {
+                Some((id, token)) => {
+                    device = Some(id.clone());
+                    paired = Some((id, token));
+                    Ok(response)
+                }
+                None => refuse("That pairing code is used or out of date. Show a new one on the Mac."),
+            };
+        }
+        refuse("wrong or missing token")
     };
     let mut ws = tungstenite::accept_hdr(stream, check).map_err(|e| format!("handshake from {peer}: {e}"))?;
     ws.get_ref().set_read_timeout(Some(Duration::from_millis(20))).map_err(|e| e.to_string())?;
@@ -585,7 +643,18 @@ fn connection(id: u64, stream: TcpStream, shared: &Shared, options: &Options, di
     shared.clients.lock().unwrap().insert(id, Client { outbox, app: false, watching: vec![] });
     let hello = ToApp::Hello { protocol: wire::PROTOCOL, server: options.name.clone(), data: name_of(directory) };
     write(&mut ws, &hello)?;
+    if let Some((device, token)) = paired {
+        eprintln!("client {id}: paired as {device}");
+        write(&mut ws, &ToApp::Paired { device, token })?;
+    }
     loop {
+        // Serving stopped, or this phone forgotten: the connection ends.
+        let forgotten = device.as_ref().is_some_and(|d| options.pairing.as_ref().is_some_and(|p| !p.has(d)));
+        if options.stopped() || forgotten {
+            let _ = ws.close(None);
+            let _ = ws.flush();
+            return Ok(());
+        }
         match ws.read() {
             Ok(Message::Text(text)) => {
                 let message = serde_json::from_str::<FromApp>(&text).unwrap_or(FromApp::Unknown);
@@ -849,4 +918,28 @@ fn write(ws: &mut WebSocket<TcpStream>, message: &ToApp) -> Result<(), String> {
 
 fn name_of(directory: &Path) -> String {
     directory.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
+/// `%20` and `+` back to what they stand for (a phone's name in the pairing link).
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => out.push(b' '),
+            b'%' if i + 2 < bytes.len() => {
+                match u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16) {
+                    Ok(b) => {
+                        out.push(b);
+                        i += 2;
+                    }
+                    Err(_) => out.push(b'%'),
+                }
+            }
+            b => out.push(b),
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }

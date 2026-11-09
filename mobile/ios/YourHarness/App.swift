@@ -13,6 +13,8 @@ struct YourHarnessApp: App {
             RootView()
                 .environment(fleet)
                 .preferredColorScheme(Self.appearance)
+                // The Mac's QR code, scanned with the Camera app: pairs with that Mac.
+                .onOpenURL { fleet.pair($0) }
         }
     }
 
@@ -48,6 +50,12 @@ struct RootView: View {
             Tab(value: .search, role: .search) {
                 NavigationStack { SearchView() }.environment(store).id(store.id)
             }
+        }
+        // `YH_PHONE_PAIR=<yourharness://pair… link>`: paired with, as opening the link does.
+        .task {
+            guard let link = ProcessInfo.processInfo.environment["YH_PHONE_PAIR"].flatMap(URL.init(string:)) else { return }
+            try? await Task.sleep(for: .seconds(2))
+            fleet.pair(link)
         }
         // `YH_PHONE_SWITCH=<index>`: that Mac shown 6 s after launch, as its menu does.
         .task {

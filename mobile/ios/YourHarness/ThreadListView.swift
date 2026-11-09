@@ -47,7 +47,7 @@ struct ThreadListView: View {
 
     @ViewBuilder private var rows: some View {
             if store.state != .connected {
-                ConnectionRow(state: store.state, address: store.serverAddress)
+                ConnectionRow(state: store.state, address: store.shownAddress)
             }
             ForEach(store.sections) { section in
                 Section {
@@ -133,13 +133,43 @@ struct ThreadListView: View {
 private struct Unreachable: View {
     @Environment(Store.self) private var store
     @Environment(Fleet.self) private var fleet
+    @State private var scanning = false
 
     var body: some View {
+        if let failed = store.pairingFailed {
+            ContentUnavailableView {
+                Label("Couldn't Pair", systemImage: "exclamationmark.triangle")
+            } description: {
+                Text(failed)
+            } actions: {
+                Button("Scan Again") { scanning = true }
+                    .buttonStyle(.borderedProminent)
+                if fleet.stores.count > 1 { Button("Your Macs") { fleet.tab = .mac } }
+            }
+            .sheet(isPresented: $scanning) { ScannerSheet() }
+        } else if store.serverAddress == Store.defaultAddress {
+            // A new install, paired with nothing yet.
+            ContentUnavailableView {
+                Label("Pair with Your Mac", systemImage: "qrcode.viewfinder")
+            } description: {
+                Text("On the Mac, open YourHarness → Settings → Phone, turn on Let phones connect, and scan the code it shows. Your phone and Mac need to be on the same Wi‑Fi.")
+            } actions: {
+                Button("Scan the Mac's Code") { scanning = true }
+                    .buttonStyle(.borderedProminent)
+                Button("Other Ways") { fleet.tab = .mac }
+            }
+            .sheet(isPresented: $scanning) { ScannerSheet() }
+        } else {
+            unreachable
+        }
+    }
+
+    private var unreachable: some View {
         ContentUnavailableView {
             Label("Can't Reach Your Mac", systemImage: "desktopcomputer.trianglebadge.exclamationmark")
         } description: {
             Text("Open YourHarness on your Mac with the phone server turned on. The phone keeps trying \(retry).")
-            Text(store.serverAddress).font(.footnote.monospaced())
+            Text(store.shownAddress).font(.footnote.monospaced())
         } actions: {
             Button("Try Again") { store.reconnect() }
                 .buttonStyle(.borderedProminent)
@@ -366,9 +396,19 @@ struct ConnectionRow: View {
 struct MacView: View {
     @Environment(Fleet.self) private var fleet
     @State private var address = ProcessInfo.processInfo.environment["YH_PHONE_ADD_MAC"] ?? ""
+    @State private var scanning = false
 
     var body: some View {
         Form {
+            Section {
+                Button {
+                    scanning = true
+                } label: {
+                    Label("Scan the Mac's Code", systemImage: "qrcode.viewfinder")
+                }
+            } footer: {
+                Text("On the Mac, open YourHarness → Settings → Phone and turn on Let phones connect. Your phone and Mac need to be on the same Wi‑Fi.")
+            }
             Section {
                 ForEach(fleet.stores) { mac in
                     Button { fleet.select(mac) } label: { MacRow(mac: mac, shown: mac === fleet.current) }
@@ -389,7 +429,7 @@ struct MacView: View {
                 if fleet.stores.count > 1 { Text("All stay connected; tap one to show it. Only the one shown streams a thread.") }
             }
             Section {
-                TextField("ws://192.168.1.20:7878/?token=…", text: $address)
+                TextField("Pairing link or ws:// address", text: $address)
                     .keyboardType(.URL)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
@@ -397,14 +437,15 @@ struct MacView: View {
                 Button("Add Mac") {
                     if fleet.add(address) { address = "" }
                 }
-                .disabled(URL(string: address)?.scheme.map { ["ws", "wss"].contains($0) } != true)
+                .disabled(URL(string: address)?.scheme.map { ["ws", "wss", "yourharness"].contains($0) } != true)
             } header: {
-                Text("Add a Mac")
+                Text("Add by Link")
             } footer: {
-                Text("Start YourHarness on the Mac with YH_SERVER, and paste the address it prints, token and all. The Simulator reaches this Mac at 127.0.0.1.")
+                Text("A yourharness://pair link from the Mac's code, or a ws:// address with its token.")
             }
         }
         .navigationTitle("Macs")
+        .sheet(isPresented: $scanning) { ScannerSheet() }
         .task {
             // `YH_PHONE_ADD_MAC=<address>`: added as the button does.
             if ProcessInfo.processInfo.environment["YH_PHONE_ADD_MAC"] != nil, fleet.add(address) { address = "" }
@@ -425,8 +466,12 @@ private struct MacRow: View {
                 .frame(width: 30)
             VStack(alignment: .leading, spacing: 2) {
                 Text(mac.displayName).font(.body.weight(shown ? .semibold : .regular)).lineLimit(1)
-                Text(MacMenu.status(of: mac, waiting: false)).font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
-                Text(mac.serverAddress.replacingOccurrences(of: #"\?token=.*"#, with: "", options: .regularExpression))
+                if let failed = mac.pairingFailed {
+                    Text(failed).font(.subheadline).foregroundStyle(.orange).lineLimit(3)
+                } else {
+                    Text(mac.pairing ? "Pairing…" : MacMenu.status(of: mac, waiting: false)).font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
+                }
+                Text(mac.shownAddress)
                     .font(.caption.monospaced()).foregroundStyle(.tertiary).lineLimit(1)
             }
             Spacer(minLength: 0)

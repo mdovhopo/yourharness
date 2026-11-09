@@ -27,6 +27,18 @@ final class Store: Identifiable {
     @ObservationIgnored var shown = false
     /// The Mac said who it is (its name is kept with its address).
     @ObservationIgnored var onHello: (() -> Void)?
+    /// The Mac paired this phone: its token, kept in place of the pairing code.
+    @ObservationIgnored var onPaired: ((String) -> Void)?
+    /// Connecting with a pairing code (it works once): a refusal means it's used or out of date.
+    var pairing = false
+    /// Why pairing didn't work, shown on its row.
+    var pairingFailed: String?
+
+    /// Where it connects, for showing: host and port, never its token or pairing code.
+    var shownAddress: String {
+        guard let url = URL(string: serverAddress), let host = url.host() else { return serverAddress }
+        return url.port.map { "\(host):\($0)" } ?? host
+    }
 
     /// What the Mac is called here: its name once heard, else its address's host.
     var displayName: String {
@@ -89,9 +101,16 @@ final class Store: Identifiable {
         serverName = name
         if selects { selectOnLoad = ProcessInfo.processInfo.environment["YH_SELECT"] }
         connection = Connection(url: URL(string: address) ?? URL(string: Store.defaultAddress)!)
+        pairing = address.contains("pair=")
         connection.onState = { [weak self] in
-            self?.state = $0
-            if $0 == .connected { self?.everConnected = true }
+            guard let self else { return }
+            state = $0
+            if $0 == .connected { everConnected = true }
+            // A pairing code the Mac refused won't work on a retry: stop, and say what to do.
+            if pairing, case .waiting(let reason, _) = $0, reason.contains("refused") {
+                pairingFailed = "That code is used or out of date. Show a new one on the Mac (Settings → Phone)."
+                disconnect()
+            }
         }
         connection.onMessages = { [weak self] in self?.apply($0) }
         connection.connect()
@@ -101,6 +120,14 @@ final class Store: Identifiable {
     func becomeCurrent() {
         MediaCache.shared.ask = { [weak self] thread, seq, index in self?.connection.send(.media(thread: thread, seq: seq, index: index)) }
         DiagramCache.shared.ask = { [weak self] key, source in self?.connection.send(.diagram(key: key, source: source)) }
+    }
+
+    /// Paired: from now on it connects with its token (the connection open goes on as it is).
+    func paired(address: String) {
+        serverAddress = address
+        pairing = false
+        pairingFailed = nil
+        connection.retarget(URL(string: address)!)
     }
 
     /// Removed from the list: no more connecting.
@@ -413,6 +440,9 @@ final class Store: Identifiable {
                     if case .send(_, let thread, let text, _, _)? = action { returnedDraft = (thread, text) }
                 }
                 Perf.shared.log("DONE \(action?.name ?? id)\(error.map { ": " + $0 } ?? "")")
+            case .paired(_, let token):
+                onPaired?(token)
+                Perf.shared.log("PAIRED \(displayName)")
             case .error(let message):
                 print("server: \(message)")
             case .unknown:

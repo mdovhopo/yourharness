@@ -89,6 +89,7 @@ fn print(m: &ToApp, began: &mut bool) -> bool {
         ToApp::Diagram { key, drawing, error } => println!("DIAGRAM {key} {}", drawing.as_ref().map(|d| format!("{} {}x{} paths={} labels={}", d.kind, d.width, d.height, d.paths.len(), d.labels.len())).unwrap_or_else(|| error.clone().unwrap_or_default())),
         ToApp::ToolResult { seq, input, result, .. } => println!("TOOL #{seq} input={} result={}", input.as_ref().map_or(0, |s| s.chars().count()), result.as_ref().map_or(0, |s| s.chars().count())),
         ToApp::Error { message } => println!("ERROR {message}"),
+        ToApp::Paired { device, token } => println!("PAIRED {device} token={token}"),
     }
     false
 }

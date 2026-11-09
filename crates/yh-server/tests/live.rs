@@ -67,6 +67,20 @@ impl Client {
         }
         panic!("no {what} within 5 s");
     }
+
+    /// The server closes the connection within `time`.
+    fn closed_within(&mut self, time: Duration) -> bool {
+        let until = Instant::now() + time;
+        while Instant::now() < until {
+            match self.0.read() {
+                Ok(Message::Close(_)) => return true,
+                Ok(_) => {}
+                Err(tungstenite::Error::Io(e)) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
+                Err(_) => return true,
+            }
+        }
+        false
+    }
 }
 
 fn start(dir: &std::path::Path, token: Option<&str>) -> String {
@@ -77,7 +91,7 @@ fn start_with(dir: &std::path::Path, token: Option<&str>, links: Option<yh_serve
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let (dir, token) = (dir.to_path_buf(), token.map(str::to_string));
-    std::thread::spawn(move || yh_server::serve(listener, dir, yh_server::Options { token, name: "test".into() }, links).unwrap());
+    std::thread::spawn(move || yh_server::serve(listener, dir, yh_server::Options { token, name: "test".into(), pairing: None, stop: None }, links).unwrap());
     format!("ws://127.0.0.1:{port}/")
 }
 
@@ -244,4 +258,37 @@ fn a_token_is_required_when_set() {
     assert!(Client::connect(&format!("{url}?token=nope")).is_err());
     let mut c = Client::connect(&format!("{url}?token=s3cret")).unwrap();
     c.expect("hello", |m| matches!(m, ToApp::Hello { .. }));
+}
+
+/// A phone pairs with a code (once), connects with its token after, is cut off when forgotten,
+/// and everyone is when serving stops.
+#[test]
+fn a_phone_pairs_with_a_code_and_is_cut_off_when_forgotten() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    let dir = temp_dir("pair");
+    let db = Database::open(&dir).unwrap();
+    db.save_state(state("t"));
+    db.flush();
+    let pairing = Arc::new(yh_server::pairing::Pairing::new(vec![], Box::new(|_| {})));
+    let stop = Arc::new(AtomicBool::new(false));
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("ws://{}/", listener.local_addr().unwrap());
+    let options = yh_server::Options { token: None, name: "test".into(), pairing: Some(pairing.clone()), stop: Some(stop.clone()) };
+    let served = std::thread::spawn(move || yh_server::serve(listener, dir, options, None));
+    assert!(Client::connect(&url).is_err(), "nothing without a token");
+    assert!(Client::connect(&format!("{url}?pair=nope&device=x")).is_err(), "a wrong code");
+    let code = pairing.new_code();
+    let mut c = Client::connect(&format!("{url}?pair={code}&device=Max%27s%20iPhone")).unwrap();
+    c.expect("hello", |m| matches!(m, ToApp::Hello { .. }));
+    let ToApp::Paired { device, token } = c.expect("paired", |m| matches!(m, ToApp::Paired { .. })) else { unreachable!() };
+    assert_eq!(pairing.devices()[0].name, "Max's iPhone");
+    assert!(Client::connect(&format!("{url}?pair={code}&device=y")).is_err(), "the code works once");
+    let mut d = Client::connect(&format!("{url}?token={token}")).unwrap();
+    d.expect("hello again", |m| matches!(m, ToApp::Hello { .. }));
+    pairing.forget(&device);
+    assert!(d.closed_within(Duration::from_secs(2)), "forgotten: its connection ends");
+    assert!(Client::connect(&format!("{url}?token={token}")).is_err(), "and its token no longer works");
+    stop.store(true, Ordering::Relaxed);
+    assert!(served.join().unwrap().is_ok(), "serving stops");
 }

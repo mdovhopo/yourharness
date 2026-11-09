@@ -327,6 +327,9 @@ pub enum ToApp {
     /// A row's whole tool input and result, asked for with `tool_result`.
     ToolResult { thread: String, seq: i64, #[serde(skip_serializing_if = "Option::is_none")] input: Option<String>, #[serde(skip_serializing_if = "Option::is_none")] result: Option<String> },
     Error { message: String },
+    /// Protocol 5: paired with this Mac (the connection carried a pairing code): connect with
+    /// `?token=` from now on. Sent once, right after `hello`.
+    Paired { device: String, token: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

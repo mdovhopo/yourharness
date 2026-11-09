@@ -140,6 +140,8 @@ Project), `next`, `inspector`, `settings`, `close` (the close button's quit ques
 open> · <counts> · order: <the sidebar's live threads>`), `YH_QUIT_ANSWER=quit|cancel` (the quit question answered,
 printed as `QUIT asked: …`; `YH_QUIT_AFTER=<s>` quits as ⌘Q, `YH_TERMINATE_AFTER=<s>` as Dock → Quit), `YH_MENU_LOG=1`
 (each menu bar rebuild), `YH_SNAPSHOT_WINDOW=<title>` (`YH_SNAPSHOT` draws that window instead: `Settings`),
+`YH_PHONES=1` (Settings → Phone's server on at launch, not saved; `YH_PHONES_BIND=127.0.0.1` keeps it
+off the network, so a Mac with its firewall on never asks; `YH_PHONES_LOG=1` prints the pairing link; docs/mobile.md),
 `YH_UPDATE_FEED` with `YH_RESTART_ANSWER=restart|later` (Restart's question answered and printed) and `YH_OPEN_VERSION=1` (the
 sidebar's version card open), `YH_SETTLE_MERGED_AFTER=<s>` (when threads whose PRs merged first settle, 20; with
 `YH_MOCK_PULLS`, printing `SETTLED merged <id>`), `YH_USAGE_SPLIT=1` (By Model), `YH_USAGE_DAY_PAGE=<n>`,

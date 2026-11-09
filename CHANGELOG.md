@@ -6,6 +6,9 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+### Added
+- Settings → Phone: let your iPhone or iPad on the same Wi‑Fi follow and run your threads. Pair a phone by scanning the QR code shown there; each phone gets a key of its own, and Forget cuts one off. Traffic isn't encrypted on the network yet, so use it on networks you trust. The phone app itself isn't released yet.
+
 ## [0.1.3] - 2026-11-09
 
 ### Changed

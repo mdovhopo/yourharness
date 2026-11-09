@@ -3,6 +3,9 @@
 
 import Foundation
 import Observation
+#if canImport(UIKit)
+import UIKit
+#endif
 
 @Observable @MainActor
 final class Fleet {
@@ -60,6 +63,7 @@ final class Fleet {
     @discardableResult
     func add(_ address: String) -> Bool {
         let address = address.trimmingCharacters(in: .whitespaces)
+        if let link = URL(string: address), link.scheme == "yourharness" { return pair(link) }
         guard let url = URL(string: address), url.scheme == "ws" || url.scheme == "wss" else { return false }
         if let known = stores.first(where: { $0.serverAddress == address }) {
             select(known)
@@ -71,6 +75,50 @@ final class Fleet {
         select(store)
         save()
         return true
+    }
+
+    /// A pairing link from the Mac's QR code (`yourharness://pair?host=…&port=…&code=…&name=…`):
+    /// connects with the code, and once the Mac answers with this phone's token, keeps the Mac
+    /// with that. Pairing again with a Mac already listed replaces it.
+    @discardableResult
+    func pair(_ link: URL) -> Bool {
+        guard link.scheme == "yourharness", link.host() == "pair",
+              let items = URLComponents(url: link, resolvingAgainstBaseURL: false)?.queryItems else { return false }
+        func item(_ name: String) -> String? { items.first { $0.name == name }?.value }
+        guard let host = item("host"), let port = item("port"), let code = item("code") else { return false }
+        let base = "ws://\(host):\(port)/"
+        let device = Self.deviceName.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? "Phone"
+        // The guess a new install starts with goes now; the Mac it paired with before, once this
+        // pairing works (a used code leaves the old pairing as it was), and any earlier try.
+        let guess = { (s: Store) in s.serverAddress == Store.defaultAddress && !s.everConnected }
+        let earlier = { (s: Store) in s.pairing && s.serverAddress.hasPrefix(base) }
+        stores.filter { guess($0) || earlier($0) }.forEach { $0.disconnect() }
+        stores.removeAll { guess($0) || earlier($0) }
+        let store = Store(address: "\(base)?pair=\(code)&device=\(device)", name: item("name"))
+        wire(store)
+        store.onPaired = { [weak self, weak store] token in
+            guard let self, let store else { return }
+            store.paired(address: "\(base)?token=\(token)")
+            for old in stores where old !== store && old.serverAddress.hasPrefix(base) { old.disconnect() }
+            stores.removeAll { $0 !== store && $0.serverAddress.hasPrefix(base) }
+            save()
+        }
+        stores.append(store)
+        tab = .threads
+        select(store)
+        Perf.shared.log("PAIRING with \(item("name") ?? host)")
+        return true
+    }
+
+    /// What the Mac lists this phone as.
+    static var deviceName: String {
+        #if canImport(UIKit)
+        let name = UIDevice.current.name
+        let model = UIDevice.current.model
+        return name == model ? "\(model) (\(UIDevice.current.systemName) \(UIDevice.current.systemVersion))" : name
+        #else
+        return "Phone"
+        #endif
     }
 
     /// Forgets a Mac; the last one stays.
@@ -94,7 +142,8 @@ final class Fleet {
 
     private func save() {
         guard saves else { return }
-        let macs = stores.map { Saved(address: $0.serverAddress, name: $0.serverName) }
+        // A Mac still pairing isn't kept: its code works only once.
+        let macs = stores.filter { !$0.pairing }.map { Saved(address: $0.serverAddress, name: $0.serverName) }
         UserDefaults.standard.set(try? JSONEncoder().encode(macs), forKey: "macs")
         UserDefaults.standard.set(stores.firstIndex { $0 === current } ?? 0, forKey: "currentMac")
     }

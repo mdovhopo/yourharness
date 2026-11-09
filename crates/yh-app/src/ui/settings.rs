@@ -1,6 +1,7 @@
-//! Settings (⌘,), four tabs: Agents (where `claude` is, its account, `gh` and
+//! Settings (⌘,), five tabs: Agents (where `claude` is, its account, `gh` and
 //! `glab`, the agents still to come), General (appearance, notifications, sleep, new thread
-//! defaults, settling, titles, memory, plans, browser, diagrams, Home and data), MCP and Releases.
+//! defaults, settling, titles, memory, plans, browser, diagrams, Home and data), MCP, Phone
+//! (phones on this network, pairing by QR code) and Releases.
 //! Each change is saved at once, in the settings keys 0.0.x used, and takes effect at once or
 //! with each thread's next `claude`.
 
@@ -42,6 +43,7 @@ pub enum Tab {
     Agents,
     General,
     Mcp,
+    Phone,
     Releases,
 }
 
@@ -51,6 +53,7 @@ impl Tab {
             "agents" => Tab::Agents,
             "general" => Tab::General,
             "mcp" => Tab::Mcp,
+            "phone" => Tab::Phone,
             "releases" => Tab::Releases,
             _ => return None,
         })
@@ -109,6 +112,23 @@ impl SettingsView {
                 if let Some(u) = cx.try_global::<SettingsLinks>().map(|l| l.updater.clone()) {
                     u.update(cx, |u, cx| u.load_notes(cx));
                 }
+            }
+            // Drawn again now and then while it shows: a pairing code goes out of date, phones
+            // are seen.
+            Tab::Phone => {
+                cx.spawn(async move |this, cx| loop {
+                    cx.background_executor().timer(std::time::Duration::from_secs(30)).await;
+                    let Ok(on) = this.update(cx, |v, cx| {
+                        cx.notify();
+                        v.tab == Tab::Phone
+                    }) else {
+                        break;
+                    };
+                    if !on {
+                        break;
+                    }
+                })
+                .detach();
             }
             _ => {}
         }
@@ -726,6 +746,84 @@ impl SettingsView {
             .into_any_element()
     }
 
+    /// Phones on this network: on or off, where they connect, a QR code to pair one, the phones
+    /// paired.
+    fn phone(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let ws = self.workspace.read(cx);
+        let on = ws.phones_on();
+        let running = ws.phones.running();
+        let name = crate::state::workspace::mac_name();
+        let link = ws.phones.pairing_link(&name);
+        let port = ws.phones.port;
+        let address = match (&ws.phones.error, ws.phones.addresses.first()) {
+            (Some(e), _) if on => e.clone(),
+            _ if !running => "Off".into(),
+            (_, Some(ip)) => format!("{ip}:{port}"),
+            (_, None) => "Not on a network".into(),
+        };
+        let mut devices = ws.phones.pairing.devices();
+        devices.sort_by(|a, b| b.paired_at.total_cmp(&a.paired_at));
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.);
+        let switch_ws = self.workspace.clone();
+        let mut page = div().flex().flex_col().gap(px(space::L)).child(
+            section("Phones on This Network")
+                .child(row(
+                    "Let phones connect",
+                    Switch::new("phones-enabled").checked(on).on_change(move |on, _, cx| {
+                        let on = *on;
+                        switch_ws.update(cx, |ws, cx| ws.set_phones(on, cx));
+                    }),
+                ))
+                .child(row("Address", div().text_color(if ws.phones.error.is_some() && on { theme.warning } else { theme.secondary }).child(address)))
+                .footer("Your iPhone or iPad on the same Wi‑Fi follows and runs your threads, with YourHarness on the phone. What they send isn't encrypted on the network yet: use it on networks you trust."),
+        );
+        if let Some(link) = link {
+            let new_ws = self.workspace.clone();
+            page = page.child(
+                section("Pair a Phone")
+                    .inline(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .gap(px(space::S))
+                            .py(px(space::M))
+                            .child(qr_code(&link, 196.))
+                            .child(div().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child(format!("Pairs with {name}"))),
+                    )
+                    .child(row(
+                        "Code",
+                        Button::new("phones-new-code").small().outline().label("New Code").on_click(move |_, _, cx| {
+                            new_ws.update(cx, |ws, cx| ws.new_pairing_code(cx));
+                        }),
+                    ))
+                    .footer("Scan it with the phone's camera, or in YourHarness on the phone: Macs, then Scan. The code works once, for 10 minutes; each phone gets a key of its own."),
+            );
+        }
+        let mut paired = section("Paired Phones");
+        if devices.is_empty() {
+            paired = paired.inline(div().px(px(space::M)).py(px(space::S + 2.)).text_color(theme.secondary).child("No phones paired yet."));
+        }
+        for d in devices {
+            let forget_ws = self.workspace.clone();
+            let id = d.id.clone();
+            let seen = d.last_seen.map(|t| format!(" · seen {}", yh_core::clock::relative(t, now))).unwrap_or_default();
+            paired = paired.child(row_owned(
+                d.name.clone(),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S))
+                    .child(div().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child(format!("paired {}{seen}", yh_core::clock::relative(d.paired_at, now))))
+                    .child(Button::new(gpui_kit::ElementId::Name(format!("forget-{}", d.id).into())).small().ghost().label("Forget").on_click(move |_, _, cx| {
+                        let id = id.clone();
+                        forget_ws.update(cx, |ws, cx| ws.forget_phone(&id, cx));
+                    })),
+            ));
+        }
+        page.child(paired.footer("A phone forgotten here can't connect again until it's paired again.")).into_any_element()
+    }
+
     fn releases(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let Some(links) = cx.try_global::<SettingsLinks>() else { return div().into_any_element() };
         let (updater, notes) = (links.updater.clone(), links.notes.clone());
@@ -880,6 +978,7 @@ impl Render for SettingsView {
             Tab::Agents => self.agents(&theme, cx),
             Tab::General => self.general(&theme, cx),
             Tab::Mcp => self.mcp(&theme, cx),
+            Tab::Phone => self.phone(&theme, cx),
             Tab::Releases => self.releases(&theme, cx),
         };
         let _ = window;
@@ -905,6 +1004,7 @@ impl Render for SettingsView {
                         .child(tab_button("settings-tab-agents", icons::bot(), "Agents", Tab::Agents, cx))
                         .child(tab_button("settings-tab-general", Icon::new(IconName::Settings), "General", Tab::General, cx))
                         .child(tab_button("settings-tab-mcp", icons::plug(), "MCP", Tab::Mcp, cx))
+                        .child(tab_button("settings-tab-phone", Icon::new(IconName::Inbox), "Phone", Tab::Phone, cx))
                         .child(tab_button("settings-tab-releases", icons::download(), "Releases", Tab::Releases, cx)),
                 ),
             )
@@ -1004,4 +1104,31 @@ pub fn open_window(workspace: Entity<Workspace>, tab: Option<Tab>, cx: &mut App)
     if std::env::var("YH_DATA_DIR").is_ok() {
         eprintln!("SETTINGS window opened");
     }
+}
+
+/// A QR code of `text`, `size` points square: dark squares on white with a quiet border, as
+/// cameras read it in light or dark.
+fn qr_code(text: &str, size: f32) -> impl IntoElement {
+    let modules = qrcode::QrCode::with_error_correction_level(text.as_bytes(), qrcode::EcLevel::M).map(|q| (q.width(), q.to_colors())).ok();
+    gpui_kit::canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            use gpui_kit::{point, size as sz, Bounds};
+            window.paint_quad(gpui_kit::fill(bounds, gpui_kit::white()));
+            let Some((width, colors)) = &modules else { return };
+            let quiet = 2.;
+            let cell = f32::from(bounds.size.width) / (*width as f32 + quiet * 2.);
+            for (i, c) in colors.iter().enumerate() {
+                if *c != qrcode::Color::Dark {
+                    continue;
+                }
+                let (x, y) = ((i % width) as f32 + quiet, (i / width) as f32 + quiet);
+                let origin = point(bounds.origin.x + px(x * cell), bounds.origin.y + px(y * cell));
+                // A hair over a cell, so neighbours meet without seams.
+                window.paint_quad(gpui_kit::fill(Bounds { origin, size: sz(px(cell + 0.3), px(cell + 0.3)) }, gpui_kit::black()));
+            }
+        },
+    )
+    .size(px(size))
+    .rounded(px(radius::MEDIUM))
 }

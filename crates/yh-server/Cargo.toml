@@ -13,5 +13,8 @@ serde_json.workspace = true
 rusqlite.workspace = true
 flume.workspace = true
 tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+# Paired phones' tokens are kept as hashes; codes and tokens from the system's randomness.
+sha2 = "0.10"
+getrandom = "0.2"
 
 [dev-dependencies]

@@ -242,9 +242,12 @@ enum ToApp: Sendable {
     case media(thread: String, seq: Int, index: Int, image: UIImage?, error: String?)
     case diagram(key: String, drawing: Drawing?, error: String?)
     case error(String)
+    /// Protocol 5: paired with the Mac (the connection carried a pairing code): its token.
+    case paired(device: String, token: String)
     case unknown
 
     private struct Tag: Decodable { let type: String }
+    private struct Paired: Decodable { let device: String; let token: String }
     private struct Hello: Decodable { let `protocol`: Int?; let server: String; let data: String }
     private struct LiveMessage: Decodable { let thread: String; let live: Live }
     private struct Done: Decodable { let id: String; let error: String?; let thread: String? }
@@ -326,6 +329,9 @@ enum ToApp: Sendable {
                 let m = try d.decode(Diagram.self, from: data)
                 return .diagram(key: m.key, drawing: m.drawing, error: m.error)
             case "error": return .error(try d.decode(Failure.self, from: data).message)
+            case "paired":
+                let m = try d.decode(Paired.self, from: data)
+                return .paired(device: m.device, token: m.token)
             default: return .unknown
             }
         } catch {

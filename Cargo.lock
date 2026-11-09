@@ -5280,6 +5280,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "qrcode"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d68782463e408eb1e668cf6152704bd856c78c5b6417adaee3203d8f4c1fc9ec"
+
+[[package]]
 name = "quick-error"
 version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8617,6 +8623,7 @@ dependencies = [
  "libc",
  "notify",
  "objc",
+ "qrcode",
  "raw-window-handle",
  "resvg 0.46.0",
  "serde_json",
@@ -8661,8 +8668,10 @@ name = "yh-server"
 version = "0.0.1"
 dependencies = [
  "flume 0.11.1",
+ "getrandom 0.2.17",
  "rusqlite",
  "serde_json",
+ "sha2 0.10.9",
  "tungstenite",
  "yh-core",
  "yh-engine",
