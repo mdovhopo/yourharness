@@ -189,7 +189,8 @@ the server answers `hello` then `paired` with a token of the phone's own, and th
 connection and its token. The phone pairs by scanning the code with the Camera app (it opens
 `yourharness://`), with Scan the Mac's Code in the app (VisionKit), or by pasting the link on the
 Macs page; a new install starts on Pair with Your Mac. A used or old code says Couldn't Pair and
-leaves an earlier pairing with that Mac as it was. Not encrypted on the network yet (plain
+leaves an earlier pairing with that Mac as it was. A thread made from the phone (its project's ✎) isn't opened on
+the Mac: the Mac stays on what you have open, the new thread in its sidebar with an unread dot. Not encrypted on the network yet (plain
 WebSocket): Tailscale is to carry it.
 
 Test hooks: `YH_PHONES=1` (on at launch, not saved), `YH_PHONES_LOG=1` (prints `PHONES pair

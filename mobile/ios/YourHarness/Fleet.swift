@@ -146,5 +146,6 @@ final class Fleet {
         let macs = stores.filter { !$0.pairing }.map { Saved(address: $0.serverAddress, name: $0.serverName) }
         UserDefaults.standard.set(try? JSONEncoder().encode(macs), forKey: "macs")
         UserDefaults.standard.set(stores.firstIndex { $0 === current } ?? 0, forKey: "currentMac")
+        Perf.shared.log("SAVED \(macs.count) Macs, showing \(stores.firstIndex { $0 === current } ?? 0)")
     }
 }

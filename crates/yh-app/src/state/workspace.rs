@@ -713,6 +713,12 @@ impl Workspace {
     // MARK: Threads and projects
 
     pub fn new_thread(&mut self, project_id: &str, cx: &mut Context<Self>) -> String {
+        self.make_thread(project_id, true, cx)
+    }
+
+    /// A new thread in the project, opened here only with `open` (one made from the phone
+    /// isn't: the Mac stays on what you have open).
+    fn make_thread(&mut self, project_id: &str, open: bool, cx: &mut Context<Self>) -> String {
         // An untouched blank in the project is used again instead of piling up blanks.
         let blank = self.threads.iter().find(|t| {
             let t = t.read(cx);
@@ -720,7 +726,9 @@ impl Workspace {
         });
         if let Some(blank) = blank {
             let id = blank.read(cx).id().to_string();
-            self.select(&id, cx);
+            if open {
+                self.select(&id, cx);
+            }
             return id;
         }
         self.new_count += 1;
@@ -735,7 +743,11 @@ impl Workspace {
         thread.update(cx, |t, _| t.loaded = true);
         self.threads.insert(0, thread.clone());
         self.by_id.insert(id.clone(), thread);
-        self.select(&id, cx);
+        if open {
+            self.select(&id, cx);
+        } else {
+            cx.notify();
+        }
         id
     }
 
@@ -3393,7 +3405,7 @@ impl Workspace {
             if self.project(project).is_none() {
                 return Err("No such project.".into());
             }
-            let id = self.new_thread(project, cx);
+            let id = self.make_thread(project, false, cx);
             if let (Some(text), Some(thread)) = (text.as_deref().filter(|t| !t.trim().is_empty()), self.thread(&id)) {
                 self.send(&thread, text, false, cx);
             }
