@@ -174,11 +174,12 @@ Recorded here so the MVP stays small. Roughly in order; Tailscale last.
    now or taken back; permission cards are allowed or denied, plans approved or kept; the list
    shows threads working and waiting on you. Checked 2026-11-09 with real Haiku turns in `ask`
    mode, sent from the phone: a Write card allowed from the phone (the file written) and one
-   denied (no file, the step marked failed). Not checked by hand yet: stop, send now and
-   withdraw (the same path as send). Still answered on the Mac: Claude's questions with choices
+   denied (no file, the step marked failed). Stop checked too (a long reply cut off from the
+   phone, "Interrupted" on both). Not checked by hand yet: send now and withdraw (the same path). Still answered on the Mac: Claude's questions with choices
    (the protocol has allow or deny only) and MCP servers' questions. Not in the protocol yet: a
    new thread in a project, model, effort and mode. Test hooks: `YH_PHONE_SEND=<text>`,
-   `YH_PHONE_ANSWER=allow|deny`, `YH_PHONE_ANSWER_DELAY=<s>` (3), doing what the buttons do;
+   `YH_PHONE_ANSWER=allow|deny`, `YH_PHONE_ANSWER_DELAY=<s>` (3), `YH_PHONE_STOP=<s>` (Stop that long
+   after the thread starts working), doing what the buttons do;
    `DONE <action>` lines when the Mac answers.
 2. ✅ **Real streaming**, true `running` and "waiting on you" state: rows from the engine as
    Claude writes, whole, at most every 50 ms. Checked 2026-11-09: a Haiku reply sent from the

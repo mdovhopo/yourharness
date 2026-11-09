@@ -42,12 +42,21 @@ struct TranscriptScreen: View {
             }
         }
         // Test hooks, doing what the buttons do: `YH_PHONE_SEND=<text>` once the thread is open,
-        // `YH_PHONE_ANSWER=allow|deny` to each request `YH_PHONE_ANSWER_DELAY` s (3) after it shows.
+        // `YH_PHONE_ANSWER=allow|deny` to each request `YH_PHONE_ANSWER_DELAY` s (3) after it shows,
+        // `YH_PHONE_STOP=<s>` (below).
         .task(id: store.canAct) {
             guard store.canAct, let text = Self.env["YH_PHONE_SEND"] else { return }
             try? await Task.sleep(for: .seconds(2))
             Perf.shared.log("PHONE send: \(text)")
             store.send(text, to: threadID)
+        }
+        // `YH_PHONE_STOP=<s>`: Stop pressed that long after the thread starts working.
+        .task(id: store.live?.running) {
+            guard store.live?.running == true, let after = Self.env["YH_PHONE_STOP"].flatMap(Double.init) else { return }
+            try? await Task.sleep(for: .seconds(after))
+            guard store.live?.running == true else { return }
+            Perf.shared.log("PHONE stop")
+            store.stop(threadID)
         }
         .task(id: store.live?.requests.first?.id) {
             guard let request = store.live?.requests.first, let answer = Self.env["YH_PHONE_ANSWER"] else { return }
