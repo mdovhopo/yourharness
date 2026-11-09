@@ -52,7 +52,7 @@ struct RowLayout: @unchecked Sendable {
             let s = NSMutableAttributedString(string: text.trimmingCharacters(in: .whitespacesAndNewlines),
                                               attributes: [.font: f.body, .foregroundColor: UIColor.label])
             if !attachments.isEmpty {
-                s.append(NSAttributedString(string: "\n" + attachments.map { "📎 \($0)" }.joined(separator: "\n"),
+                s.append(NSAttributedString(string: "\n" + attachments.map(Self.attachmentLabel).joined(separator: "\n"),
                                             attributes: [.font: f.footnote, .foregroundColor: UIColor.secondaryLabel]))
             }
             let inner = measure(s, width: width - 48 - 28)
@@ -199,5 +199,17 @@ enum Style {
             out.append(s)
         }
         return out
+    }
+}
+
+extension RowLayout {
+    /// How an attachment reads under your message: a picture as "Picture", a file by its name
+    /// (pictures are kept on the Mac under a long made-up name).
+    static func attachmentLabel(_ name: String) -> String {
+        let lower = name.lowercased()
+        if [".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic"].contains(where: lower.hasSuffix), !name.contains("/") {
+            return "🖼 Picture"
+        }
+        return "📎 " + (name.split(separator: "/").last.map(String.init) ?? name)
     }
 }

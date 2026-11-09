@@ -1,11 +1,13 @@
 // A row opened from the transcript: a tool call's input and result (an edit as a diff), or
 // thinking in full. Drawn from what the row carries (input up to 4000 characters, the result's
-// first 2000); the rest stays on the Mac.
+// first 2000); Show All asks the Mac for the whole of it.
 
 import SwiftUI
 
 struct RowDetail: View {
     let row: Row
+    let threadID: String
+    let store: Store?
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -15,7 +17,7 @@ struct RowDetail: View {
                     if row.kind == "thinking" {
                         Text(row.text).font(.body).textSelection(.enabled)
                     } else {
-                        ToolDetail(row: row)
+                        ToolDetail(row: row, threadID: threadID, store: store)
                     }
                 }
                 .padding()
@@ -34,9 +36,14 @@ struct RowDetail: View {
 
 private struct ToolDetail: View {
     let row: Row
+    let threadID: String
+    let store: Store?
 
+    /// The whole input and result, once asked for.
+    private var whole: Store.WholeOutput? { store?.whole["\(threadID)#\(row.seq)"] }
     private var tool: String { row.toolName ?? "" }
-    private var input: String { row.toolInput ?? "" }
+    private var input: String { whole?.input ?? row.toolInput ?? "" }
+    private var cutShort: Bool { whole == nil && ((row.toolResultLength ?? 0) > (row.toolResult?.count ?? 0) || (row.toolInput?.count ?? 0) >= 4000) }
     private var json: [String: Any] {
         (try? JSONSerialization.jsonObject(with: Data(input.utf8))) as? [String: Any] ?? [:]
     }
@@ -64,16 +71,19 @@ private struct ToolDetail: View {
         default:
             Box(title: "Input", text: pretty(input))
         }
-        if let result = row.toolResult, !result.isEmpty {
+        if let result = whole?.result ?? row.toolResult, !result.isEmpty {
             Box(title: row.toolIsError == true ? "Failed" : "Result", text: result, tint: row.toolIsError == true ? .red : nil)
-            if let length = row.toolResultLength, length > result.count {
-                Text("The first \(result.count.formatted()) of \(length.formatted()) characters. The rest is on your Mac.")
+            if whole == nil, let length = row.toolResultLength, length > result.count {
+                Text("The first \(result.count.formatted()) of \(length.formatted()) characters.")
                     .font(.footnote).foregroundStyle(.secondary)
             }
         } else if row.toolIsError == nil {
             Label("No result yet", systemImage: "hourglass").font(.footnote).foregroundStyle(.secondary)
         }
-        if input.count >= 4000 {
+        if cutShort, store?.canControl == true {
+            Button("Show All", systemImage: "arrow.down.doc") { store?.askWhole(thread: threadID, seq: row.seq) }
+                .buttonStyle(.glass)
+        } else if whole == nil, input.count >= 4000 {
             Text("The input is cut short here; the whole of it is on your Mac.").font(.footnote).foregroundStyle(.secondary)
         }
     }

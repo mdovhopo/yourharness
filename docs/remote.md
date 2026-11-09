@@ -27,7 +27,10 @@ rather than for the phone:
 - **Trying it:** `cargo run -p yh-server --example yh -- <url> watch|send|stop|allow|deny|withdraw|send-now …`.
   Checked with a real Haiku turn started from it: the permission card reached the client, which
   allowed it, and the turn ran to its end on the Mac.
-- **Still to do for the phone:** real streaming (`TextAppended` from the engine rather than rows
+- **Protocol 3 (since):** the whole app from a client: questions, plans, MCP questions, new
+  threads, model, effort and mode, thread actions, pictures, whole tool output; `done` comes once
+  the app took the action. Real streaming came too (rows from the engine). See docs/mobile.md.
+- **Was still to do for the phone (most done since):** real streaming (`TextAppended` from the engine rather than rows
   from the database), resuming from a `rev` after a reconnect, a query for a whole tool result,
   answering questions and plans with their content (not only allow and deny), MCP questions,
   uploads, and the device's push token (docs/mobile.md lists them).

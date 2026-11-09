@@ -12,18 +12,21 @@ struct TranscriptScreen: View {
     @Environment(Store.self) private var store
     @State private var model: TranscriptModel?
     @State private var draft = ""
+    @State private var images: [OutgoingImage] = []
     @State private var composerHeight: CGFloat = 0
+    /// `YH_PHONE_QUEUE`'s message went.
+    @State private var queued = false
     private static let env = ProcessInfo.processInfo.environment
 
     var body: some View {
         Group {
             if let model {
                 // Under the composer, so rows scroll beneath its glass; its height is the list's inset.
-                TranscriptRepresentable(model: model, bottomInset: composerHeight).ignoresSafeArea(.container, edges: .bottom)
+                TranscriptRepresentable(model: model, store: store, bottomInset: composerHeight).ignoresSafeArea(.container, edges: .bottom)
             }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            ComposerBar(threadID: threadID, draft: $draft)
+            ComposerBar(threadID: threadID, draft: $draft, images: $images)
                 .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { composerHeight = $0 }
         }
         .overlay(alignment: .top) {
@@ -41,14 +44,69 @@ struct TranscriptScreen: View {
                     }
             }
         }
-        // Test hooks, doing what the buttons do: `YH_PHONE_SEND=<text>` once the thread is open,
-        // `YH_PHONE_ANSWER=allow|deny` to each request `YH_PHONE_ANSWER_DELAY` s (3) after it shows,
-        // `YH_PHONE_STOP=<s>` (below).
+        // Test hooks, doing what the buttons do (docs/mobile.md lists them).
         .task(id: store.canAct) {
             guard store.canAct, let text = Self.env["YH_PHONE_SEND"] else { return }
             try? await Task.sleep(for: .seconds(2))
-            Perf.shared.log("PHONE send: \(text)")
+            let pictures = Self.env["YH_PHONE_PHOTO"] == "1" ? [TestPicture.make()] : []
+            Perf.shared.log("PHONE send: \(text)\(pictures.isEmpty ? "" : " +1 picture")")
+            store.send(text, to: threadID, images: pictures)
+        }
+        .task(id: store.canControl) {
+            guard store.canControl else { return }
+            try? await Task.sleep(for: .seconds(1))
+            // `YH_PHONE_SET=model=haiku,effort=low,mode=ask`
+            for part in (Self.env["YH_PHONE_SET"] ?? "").split(separator: ",") {
+                let kv = part.split(separator: "=", maxSplits: 1).map(String.init)
+                guard kv.count == 2 else { continue }
+                Perf.shared.log("PHONE set \(kv[0]) \(kv[1])")
+                switch kv[0] {
+                case "model": store.setModel(kv[1], of: threadID)
+                case "effort": store.setEffort(kv[1], of: threadID)
+                case "mode": store.setMode(kv[1], of: threadID)
+                default: break
+                }
+            }
+            // `YH_PHONE_WHOLE=<seq>`: a row's whole tool output asked for, as its sheet's button does.
+            if let seq = Self.env["YH_PHONE_WHOLE"].flatMap(Int.init) {
+                store.askWhole(thread: threadID, seq: seq)
+                for _ in 0..<50 {
+                    if let w = store.whole["\(threadID)#\(seq)"] {
+                        Perf.shared.log("PHONE whole \(seq): input \(w.input?.count ?? 0), result \(w.result?.count ?? 0) characters")
+                        break
+                    }
+                    try? await Task.sleep(for: .milliseconds(100))
+                }
+            }
+            // `YH_PHONE_THREAD_ACTIONS=pin,rename:Title,settle,unsettle,delete`, a second and a half apart.
+            for step in (Self.env["YH_PHONE_THREAD_ACTIONS"] ?? "").split(separator: ",").map(String.init) {
+                try? await Task.sleep(for: .seconds(1.5))
+                Perf.shared.log("PHONE thread \(step)")
+                switch step {
+                case "pin": store.pin(threadID, true)
+                case "unpin": store.pin(threadID, false)
+                case "settle": store.settle(threadID, true)
+                case "unsettle": store.settle(threadID, false)
+                case "delete": store.delete(threadID)
+                case let s where s.hasPrefix("rename:"): store.rename(threadID, to: String(s.dropFirst(7)))
+                default: break
+                }
+            }
+        }
+        // `YH_PHONE_QUEUE=<text>`: sent while Claude works; `YH_PHONE_QUEUE_ACTION=now|remove` then.
+        .task(id: store.live?.running) {
+            guard store.live?.running == true, let text = Self.env["YH_PHONE_QUEUE"], !queued else { return }
+            queued = true
+            try? await Task.sleep(for: .seconds(2))
+            Perf.shared.log("PHONE queue: \(text)")
             store.send(text, to: threadID)
+        }
+        .task(id: store.live?.queue.first?.id) {
+            guard let q = store.live?.queue.first, let action = Self.env["YH_PHONE_QUEUE_ACTION"] else { return }
+            try? await Task.sleep(for: .seconds(2))
+            guard store.live?.queue.first?.id == q.id else { return }
+            Perf.shared.log("PHONE queued \(action)")
+            if action == "now" { store.sendNow(q, in: threadID) } else { store.withdraw(q, in: threadID) }
         }
         // `YH_PHONE_STOP=<s>`: Stop pressed that long after the thread starts working.
         .task(id: store.live?.running) {
@@ -58,13 +116,49 @@ struct TranscriptScreen: View {
             Perf.shared.log("PHONE stop")
             store.stop(threadID)
         }
+        // A request waiting: `YH_PHONE_ANSWER=allow|deny` for a tool; `YH_PHONE_CHOOSE=<label>[,<label>]`
+        // answers Claude's question (`YH_PHONE_ANSWER=deny` skips it); `YH_PHONE_PLAN=approve:<mode>|keep:<feedback>`
+        // for a plan; each `YH_PHONE_ANSWER_DELAY` s (3) after it shows.
         .task(id: store.live?.requests.first?.id) {
-            guard let request = store.live?.requests.first, let answer = Self.env["YH_PHONE_ANSWER"] else { return }
-            Perf.shared.log("PHONE card: \(request.tool) · \(request.description)")
+            guard let request = store.live?.requests.first else { return }
+            Perf.shared.log("PHONE card: \(request.tool) · \(request.description.prefix(60))")
             try? await Task.sleep(for: .seconds(Self.env["YH_PHONE_ANSWER_DELAY"].flatMap(Double.init) ?? 3))
             guard store.live?.requests.first?.id == request.id else { return }
-            Perf.shared.log("PHONE \(answer) \(request.tool)")
-            store.respond(request, allow: answer == "allow", in: threadID)
+            switch request.tool {
+            case "AskUserQuestion":
+                let questions = AskedQuestion.parse(request.input)
+                if let labels = Self.env["YH_PHONE_CHOOSE"]?.split(separator: ",").map({ $0.trimmingCharacters(in: .whitespaces) }) {
+                    var chosen: [Int: Set<Int>] = [:]
+                    var written: [Int: String] = [:]
+                    for q in questions {
+                        let picks = q.options.indices.filter { labels.contains(q.options[$0].label) }
+                        if picks.isEmpty { written[q.id] = labels.first ?? "" } else { chosen[q.id] = Set(q.multi ? picks : [picks[0]]) }
+                    }
+                    let answers = AskedQuestion.answers(questions, chosen: chosen, written: written)
+                    Perf.shared.log("PHONE answer \(answers.values.sorted().joined(separator: "; "))")
+                    store.answer(request, answers: answers, in: threadID)
+                } else if Self.env["YH_PHONE_ANSWER"] == "deny" {
+                    Perf.shared.log("PHONE skip question")
+                    store.skip(request, in: threadID)
+                }
+            case "ExitPlanMode":
+                guard let plan = Self.env["YH_PHONE_PLAN"] else { return }
+                let parts = plan.split(separator: ":", maxSplits: 1).map(String.init)
+                Perf.shared.log("PHONE plan \(plan)")
+                if parts.first == "approve" { store.approvePlan(request, mode: parts.count > 1 ? parts[1] : "auto", feedback: "", in: threadID) }
+                else { store.keepPlanning(request, feedback: parts.count > 1 ? parts[1] : "", in: threadID) }
+            default:
+                guard let answer = Self.env["YH_PHONE_ANSWER"] else { return }
+                Perf.shared.log("PHONE \(answer) \(request.tool)")
+                store.respond(request, allow: answer == "allow", in: threadID)
+            }
+        }
+        // `YH_PHONE_MCP=accept|decline`: an MCP server's question answered.
+        .task(id: store.live?.questions.first?.id) {
+            guard let q = store.live?.questions.first, let answer = Self.env["YH_PHONE_MCP"] else { return }
+            try? await Task.sleep(for: .seconds(2))
+            Perf.shared.log("PHONE mcp \(answer) \(q.server)")
+            store.answerQuestion(q, accept: answer == "accept", in: threadID)
         }
         .navigationTitle(store.threads[threadID]?.title ?? "Thread")
         .navigationSubtitle(store.threads[threadID].flatMap(store.projectName) ?? "")
@@ -85,10 +179,14 @@ struct TranscriptScreen: View {
 
 struct TranscriptRepresentable: UIViewControllerRepresentable {
     let model: TranscriptModel
+    /// For a row's sheet: its whole output is asked of the Mac.
+    let store: Store
     var bottomInset: CGFloat = 0
 
     func makeUIViewController(context: Context) -> TranscriptViewController {
-        TranscriptViewController(model: model)
+        let controller = TranscriptViewController(model: model)
+        controller.store = store
+        return controller
     }
 
     func updateUIViewController(_ controller: TranscriptViewController, context: Context) {
@@ -111,6 +209,8 @@ final class TranscriptViewController: UIViewController, UICollectionViewDataSour
     private var openedRow = false
     fileprivate var view_: UICollectionView { collectionView }
     fileprivate var transcript: TranscriptModel { model }
+
+    weak var store: Store?
 
     init(model: TranscriptModel) {
         self.model = model
@@ -306,7 +406,7 @@ final class TranscriptViewController: UIViewController, UICollectionViewDataSour
     }
 
     fileprivate func openDetail(_ row: Row) {
-        let sheet = UIHostingController(rootView: RowDetail(row: row))
+        let sheet = UIHostingController(rootView: RowDetail(row: row, threadID: model.threadID, store: store))
         if let s = sheet.sheetPresentationController {
             s.detents = [.medium(), .large()]
             s.prefersGrabberVisible = true
@@ -502,5 +602,20 @@ final class CodeBlockView: UIView {
         self.code.frame = CGRect(x: p.left, y: 0, width: codeSize.width, height: codeSize.height)
         scroll.contentSize = CGSize(width: codeSize.width + p.left + p.right, height: codeSize.height)
         scroll.contentOffset = .zero
+    }
+}
+
+/// A picture made up for test runs (`YH_PHONE_PHOTO=1`): the Simulator's library isn't there to
+/// pick from. Big type, so a model can read it.
+enum TestPicture {
+    static func make() -> OutgoingImage {
+        let size = CGSize(width: 600, height: 300)
+        let image = UIGraphicsImageRenderer(size: size).image { ctx in
+            UIColor.systemTeal.setFill()
+            ctx.fill(CGRect(origin: .zero, size: size))
+            let text = "BLUE 42" as NSString
+            text.draw(at: CGPoint(x: 90, y: 90), withAttributes: [.font: UIFont.boldSystemFont(ofSize: 110), .foregroundColor: UIColor.white])
+        }
+        return OutgoingImage(mediaType: "image/jpeg", data: image.jpegData(compressionQuality: 0.9)!)
     }
 }

@@ -3,10 +3,15 @@
 Status: the MVP works locally, on the `remote-foundation` branch (the `mobile` branch merged
 into it; the foundation's thread carries both). Nothing here is merged into `main`.
 
-**What works (checked 2026-11-09 in the Simulator with real Haiku turns):** the Mac's threads
-and transcripts live; sending from the phone, steering, stopping; permission and plan cards
-answered from the phone; Claude's reply streaming in word by word as the Mac's Claude Code
-writes it; "working" and "waiting on you" in the list.
+**What works (checked 2026-11-09 in the Simulator with real Haiku turns, protocol 3):** the
+Mac's threads and transcripts live, Claude's reply streaming in as the Mac's Claude Code writes
+it; sending, steering, stopping; queued messages sent now or taken back; permission cards; Claude's
+questions answered (several questions, several choices, or your own words) or skipped; plans
+approved into a mode or sent back with feedback; MCP servers' questions accepted or declined;
+pictures sent with a message; a new thread in a project; model, effort and the project's
+permission mode; rename, pin, settle and bring back, delete; a tool call's whole output; the
+phone reconnecting by itself when the Mac app restarts. Tailscale and a real iPhone come next
+(see Post-MVP).
 
 ## The MVP goal
 
@@ -185,6 +190,20 @@ Recorded here so the MVP stays small. Roughly in order; Tailscale last.
    Claude writes, whole, at most every 50 ms. Checked 2026-11-09: a Haiku reply sent from the
    phone grew paragraph by paragraph on it, in a thread that started empty (which first showed
    a bug: rows arriving with none shown were dropped).
+2b. ✅ **The whole app from the phone** (protocol 3), each checked with a real Haiku turn sent
+   from the phone: a two-question card with a multi-select answered (`Zed, Vim` and `macOS`
+   reached Claude); a plan made in Plan mode set from the phone, approved into Accept Edits (the
+   file written, the project's mode changed); an MCP server's form question accepted (a test
+   server, `pick_color`, got its default back); a picture read by Claude ("BLUE 42"); model and
+   effort set; a queued message removed, another sent now (the command interrupted, the reply
+   to it given); a 13,892-character result fetched whole; pin, rename, settle, bring back,
+   delete; a new thread from a project's header; the Mac app restarted mid-session, the phone
+   back on its own. Test hooks: `YH_PHONE_NEW_THREAD=<text>` (with `YH_PHONE_PROJECT=<name>`),
+   `YH_PHONE_CHOOSE=<label>[,<label>]` (answers Claude's question; `YH_PHONE_ANSWER=deny` skips
+   it), `YH_PHONE_PLAN=approve:<mode>|keep:<feedback>`, `YH_PHONE_MCP=accept|decline`,
+   `YH_PHONE_SET=model=…,effort=…,mode=…`, `YH_PHONE_QUEUE=<text>` with
+   `YH_PHONE_QUEUE_ACTION=now|remove`, `YH_PHONE_PHOTO=1` (a made-up picture with
+   `YH_PHONE_SEND`), `YH_PHONE_WHOLE=<seq>`, `YH_PHONE_THREAD_ACTIONS=pin,rename:<title>,settle,unsettle,delete`.
 3. **A real phone on the local network:** the server on the LAN with its token,
    found by Bonjour, paired by QR code, the token in the Keychain.
 4. **Notifications:** APNs sent straight from the Mac with the app's key (no relay for personal

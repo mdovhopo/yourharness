@@ -24,6 +24,19 @@ final class Store {
     /// Actions sent and not yet answered, by id: what to put back if one fails.
     private var pending: [String: FromApp] = [:]
     var canAct: Bool { serverProtocol >= 2 && state == .connected }
+    /// Protocol 3: answering questions and plans, new threads, model, effort and mode, thread
+    /// actions, pictures, whole tool output.
+    var canControl: Bool { serverProtocol >= 3 && state == .connected }
+    /// The models and permission modes the Mac offers (protocol 3).
+    var models: [ModelOption] = []
+    var modes: [String] = []
+    /// Rows' whole tool input and result, asked for from a row's sheet, by "thread#seq".
+    var whole: [String: WholeOutput] = [:]
+
+    struct WholeOutput: Equatable {
+        let input: String?
+        let result: String?
+    }
 
     @ObservationIgnored let connection: Connection
     /// The open thread's rows; not observed, the transcript applies its updates itself.
@@ -31,6 +44,8 @@ final class Store {
     /// `YH_SELECT`: a thread (title or id) opened once the list arrives; `active`, the first
     /// thread that's working, whenever that is.
     @ObservationIgnored private var selectOnLoad = ProcessInfo.processInfo.environment["YH_SELECT"]
+    /// A thread made from here, opened once the list has it.
+    @ObservationIgnored private var openWhenListed: String?
 
     static let defaultAddress = "ws://127.0.0.1:7878/"
 
@@ -105,10 +120,63 @@ final class Store {
     // MARK: Actions (protocol 2), as the Mac's own buttons take them
 
     /// Your message: starts a turn, or waits behind the one under way (`now`: stops it for this).
-    func send(_ text: String, to thread: String, now: Bool = false) {
+    func send(_ text: String, to thread: String, now: Bool = false, images: [OutgoingImage] = []) {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
-        act(.send(id: Self.newID(), thread: thread, text: text, now: now))
+        guard !text.isEmpty || !images.isEmpty else { return }
+        act(.send(id: Self.newID(), thread: thread, text: text, now: now, images: images))
+    }
+
+    // MARK: Protocol 3
+
+    /// Claude's question answered: each question's text, and the options chosen (joined) or
+    /// what was written.
+    func answer(_ request: Request, answers: [String: String], in thread: String) {
+        act(.answer(id: Self.newID(), thread: thread, requestID: request.id, answers: answers))
+    }
+
+    func skip(_ request: Request, in thread: String) {
+        act(.skipQuestion(id: Self.newID(), thread: thread, requestID: request.id))
+    }
+
+    func approvePlan(_ request: Request, mode: String, feedback: String, in thread: String) {
+        act(.approvePlan(id: Self.newID(), thread: thread, requestID: request.id, mode: mode, feedback: feedback.isEmpty ? nil : feedback))
+    }
+
+    func keepPlanning(_ request: Request, feedback: String, in thread: String) {
+        act(.keepPlanning(id: Self.newID(), thread: thread, requestID: request.id, feedback: feedback.isEmpty ? nil : feedback))
+    }
+
+    func answerQuestion(_ question: MCPQuestion, accept: Bool, in thread: String) {
+        act(.answerQuestion(id: Self.newID(), thread: thread, requestID: question.id, accept: accept))
+    }
+
+    /// A new thread in `project`; opened once the Mac has made it.
+    func newThread(in project: String, text: String? = nil) {
+        act(.newThread(id: Self.newID(), project: project, text: text))
+    }
+
+    func setModel(_ model: String?, of thread: String) { act(.setModel(id: Self.newID(), thread: thread, model: model)) }
+    func setEffort(_ effort: String?, of thread: String) { act(.setEffort(id: Self.newID(), thread: thread, effort: effort)) }
+    func setMode(_ mode: String, of thread: String) { act(.setMode(id: Self.newID(), thread: thread, mode: mode)) }
+    func rename(_ thread: String, to title: String) { act(.rename(id: Self.newID(), thread: thread, title: title)) }
+    func pin(_ thread: String, _ on: Bool) { act(.pin(id: Self.newID(), thread: thread, on: on)) }
+    func settle(_ thread: String, _ on: Bool) { act(.settle(id: Self.newID(), thread: thread, on: on)) }
+
+    func delete(_ thread: String) {
+        if path.last == thread { path.removeLast() }
+        act(.delete(id: Self.newID(), thread: thread))
+    }
+
+    /// A row's whole tool input and result, into `whole`.
+    func askWhole(thread: String, seq: Int) {
+        guard canControl, whole["\(thread)#\(seq)"] == nil else { return }
+        connection.send(.toolResult(thread: thread, seq: seq))
+    }
+
+    /// The project a thread is in, and its permission mode.
+    func project(of thread: String) -> Project? {
+        guard let t = threads[thread] else { return nil }
+        return projects.first { $0.id == t.projectId }
     }
 
     func stop(_ thread: String) {
@@ -170,10 +238,12 @@ final class Store {
                 order = list.map(\.id)
                 threads = Dictionary(list.map { ($0.id, $0) }, uniquingKeysWith: { $1 })
                 selectIfAsked()
+                if let wanted = openWhenListed, threads[wanted] != nil { path = [wanted]; openWhenListed = nil }
             case .threadUpserted(let thread):
                 if threads[thread.id] == nil { order.append(thread.id) }
                 threads[thread.id] = thread
                 selectIfAsked()
+                if openWhenListed == thread.id { path = [thread.id]; openWhenListed = nil }
             case .threadRemoved(let id):
                 threads[id] = nil
                 order.removeAll { $0 == id }
@@ -193,11 +263,21 @@ final class Store {
                 }
             case .live(let thread, let state):
                 if transcript?.threadID == thread, live != state { live = state }
-            case .done(let id, let error):
+            case .options(let models, let modes):
+                self.models = models
+                self.modes = modes
+            case .toolResult(let thread, let seq, let input, let result):
+                whole["\(thread)#\(seq)"] = WholeOutput(input: input, result: result)
+            case .done(let id, let error, let made):
                 let action = pending.removeValue(forKey: id)
+                // A thread made from here: opened as soon as the list has it.
+                if case .newThread? = action, let made, error == nil {
+                    openWhenListed = made
+                    if threads[made] != nil { path = [made]; openWhenListed = nil }
+                }
                 if let error {
                     actionError = error
-                    if case .send(_, let thread, let text, _)? = action { returnedDraft = (thread, text) }
+                    if case .send(_, let thread, let text, _, _)? = action { returnedDraft = (thread, text) }
                 }
                 Perf.shared.log("DONE \(action?.name ?? id)\(error.map { ": " + $0 } ?? "")")
             case .error(let message):
