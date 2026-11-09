@@ -6,6 +6,8 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-11-09
+
 ### Changed
 - Claude's replies are turned into a thread's rows on a thread of their own, away from the window, so the window has less to do while turns stream.
 
