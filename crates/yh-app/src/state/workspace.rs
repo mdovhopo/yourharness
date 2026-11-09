@@ -248,6 +248,17 @@ impl Workspace {
             }
         })
         .detach();
+        // The server for the app's clients (the phone): off unless asked for.
+        if let Some(remote) = start_server(&engine) {
+            cx.spawn(async move |this, cx| {
+                while let Ok(action) = remote.recv_async().await {
+                    if this.update(cx, |ws, cx| ws.remote_action(action, cx)).is_err() {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
         let mut workspace = Workspace {
             projects: library.projects.clone(),
             data_dir: data_directory(),
@@ -3232,5 +3243,63 @@ impl Workspace {
             self.answer_for_tests(&thread, cx);
         }
         cx.notify();
+    }
+}
+
+// MARK: The server
+
+/// `YH_SERVER=<port>` (`1`: 7878): the server for the app's clients (`yh_server`, the phone app),
+/// on loopback, its token `YH_SERVER_TOKEN` or made up. Prints `SERVER <url>` and writes it to
+/// `server.json` in the data folder (only you can read it). Its actions come back here.
+fn start_server(engine: &yh_engine::EngineHandle) -> Option<flume::Receiver<yh_server::Action>> {
+    let asked = std::env::var("YH_SERVER").ok()?;
+    let port: u16 = if asked == "1" { 7878 } else { asked.parse().ok()? };
+    let token = std::env::var("YH_SERVER_TOKEN").ok().filter(|t| !t.is_empty()).unwrap_or_else(|| yh_core::library::new_uuid().replace('-', "").to_lowercase());
+    let listener = match std::net::TcpListener::bind(("127.0.0.1", port)) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("SERVER can't listen on 127.0.0.1:{port}: {e}");
+            return None;
+        }
+    };
+    let data = data_directory();
+    let url = format!("ws://127.0.0.1:{port}/?token={token}");
+    eprintln!("SERVER {url}");
+    let file = data.join("server.json");
+    if std::fs::write(&file, serde_json::json!({ "url": url }).to_string()).is_ok() {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600));
+    }
+    let (actions, remote) = flume::unbounded();
+    let links = yh_server::Links { engine: engine.subscribe(), actions };
+    let name = std::process::Command::new("scutil").args(["--get", "ComputerName"]).output().ok().and_then(|o| String::from_utf8(o.stdout).ok()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).unwrap_or_else(|| "Mac".into());
+    std::thread::Builder::new()
+        .name("server".into())
+        .spawn(move || {
+            if let Err(e) = yh_server::serve(listener, data, yh_server::Options { token: Some(token), name }, Some(links)) {
+                eprintln!("SERVER stopped: {e}");
+            }
+        })
+        .ok()?;
+    Some(remote)
+}
+
+impl Workspace {
+    /// What a client of the server asked (the phone): taken as the same click here would be.
+    fn remote_action(&mut self, action: yh_server::Action, cx: &mut Context<Self>) {
+        if std::env::var("YH_DATA_DIR").is_ok() {
+            eprintln!("REMOTE {action:?}");
+        }
+        let thread_id = match &action {
+            yh_server::Action::Send { thread, .. } | yh_server::Action::Stop { thread } | yh_server::Action::Respond { thread, .. } | yh_server::Action::Withdraw { thread, .. } | yh_server::Action::SendNow { thread, .. } => thread.clone(),
+        };
+        let Some(thread) = self.thread(&thread_id) else { return };
+        match action {
+            yh_server::Action::Send { text, now, .. } => self.send(&thread, &text, now, cx),
+            yh_server::Action::Stop { .. } => self.stop(&thread, &Default::default(), cx),
+            yh_server::Action::Respond { request_id, allow, .. } => self.respond_to(&thread, &request_id, if allow { Decision::allow() } else { Decision::deny() }, cx),
+            yh_server::Action::Withdraw { message, .. } => self.withdraw(&thread, &message, false, cx),
+            yh_server::Action::SendNow { message, .. } => self.send_now(&thread, &message, cx),
+        }
     }
 }

@@ -1,6 +1,36 @@
 # Remote: the foundation
 
-Status: in progress. F0 is done (`yh_core::thread_run`), and F1's first step (`yh-engine`: turns on the engine's thread); the rest is planned.
+Status: in progress. Done: F0 (`yh_core::thread_run`), F1's first step (`yh-engine`: turns on
+the engine's thread), and a first `yh-proto` and `yh-server` (see "The order changed" below).
+Next: Tailscale (F3), then F1's steps 2 and 3.
+
+## The order changed (2026-11-09)
+
+The phone app is being built in parallel (`mobile` branch, docs/mobile.md), on a development
+server that only reads the database. What it was waiting for (sending, stopping, answering
+cards, live "working" and "waiting on you") the engine already had after F1's first step, so the
+protocol and the server came next, before F1's steps 2 and 3, which matter for a headless node
+rather than for the phone:
+
+- **`yh-proto`** is the phone's wire as it was (same message names and shapes), plus `live` (a
+  thread's run: working, requests waiting on you, MCP questions, the queue, context), `done` (an
+  action's answer), a thread's `running` and `waiting`, and the actions `send`, `stop`,
+  `respond`, `withdraw`, `send_now`. Protocol 2; only additions, so either side reads the other.
+- **`yh-server`** started as the phone's development server, so the phone switches by changing
+  its address. Rows and the thread list still come from the database (about once a second while
+  a reply streams); live state comes from the engine as it happens (`EngineHandle::subscribe`);
+  actions go to the app's main thread and are taken as a click would be (`Workspace::remote_action`),
+  so slash commands, titles and notifications behave the same.
+- **Running it:** `YH_SERVER=<port>` (`1`: 7878) starts it inside the app, on `127.0.0.1` only,
+  with a token (`YH_SERVER_TOKEN`, or made up); it prints `SERVER <url>` and writes the URL to
+  `server.json` in the data folder, readable only by you. A wrong or missing token gets 401.
+- **Trying it:** `cargo run -p yh-server --example yh -- <url> watch|send|stop|allow|deny|withdraw|send-now …`.
+  Checked with a real Haiku turn started from it: the permission card reached the client, which
+  allowed it, and the turn ran to its end on the Mac.
+- **Still to do for the phone:** real streaming (`TextAppended` from the engine rather than rows
+  from the database), resuming from a `rev` after a reconnect, a query for a whole tool result,
+  answering questions and plans with their content (not only allow and deny), MCP questions,
+  uploads, and the device's push token (docs/mobile.md lists them).
 
 ## Goal
 

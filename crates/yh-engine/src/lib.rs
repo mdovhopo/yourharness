@@ -96,6 +96,9 @@ pub enum Command {
     Events { thread: String, events: Vec<Event> },
     /// Quitting: running jobs cut off, everything saved, every `claude` ended; then `done`.
     Quit { done: flume::Sender<()> },
+    /// Everything said from now on goes to `to` too (the server); first, each thread's state as
+    /// it stands.
+    Subscribe { to: flume::Sender<Output> },
 }
 
 impl Command {
@@ -103,7 +106,7 @@ impl Command {
         use Command::*;
         match self {
             Open { thread, .. } | Send { thread, .. } | Deliver { thread, .. } | Launch { thread, .. } | Interrupt { thread } | Stop { thread } | Respond { thread, .. } | AnswerElicitation { thread, .. } | Mcp { thread, .. } | End { thread, .. } | SetModel { thread, .. } | SetMode { thread, .. } | SetEffort { thread, .. } | Notice { thread, .. } | ChangedFiles { thread, .. } | CutOffJobs { thread, .. } | Withdraw { thread, .. } | SendNow { thread, .. } | StopJob { thread, .. } | TookRestored { thread, .. } | SetMcpServers { thread, .. } | SetSession { thread, .. } | Forget { thread } | Save { thread } | Events { thread, .. } => Some(thread),
-            Quit { .. } => None,
+            Quit { .. } | Subscribe { .. } => None,
         }
     }
 }
@@ -165,6 +168,7 @@ impl ThreadUpdate {
     }
 }
 
+#[derive(Clone)]
 pub enum Output {
     Thread(ThreadUpdate),
     /// The thread's `claude` has to start: the app answers with `Command::Launch`.
@@ -184,6 +188,13 @@ impl EngineHandle {
     pub fn send(&self, command: Command) {
         let _ = self.inbox.send(Input::Command(command));
     }
+
+    /// A copy of everything the engine says from now on (`Command::Subscribe`).
+    pub fn subscribe(&self) -> flume::Receiver<Output> {
+        let (to, outputs) = flume::unbounded();
+        self.send(Command::Subscribe { to });
+        outputs
+    }
 }
 
 enum Input {
@@ -195,7 +206,7 @@ enum Input {
 pub fn start(db: Option<Arc<Database>>) -> EngineHandle {
     let (inbox, rx) = flume::unbounded();
     let (out, outputs) = flume::unbounded();
-    let engine = Engine { db, inbox: inbox.clone(), out, runs: HashMap::new(), runtimes: HashMap::new(), launching: HashMap::new(), generation: 0, saved_at: HashMap::new(), steering: HashMap::new(), updates: Vec::new() };
+    let engine = Engine { db, inbox: inbox.clone(), out, runs: HashMap::new(), runtimes: HashMap::new(), launching: HashMap::new(), generation: 0, saved_at: HashMap::new(), steering: HashMap::new(), subscribers: Vec::new(), updates: Vec::new() };
     std::thread::Builder::new().name("engine".into()).spawn(move || engine.run(rx)).expect("the engine's thread");
     EngineHandle { inbox, outputs }
 }
@@ -234,6 +245,8 @@ struct Engine {
     /// Messages sent without what to tell Claude yet (`Deliver` follows): whether a turn was
     /// under way when each was sent.
     steering: HashMap<String, bool>,
+    /// Who else hears everything (`Command::Subscribe`).
+    subscribers: Vec<flume::Sender<Output>>,
     /// Updates made since the last were sent, in order, one per thread.
     updates: Vec<ThreadUpdate>,
 }
@@ -378,9 +391,15 @@ impl Engine {
         self.update(thread).changes.extend(changes);
     }
 
+    /// To the app, and to every subscriber still listening.
+    fn emit(&mut self, output: Output) {
+        self.subscribers.retain(|s| s.send(output.clone()).is_ok());
+        let _ = self.out.send(output);
+    }
+
     fn flush(&mut self) {
-        for u in self.updates.drain(..) {
-            let _ = self.out.send(Output::Thread(u));
+        for u in std::mem::take(&mut self.updates) {
+            self.emit(Output::Thread(u));
         }
     }
 
@@ -559,7 +578,7 @@ impl Engine {
             Command::Forget { thread } => {
                 if let Some(rt) = self.runtimes.remove(&thread) {
                     rt.process.terminate();
-                    let _ = self.out.send(Output::Runtime { thread: thread.clone(), pid: None });
+                    self.emit(Output::Runtime { thread: thread.clone(), pid: None });
                 }
                 self.launching.remove(&thread);
                 self.runs.remove(&thread);
@@ -569,6 +588,15 @@ impl Engine {
             Command::Events { thread, events } => {
                 let generation = self.runtimes.get(&thread).map_or(0, |rt| rt.generation);
                 self.claude_batch(&thread, generation, events);
+            }
+            Command::Subscribe { to } => {
+                for (thread, run) in &self.runs {
+                    let _ = to.send(Output::Thread(ThreadUpdate::new(thread, run.live.clone())));
+                }
+                for (thread, rt) in &self.runtimes {
+                    let _ = to.send(Output::Runtime { thread: thread.clone(), pid: Some(rt.process.pid) });
+                }
+                self.subscribers.push(to);
             }
             Command::Quit { .. } => {}
         }
@@ -594,7 +622,7 @@ impl Engine {
         }
         self.end_runtime(thread);
         self.launching.insert(thread.to_string(), Launching { effort: effort.clone(), ..Default::default() });
-        let _ = self.out.send(Output::NeedsLaunch { thread: thread.to_string() });
+        self.emit(Output::NeedsLaunch { thread: thread.to_string() });
         false
     }
 
@@ -665,7 +693,7 @@ impl Engine {
                 }
             })
             .expect("a thread for its events");
-        let _ = self.out.send(Output::Runtime { thread: thread.to_string(), pid: Some(pid) });
+        self.emit(Output::Runtime { thread: thread.to_string(), pid: Some(pid) });
         let rt = self.runtimes.get_mut(thread).expect("just started");
         for (message_id, now, d) in waiting.messages {
             rt.process.send(&d.text, &d.blocks, &message_id, now.then_some("now"));
@@ -680,7 +708,7 @@ impl Engine {
     fn end_runtime(&mut self, thread: &str) {
         let Some(rt) = self.runtimes.remove(thread) else { return };
         rt.process.terminate();
-        let _ = self.out.send(Output::Runtime { thread: thread.to_string(), pid: None });
+        self.emit(Output::Runtime { thread: thread.to_string(), pid: None });
         if self.runs.get(thread).is_some_and(|r| r.live.jobs.any_running()) {
             self.cut_off_jobs(thread, "stopped when Claude was restarted");
         }
@@ -779,7 +807,7 @@ impl Engine {
         }
         if exited {
             if self.runtimes.remove(thread).is_some() {
-                let _ = self.out.send(Output::Runtime { thread: thread.to_string(), pid: None });
+                self.emit(Output::Runtime { thread: thread.to_string(), pid: None });
             }
         }
         // A message sent now (after a stop) starts its own turn right after the stop's end.
