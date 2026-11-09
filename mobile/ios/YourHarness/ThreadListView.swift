@@ -8,6 +8,8 @@ struct ThreadListView: View {
     @State private var renaming: ThreadInfo?
     @State private var title = ""
     @State private var deleting: ThreadInfo?
+    /// The project whose PRs are open in a sheet.
+    @State private var pullsFor: Project?
     private static let env = ProcessInfo.processInfo.environment
 
     var body: some View {
@@ -70,6 +72,12 @@ struct ThreadListView: View {
                     HStack {
                         Text(section.project.name)
                         Spacer()
+                        if store.canSearch {
+                            Button("Pull Requests", systemImage: "arrow.triangle.pull") { pullsFor = section.project }
+                                .labelStyle(.iconOnly)
+                                .font(.body)
+                                .accessibilityLabel("Pull requests in \(section.project.name)")
+                        }
                         if store.canControl {
                             Button("New Thread", systemImage: "square.and.pencil") { store.newThread(in: section.project.id) }
                                 .labelStyle(.iconOnly)
@@ -91,6 +99,12 @@ struct ThreadListView: View {
             }
         }
         .refreshable { store.reconnect() }
+        .sheet(item: $pullsFor) { PullsSheet(project: $0).environment(store) }
+        // `YH_PHONE_PULLS=<project name>`: its PRs open, as its header's button does.
+        .task(id: store.projects.count) {
+            guard let name = Self.env["YH_PHONE_PULLS"], pullsFor == nil, let p = store.projects.first(where: { $0.name == name }) else { return }
+            pullsFor = p
+        }
         .alert("Rename Thread", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
             TextField("Title", text: $title)
             Button("Cancel", role: .cancel) { renaming = nil }

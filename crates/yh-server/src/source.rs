@@ -156,6 +156,12 @@ impl Source {
         Ok(project.and_then(|j| object(&j).get("path").and_then(Value::as_str).map(str::to_string)).filter(exists))
     }
 
+    /// A project's folder, when it's there.
+    pub fn project_folder(&self, project: &str) -> rusqlite::Result<Option<String>> {
+        let json: Option<Vec<u8>> = self.c.query_row("SELECT json FROM projects WHERE id = ?", [project], |r| r.get(0)).optional()?;
+        Ok(json.and_then(|j| object(&j).get("path").and_then(Value::as_str).map(str::to_string)).filter(|p| std::path::Path::new(p).is_dir()))
+    }
+
     /// A row's whole tool input and result: the columns, or their blobs when they're long.
     pub fn whole(&self, thread: &str, seq: i64) -> rusqlite::Result<(Option<String>, Option<String>)> {
         let found: Option<(Option<String>, Option<String>, Option<String>, Option<String>)> = self

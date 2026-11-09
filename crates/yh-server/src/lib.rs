@@ -44,6 +44,7 @@ const DEFAULT_ROWS: i64 = 160;
 const MAX_ROWS: i64 = 1000;
 
 pub mod pairing;
+mod pulls;
 
 pub struct Options {
     /// Required as `?token=` when set (or a paired phone's token, with `pairing`).
@@ -257,6 +258,8 @@ struct Shared {
     limits: Mutex<Vec<wire::LimitWindow>>,
     /// Folders' files for `@`, kept 30 seconds.
     files: Mutex<HashMap<String, (Instant, Arc<Vec<String>>)>>,
+    /// Each project's PRs as last read, for a minute.
+    pulls: Mutex<HashMap<String, (Instant, ToApp)>>,
     actions: Option<flume::Sender<Asked>>,
     engine: Option<yh_engine::EngineHandle>,
     /// Each watched thread's newest rows as the engine told them.
@@ -600,7 +603,7 @@ fn refresh_listing(source: &Source, shared: &Shared, changed_at: &HashMap<String
     }
 }
 
-fn connection(id: u64, stream: TcpStream, shared: &Shared, options: &Options, directory: &Path) -> Result<(), String> {
+fn connection(id: u64, stream: TcpStream, shared: &Arc<Shared>, options: &Options, directory: &Path) -> Result<(), String> {
     let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
     // In: the server's own token, a paired phone's, or a pairing code (`?pair=…&device=<name>`),
     // which pairs this phone and answers with its token.
@@ -694,7 +697,7 @@ fn connection(id: u64, stream: TcpStream, shared: &Shared, options: &Options, di
 
 /// What a client's message asks for: the replies to send it now. Subscribing also changes
 /// what the poller sends it.
-fn answer(id: u64, message: FromApp, shared: &Shared, source: &Source) -> Vec<ToApp> {
+fn answer(id: u64, message: FromApp, shared: &Arc<Shared>, source: &Source) -> Vec<ToApp> {
     let set = |f: &dyn Fn(&mut Client)| {
         if let Some(c) = shared.clients.lock().unwrap().get_mut(&id) {
             f(c);
@@ -756,6 +759,25 @@ fn answer(id: u64, message: FromApp, shared: &Shared, source: &Source) -> Vec<To
             Ok(hits) => vec![ToApp::SearchResults { query, hits }],
             Err(e) => failed(e),
         },
+        // Read aside (the forges take a second or two), then sent to this client alone.
+        FromApp::Pulls { project, fresh } => {
+            let cached = shared.pulls.lock().unwrap().get(&project).filter(|(at, _)| !fresh && at.elapsed() < Duration::from_secs(60)).map(|(_, m)| m.clone());
+            if let Some(m) = cached {
+                return vec![m];
+            }
+            let folder = match source.project_folder(&project) {
+                Ok(Some(f)) => f,
+                Ok(None) => return vec![ToApp::Pulls { project, pulls: vec![], errors: vec!["This project has no folder on the Mac.".into()], accounts: vec![] }],
+                Err(e) => return failed(e),
+            };
+            let shared = shared.clone();
+            std::thread::spawn(move || {
+                let m = pulls::read(&project, &folder);
+                shared.pulls.lock().unwrap().insert(project, (Instant::now(), m.clone()));
+                shared.send_to(id, &[m], |_| {});
+            });
+            vec![]
+        }
         FromApp::Files { thread, query } => {
             let folder = match source.folder_of(&thread) {
                 Ok(Some(f)) => f,
@@ -870,7 +892,7 @@ fn to_action(m: FromApp) -> Result<Action, String> {
         F::Pin { thread, on, .. } => Action::Pin { thread, on },
         F::Settle { thread, on, .. } => Action::Settle { thread, on },
         F::Delete { thread, .. } => Action::Delete { thread },
-        F::SubscribeApp | F::SubscribeThread { .. } | F::UnsubscribeThread { .. } | F::Page { .. } | F::ToolResult { .. } | F::Subagent { .. } | F::Media { .. } | F::Diagram { .. } | F::Search { .. } | F::Files { .. } | F::Unknown => return Err("Not an action.".into()),
+        F::SubscribeApp | F::SubscribeThread { .. } | F::UnsubscribeThread { .. } | F::Page { .. } | F::ToolResult { .. } | F::Subagent { .. } | F::Media { .. } | F::Diagram { .. } | F::Search { .. } | F::Files { .. } | F::Pulls { .. } | F::Unknown => return Err("Not an action.".into()),
     })
 }
 

@@ -208,6 +208,18 @@ link (CoreImage's detector); the Simulator paired over 192.168.50.73, reconnecte
 after a restart, got Couldn't Pair for the used code with the earlier pairing kept; the Mac listed
 it after a restart. Server test: `a_phone_pairs_with_a_code_and_is_cut_off_when_forgotten`.
 
+### Pull requests
+
+Each project's header on the phone has a PR button (projects with no threads show too, as on the
+Mac). It asks the Mac `pulls` (protocol 5), which reads the project's repos' open PRs as its project
+page does (`yh_core::workspace`, `gh`/`glab`, `YH_MOCK_PULLS` in tests), aside on a thread of its own,
+kept a minute (`fresh` asks again; pull to refresh). The sheet lists Needs Your Review, Yours and
+Others, each stack together on a rail, with draft, review, conflicts, behind, auto-merge and merge
+queue badges and the checks' state; chips filter the sections and drafts (kept between launches).
+A PR opens on GitHub; long press copies its link. Hooks: `YH_PHONE_PULLS=<project name>` (its sheet
+open; filters reset), `YH_PHONE_PULLS_HIDE=others,drafts`, and `YH_WAIT=<s>` for `yh … raw`. Checked
+with mock PRs (a stack of three, one for review, a draft, conflicts, auto-merge) and real `gh`.
+
 ### On your own iPhone or iPad
 
 `scripts/mobile-device.sh [device]` builds the app signed with your Apple team, installs it on a

@@ -37,6 +37,43 @@ pub struct LimitWindow {
     pub resets_at: Option<f64>,
 }
 
+/// One open PR as a project's page lists it (protocol 5): in a stack (`stack` is its bottom PR's
+/// `repo#number`, `depth` how far up), in a section (`review`: waits for your review, `mine`,
+/// `others`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PullInfo {
+    /// `owner/repo`.
+    pub repo: String,
+    pub number: u64,
+    pub title: String,
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    pub draft: bool,
+    /// `approved`, `changesRequested`, `required` or empty.
+    #[serde(default)]
+    pub review: String,
+    /// `passing`, `failing`, `pending` or empty.
+    #[serde(default)]
+    pub checks: String,
+    /// `CLEAN`, `BLOCKED`, `BEHIND`, `DIRTY` (conflicts), `UNSTABLE`, `DRAFT`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_status: Option<String>,
+    #[serde(default)]
+    pub auto_merge: bool,
+    #[serde(default)]
+    pub in_merge_queue: bool,
+    /// ISO 8601.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+    pub head: String,
+    pub base: String,
+    pub mine: bool,
+    pub section: String,
+    pub stack: String,
+    pub depth: u32,
+}
+
 /// Where a search found its words: a thread's row, the words around them in `[brackets]`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SearchHit {
@@ -329,6 +366,9 @@ pub enum ToApp {
     /// A row's whole tool input and result, asked for with `tool_result`.
     ToolResult { thread: String, seq: i64, #[serde(skip_serializing_if = "Option::is_none")] input: Option<String>, #[serde(skip_serializing_if = "Option::is_none")] result: Option<String> },
     Error { message: String },
+    /// Protocol 5: a project's open PRs, as its page on the Mac lists them; `errors` say why some
+    /// couldn't be read (`gh` missing, offline), `accounts` who the forges know you as.
+    Pulls { project: String, pulls: Vec<PullInfo>, #[serde(default)] errors: Vec<String>, #[serde(default)] accounts: Vec<String> },
     /// Protocol 5: paired with this Mac (the connection carried a pairing code): connect with
     /// `?token=` from now on. Sent once, right after `hello`.
     Paired { device: String, token: String },
@@ -397,6 +437,9 @@ pub enum FromApp {
     Files { thread: String, query: String },
     /// A question on the side of `thread`, as `/btw` asks it: in its side chat (`side:<thread>`).
     AskAside { #[serde(default)] id: Option<String>, thread: String, text: String },
+    /// Protocol 5: a project's open PRs (`fresh`: asked of the forges again, not the last
+    /// minute's answer); answered with `pulls`.
+    Pulls { project: String, #[serde(default)] fresh: bool },
     #[serde(other)]
     Unknown,
 }

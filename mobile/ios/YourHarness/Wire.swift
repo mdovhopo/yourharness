@@ -133,6 +133,37 @@ extension Row {
     }
 }
 
+/// One open PR as the project's page on the Mac lists it (protocol 5): in a stack (`stack`, its
+/// bottom PR; `depth`, how far up) and a section (`review`, `mine`, `others`).
+struct PullInfo: Decodable, Sendable, Hashable, Identifiable {
+    let repo: String
+    let number: Int
+    let title: String
+    let url: String
+    let author: String?
+    let draft: Bool
+    let review: String?
+    let checks: String?
+    let mergeStatus: String?
+    let autoMerge: Bool?
+    let inMergeQueue: Bool?
+    let updatedAt: String?
+    let head: String
+    let base: String
+    let mine: Bool
+    let section: String
+    let stack: String
+    let depth: Int
+    var id: String { "\(repo)#\(number)" }
+}
+
+/// A project's PRs as the Mac answered.
+struct PullsAnswer: Sendable {
+    let pulls: [PullInfo]
+    let errors: [String]
+    let accounts: [String]
+}
+
 /// A slash command the composer offers (protocol 5).
 struct SlashCommand: Decodable, Sendable, Hashable, Identifiable {
     let name: String
@@ -243,11 +274,14 @@ enum ToApp: Sendable {
     case media(thread: String, seq: Int, index: Int, image: UIImage?, error: String?)
     case diagram(key: String, drawing: Drawing?, error: String?)
     case error(String)
+    /// Protocol 5: a project's open PRs.
+    case pulls(project: String, answer: PullsAnswer)
     /// Protocol 5: paired with the Mac (the connection carried a pairing code): its token.
     case paired(device: String, token: String)
     case unknown
 
     private struct Tag: Decodable { let type: String }
+    private struct Pulls: Decodable { let project: String; let pulls: [PullInfo]; let errors: [String]?; let accounts: [String]? }
     private struct Paired: Decodable { let device: String; let token: String }
     private struct Hello: Decodable { let `protocol`: Int?; let server: String; let data: String; let mac: String? }
     private struct LiveMessage: Decodable { let thread: String; let live: Live }
@@ -330,6 +364,9 @@ enum ToApp: Sendable {
                 let m = try d.decode(Diagram.self, from: data)
                 return .diagram(key: m.key, drawing: m.drawing, error: m.error)
             case "error": return .error(try d.decode(Failure.self, from: data).message)
+            case "pulls":
+                let m = try d.decode(Pulls.self, from: data)
+                return .pulls(project: m.project, answer: PullsAnswer(pulls: m.pulls, errors: m.errors ?? [], accounts: m.accounts ?? []))
             case "paired":
                 let m = try d.decode(Paired.self, from: data)
                 return .paired(device: m.device, token: m.token)
@@ -383,6 +420,7 @@ enum FromApp {
     case search(query: String)
     case files(thread: String, query: String)
     case askAside(id: String, thread: String, text: String)
+    case pulls(project: String, fresh: Bool)
 
     var actionID: String? {
         switch self {
@@ -455,6 +493,7 @@ enum FromApp {
         case .search(let query): ["type": "search", "query": query]
         case .files(let t, let query): ["type": "files", "thread": t, "query": query]
         case .askAside(let id, let t, let text): ["type": "ask_aside", "id": id, "thread": t, "text": text]
+        case .pulls(let project, let fresh): ["type": "pulls", "project": project, "fresh": fresh]
         }
         let data = try! JSONSerialization.data(withJSONObject: object)
         return String(decoding: data, as: UTF8.self)

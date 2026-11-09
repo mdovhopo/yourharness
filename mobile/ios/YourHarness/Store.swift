@@ -159,7 +159,8 @@ final class Store: Identifiable {
         let all = order.compactMap { threads[$0] }
         return projects.compactMap { project in
             let mine = all.filter { $0.projectId == project.id }
-            guard !mine.isEmpty else { return nil }
+            // A project with no threads yet still shows, as the Mac's sidebar has it: its header
+            // starts one, and its PRs are there.
             let live = mine.filter { !$0.settled }.sorted { ($0.pinned ? 1 : 0, $0.createdAt) > ($1.pinned ? 1 : 0, $1.createdAt) }
             let settled = mine.filter(\.settled).sorted { $0.updatedAt > $1.updatedAt }
             return Section(project: project, live: live, settled: settled)
@@ -295,6 +296,17 @@ final class Store: Identifiable {
     private static func newID() -> String { UUID().uuidString.lowercased() }
 
     // MARK: Protocol 5
+
+    /// Each project's open PRs as last answered, and the projects being asked about.
+    var pulls: [String: PullsAnswer] = [:]
+    var askingPulls: Set<String> = []
+
+    /// A project's PRs from the Mac (`fresh`: asked of GitHub again, not the last minute's).
+    func askPulls(_ project: String, fresh: Bool = false) {
+        guard canSearch else { return }
+        askingPulls.insert(project)
+        connection.send(.pulls(project: project, fresh: fresh))
+    }
 
     /// Searches every thread's words; hits arrive in `searchHits`. Titles are matched here.
     func search(_ query: String) {
@@ -445,6 +457,10 @@ final class Store: Identifiable {
                     if case .send(_, let thread, let text, _, _)? = action { returnedDraft = (thread, text) }
                 }
                 Perf.shared.log("DONE \(action?.name ?? id)\(error.map { ": " + $0 } ?? "")")
+            case .pulls(let project, let answer):
+                pulls[project] = answer
+                askingPulls.remove(project)
+                Perf.shared.log("PULLS \(answer.pulls.count) in \(projects.first { $0.id == project }?.name ?? project)")
             case .paired(_, let token):
                 onPaired?(token)
                 Perf.shared.log("PAIRED \(displayName)")

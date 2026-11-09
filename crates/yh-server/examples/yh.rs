@@ -6,7 +6,7 @@
 //! cargo run -p yh-server --example yh -- <url> stop <thread>
 //! cargo run -p yh-server --example yh -- <url> allow|deny <thread> [request id]   (the first waiting)
 //! cargo run -p yh-server --example yh -- <url> withdraw|send-now <thread> <message id>
-//! cargo run -p yh-server --example yh -- <url> raw '<any message as JSON>'
+//! cargo run -p yh-server --example yh -- <url> raw '<any message as JSON>'   (YH_WAIT=<s>: listens longer)
 //! cargo run -p yh-server --example yh -- <url> listen <seconds> [thread]   (what a client gets: counts and bytes by type)
 //! ```
 //!
@@ -89,6 +89,7 @@ fn print(m: &ToApp, began: &mut bool) -> bool {
         ToApp::Diagram { key, drawing, error } => println!("DIAGRAM {key} {}", drawing.as_ref().map(|d| format!("{} {}x{} paths={} labels={}", d.kind, d.width, d.height, d.paths.len(), d.labels.len())).unwrap_or_else(|| error.clone().unwrap_or_default())),
         ToApp::ToolResult { seq, input, result, .. } => println!("TOOL #{seq} input={} result={}", input.as_ref().map_or(0, |s| s.chars().count()), result.as_ref().map_or(0, |s| s.chars().count())),
         ToApp::Error { message } => println!("ERROR {message}"),
+        ToApp::Pulls { project, pulls, errors, .. } => println!("PULLS {project} {} PRs{}{}", pulls.len(), pulls.iter().take(4).map(|p| format!(" | {}#{} {} [{} d{}]", p.repo, p.number, p.title, p.section, p.depth)).collect::<String>(), errors.iter().map(|e| format!(" ! {e}")).collect::<String>()),
         ToApp::Paired { device, token } => println!("PAIRED {device} token={token}"),
     }
     false
@@ -182,7 +183,9 @@ fn main() {
         "raw" => {
             let Some(json) = rest.first() else { usage() };
             ws.send(Message::text(json.clone())).unwrap();
-            let until = Instant::now() + Duration::from_secs(2);
+            // `YH_WAIT=<s>`: longer, for answers that take a while (a project's PRs).
+            let wait = std::env::var("YH_WAIT").ok().and_then(|s| s.parse().ok()).unwrap_or(2);
+            let until = Instant::now() + Duration::from_secs(wait);
             while Instant::now() < until {
                 if let Some(m) = next(&mut ws) {
                     print(&m, &mut began);
