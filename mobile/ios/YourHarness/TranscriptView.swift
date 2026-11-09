@@ -161,9 +161,13 @@ struct TranscriptScreen: View {
             store.answerQuestion(q, accept: answer == "accept", in: threadID)
         }
         .navigationTitle(store.threads[threadID]?.title ?? "Thread")
-        .navigationSubtitle(store.threads[threadID].flatMap(store.projectName) ?? "")
+        // The project, then the model and effort it runs with.
+        .navigationSubtitle([store.threads[threadID].flatMap(store.projectName), store.canControl ? ThreadSettings.summary(store.threads[threadID], models: store.models) : nil].compactMap { $0 }.joined(separator: " · "))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            if store.canControl {
+                ToolbarItem(placement: .topBarTrailing) { ThreadSettings(threadID: threadID) }
+            }
             if store.threads[threadID]?.isRunning == true {
                 ToolbarItem(placement: .topBarTrailing) {
                     Image(systemName: "circle.fill").font(.system(size: 8)).foregroundStyle(.green)

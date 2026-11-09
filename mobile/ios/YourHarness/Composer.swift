@@ -37,7 +37,6 @@ struct ComposerBar: View {
                 StatusLine(activity: live?.activity, tokens: live?.contextTokens, window: live?.contextWindow)
             }
             if store.canAct {
-                if store.canControl { SettingsRow(threadID: threadID) }
                 if !images.isEmpty { attachments }
                 field
             } else {
@@ -161,16 +160,23 @@ extension OutgoingImage {
 }
 
 /// The thread's model and effort, and its project's permission mode, as the Mac's pickers set
-/// them: one quiet line ("Haiku 5.5 · Medium · Accept Edits"), each part a menu.
-private struct SettingsRow: View {
+/// them: a menu in the navigation bar, each setting a submenu showing what it is now.
+struct ThreadSettings: View {
     let threadID: String
     @Environment(Store.self) private var store
 
     private var thread: ThreadInfo? { store.threads[threadID] }
     private var model: ModelOption? { store.models.first { $0.id == thread?.model } }
 
+    /// What shows under the title: the model, and the effort when one is chosen.
+    static func summary(_ thread: ThreadInfo?, models: [ModelOption]) -> String? {
+        guard let thread else { return nil }
+        let model = models.first { $0.id == thread.model }?.name ?? thread.model.map(short)
+        return [model, thread.effort.map(effortName)].compactMap { $0 }.joined(separator: " · ").nilIfEmpty
+    }
+
     var body: some View {
-        HStack(spacing: 4) {
+        Menu {
             Menu {
                 Picker("Model", selection: Binding(get: { thread?.model ?? "" }, set: { store.setModel($0.isEmpty ? nil : $0, of: threadID) })) {
                     Text("Default").tag("")
@@ -180,10 +186,9 @@ private struct SettingsRow: View {
                     }
                 }
             } label: {
-                part(model?.name ?? thread?.model.map(Self.short) ?? "Default model")
+                Label("Model", systemImage: "sparkles")
+                Text(model?.name ?? thread?.model.map(Self.short) ?? "Default")
             }
-            .accessibilityLabel("Model")
-            dot
             let efforts = model?.efforts ?? ["low", "medium", "high", "xhigh", "max"]
             Menu {
                 Picker("Effort", selection: Binding(get: { thread?.effort ?? "" }, set: { store.setEffort($0.isEmpty ? nil : $0, of: threadID) })) {
@@ -191,10 +196,9 @@ private struct SettingsRow: View {
                     ForEach(efforts, id: \.self) { e in Text(Self.effortName(e)).tag(e) }
                 }
             } label: {
-                part(thread?.effort.map(Self.effortName) ?? "Default effort")
+                Label("Effort", systemImage: "gauge.with.dots.needle.33percent")
+                Text(thread?.effort.map(Self.effortName) ?? "Default")
             }
-            .accessibilityLabel("Effort")
-            dot
             let mode = store.project(of: threadID)?.mode ?? "auto"
             Menu {
                 Picker("Permissions", selection: Binding(get: { mode }, set: { store.setMode($0, of: threadID) })) {
@@ -203,28 +207,13 @@ private struct SettingsRow: View {
                     }
                 }
             } label: {
-                part(Self.modeName(mode))
+                Label("Permissions", systemImage: "shield")
+                Text(Self.modeName(mode))
             }
-            .accessibilityLabel("Permissions")
-            Spacer(minLength: 0)
+        } label: {
+            Image(systemName: "slider.horizontal.3")
         }
-        .font(.footnote)
-        .foregroundStyle(.secondary)
-        .padding(.horizontal, 14)
-    }
-
-    private var dot: some View {
-        Text("·").foregroundStyle(.tertiary).accessibilityHidden(true)
-    }
-
-    /// A setting's name, a small chevron saying it opens a menu; no background.
-    private func part(_ text: String) -> some View {
-        HStack(spacing: 2) {
-            Text(text).lineLimit(1)
-            Image(systemName: "chevron.up.chevron.down").font(.system(size: 8, weight: .semibold)).foregroundStyle(.tertiary)
-        }
-        .padding(.vertical, 4)
-        .contentShape(.rect)
+        .accessibilityLabel("Thread settings")
     }
 
     static func short(_ model: String) -> String { model.replacingOccurrences(of: "claude-", with: "").capitalized }
@@ -613,4 +602,8 @@ private struct MCPQuestionCard: View {
             .controlSize(.large)
         }
     }
+}
+
+extension String {
+    var nilIfEmpty: String? { isEmpty ? nil : self }
 }
