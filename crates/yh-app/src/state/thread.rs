@@ -1185,15 +1185,19 @@ impl ThreadState {
     }
 
     /// Applies one event from this thread's `claude`. True when what the sidebar shows changed.
-    pub fn apply(&mut self, event: Event, cx: &mut Context<Self>) -> bool {
-        let changed = self.apply_event(event, cx);
+    pub fn apply(&mut self, event: Event, _cx: &mut Context<Self>) -> bool {
+        self.apply_plain(event)
+    }
+
+    fn apply_plain(&mut self, event: Event) -> bool {
+        let changed = self.apply_event(event);
         if self.folds_dirty {
             self.refresh_folds();
         }
         changed
     }
 
-    fn apply_event(&mut self, event: Event, _cx: &mut Context<Self>) -> bool {
+    fn apply_event(&mut self, event: Event) -> bool {
         match event {
             Event::Session { id } => {
                 self.session_id = Some(id);
@@ -1837,6 +1841,54 @@ mod tests {
             run: Some(SubagentSummary { description: description.into(), status: "completed".into(), tool_uses: Some(3), ..Default::default() }),
             ..Default::default()
         }
+    }
+
+    /// The recorded sessions and the synthetic one, as the thread saves them
+    /// (`yh_core::golden`): the reducer, wherever it lives, must save exactly this.
+    fn golden(steps: Vec<yh_core::golden::Step>) -> String {
+        use yh_core::golden::Step;
+        let mut t = ThreadState::new(ThreadMeta::new("T".into(), "P".into(), "t".into()));
+        t.total = Some(0);
+        t.in_deck = true;
+        let mut saved: Vec<(usize, Row)> = vec![];
+        for step in steps {
+            match step {
+                Step::Event(e) => {
+                    t.apply_plain(e);
+                }
+                Step::User { id, text, queued } => {
+                    let running = t.running;
+                    t.add_user(text, &[], id, queued && running, None);
+                    t.running = true;
+                }
+                Step::Interrupt => t.interrupt_requested = true,
+                Step::ChangedFiles { message, files } => t.set_changed_files(message, files.into_iter().map(str::to_string).collect()),
+            }
+            // Saved as it goes, as the workspace saves: the newest version of each row wins.
+            for (seq, row) in t.take_changes() {
+                saved.retain(|(s, _)| *s != seq);
+                saved.push((seq, row));
+            }
+        }
+        let ids = |v: Vec<String>| v.join(",");
+        let state = vec![
+            format!("running {} activity {:?} session {:?} meta session {:?} stopped by you {}", t.running, t.activity, t.session_id, t.meta.session_id, t.stopped_by_you),
+            format!("permissions [{}] elicitations [{}]", ids(t.permissions.iter().map(|p| format!("{}:{}", p.id, p.description)).collect()), ids(t.elicitations.iter().map(|e| e.id.clone()).collect())),
+            format!("queue [{}] restored [{}]", ids(t.queue.iter().map(|q| q.id.clone()).collect()), ids(t.composer.restored.iter().map(|r| r.0.clone()).collect())),
+            format!("context {:?}/{:?} mcp {:?}", t.composer.context_tokens, t.composer.context_window, t.composer.mcp_servers),
+            format!("jobs running {} agents {} ended {} total {:?}", t.jobs.running.len(), t.jobs.agents.len(), t.jobs.ended.len(), t.total),
+            format!("subagents [{}]", ids(t.subagents().iter().map(|(id, e)| format!("{id}:{}", e.borrow().sub.as_ref().map_or("-".to_string(), |s| format!("{}/{}/{:?}", s.status, s.steps, s.activity)))).collect())),
+        ];
+        yh_core::golden::describe(&saved, &state)
+    }
+
+    #[test]
+    fn saves_what_the_golden_files_say() {
+        for (name, text) in yh_core::golden::SESSIONS {
+            let steps = yh_core::golden::session_events(text).into_iter().map(yh_core::golden::Step::Event).collect();
+            yh_core::golden::check(name, &golden(steps));
+        }
+        yh_core::golden::check("synthetic", &golden(yh_core::golden::synthetic()));
     }
 
     #[test]

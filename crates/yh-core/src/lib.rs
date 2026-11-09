@@ -5,6 +5,7 @@
 pub mod attachments;
 pub mod agents;
 pub mod claude;
+pub mod golden;
 pub mod dev_servers;
 pub mod db;
 pub mod diagrams;
