@@ -166,8 +166,12 @@ Recorded here so the MVP stays small. Roughly in order; Tailscale last.
    use), Allow and Deny on the lock screen, a Live Activity for a running turn. Needs the
    Apple Developer Program account.
 5. **Composer extras:** photos and camera, voice, `@` files, slash commands.
-6. **Richer transcript:** diffs, sub-agents, Mermaid, images, full tool output on request,
-   Find, search across threads.
+6. **Richer transcript:** ✅ a tool row opens in a sheet (an edit as a line diff, a write's
+   content, a command and its output, other inputs pretty-printed, the result's first 2000
+   characters), thinking opens in full, your messages and replies copy with a long press
+   (`YH_OPEN_ROW=<tool name|thinking>` opens the newest such row). Still to come: sub-agents,
+   Mermaid, images, full tool output on request (a protocol query), Find, search across
+   threads.
 7. **Shared Rust client core** (`yh-client`, `yh-ffi` through UniFFI): `yh-core`'s markdown
    so both apps render the same, an offline cache in SQLite; then **Android** in Compose over it.
 8. **iPad layout**, widgets, a share extension into a thread, Shortcuts.

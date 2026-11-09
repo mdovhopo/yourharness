@@ -87,7 +87,7 @@ struct ToolSummary: Sendable {
         return nil
     }
 
-    private static func field(_ key: String, in json: String) -> String? {
+    static func field(_ key: String, in json: String) -> String? {
         guard let keyRange = json.range(of: "\"\(key)\"") else { return nil }
         var i = keyRange.upperBound
         while i < json.endIndex, json[i] == " " || json[i] == ":" { i = json.index(after: i) }

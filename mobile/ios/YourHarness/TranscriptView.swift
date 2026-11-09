@@ -99,6 +99,7 @@ final class TranscriptViewController: UIViewController, UICollectionViewDataSour
     private var busy = false
     private var followsBottom = true
     private var probe: ScrollProbe?
+    private var openedRow = false
     fileprivate var view_: UICollectionView { collectionView }
     fileprivate var transcript: TranscriptModel { model }
 
@@ -117,7 +118,7 @@ final class TranscriptViewController: UIViewController, UICollectionViewDataSour
         collectionView.backgroundColor = .systemBackground
         collectionView.dataSource = self
         collectionView.delegate = self
-        collectionView.allowsSelection = false
+        collectionView.allowsSelection = true
         collectionView.keyboardDismissMode = .interactive
         collectionView.register(RowCell.self, forCellWithReuseIdentifier: "row")
         view.addSubview(collectionView)
@@ -176,6 +177,13 @@ final class TranscriptViewController: UIViewController, UICollectionViewDataSour
                 followsBottom = true
                 scrollToBottom()
                 Perf.shared.log("SHOWN \(measured.count) rows")
+                // `YH_OPEN_ROW=<tool name|thinking>`: the newest such row opened, as a tap does.
+                if let wanted = ProcessInfo.processInfo.environment["YH_OPEN_ROW"], !openedRow,
+                   let row = model.rows.last(where: { $0.row.toolName == wanted || $0.row.kind == wanted })?.row {
+                    openedRow = true
+                    Perf.shared.log("OPEN row \(row.seq) \(wanted)")
+                    openDetail(row)
+                }
             }
         case .prepended:
             guard let first = layouts.first?.seq else { return process() }
@@ -271,6 +279,41 @@ final class TranscriptViewController: UIViewController, UICollectionViewDataSour
         let cell = collectionView.dequeueReusableCell(withReuseIdentifier: "row", for: indexPath) as! RowCell
         cell.configure(layouts[indexPath.item])
         return cell
+    }
+
+    // MARK: Opening and copying rows
+
+    /// A tool call or thinking opens in a sheet: what it did, an edit as a diff.
+    func collectionView(_ collectionView: UICollectionView, shouldSelectItemAt indexPath: IndexPath) -> Bool {
+        guard let row = model.row(layouts[indexPath.item].seq)?.row else { return false }
+        return row.kind == "tool" || (row.kind == "thinking" && !row.text.isEmpty)
+    }
+
+    func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
+        collectionView.deselectItem(at: indexPath, animated: false)
+        guard let row = model.row(layouts[indexPath.item].seq)?.row else { return }
+        openDetail(row)
+    }
+
+    fileprivate func openDetail(_ row: Row) {
+        let sheet = UIHostingController(rootView: RowDetail(row: row))
+        if let s = sheet.sheetPresentationController {
+            s.detents = [.medium(), .large()]
+            s.prefersGrabberVisible = true
+        }
+        present(sheet, animated: true)
+        UISelectionFeedbackGenerator().selectionChanged()
+    }
+
+    /// Your messages and Claude's replies copy with a long press.
+    func collectionView(_ collectionView: UICollectionView, contextMenuConfigurationForItemsAt indexPaths: [IndexPath], point: CGPoint) -> UIContextMenuConfiguration? {
+        guard let path = indexPaths.first, let row = model.row(layouts[path.item].seq)?.row, !row.text.isEmpty,
+              row.kind == "user" || row.kind == "assistant" else { return nil }
+        return UIContextMenuConfiguration(actionProvider: { _ in
+            UIMenu(children: [UIAction(title: "Copy", image: UIImage(systemName: "doc.on.doc")) { _ in
+                UIPasteboard.general.string = row.text
+            }])
+        })
     }
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
