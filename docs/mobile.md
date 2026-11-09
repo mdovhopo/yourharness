@@ -150,7 +150,8 @@ YH_NO_CLAUDE=1` with the preset's fake `claude` first in `YH_PATH` (as `scripts/
 ## The server
 
 `yh-server` runs inside the Mac app when it's started with `YH_SERVER=<port>`: on `127.0.0.1`
-only, with a token (`YH_SERVER_TOKEN`, or made up and printed as `SERVER <url>`). The thread list
+only, with a token (`YH_SERVER_TOKEN`, or made up and printed as `SERVER <url>`; `YH_SERVER_NAME` names
+it for phones, so two test copies on one Mac tell apart). The thread list
 comes from the database; a watched thread's rows come from the engine as Claude writes them:
 the engine's snapshot when the phone opens a thread, told in order with the changes that follow,
 then each changed row, whole, at most every 50 ms. The phone takes them as before (newest `rev`
@@ -278,7 +279,18 @@ Recorded here so the MVP stays small. Roughly in order; Tailscale last.
    thread screen was an empty view until it appeared, and an empty view never appears in a split
    view's detail, so it never opened its thread; it has a base view now. Still to come: widgets, a
    share extension into a thread, Shortcuts.
-9. **Several Macs** in one list.
+9. ✅ **Several Macs** (2026-11-09): the phone keeps a list of Macs (`Fleet`, one `Store` each), all
+   connected; a Mac not shown gets only its thread list and statuses, so switching is instant and
+   the Threads tab's badge counts threads waiting on you on the others. With more than one, the
+   Threads title is the Mac shown, inline, its menu listing each Mac with how it's doing ("Connected
+   · 1 waiting on you · 1 working") to switch to; the Mac tab lists them (tap to show, swipe to
+   forget, add by address). Each Mac keeps its own open thread. Only the Mac shown watches a
+   thread: a screen shown again for a moment as a switch takes it down used to pull the thread's
+   rows once more. Checked with two Mac test copies (7979, and 7980 named "Mac Studio" with a Write
+   card waiting): badge, menu, list; switched mid-run, the first Mac's thread then streamed a reply
+   and the phone got none of it (`UNWATCH`, then `rows=0`). Hooks: `YH_SERVER=<a>,<b>` (Macs, not
+   saved), `YH_PHONE_MAC=<index>` (shown at launch), `YH_PHONE_SWITCH=<index>` (shown 6 s later),
+   `YH_PHONE_ADD_MAC=<address>`; `WATCH`, `UNWATCH` and `MAC` lines.
 10. **Tailscale:** the server on the tailnet's addresses, `tailscale whois`, `wss://` with
     `tailscale cert`, as [remote.md](remote.md) plans.
 

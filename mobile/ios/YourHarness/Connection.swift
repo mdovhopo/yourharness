@@ -34,6 +34,13 @@ final class Connection {
         open()
     }
 
+    /// Closed for good (the Mac removed from the list): late callbacks and retries dropped.
+    func close() {
+        generation += 1
+        task?.cancel(with: .goingAway, reason: nil)
+        task = nil
+    }
+
     func send(_ message: FromApp) {
         task?.send(.string(message.json)) { _ in }
     }

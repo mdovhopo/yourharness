@@ -5,7 +5,10 @@ import Foundation
 import Observation
 
 @Observable @MainActor
-final class Store {
+final class Store: Identifiable {
+    /// One Mac: the phone holds a Store for each it knows (`Fleet`), all connected; only the one
+    /// shown watches a thread.
+    nonisolated let id = UUID()
     var state: Connection.State = .connecting
     var serverName: String?
     var projects: [Project] = []
@@ -14,14 +17,25 @@ final class Store {
     private var order: [String] = []
     /// The navigation stack: thread IDs.
     var path: [String] = []
-    /// The dock's tab (`YH_PHONE_TAB=usage|mac|search` at launch).
-    var tab = ProcessInfo.processInfo.environment["YH_PHONE_TAB"].flatMap(AppTab.init(rawValue:)) ?? .threads
-
-    /// A thread opened from anywhere: over the thread list.
+    /// A thread opened from anywhere: over the thread list (the fleet turns to Threads).
     func show(_ thread: String) {
-        tab = .threads
+        onShow?()
         path = [thread]
     }
+    @ObservationIgnored var onShow: (() -> Void)?
+    /// The Mac the phone shows (the fleet says).
+    @ObservationIgnored var shown = false
+    /// The Mac said who it is (its name is kept with its address).
+    @ObservationIgnored var onHello: (() -> Void)?
+
+    /// What the Mac is called here: its name once heard, else its address's host.
+    var displayName: String {
+        serverName ?? URL(string: serverAddress)?.host() ?? serverAddress
+    }
+
+    /// Threads on this Mac waiting on you.
+    var waitingCount: Int { threads.values.filter(\.isWaiting).count }
+    var runningCount: Int { threads.values.filter(\.isRunning).count }
     var serverAddress: String
     /// 1: the dev server, read-only; 2: the Mac app's server, which takes actions.
     var serverProtocol = 0
@@ -63,16 +77,17 @@ final class Store {
     @ObservationIgnored private(set) var transcript: TranscriptModel?
     /// `YH_SELECT`: a thread (title or id) opened once the list arrives; `active`, the first
     /// thread that's working, whenever that is.
-    @ObservationIgnored private var selectOnLoad = ProcessInfo.processInfo.environment["YH_SELECT"]
+    @ObservationIgnored private var selectOnLoad: String?
     /// A thread made from here, opened once the list has it.
     @ObservationIgnored private var openWhenListed: String?
 
     static let defaultAddress = "ws://127.0.0.1:7878/"
 
-    init() {
-        let env = ProcessInfo.processInfo.environment["YH_SERVER"]
-        let address = env ?? UserDefaults.standard.string(forKey: "server") ?? Store.defaultAddress
+    /// `selects`: `YH_SELECT` is for this one (the Mac shown at launch).
+    init(address: String, name: String? = nil, selects: Bool = false) {
         serverAddress = address
+        serverName = name
+        if selects { selectOnLoad = ProcessInfo.processInfo.environment["YH_SELECT"] }
         connection = Connection(url: URL(string: address) ?? URL(string: Store.defaultAddress)!)
         connection.onState = { [weak self] in
             self?.state = $0
@@ -80,16 +95,18 @@ final class Store {
         }
         connection.onMessages = { [weak self] in self?.apply($0) }
         connection.connect()
-        // Pictures and diagrams in rows are asked for as they're shown.
+    }
+
+    /// Shown now: pictures and diagrams in rows are asked of this Mac as they're shown.
+    func becomeCurrent() {
         MediaCache.shared.ask = { [weak self] thread, seq, index in self?.connection.send(.media(thread: thread, seq: seq, index: index)) }
         DiagramCache.shared.ask = { [weak self] key, source in self?.connection.send(.diagram(key: key, source: source)) }
     }
 
-    func connect(to address: String) {
-        guard let url = URL(string: address), url.scheme == "ws" || url.scheme == "wss" else { return }
-        serverAddress = address
-        UserDefaults.standard.set(address, forKey: "server")
-        connection.connect(to: url)
+    /// Removed from the list: no more connecting.
+    func disconnect() {
+        connection.close()
+        state = .waiting(reason: "Removed", retryIn: 0)
     }
 
     func reconnect() {
@@ -126,12 +143,16 @@ final class Store {
 
     func open(_ threadID: String) -> TranscriptModel {
         if let t = transcript, t.threadID == threadID { return t }
+        // A Mac not shown watches nothing: its screens can show again for a moment as a switch
+        // takes them down, and mustn't pull the thread's rows.
+        guard shown else { return TranscriptModel(threadID: threadID, askEarlier: { _ in }, resubscribe: {}) }
         let model = TranscriptModel(
             threadID: threadID,
             askEarlier: { [weak self] before in self?.connection.send(.page(threadID, beforeSeq: before, limit: TranscriptModel.pageSize)) },
             resubscribe: { [weak self] in self?.connection.send(.subscribeThread(threadID, limit: TranscriptModel.pageSize)) })
         transcript = model
         live = nil
+        Perf.shared.log("WATCH \(displayName) \(threadID.prefix(8))")
         connection.send(.subscribeThread(threadID, limit: TranscriptModel.pageSize))
         return model
     }
@@ -140,6 +161,7 @@ final class Store {
         guard transcript === model else { return }
         transcript = nil
         live = nil
+        Perf.shared.log("UNWATCH \(displayName) \(model.threadID.prefix(8))")
         connection.send(.unsubscribeThread)
     }
 
@@ -319,6 +341,7 @@ final class Store {
             case .hello(let version, let server, _):
                 serverName = server
                 serverProtocol = version
+                onHello?()
                 connection.send(.subscribeApp)
                 if let t = transcript {
                     t.resubscribing()

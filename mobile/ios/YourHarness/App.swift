@@ -2,7 +2,7 @@ import SwiftUI
 
 @main
 struct YourHarnessApp: App {
-    @State private var store = Store()
+    @State private var fleet = Fleet()
 
     init() {
         Perf.shared.start()
@@ -11,7 +11,7 @@ struct YourHarnessApp: App {
     var body: some Scene {
         WindowGroup {
             RootView()
-                .environment(store)
+                .environment(fleet)
                 .preferredColorScheme(Self.appearance)
         }
     }
@@ -28,42 +28,60 @@ struct YourHarnessApp: App {
 
 /// The dock: threads, usage, the Mac, and search. A thread opens over it, the dock hidden.
 struct RootView: View {
-    @Environment(Store.self) private var store
+    @Environment(Fleet.self) private var fleet
+
+    var body: some View {
+        @Bindable var fleet = fleet
+        let store = fleet.current
+        // Each tab draws the Mac shown; switching Macs builds them anew for it.
+        TabView(selection: $fleet.tab) {
+            Tab("Threads", systemImage: "bubble.left.and.bubble.right", value: .threads) {
+                ThreadsTab(store: store).environment(store).id(store.id)
+            }
+            .badge(fleet.waitingElsewhere)
+            Tab("Usage", systemImage: "gauge.with.dots.needle.33percent", value: .usage) {
+                NavigationStack { UsageView() }.environment(store).id(store.id)
+            }
+            Tab("Mac", systemImage: "desktopcomputer", value: .mac) {
+                NavigationStack { MacView() }.environment(store)
+            }
+            Tab(value: .search, role: .search) {
+                NavigationStack { SearchView() }.environment(store).id(store.id)
+            }
+        }
+        // `YH_PHONE_SWITCH=<index>`: that Mac shown 6 s after launch, as its menu does.
+        .task {
+            guard let i = ProcessInfo.processInfo.environment["YH_PHONE_SWITCH"].flatMap(Int.init) else { return }
+            try? await Task.sleep(for: .seconds(6))
+            if fleet.stores.indices.contains(i) { fleet.select(fleet.stores[i]) }
+        }
+    }
+}
+
+/// The Threads tab for one Mac: the list, and the open thread over it (iPhone) or beside it (iPad).
+private struct ThreadsTab: View {
+    @Bindable var store: Store
     @Environment(\.horizontalSizeClass) private var sizeClass
 
     var body: some View {
-        @Bindable var store = store
-        TabView(selection: $store.tab) {
-            Tab("Threads", systemImage: "bubble.left.and.bubble.right", value: .threads) {
-                if sizeClass == .regular {
-                    // iPad (or a wide window): the list beside the open thread.
-                    NavigationSplitView {
-                        ThreadListView(selection: Binding(get: { store.path.last }, set: { store.path = $0.map { [$0] } ?? [] }))
-                    } detail: {
-                        if let id = store.path.last {
-                            NavigationStack { TranscriptScreen(threadID: id) }.id(id)
-                        } else {
-                            ContentUnavailableView("No Thread Open", systemImage: "bubble.left.and.bubble.right", description: Text("Choose a thread from the list."))
-                        }
-                    }
+        if sizeClass == .regular {
+            // iPad (or a wide window): the list beside the open thread.
+            NavigationSplitView {
+                ThreadListView(selection: Binding(get: { store.path.last }, set: { store.path = $0.map { [$0] } ?? [] }))
+            } detail: {
+                if let id = store.path.last {
+                    NavigationStack { TranscriptScreen(threadID: id) }.id(id)
                 } else {
-                    NavigationStack(path: $store.path) {
-                        ThreadListView()
-                            .navigationDestination(for: String.self) { id in
-                                TranscriptScreen(threadID: id)
-                                    .toolbar(.hidden, for: .tabBar)
-                            }
-                    }
+                    ContentUnavailableView("No Thread Open", systemImage: "bubble.left.and.bubble.right", description: Text("Choose a thread from the list."))
                 }
             }
-            Tab("Usage", systemImage: "gauge.with.dots.needle.33percent", value: .usage) {
-                NavigationStack { UsageView() }
-            }
-            Tab("Mac", systemImage: "desktopcomputer", value: .mac) {
-                NavigationStack { MacView() }
-            }
-            Tab(value: .search, role: .search) {
-                NavigationStack { SearchView() }
+        } else {
+            NavigationStack(path: $store.path) {
+                ThreadListView()
+                    .navigationDestination(for: String.self) { id in
+                        TranscriptScreen(threadID: id)
+                            .toolbar(.hidden, for: .tabBar)
+                    }
             }
         }
     }

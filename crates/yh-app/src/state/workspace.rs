@@ -3276,7 +3276,9 @@ fn start_server(engine: &yh_engine::EngineHandle) -> Option<flume::Receiver<yh_s
     }
     let (actions, remote) = flume::unbounded();
     let links = yh_server::Links { engine: engine.clone(), actions };
-    let name = std::process::Command::new("scutil").args(["--get", "ComputerName"]).output().ok().and_then(|o| String::from_utf8(o.stdout).ok()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).unwrap_or_else(|| "Mac".into());
+    // `YH_SERVER_NAME`: what phones call this Mac (tests run two on one Mac); else its name.
+    let name = std::env::var("YH_SERVER_NAME").ok().filter(|s| !s.is_empty());
+    let name = name.unwrap_or_else(|| std::process::Command::new("scutil").args(["--get", "ComputerName"]).output().ok().and_then(|o| String::from_utf8(o.stdout).ok()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).unwrap_or_else(|| "Mac".into()));
     std::thread::Builder::new()
         .name("server".into())
         .spawn(move || {

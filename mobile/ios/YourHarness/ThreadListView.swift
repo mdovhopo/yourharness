@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ThreadListView: View {
     @Environment(Store.self) private var store
+    @Environment(Fleet.self) private var fleet
     @State private var openShelves: Set<String> = []
     /// The thread being renamed, and the title being typed.
     @State private var renaming: ThreadInfo?
@@ -17,8 +18,20 @@ struct ThreadListView: View {
                 list
             }
         }
-        .navigationTitle("Threads")
-        .navigationSubtitle(store.state == .connected ? store.serverName ?? "" : "")
+        .navigationTitle(fleet.stores.count > 1 ? store.displayName : "Threads")
+        .navigationSubtitle(subtitle)
+        // Inline with several Macs: the title shows its menu's chevron.
+        .navigationBarTitleDisplayMode(fleet.stores.count > 1 ? .inline : .automatic)
+        .toolbarTitleMenu {
+            // Several Macs: the title is the Mac shown, and switches to another.
+            if fleet.stores.count > 1 { MacMenu() }
+        }
+    }
+
+    private var subtitle: String {
+        guard fleet.stores.count > 1 else { return store.state == .connected ? store.serverName ?? "" : "" }
+        let others = fleet.waitingElsewhere
+        return others > 0 ? "\(others) waiting on another Mac" : "\(fleet.stores.count) Macs"
     }
 
     /// The open thread, when the list stands beside it (iPad): a row is chosen, not pushed.
@@ -119,6 +132,7 @@ struct ThreadListView: View {
 /// The Mac can't be reached and never was this time: what to do about it.
 private struct Unreachable: View {
     @Environment(Store.self) private var store
+    @Environment(Fleet.self) private var fleet
 
     var body: some View {
         ContentUnavailableView {
@@ -129,7 +143,7 @@ private struct Unreachable: View {
         } actions: {
             Button("Try Again") { store.reconnect() }
                 .buttonStyle(.borderedProminent)
-            Button("Mac Settings") { store.tab = .mac }
+            Button(fleet.stores.count > 1 ? "Your Macs" : "Mac Settings") { fleet.tab = .mac }
         }
     }
 
@@ -148,6 +162,7 @@ struct SearchView: View {
     var body: some View {
         results
             .navigationTitle("Search")
+            .navigationSubtitle(store.displayName)
             .searchable(text: $query, prompt: "Titles and conversations")
             .task(id: query) {
                 // Asked once typing pauses.
@@ -346,46 +361,120 @@ struct ConnectionRow: View {
     }
 }
 
-/// The dock's Mac page: where the phone connects, and how that's going.
+/// The dock's Mac page: the Macs the phone knows, each connected; one is shown. Add one by the
+/// address its YourHarness prints; swipe one away to forget it.
 struct MacView: View {
-    @Environment(Store.self) private var store
-    @State private var address = ""
+    @Environment(Fleet.self) private var fleet
+    @State private var address = ProcessInfo.processInfo.environment["YH_PHONE_ADD_MAC"] ?? ""
 
     var body: some View {
         Form {
             Section {
-                LabeledContent("Status", value: status)
-                if let name = store.serverName, store.state == .connected {
-                    LabeledContent("Mac", value: name)
-                    LabeledContent("Protocol", value: "\(store.serverProtocol)")
+                ForEach(fleet.stores) { mac in
+                    Button { fleet.select(mac) } label: { MacRow(mac: mac, shown: mac === fleet.current) }
+                        .buttonStyle(.plain)
+                        .swipeActions {
+                            if fleet.stores.count > 1 {
+                                Button("Forget", systemImage: "trash", role: .destructive) { fleet.remove(mac) }
+                            }
+                        }
+                        .contextMenu {
+                            if mac.state != .connected { Button("Try Again", systemImage: "arrow.clockwise") { mac.reconnect() } }
+                            if fleet.stores.count > 1 { Button("Forget This Mac", systemImage: "trash", role: .destructive) { fleet.remove(mac) } }
+                        }
                 }
-                if store.state != .connected {
-                    Button("Try Again") { store.reconnect() }
-                }
+            } header: {
+                Text(fleet.stores.count > 1 ? "Your Macs" : "Your Mac")
+            } footer: {
+                if fleet.stores.count > 1 { Text("All stay connected; tap one to show it. Only the one shown streams a thread.") }
             }
             Section {
-                TextField(Store.defaultAddress, text: $address)
+                TextField("ws://192.168.1.20:7878/?token=…", text: $address)
                     .keyboardType(.URL)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .font(.body.monospaced())
-                Button("Connect") { store.connect(to: address.trimmingCharacters(in: .whitespaces)) }
-                    .disabled(address == store.serverAddress || URL(string: address)?.scheme.map { ["ws", "wss"].contains($0) } != true)
+                Button("Add Mac") {
+                    if fleet.add(address) { address = "" }
+                }
+                .disabled(URL(string: address)?.scheme.map { ["ws", "wss"].contains($0) } != true)
             } header: {
-                Text("Mac address")
+                Text("Add a Mac")
             } footer: {
-                Text("Start YourHarness on your Mac with YH_SERVER, and paste the address it prints, token and all. The Simulator reaches it at 127.0.0.1.")
+                Text("Start YourHarness on the Mac with YH_SERVER, and paste the address it prints, token and all. The Simulator reaches this Mac at 127.0.0.1.")
             }
         }
-        .navigationTitle("Mac")
-        .onAppear { address = store.serverAddress }
+        .navigationTitle("Macs")
+        .task {
+            // `YH_PHONE_ADD_MAC=<address>`: added as the button does.
+            if ProcessInfo.processInfo.environment["YH_PHONE_ADD_MAC"] != nil, fleet.add(address) { address = "" }
+        }
+    }
+}
+
+/// A Mac in the list: its name, how it's connected, and what's going on there.
+private struct MacRow: View {
+    let mac: Store
+    let shown: Bool
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "desktopcomputer")
+                .font(.title3)
+                .foregroundStyle(mac.state == .connected ? Color.accentColor : .secondary)
+                .frame(width: 30)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(mac.displayName).font(.body.weight(shown ? .semibold : .regular)).lineLimit(1)
+                Text(MacMenu.status(of: mac, waiting: false)).font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
+                Text(mac.serverAddress.replacingOccurrences(of: #"\?token=.*"#, with: "", options: .regularExpression))
+                    .font(.caption.monospaced()).foregroundStyle(.tertiary).lineLimit(1)
+            }
+            Spacer(minLength: 0)
+            if mac.waitingCount > 0 {
+                Label("\(mac.waitingCount)", systemImage: "hand.raised.fill").font(.footnote).foregroundStyle(.orange)
+                    .accessibilityLabel("\(mac.waitingCount) waiting on you")
+            }
+            if shown {
+                Image(systemName: "checkmark").font(.body.weight(.semibold)).foregroundStyle(Color.accentColor)
+                    .accessibilityLabel("Shown")
+            }
+        }
+        .contentShape(.rect)
+        .padding(.vertical, 2)
+    }
+}
+
+/// The Threads title's menu with several Macs: each, with what's going on there; the shown one ticked.
+struct MacMenu: View {
+    @Environment(Fleet.self) private var fleet
+
+    var body: some View {
+        ForEach(fleet.stores) { mac in
+            Button {
+                fleet.select(mac)
+            } label: {
+                Label {
+                    Text(mac.displayName)
+                    Text(Self.status(of: mac))
+                } icon: {
+                    Image(systemName: mac === fleet.current ? "checkmark" : mac.waitingCount > 0 ? "hand.raised.fill" : "desktopcomputer")
+                }
+            }
+        }
+        Divider()
+        Button("Your Macs…", systemImage: "desktopcomputer.and.macbook") { fleet.tab = .mac }
     }
 
-    private var status: String {
-        switch store.state {
-        case .connecting: "Connecting"
-        case .connected: "Connected"
-        case .waiting(let reason, _): reason
+    /// "Connected · 2 waiting on you · 1 working", or why it isn't.
+    static func status(of mac: Store, waiting: Bool = true) -> String {
+        switch mac.state {
+        case .connecting: return "Connecting…"
+        case .waiting(let reason, _): return reason
+        case .connected:
+            var parts = ["Connected"]
+            if waiting, mac.waitingCount > 0 { parts.append("\(mac.waitingCount) waiting on you") }
+            if mac.runningCount > 0 { parts.append("\(mac.runningCount) working") }
+            return parts.joined(separator: " · ")
         }
     }
 }
@@ -411,6 +500,7 @@ struct UsageView: View {
             }
         }
         .navigationTitle("Usage")
+        .navigationSubtitle(store.displayName)
     }
 }
 
