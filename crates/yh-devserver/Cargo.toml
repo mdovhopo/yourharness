@@ -1,0 +1,14 @@
+[package]
+name = "yh-devserver"
+version = "0.0.1"
+edition.workspace = true
+publish.workspace = true
+description = "Development server for the phone app: a data folder's harness.sqlite, read-only, live over a WebSocket. Temporary, until yh-server."
+
+[dependencies]
+yh-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true
+flume.workspace = true
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }

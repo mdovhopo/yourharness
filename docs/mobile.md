@@ -91,10 +91,15 @@ files. Sub-agent records are left out of the MVP.
 
 | | What | Done when |
 |---|---|---|
-| **M0** | `yh-devserver`: the wire above, read-only, polling `rev`; tests against a temp database | `cargo test -p yh-devserver`; a WebSocket client sees rows arrive while a dev app runs a Haiku turn on the same scratch folder |
-| **M1** | App skeleton: XcodeGen project, connection, thread list live | Simulator screenshot shows the preset's threads; a new thread made on the Mac appears |
-| **M2** | Transcript: `UICollectionView`, row kinds, markdown, follow-bottom, paging | A Haiku turn on the Mac shows up on the phone as it runs, checked by screenshots |
+| ✅ **M0** | `yh-devserver`: the wire above, read-only, polling `rev`; tests against a temp database | `cargo test -p yh-devserver`; a WebSocket client sees rows arrive while a dev app runs a Haiku turn on the same scratch folder |
+| ✅ **M1** | App skeleton: XcodeGen project, connection, thread list live | Simulator screenshot shows the preset's threads; a new thread made on the Mac appears |
+| ✅ **M2** | Transcript: `UICollectionView`, row kinds, markdown, follow-bottom, paging | A Haiku turn on the Mac shows up on the phone as it runs, checked by screenshots |
 | **M3** | Speed and polish: the extreme preset's 20 huge threads, light and dark, Dynamic Type, VoiceOver names | No hitches in Instruments while a 32,000-row thread updates; a design pass |
+
+M0 to M2 were checked on 2026-11-09 with real Haiku turns in a test copy of the app: the phone
+opened the working thread on its own (`YH_SELECT=active`) and drew the reply as it grew, about
+once a second, following the bottom. `cargo run -p yh-devserver --example watch` prints what the
+phone gets, one line a message.
 
 ### Running it
 
@@ -103,6 +108,7 @@ scripts/preset.sh extreme                         # or any preset → test-harne
 cp -c -R test-harness-root/extreme /tmp/yh-mobile-data
 cargo run -p yh-devserver -- /tmp/yh-mobile-data  # ws://127.0.0.1:7878
 scripts/mobile.sh                                 # generate, build, boot a Simulator, install, launch
+YH_SELECT=active scripts/mobile.sh --no-build --screenshot /tmp/phone.png
 ```
 
 Screenshots come from `xcrun simctl io booted screenshot`, which captures the Simulator only

@@ -1,0 +1,45 @@
+# XcodeGen: `xcodegen generate` makes YourHarnessMobile.xcodeproj (not committed).
+# scripts/mobile.sh does that, builds, and runs it in a Simulator.
+name: YourHarnessMobile
+options:
+  bundleIdPrefix: com.mdovhopo
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MARKETING_VERSION: "0.0.1"
+    CURRENT_PROJECT_VERSION: "1"
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_STYLE: Automatic
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    SWIFT_STRICT_CONCURRENCY: complete
+targets:
+  YourHarnessMobile:
+    type: application
+    platform: iOS
+    sources: [YourHarness]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.mdovhopo.yourharness.mobile
+        PRODUCT_NAME: YourHarness
+        TARGETED_DEVICE_FAMILY: "1"
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: YourHarness
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight
+        INFOPLIST_KEY_NSLocalNetworkUsageDescription: YourHarness connects to your Mac to show its threads.
+    info:
+      path: YourHarness/Info.plist
+      properties:
+        # ws:// to the Mac on the local network (and 127.0.0.1 from the Simulator).
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+schemes:
+  YourHarnessMobile:
+    build:
+      targets:
+        YourHarnessMobile: all
+    run:
+      config: Debug

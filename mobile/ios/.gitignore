@@ -1,0 +1,3 @@
+*.xcodeproj/
+build/
+YourHarness/Info.plist
