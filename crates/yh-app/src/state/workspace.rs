@@ -3242,11 +3242,17 @@ impl Workspace {
             self.turn_ended(&thread, end, cx);
             self.composer_turn_ended(&thread, cx);
         }
+        // The window around the thread draws again only when what it shows changed (status,
+        // cards, a turn's end): the thread's rows and status redraw through the thread itself.
+        // On every update, 20 threads streaming redrew the whole window each frame.
+        let chrome = u.chrome || u.turn_ended.is_some() || u.agents_changed;
         if u.chrome {
             self.note_attention(&thread, cx);
             self.answer_for_tests(&thread, cx);
         }
-        cx.notify();
+        if chrome {
+            cx.notify();
+        }
     }
 }
 

@@ -214,7 +214,7 @@ enum Input {
 pub fn start(db: Option<Arc<Database>>) -> EngineHandle {
     let (inbox, rx) = flume::unbounded();
     let (out, outputs) = flume::unbounded();
-    let engine = Engine { db, inbox: inbox.clone(), out, runs: HashMap::new(), runtimes: HashMap::new(), launching: HashMap::new(), generation: 0, saved_at: HashMap::new(), steering: HashMap::new(), subscribers: Vec::new(), updates: Vec::new() };
+    let engine = Engine { db, inbox: inbox.clone(), out, runs: HashMap::new(), runtimes: HashMap::new(), launching: HashMap::new(), generation: 0, saved_at: HashMap::new(), steering: HashMap::new(), subscribers: Vec::new(), updates: Vec::new(), flushed_at: Instant::now() };
     std::thread::Builder::new().name("engine".into()).spawn(move || engine.run(rx)).expect("the engine's thread");
     EngineHandle { inbox, outputs }
 }
@@ -257,7 +257,13 @@ struct Engine {
     subscribers: Vec<flume::Sender<Output>>,
     /// Updates made since the last were sent, in order, one per thread.
     updates: Vec<ThreadUpdate>,
+    /// When updates last went out: at most once a frame (`FRAME`), as the app takes them.
+    flushed_at: Instant,
 }
+
+/// How often updates go out while threads stream. Each event its own update woke the app and
+/// cloned the thread's live state thousands of times a second with 20 threads streaming.
+const FRAME: Duration = Duration::from_millis(8);
 
 /// `YH_RUNTIME_LOG=1`: each thread's `claude` started and ended, printed as `RUNTIME …`.
 fn runtime_log(text: String) {
@@ -307,7 +313,10 @@ impl Engine {
     fn run(mut self, inbox: flume::Receiver<Input>) {
         let log = std::env::var("YH_EVENT_LOG").as_deref() == Ok("1");
         loop {
-            let first = match self.next_idle() {
+            // Updates waiting go out when their frame is up, whatever comes before.
+            let flush_at = (!self.updates.is_empty()).then(|| self.flushed_at + FRAME);
+            let wake = [self.next_idle(), flush_at].into_iter().flatten().min();
+            let first = match wake {
                 Some(at) => match inbox.recv_timeout(at.saturating_duration_since(Instant::now())) {
                     Ok(input) => Some(input),
                     Err(flume::RecvTimeoutError::Timeout) => None,
@@ -354,7 +363,9 @@ impl Engine {
                 self.claude_batch(&thread, generation, events);
             }
             self.reap_idle();
-            self.flush();
+            if quit.is_some() || self.flushed_at.elapsed() >= FRAME {
+                self.flush();
+            }
             if let Some(done) = quit {
                 self.quit();
                 self.flush();
@@ -379,16 +390,13 @@ impl Engine {
     }
 
     /// The thread's update so far this round.
+    /// Its live state is taken as it goes out (`flush`).
     fn update(&mut self, thread: &str) -> &mut ThreadUpdate {
-        let live = self.run_of(thread).live.clone();
+        self.run_of(thread);
         match self.updates.iter().position(|u| u.thread == thread) {
-            Some(at) => {
-                let u = &mut self.updates[at];
-                u.live = live;
-                u
-            }
+            Some(at) => &mut self.updates[at],
             None => {
-                self.updates.push(ThreadUpdate::new(thread, live));
+                self.updates.push(ThreadUpdate::new(thread, LiveState::default()));
                 self.updates.last_mut().unwrap()
             }
         }
@@ -401,14 +409,28 @@ impl Engine {
     }
 
     /// To the app, and to every subscriber still listening.
+    /// Anything else goes after the updates made before it (a snapshot is told in order with
+    /// the changes).
     fn emit(&mut self, output: Output) {
+        if !matches!(output, Output::Thread(_)) {
+            self.flush();
+        }
+        self.send(output);
+    }
+
+    fn send(&mut self, output: Output) {
         self.subscribers.retain(|s| s.send(output.clone()).is_ok());
         let _ = self.out.send(output);
     }
 
+    /// The updates waiting, each with its thread's live state now.
     fn flush(&mut self) {
-        for u in std::mem::take(&mut self.updates) {
-            self.emit(Output::Thread(u));
+        self.flushed_at = Instant::now();
+        for mut u in std::mem::take(&mut self.updates) {
+            if let Some(run) = self.runs.get(&u.thread) {
+                u.live = run.live.clone();
+            }
+            self.send(Output::Thread(u));
         }
     }
 

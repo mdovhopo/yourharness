@@ -6,6 +6,12 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+### Changed
+- Claude's replies are turned into a thread's rows on a thread of their own, away from the window, so the window has less to do while turns stream.
+
+### Added
+- The groundwork for a companion iPhone and iPad app: an experimental server, off unless YourHarness is started with `YH_SERVER`, that only listens on this Mac for now. The app itself isn't released yet.
+
 ## [0.1.2] - 2026-11-09
 
 ### Fixed
