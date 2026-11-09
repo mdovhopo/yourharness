@@ -6,6 +6,10 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+### Fixed
+- Files: a file's lines scroll sideways when they're wider than the panel, and their text can be selected and copied.
+- Mermaid diagrams whose quoted labels run over more than one line are drawn again instead of shown as code.
+
 ## [0.1.0] - 2026-11-09
 
 **YourHarness is now a Rust app.** This release replaces the Swift and SwiftUI app with a complete rewrite in Rust, drawn with GPUI (the GPU-accelerated framework the Zed editor uses) in a single native process. The transcript stays smooth and memory stays low with many long threads streaming at once, and switching threads takes a few hundredths of a second. It's the same app to macOS: the same name, bundle ID and signature, so it updates from 0.0.16 like any release and keeps the permissions you granted. Everything you had carries over: projects, threads, memory, settings, usage history and browser sign-ins are read from where 0.0.16 kept them, and the database stays in 0.0.x's format, so going back to 0.0.16 still works. The Swift app's code is gone from the repository.

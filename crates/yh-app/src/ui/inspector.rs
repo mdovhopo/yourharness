@@ -150,6 +150,8 @@ struct OpenFile {
     carries: std::sync::Arc<Vec<yh_core::markdown::Carry>>,
     /// Its language, from its extension, for colouring.
     lang: String,
+    /// The widest line: the list measures it to know how far it scrolls sideways.
+    widest: usize,
 }
 
 impl OpenFile {
@@ -163,6 +165,7 @@ impl OpenFile {
         self.note = read.note;
         self.cut_lines = read.cut_lines;
         self.carries = read.carries;
+        self.widest = read.widest;
         // A wrapped list measures each line: made again for the new lines, at the same place.
         if let (Some(old), FileContent::Text(lines)) = (self.wrapped.take(), &self.content) {
             let state = gpui_kit::ListState::new(lines.len(), gpui_kit::ListAlignment::Top, px(400.));
@@ -179,6 +182,7 @@ struct ViewerRead {
     note: Option<String>,
     cut_lines: bool,
     carries: std::sync::Arc<Vec<yh_core::markdown::Carry>>,
+    widest: usize,
 }
 
 fn extension(path: &str) -> String {
@@ -188,11 +192,17 @@ fn extension(path: &str) -> String {
 /// `read_for_viewer`, with what each line starts inside worked out too.
 fn read_file(full: &str) -> ViewerRead {
     let (content, note, cut_lines) = read_for_viewer(full);
-    let carries = match &content {
-        FileContent::Text(lines) => yh_core::markdown::line_carries(lines, &extension(full)),
-        _ => vec![],
+    let (carries, widest) = match &content {
+        FileContent::Text(lines) => (yh_core::markdown::line_carries(lines, &extension(full)), widest_line(lines)),
+        _ => (vec![], 0),
     };
-    ViewerRead { content, note, cut_lines, carries: std::sync::Arc::new(carries) }
+    ViewerRead { content, note, cut_lines, carries: std::sync::Arc::new(carries), widest }
+}
+
+/// The line that's drawn widest in a monospaced font, a tab as four.
+fn widest_line(lines: &[SharedString]) -> usize {
+    let width = |l: &SharedString| l.chars().map(|c| if c == '\t' { 4 } else { 1 }).sum::<usize>();
+    lines.iter().enumerate().max_by_key(|(_, l)| width(l)).map_or(0, |(i, _)| i)
 }
 
 /// Lines longer than this are cut.
@@ -914,7 +924,7 @@ impl Inspector {
         let full = if relative.starts_with('/') { relative.clone() } else { format!("{}/{relative}", folder.trim_end_matches('/')) };
         let started = std::time::Instant::now();
         cx.spawn(async move |this, cx| {
-            let ViewerRead { content, note, cut_lines, carries } = cx.background_executor().spawn(async move { read_file(&full) }).await;
+            let ViewerRead { content, note, cut_lines, carries, widest } = cx.background_executor().spawn(async move { read_file(&full) }).await;
             let _ = this.update(cx, |this, cx| {
                 let state = this.folders.entry(folder).or_default();
                 let scroll = UniformListScrollHandle::new();
@@ -926,7 +936,7 @@ impl Inspector {
                     eprintln!("FILES opened {relative} ({n} lines) in {} ms", started.elapsed().as_millis());
                 }
                 let lang = extension(&relative);
-                let file = OpenFile { path: relative, content, note, cut_lines, scroll, wrapped: None, lines_picked: lines, preview, carries, lang };
+                let file = OpenFile { path: relative, content, note, cut_lines, scroll, wrapped: None, lines_picked: lines, preview, carries, lang, widest };
                 // A preview takes the last preview's place.
                 match state.files.iter().position(|f| f.preview).filter(|_| preview) {
                     Some(i) => {
@@ -1928,6 +1938,15 @@ impl Inspector {
                 // Find's matches, when they're for this file.
                 let hits = if self.file_find_open && self.file_hits_for.as_deref() == Some(file.path.as_str()) { self.file_hits.clone() } else { Rc::new(vec![]) };
                 let hit = self.file_hit;
+                let widest = file.widest;
+                // Each line takes part in the window's text selection, after everything else
+                // in reading order, under an id that's this file's.
+                let file_key = {
+                    use std::hash::{Hash, Hasher};
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    file.path.hash(&mut hasher);
+                    hasher.finish()
+                };
                 let row = move |i: usize, wrap: bool| {
                     let on = picked.is_some_and(|(a, b)| i + 1 >= a && i + 1 <= b.max(a));
                     let first = hits.partition_point(|(l, _)| *l < i);
@@ -1944,7 +1963,13 @@ impl Inspector {
                         .when(!wrap, |d| d.whitespace_nowrap())
                         .when(on, |d| d.bg(theme3.warning.opacity(0.16)))
                         .child(div().flex_none().w(px(gutter)).pr(px(space::S + 2.)).text_right().text_color(if on { theme3.secondary } else { theme3.tertiary }).child(format!("{}", i + 1)))
-                        .child(div().when(!wrap, |d| d.flex_none()).when(wrap, |d| d.flex_1().min_w_0().overflow_hidden().whitespace_normal()).child(code_line(&lines[i], &lang, carry, &found, current, &theme3)))
+                        .child(div().when(!wrap, |d| d.flex_none()).when(wrap, |d| d.flex_1().min_w_0().overflow_hidden().whitespace_normal()).child(crate::ui::selectable::SelText::new(
+                            gpui_kit::ElementId::NamedInteger("file-line".into(), file_key ^ i as u64),
+                            lines[i].clone(),
+                            code_line(&lines[i], &lang, carry, &found, current, &theme3),
+                            (1 << 62) + i as u64,
+                            theme3.accent.opacity(0.28),
+                        )))
                 };
                 if let Some(state) = file.wrapped.clone().filter(|_| wraps) {
                     gpui_kit::list(state, move |i, _, _| {
@@ -1967,6 +1992,8 @@ impl Inspector {
                                 LINES_WORST_US.fetch_max(started.elapsed().as_micros() as u64, std::sync::atomic::Ordering::Relaxed);
                                 rows
                             })
+                            .with_horizontal_sizing_behavior(gpui_kit::ListHorizontalSizingBehavior::Unconstrained)
+                            .with_width_from_item(Some(widest))
                             .track_scroll(&file.scroll)
                             .size_full(),
                         )
