@@ -657,16 +657,45 @@ fn main() {
             })
             .detach();
         }
-        // `YH_WHEEL=<x,y,dy,count>[;…]`: `count` pixel wheel events of `dy` (positive scrolls
-        // up, as a trackpad does) at that window point, through the window as a real wheel goes,
+        // `YH_DRAG=<x1,y1,x2,y2>`: the left button pressed at the first window point, dragged to
+        // the second and let go, through the window, after `YH_DRAFT_DELAY` + 0.5 s; then prints
+        // what ⌘C would copy (`DRAG selected …`).
+        if let Some(drag) = env("YH_DRAG") {
+            let v: Vec<f32> = drag.split(',').filter_map(|n| n.trim().parse().ok()).collect();
+            let delay: f64 = env("YH_DRAFT_DELAY").and_then(|v| v.parse().ok()).unwrap_or(1.0) + 0.5;
+            if let [x1, y1, x2, y2] = v[..] {
+                cx.spawn(async move |cx| {
+                    cx.background_executor().timer(Duration::from_secs_f64(delay)).await;
+                    if let Some(ns) = input_target(window, None, cx) {
+                        crate::platform::mouse_move(ns, x1, y1);
+                        crate::platform::mouse_button(ns, x1, y1, crate::platform::Press::Down);
+                        for step in 1..=10 {
+                            let f = step as f32 / 10.;
+                            crate::platform::mouse_button(ns, x1 + (x2 - x1) * f, y1 + (y2 - y1) * f, crate::platform::Press::Drag);
+                            cx.background_executor().timer(Duration::from_millis(30)).await;
+                        }
+                        crate::platform::mouse_button(ns, x2, y2, crate::platform::Press::Up);
+                    }
+                    cx.background_executor().timer(Duration::from_millis(400)).await;
+                    let _ = window.update(cx, |_, window, cx| {
+                        let text = gpui_kit::base::TextSelection::selected_text(window, cx);
+                        eprintln!("DRAG selected ({} chars): {:?}", text.chars().count(), text.chars().take(300).collect::<String>());
+                    });
+                })
+                .detach();
+            }
+        }
+        // `YH_WHEEL=<x,y,dy,count[,dx]>[;…]`: `count` pixel wheel events of `dy` (positive scrolls
+        // up, as a trackpad does; `dx` sideways, positive scrolling left) at that window point, through the window as a real wheel goes,
         // after `YH_DRAFT_DELAY` (+0.5 s after `YH_HOVER`); after each step it prints where the
         // open transcript and every capped box that can scroll stand (`WHEEL …`).
         if let Some(steps) = env("YH_WHEEL") {
-            let steps: Vec<(f32, f32, i32, u32)> = steps
+            let steps: Vec<(f32, f32, i32, u32, i32)> = steps
                 .split(';')
                 .filter_map(|s| {
                     let v: Vec<&str> = s.split(',').map(str::trim).collect();
-                    Some((v.first()?.parse().ok()?, v.get(1)?.parse().ok()?, v.get(2)?.parse().ok()?, v.get(3).and_then(|c| c.parse().ok()).unwrap_or(1)))
+                    let dx = v.get(4).and_then(|c| c.parse().ok()).unwrap_or(0);
+                    Some((v.first()?.parse().ok()?, v.get(1)?.parse().ok()?, v.get(2)?.parse().ok()?, v.get(3).and_then(|c| c.parse().ok()).unwrap_or(1), dx))
                 })
                 .collect();
             let delay: f64 = env("YH_DRAFT_DELAY").and_then(|v| v.parse().ok()).unwrap_or(1.0) + 0.5;
@@ -684,13 +713,13 @@ fn main() {
                     });
                 };
                 report("start".into(), cx);
-                for (n, (x, y, dy, count)) in steps.into_iter().enumerate() {
+                for (n, (x, y, dy, count, dx)) in steps.into_iter().enumerate() {
                     if let Some(ns) = input_target(window, in_window.as_deref(), cx) {
                         crate::platform::mouse_move(ns, x, y);
                     }
                     for _ in 0..count {
                         if let Some(ns) = input_target(window, in_window.as_deref(), cx) {
-                            crate::platform::wheel(ns, x, y, dy);
+                            crate::platform::wheel_xy(ns, x, y, dy, dx);
                         }
                         cx.background_executor().timer(Duration::from_millis(30)).await;
                     }

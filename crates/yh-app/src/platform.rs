@@ -263,13 +263,18 @@ unsafe extern "C" {
 
 /// A pixel scroll, as a trackpad sends: through the window, which finds what's under it.
 pub fn wheel(w: id, x: f32, y: f32, dy: i32) {
+    wheel_xy(w, x, y, dy, 0)
+}
+
+/// A pixel wheel event that also goes sideways (`dx`, positive scrolling left).
+pub fn wheel_xy(w: id, x: f32, y: f32, dy: i32, dx: i32) {
     unsafe {
         let point = window_point(w, x, y);
         let screen_point: NSPoint = msg_send![w, convertPointToScreen: point];
         let screens: id = msg_send![class!(NSScreen), screens];
         let first: id = msg_send![screens, objectAtIndex: 0usize];
         let first_frame: NSRect = msg_send![first, frame];
-        let cg = CGEventCreateScrollWheelEvent2(std::ptr::null(), 0 /* pixel */, 1, dy, 0, 0);
+        let cg = CGEventCreateScrollWheelEvent2(std::ptr::null(), 0 /* pixel */, 2, dy, dx, 0);
         if cg.is_null() {
             return;
         }

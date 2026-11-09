@@ -195,14 +195,21 @@ fn strip_simple_tags(text: &str) -> String {
 /// inside quotes and brackets.
 pub(crate) fn statements(source: &str) -> Vec<String> {
     let mut result = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0usize;
+    let mut in_quote = false;
     for raw in lines(source) {
-        let line = match raw.find("%%") {
-            Some(comment) => &raw[..comment],
-            None => raw,
+        // A quoted label left open goes on to the next line, the break kept as one.
+        let line = if in_quote {
+            current.push_str("<br>");
+            trim(raw)
+        } else {
+            depth = 0;
+            match raw.find("%%") {
+                Some(comment) => &raw[..comment],
+                None => raw,
+            }
         };
-        let mut current = String::new();
-        let mut depth = 0usize;
-        let mut in_quote = false;
         for c in line.chars() {
             match c {
                 '"' => in_quote = !in_quote,
@@ -216,8 +223,11 @@ pub(crate) fn statements(source: &str) -> Vec<String> {
                 current.push(c);
             }
         }
-        result.push(current);
+        if !in_quote {
+            result.push(std::mem::take(&mut current));
+        }
     }
+    result.push(current);
     result
         .into_iter()
         .map(|statement| trim(&statement).to_string())

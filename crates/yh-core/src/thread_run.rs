@@ -701,8 +701,10 @@ impl ThreadRun {
                 let seq = self.append(data);
                 self.row_mut(seq).live = true;
                 self.blocks.insert(key, seq);
-                // Claude woken by a job's end: a turn with no message of yours.
-                let woke = !self.live.running && self.live.jobs.version > 0;
+                // A block while no turn is under way: one is. Claude woken by a job's end (a turn
+                // with no message of yours), or your message's turn after one the CLI ran first
+                // and ended (a job from before a restart reported as it resumed).
+                let woke = !self.live.running;
                 if woke {
                     self.live.running = true;
                 }
@@ -720,6 +722,8 @@ impl ThreadRun {
                         let seq = self.append(EntryData::new(key.clone(), k, ""));
                         self.row_mut(seq).live = true;
                         self.blocks.insert(key, seq);
+                        // As for a block's start: Claude is writing, so a turn is under way.
+                        self.live.running = true;
                         seq
                     }
                 };
@@ -1345,6 +1349,24 @@ mod tests {
                 .collect();
             assert_eq!(actual, expected, "{name}");
         }
+    }
+
+    /// Resumed after a restart, the CLI first reports a job from before it (a turn of its own,
+    /// ended), then answers your message: that turn is under way, though no job is known.
+    #[test]
+    fn a_turn_after_one_the_cli_ended_first_is_under_way() {
+        let mut run = ThreadRun { live: LiveState { total: Some(0), ..Default::default() }, ..Default::default() };
+        run.add_user("proceed", &[], "u", false, None);
+        run.live.running = true;
+        assert!(run.apply(Event::Done { is_error: false, text: String::new() }, &NoRows).chrome);
+        assert!(!run.live.running);
+        let start = Event::BlockStart { message: "m".into(), index: 0, parent: None, kind: BlockKind::Thinking };
+        assert!(run.apply(start, &NoRows).chrome, "the sidebar shows it working again");
+        assert!(run.live.running);
+        // A delta with no start (the start was missed) counts the same.
+        run.apply(Event::Done { is_error: false, text: String::new() }, &NoRows);
+        run.apply(Event::Delta { message: "m2".into(), index: 0, parent: None, kind: DeltaKind::Text, text: "Hi".into() }, &NoRows);
+        assert!(run.live.running);
     }
 
     #[test]
