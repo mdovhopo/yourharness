@@ -225,8 +225,8 @@ Checked 2026-11-10 against this Mac's tailnet: the Simulator paired from a link 
 was dead (`10.255.255.1`) plus the `ts.net` name, over Tailscale, and showed the threads; the `yh`
 client paired over `100.78.55.9` (`whois` saying it's you), was refused with a faked other user,
 and still got in over Wi‑Fi; Over Tailscale only listened on `100.78.55.9` alone (Wi‑Fi refused)
-and a Haiku turn sent over the `ts.net` name streamed its reply back. Not yet: a real iPhone on
-cellular.
+and a Haiku turn sent over the `ts.net` name streamed its reply back. Checked by the user the same
+day with 0.1.4: the real iPhone on cellular, the Mac on Wi‑Fi, end to end.
 
 Test hooks: `YH_PHONES=1` (on at launch, not saved), `YH_PHONES_LOG=1` (prints `PHONES pair
 <link>`), `YH_PHONES_BIND=127.0.0.1` (listens on loopback only: with the Mac's firewall on, listening
