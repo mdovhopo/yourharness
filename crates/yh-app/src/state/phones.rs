@@ -12,7 +12,13 @@ use std::sync::Arc;
 use serde_json::Value;
 use yh_server::pairing::{Device, Pairing};
 
-pub const DEFAULT_PORT: u16 = 7878;
+/// Unassigned at IANA and no known app's default (7878, the first choice, is registered to
+/// Opswise and is Radarr's default); below the ports macOS hands out for outgoing connections.
+pub const DEFAULT_PORT: u16 = 47878;
+/// What 0.1.3's Settings → Phone listened on: kept for a Mac whose phones paired with it.
+pub const FIRST_PORT: u16 = 7878;
+/// Ports tried after the chosen one when it's taken.
+const TRIES: u16 = 10;
 
 pub struct Phones {
     pub pairing: Arc<Pairing>,
@@ -40,20 +46,38 @@ impl Phones {
     }
 
     /// Listens on every network address (`YH_PHONES_BIND` for tests: 127.0.0.1, so no firewall
-    /// question), its actions to `actions`. A pairing code is ready once it's on.
+    /// question), its actions to `actions`. A pairing code is ready once it's on. When its port
+    /// is taken, the next few are tried; the port it got is `self.port`, to keep.
     pub fn start(&mut self, data_dir: std::path::PathBuf, name: String, links: yh_server::Links) {
         if self.running() {
             return;
         }
         let bind = std::env::var("YH_PHONES_BIND").unwrap_or_else(|_| "0.0.0.0".into());
-        let listener = match std::net::TcpListener::bind((bind.as_str(), self.port)) {
-            Ok(l) => l,
-            Err(e) => {
-                self.error = Some(if e.kind() == std::io::ErrorKind::AddrInUse { format!("Port {} is taken by another app.", self.port) } else { e.to_string() });
-                eprintln!("PHONES can't listen on {bind}:{}: {e}", self.port);
-                return;
+        let mut last = None;
+        let mut got = None;
+        for port in self.port..self.port.saturating_add(TRIES) {
+            match std::net::TcpListener::bind((bind.as_str(), port)) {
+                Ok(l) => {
+                    got = Some((l, port));
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                    eprintln!("PHONES port {port} is taken");
+                    last = Some(e);
+                }
+                Err(e) => {
+                    last = Some(e);
+                    break;
+                }
             }
+        }
+        let Some((listener, port)) = got else {
+            let e = last.map(|e| e.to_string()).unwrap_or_default();
+            self.error = Some(format!("Couldn't listen on ports {}–{}: {e}", self.port, self.port.saturating_add(TRIES - 1)));
+            eprintln!("PHONES can't listen on {bind}:{}: {e}", self.port);
+            return;
         };
+        self.port = port;
         self.error = None;
         self.addresses = addresses();
         let stop = Arc::new(AtomicBool::new(false));
@@ -135,6 +159,7 @@ mod tests {
     fn a_link_holds_where_to_connect_and_a_code() {
         let (tx, _rx) = flume::unbounded();
         let mut p = super::Phones::new(None, Some(7979), tx);
+        assert_eq!(super::Phones::new(None, None, flume::unbounded().0).port, super::DEFAULT_PORT);
         assert!(p.pairing_link("Mac").is_none(), "off: no link");
         p.stop = Some(Default::default());
         p.addresses = vec!["192.168.1.20".into()];

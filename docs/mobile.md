@@ -176,7 +176,10 @@ and never asks for screen recording. Never `screencapture`.
 ### Phones on this network (pairing)
 
 Settings → Phone on the Mac: **Let phones connect** (saved as `phonesEnabled`) starts a second
-server on every network address (port 7878, `phonesPort`), stopped again when it's turned off.
+server on every network address, stopped again when it's turned off. Its port is 47878 (unassigned at
+IANA, no known app's default; 7878, the first choice, is registered to Opswise and is Radarr's
+default), 7878 on a Mac whose phones paired with 0.1.3; when it's taken the next nine are tried, and
+the one it got is kept (`phonesPort`) and carried in the pairing link. `YH_PHONES_PORT` for tests.
 It shows the Mac's address and a QR code of a pairing link,
 `yourharness://pair?host=<ip>&port=<port>&code=<code>&name=<Mac>`. The code is random, works
 once, for 10 minutes; New Code replaces it. A phone connects with `?pair=<code>&device=<name>`,

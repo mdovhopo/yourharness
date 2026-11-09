@@ -266,7 +266,10 @@ impl Workspace {
         start_server(&engine, remote_actions.clone());
         // Phones on this network (Settings → Phone): the paired list saved as it changes.
         let (devices_changed, devices) = flume::unbounded::<Vec<yh_server::pairing::Device>>();
-        let phones = crate::state::phones::Phones::new(library.setting("phoneDevices"), library.setting("phonesPort").and_then(|v| v.as_u64()).map(|p| p as u16), devices_changed);
+        // Its port: `YH_PHONES_PORT` (tests, not kept), the one it got last time, 7878 for a Mac
+        // whose phones paired with 0.1.3 (before the port was kept), else the default.
+        let port = std::env::var("YH_PHONES_PORT").ok().and_then(|p| p.parse().ok()).or_else(|| library.setting("phonesPort").and_then(|v| v.as_u64()).map(|p| p as u16)).or_else(|| library.setting("phonesEnabled").is_some().then_some(crate::state::phones::FIRST_PORT));
+        let phones = crate::state::phones::Phones::new(library.setting("phoneDevices"), port, devices_changed);
         cx.spawn(async move |this, cx| {
             while let Ok(first) = devices.recv_async().await {
                 let list = devices.try_iter().last().unwrap_or(first);
@@ -3347,6 +3350,10 @@ impl Workspace {
     fn start_phones(&mut self) {
         let links = yh_server::Links { engine: self.engine.clone(), actions: self.remote_actions.clone() };
         self.phones.start(self.data_dir.clone(), mac_name(), links);
+        // The port it got is kept, so paired phones find it there next time.
+        if self.phones.running() && std::env::var("YH_PHONES_PORT").is_err() {
+            self.library.set_setting("phonesPort", &Value::from(self.phones.port));
+        }
         if std::env::var("YH_PHONES_LOG").as_deref() == Ok("1") {
             if let Some(link) = self.phones.pairing_link(&mac_name()) {
                 eprintln!("PHONES pair {link}");
