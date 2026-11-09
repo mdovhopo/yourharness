@@ -26,7 +26,7 @@ impl MenuState {
             usage_open: ws.page == Some(Page::Usage),
             inspector_open: ws.shows_inspector,
             thread_visible: thread.is_some(),
-            running: thread.as_ref().is_some_and(|t| t.read(cx).running),
+            running: thread.as_ref().is_some_and(|t| t.read(cx).run.running),
             waiting: thread.as_ref().is_some_and(|t| t.read(cx).waiting_for_you()),
             finds: finds && thread.is_some(),
         }

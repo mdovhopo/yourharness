@@ -64,7 +64,7 @@ show and pile up: parallel sub-agents print `PERMISSIONS waiting: 2`). Also `YH_
 in window points through the window, a second apart, after `YH_DRAFT_DELAY` + 0.5 s: the composer's pickers,
 the plan card's Approve menu; `r<x,y>` right-clicks, for context menus, and `h<x,y>` only moves the pointer, a menu
 row lit; `YH_CLICK_WINDOW=<title>` sends them, and `YH_WHEEL`'s, to that window instead:
-`Settings`), `YH_WHEEL=<x,y,dy,count>[;…]` (`count` pixel wheel events of `dy`, positive scrolling up, at that point
+`Settings`), `YH_DRAG=<x1,y1,x2,y2>` (the left button dragged between those window points, same delay, then `DRAG selected …`: what ⌘C would copy), `YH_WHEEL=<x,y,dy,count[,dx]>[;…]` (`count` pixel wheel events of `dy`, positive scrolling up, `dx` sideways, at that point
 through the window as a real wheel goes, same delay; after each step `WHEEL …` prints the open transcript's top row
 and every capped tool box that can scroll, `key:offset/max`: for the 320 pt boxes and sideways code blocks; with Settings
 open, also where its page and title prompt stand),

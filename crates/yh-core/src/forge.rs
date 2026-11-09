@@ -561,6 +561,14 @@ fn mock_item(item: &Value, now: f64) -> Option<PullRequest> {
     Some(pull)
 }
 
+/// A shell command (a `Bash` call's input) that changes or reads pull requests: the right
+/// sidebar looks the thread's PRs up again after it.
+pub fn touches_pull_requests(input_json: &str) -> bool {
+    let v: serde_json::Value = serde_json::from_str(input_json).unwrap_or_default();
+    let command = v["command"].as_str().unwrap_or("");
+    ["gh pr", "gh stack", "glab mr", "git push", "gh api"].iter().any(|c| command.contains(c))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

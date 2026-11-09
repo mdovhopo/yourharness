@@ -1,0 +1,12 @@
+[package]
+name = "yh-proto"
+version = "0.0.1"
+edition.workspace = true
+publish.workspace = true
+description = "What YourHarness and its clients (the phone app) say to each other: JSON messages over a WebSocket."
+
+[dependencies]
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

@@ -2,165 +2,15 @@
 //! earlier pages are read when you scroll up to them. A streamed delta changes its entry in
 //! place and tells the list to measure just that row again (`ListState::splice`).
 
-use yh_core::claude::{Block, BlockKind, DeltaKind, Event};
-use yh_core::db::Row;
 use yh_core::library::{EntryData, Kind, ThreadMeta};
+use yh_core::thread_run::{ComposerState, LiveState, RowChange, TextPatch, TranscriptRow};
+pub use yh_core::plan::is_plan_tool;
+pub use yh_core::thread_run::{Elicitation, Permission, SubStep, Subagent, AGENT_TOOLS};
 use yh_core::markdown::Markdown;
-use gpui_kit::{px, Context, ListAlignment, ListOffset, ListState};
+use gpui_kit::{px, ListAlignment, ListOffset, ListState};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-
-#[derive(Clone, Debug)]
-pub struct Subagent {
-    pub description: String,
-    pub status: String,
-    pub steps: usize,
-    /// What it reported, when it came apart from the tool's result (a background sub-agent).
-    pub report: Option<String>,
-    /// What it said and did, for following it in the right sidebar: its finished messages
-    /// and tool calls, the newest `SUBAGENT_LOG` of them.
-    pub log: Vec<SubStep>,
-    /// What `stop_task` takes to stop it (the right sidebar's Stop).
-    pub task_id: Option<String>,
-    /// What it's doing now, as the CLI says it (`task_progress`: "Reading a.txt").
-    pub activity: Option<String>,
-    /// Tokens it has used so far, and its tool calls, as the CLI counts them.
-    pub tokens: Option<u64>,
-    pub tool_uses: Option<u64>,
-    /// When it started (seconds since 1970), and how long it ran, as the CLI counts it.
-    pub started_at: f64,
-    pub duration_ms: Option<u64>,
-    /// What it had used before it was continued (`SendMessage`): the CLI counts a continued
-    /// run afresh, so its numbers go on from these.
-    base: yh_core::claude::SubagentUsage,
-}
-
-/// One thing a sub-agent did: a message (`tool` None) or a tool call with its result.
-#[derive(Clone, Debug)]
-pub struct SubStep {
-    pub tool: Option<String>,
-    pub id: String,
-    pub text: String,
-    pub result: Option<String>,
-    pub is_error: bool,
-}
-
-const SUBAGENT_LOG: usize = 200;
-
-impl Subagent {
-    fn new(description: String) -> Subagent {
-        Subagent {
-            description,
-            status: "running".into(),
-            steps: 0,
-            report: None,
-            log: vec![],
-            task_id: None,
-            activity: None,
-            tokens: None,
-            tool_uses: None,
-            started_at: yh_core::library::now_ms() / 1000.0,
-            duration_ms: None,
-            base: Default::default(),
-        }
-    }
-
-    /// As saved (the record 0.0.x wrote, `SubagentSnapshot`): with what it was asked, from its call.
-    fn record(&self, input: Option<&str>) -> yh_core::subagent_record::SubagentRecord {
-        use yh_core::subagent_record::{SubagentEntry, SubagentRecord};
-        let input: serde_json::Value = input.and_then(|i| serde_json::from_str(i).ok()).unwrap_or_default();
-        SubagentRecord {
-            description: self.description.clone(),
-            agent_type: input["subagent_type"].as_str().map(str::to_string),
-            prompt: input["prompt"].as_str().unwrap_or("").to_string(),
-            is_background: input["run_in_background"] == true,
-            status: self.status.clone(),
-            tool_uses: self.tool_uses.or_else(|| (self.steps > 0).then_some(self.steps as u64)),
-            tokens: self.tokens,
-            duration_ms: self.duration_ms,
-            report: self.report.clone(),
-            started_at: self.started_at,
-            entries: self
-                .log
-                .iter()
-                .enumerate()
-                .map(|(n, step)| match &step.tool {
-                    Some(tool) => SubagentEntry {
-                        id: step.id.clone(),
-                        kind: "tool".into(),
-                        text: String::new(),
-                        tool_name: Some(tool.clone()),
-                        tool_input: Some(step.text.clone()),
-                        tool_result: step.result.clone(),
-                        tool_is_error: step.result.is_some().then_some(step.is_error),
-                    },
-                    None => SubagentEntry { id: format!("s{n}"), kind: "assistant".into(), text: step.text.clone(), ..Default::default() },
-                })
-                .collect(),
-        }
-    }
-
-    /// What was saved, back into a run (one still running when saved has stopped).
-    fn from_record(r: yh_core::subagent_record::SubagentRecord) -> Subagent {
-        let log: Vec<SubStep> = r
-            .entries
-            .into_iter()
-            .filter_map(|e| match e.kind.as_str() {
-                "tool" => Some(SubStep { tool: e.tool_name.or(Some("Tool".into())), id: e.id, text: e.tool_input.unwrap_or_default(), result: e.tool_result, is_error: e.tool_is_error == Some(true) }),
-                "assistant" if !e.text.is_empty() => Some(SubStep { tool: None, id: String::new(), text: e.text, result: None, is_error: false }),
-                _ => None,
-            })
-            .collect();
-        let steps = log.iter().filter(|s| s.tool.is_some()).count();
-        Subagent {
-            description: r.description,
-            status: r.status,
-            steps: r.tool_uses.map_or(steps, |n| n as usize),
-            report: r.report,
-            log,
-            task_id: None,
-            activity: None,
-            tokens: r.tokens,
-            tool_uses: r.tool_uses,
-            started_at: r.started_at,
-            duration_ms: r.duration_ms,
-            base: Default::default(),
-        }
-    }
-
-    /// A saved run as the panel lists it before its steps are read.
-    fn from_summary(s: yh_core::subagent_record::SubagentSummary) -> Subagent {
-        Subagent {
-            description: s.description,
-            status: s.status,
-            steps: s.tool_uses.unwrap_or(0) as usize,
-            report: None,
-            log: vec![],
-            task_id: None,
-            activity: None,
-            tokens: s.tokens,
-            tool_uses: s.tool_uses,
-            started_at: s.started_at,
-            duration_ms: s.duration_ms,
-            base: Default::default(),
-        }
-    }
-
-    fn apply(&mut self, usage: yh_core::claude::SubagentUsage) {
-        let plus = |n: Option<u64>, base: Option<u64>| n.map(|n| n + base.unwrap_or(0));
-        self.tokens = plus(usage.tokens, self.base.tokens).or(self.tokens);
-        self.tool_uses = plus(usage.tool_uses, self.base.tool_uses).or(self.tool_uses);
-        self.duration_ms = plus(usage.duration_ms, self.base.duration_ms).or(self.duration_ms);
-    }
-
-    /// Continued after it ended (`SendMessage` to it): working again, its numbers going on.
-    fn resume(&mut self) {
-        self.base = yh_core::claude::SubagentUsage { tokens: self.tokens, tool_uses: self.tool_uses.or((self.steps > 0).then_some(self.steps as u64)), duration_ms: self.duration_ms };
-        self.status = "running".into();
-        self.activity = None;
-    }
-}
 
 pub struct Entry {
     pub data: EntryData,
@@ -185,22 +35,22 @@ pub struct Entry {
 
 pub type EntryRef = Rc<RefCell<Entry>>;
 
-fn entry(mut data: EntryData, seq: usize) -> EntryRef {
-    let date = data.date;
-    // A sub-agent's call read from history: its run as it was saved.
-    let sub = data.subagent.take().and_then(|b| yh_core::subagent_record::SubagentRecord::decode(&b)).map(Subagent::from_record);
-    Rc::new(RefCell::new(Entry {
-        data,
-        live: false,
-        sub,
-        version: 0,
-        open: false,
-        markdown: None,
-        seq,
-        date,
+/// A row as the run told it, to show.
+fn entry_of(r: TranscriptRow) -> EntryRef {
+    Rc::new(RefCell::new(Entry { data: r.data, live: r.live, sub: r.sub, version: 0, open: false, markdown: None, seq: r.seq, date: r.date, delivery: r.delivery }))
+}
 
-        delivery: None,
-    }))
+/// A row read from storage: a sub-agent's call with its run as it was saved.
+fn entry(data: EntryData, seq: usize) -> EntryRef {
+    entry_of(TranscriptRow::saved(data, seq))
+}
+
+impl Entry {
+    /// As the run holds it.
+    #[cfg(test)]
+    fn transcript_row(&self) -> TranscriptRow {
+        TranscriptRow { seq: self.seq, data: self.data.clone(), live: self.live, sub: self.sub.clone(), date: self.date, delivery: self.delivery.clone() }
+    }
 }
 
 /// A sub-agent call that isn't held, as the Sub-agents panel lists it: what it was asked
@@ -240,43 +90,8 @@ fn summary_of(e: &Entry) -> EntryRef {
     data.tool_result = e.data.tool_result.as_ref().map(|_| String::new());
     data.is_error = e.data.is_error;
     let summary = entry(data, e.seq);
-    summary.borrow_mut().sub = e.sub.as_ref().map(|s| Subagent { log: vec![], report: None, ..s.clone() });
+    summary.borrow_mut().sub = e.sub.as_ref().map(Subagent::summarized);
     summary
-}
-
-fn kind_name(kind: Kind) -> &'static str {
-    match kind {
-        Kind::User => "user",
-        Kind::Assistant => "assistant",
-        Kind::Thinking => "thinking",
-        Kind::Tool => "tool",
-        Kind::Notice => "notice",
-        Kind::Command => "commandOutput",
-    }
-}
-
-impl Entry {
-    /// As a row of `entries`, with the whole tool result when only its head is held.
-    pub fn row(&self, full_result: Option<String>) -> Row {
-        Row {
-            id: self.data.id.clone(),
-            kind: kind_name(self.data.kind).into(),
-            text: self.data.text.clone(),
-            tool_name: self.data.tool_name.clone(),
-            tool_input: self.data.tool_input.clone(),
-            tool_result: full_result.or_else(|| self.data.tool_result.clone()),
-            tool_is_error: (self.data.kind == Kind::Tool && self.data.tool_result.is_some()).then_some(self.data.is_error),
-            date: self.date,
-            turn_ended_at: self.data.turn_ended_at,
-            delivery: self.delivery.clone(),
-            attachments: (!self.data.attachments.is_empty()).then(|| serde_json::to_string(&self.data.attachments).unwrap_or_default()),
-            notice_style: (self.data.kind == Kind::Notice && self.data.is_error).then(|| "error".into()),
-            subagent: self.sub.as_ref().map(|s| s.record(self.data.tool_input.as_deref()).encode()),
-            // As `JSONEncoder` writes `[String]`: slashes escaped.
-            changed_files: self.data.changed_files.as_ref().map(|f| serde_json::to_string(f).unwrap_or_default().replace('/', "\\/")),
-            ..Default::default()
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -299,24 +114,6 @@ pub struct Item {
     pub entries: Vec<EntryRef>,
     pub open: bool,
 }
-
-/// A call that changes or reads the plan, or loads only the task tools (`ToolSearch`
-/// `select:TaskCreate,TaskUpdate`): shown as the plan it leaves.
-pub fn is_plan_tool(name: &str, input: &str) -> bool {
-    if yh_core::plan::TOOLS.contains(&name) {
-        return true;
-    }
-    if name != "ToolSearch" || !input.contains("select:") {
-        return false;
-    }
-    let query = serde_json::from_str::<serde_json::Value>(input).ok().and_then(|v| v["query"].as_str().map(str::to_string)).unwrap_or_default();
-    let Some(names) = query.strip_prefix("select:") else { return false };
-    let names: Vec<&str> = names.split(',').map(str::trim).filter(|n| !n.is_empty()).collect();
-    !names.is_empty() && names.iter().all(|n| yh_core::plan::TOOLS.contains(n))
-}
-
-/// Tools whose call is a sub-agent: shown as a card of its own.
-pub const AGENT_TOOLS: &[&str] = &["Agent", "Task"];
 
 /// A call that runs a sub-agent: an Agent (or Task) call, or one whose tool isn't known yet
 /// but already has a run.
@@ -375,15 +172,6 @@ fn expand_all() -> bool {
     *EXPAND.get_or_init(|| std::env::var("YH_EXPAND_WORK").as_deref() == Ok("1"))
 }
 
-/// Your message sent while Claude works, waiting for its current step.
-#[derive(Clone, Debug)]
-pub struct Queued {
-    pub id: String,
-    pub text: String,
-    /// Images (names in `attachments/`), then files.
-    pub attachments: Vec<String>,
-}
-
 /// Claude asks you to sign in to an MCP server (`mcp__harness__sign_in_to_mcp_server`).
 #[derive(Clone, Debug)]
 pub struct SignInAsk {
@@ -395,56 +183,21 @@ pub struct SignInAsk {
     pub cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
-/// An MCP server's question mid-call, waiting for you.
-#[derive(Clone, Debug)]
-pub struct Elicitation {
-    pub id: String,
-    pub server: String,
-    pub message: String,
-    /// `form` or `url`.
-    pub mode: String,
-    pub schema: serde_json::Value,
-    pub url: Option<String>,
-    /// A page's question: what its end (`elicitation_complete`) names it by.
-    pub elicitation_id: Option<String>,
-}
-
-#[derive(Clone, Debug)]
-pub struct Permission {
-    pub id: String,
-    pub tool: String,
-    pub description: String,
-    pub input: String,
-}
-
 impl ThreadState {
     /// The request the composer shows: the oldest waiting.
     pub fn permission(&self) -> Option<&Permission> {
-        self.permissions.first()
+        self.run.permission()
     }
 
     pub fn waiting_for_you(&self) -> bool {
-        !self.permissions.is_empty()
+        self.run.waiting_for_you()
     }
 
     /// The MCP question the composer shows: the oldest waiting.
     pub fn elicitation(&self) -> Option<&Elicitation> {
-        self.elicitations.first()
+        self.run.elicitation()
     }
 
-    /// Your queued messages go back into the composer: when `claude` is gone with them unread.
-    pub fn restore_queued(&mut self) {
-        for q in std::mem::take(&mut self.queue) {
-            self.composer.restore_on_withdraw.remove(&q.id);
-            self.composer.restored.push((q.id, q.text, q.attachments));
-        }
-    }
-
-    /// Takes a request off the list once answered.
-    pub fn answered(&mut self, request_id: &str) -> Option<Permission> {
-        let i = self.permissions.iter().position(|p| p.id == request_id)?;
-        Some(self.permissions.remove(i))
-    }
 }
 
 pub struct ThreadState {
@@ -452,7 +205,9 @@ pub struct ThreadState {
     pub title: String,
     pub items: Vec<Item>,
     pub list: ListState,
-    pub running: bool,
+    /// Its run's live state (requests, the queue, jobs, context) as the engine last told it;
+    /// the rows here are built from the changes it tells (`apply_update`).
+    pub run: LiveState,
     /// A turn ended while you were elsewhere.
     pub unread: bool,
     /// The checklist Claude keeps with its task tools, from the rows held.
@@ -461,23 +216,7 @@ pub struct ThreadState {
     pub find_hit: Option<i64>,
     /// What Find looks for while open (folded: no case, no accents); None draws no marks.
     pub find_query: Option<String>,
-    /// Requests waiting for you, oldest first: parallel sub-agents can each ask at once. The
-    /// composer shows the first; each is answered by its own request id.
-    pub permissions: Vec<Permission>,
-    /// Your messages sent while Claude works, oldest first, until it picks them up: shown above
-    /// the composer, not in the transcript.
-    pub queue: Vec<Queued>,
-    /// MCP servers' questions mid-call, oldest first: the composer shows the first.
-    pub elicitations: Vec<Elicitation>,
     pub sign_in: Option<SignInAsk>,
-    /// You pressed Stop: the turn's end is "Interrupted", not an error, and tells nobody.
-    pub interrupt_requested: bool,
-    /// The turn that just ended was stopped by you (read by the workspace as it ends).
-    pub stopped_by_you: bool,
-    /// What the CLI is doing between messages, when it says ("Compacting the conversation…").
-    pub activity: Option<String>,
-    /// The session's start (`init`) came from this `claude`: a resume that never got one failed.
-    pub received_init: bool,
     /// Its first title was a guess (the subject wasn't known yet): written again from the
     /// conversation once the first turn is over.
     pub title_needs_refinement: bool,
@@ -488,20 +227,8 @@ pub struct ThreadState {
     pub loading_earlier: bool,
     /// Its transcript is made (open or kept for going back): all its rows stay.
     pub in_deck: bool,
-    pub session_id: Option<String>,
-    /// Rows in the whole transcript, saved and held: the next row's number. `None` until known
-    /// (read from the database before the first new row).
-    pub total: Option<usize>,
-    /// Rows changed since the last save, by number.
-    dirty: std::collections::BTreeSet<usize>,
-    /// Whole tool results the rows hold only a head of, until saved.
-    full_results: HashMap<String, String>,
-    /// Changed rows let go of before they were saved: saved with the next changes.
-    unsaved: Vec<(usize, Row)>,
-    blocks: HashMap<String, EntryRef>,
+    /// The held rows' tool calls by id, with their row's number.
     tools: HashMap<String, (EntryRef, i64)>,
-    /// Goes up whenever a sub-agent's log changes, for the right sidebar.
-    pub subagents_version: u64,
     /// The sub-agent you picked in the right sidebar (its Agent tool call's id).
     pub inspected_subagent: Option<String>,
     /// Sub-agent calls in rows that aren't held (earlier pages, or let go of), for the panel,
@@ -512,9 +239,6 @@ pub struct ThreadState {
     saved_runs_read: bool,
     /// The saved run read whole for the panel (its steps, report), by call id; `true` once in.
     run_detail: Option<(String, bool)>,
-    /// Calls that continued a sub-agent (`SendMessage` to it), by the Agent call that started
-    /// it: the CLI reports the continued run under the new call, the run is the same.
-    agent_alias: HashMap<String, String>,
     /// Each held row's place in its turn, as `items`.
     pub folds: Vec<Fold>,
     /// The finished turns' work, as `Fold::Summary` numbers them.
@@ -525,8 +249,6 @@ pub struct ThreadState {
     folds_dirty: bool,
     /// What replies link against (the thread's files and repo), once read.
     pub linker: Option<std::sync::Arc<yh_core::links::Linker>>,
-    /// What Claude left running (background commands, watches): never saved.
-    pub jobs: crate::state::jobs::Jobs,
     /// The plan as of each run of task tool calls, by the run's last call (the transcript shows
     /// the newest as the whole checklist, earlier ones as a line).
     pub plan_steps: HashMap<String, yh_core::plan::Plan>,
@@ -538,78 +260,44 @@ pub struct ThreadState {
     pub job_lines: HashMap<String, String>,
     /// What an open job step shows of its output (its last 40 lines), by its tool call.
     pub job_outputs: HashMap<String, String>,
-    /// The composer's: how full the context is, queued messages, MCP servers needing you.
-    pub composer: ComposerState,
-}
-
-/// What the composer shows of a thread beyond its rows (see `ui::composer`).
-#[derive(Default)]
-pub struct ComposerState {
-    /// Tokens in the context after Claude's latest message, and the model's window.
-    pub context_tokens: Option<u64>,
-    pub context_window: Option<u64>,
-    /// Queued messages you took back that go back into the composer when the CLI lets go of
-    /// them: (id, text, attachments).
-    pub restore_on_withdraw: std::collections::HashSet<String>,
-    pub restored: Vec<(String, String, Vec<String>)>,
-    /// Queued messages you asked to go now (Claude is being stopped for them).
-    pub sending_now: std::collections::HashSet<String>,
-    /// MCP servers as last heard: (name, status, scope).
-    pub mcp_servers: Vec<(String, String, String)>,
 }
 
 impl ThreadState {
     pub fn new(meta: ThreadMeta) -> Self {
         let composer = ComposerState { context_tokens: meta.context_tokens, context_window: meta.context_window, ..Default::default() };
+        let run = LiveState { session_id: meta.session_id.clone(), composer, ..Default::default() };
         ThreadState {
             title: meta.title.clone(),
-            session_id: meta.session_id.clone(),
             meta,
+            run,
             items: vec![],
             list: ListState::new(0, ListAlignment::Bottom, px(800.)),
-            running: false,
             unread: false,
             plan: Default::default(),
             find_hit: None,
             find_query: None,
-            permissions: vec![],
-            elicitations: vec![],
-            queue: vec![],
             sign_in: None,
-            interrupt_requested: false,
-            stopped_by_you: false,
-            activity: None,
-            received_init: false,
             title_needs_refinement: false,
             before: 0,
             loaded: false,
             loading: false,
             loading_earlier: false,
             in_deck: false,
-            total: None,
-            dirty: Default::default(),
-            full_results: HashMap::new(),
-            unsaved: vec![],
-            blocks: HashMap::new(),
             tools: HashMap::new(),
-            subagents_version: 0,
             inspected_subagent: None,
             saved_runs: HashMap::new(),
             saved_runs_read: false,
             run_detail: None,
-            agent_alias: HashMap::new(),
             folds: vec![],
             turns: vec![],
             open_turns: Default::default(),
             folds_dirty: false,
             linker: None,
-            jobs: Default::default(),
             plan_steps: HashMap::new(),
             folded_plan_calls: Default::default(),
             latest_plan_step: None,
             job_lines: HashMap::new(),
             job_outputs: HashMap::new(),
-            composer,
         }
     }
 
@@ -668,15 +356,11 @@ impl ThreadState {
         self.refresh_folds();
     }
 
-    /// Puts a new entry at the end, folding work into the work row before it.
-    fn append(&mut self, data: EntryData) -> EntryRef {
-        let kind = data.kind;
-        let ty = item_type(&data);
-        let seq = self.total.unwrap_or(0);
-        self.total = Some(seq + 1);
-        self.dirty.insert(seq);
-        let e = entry(data, seq);
-        e.borrow_mut().date = Some(yh_core::library::now_ms() / 1000.0);
+    /// Puts a row the run added at the end, folding work into the work row before it.
+    fn push(&mut self, row: TranscriptRow) {
+        let kind = row.data.kind;
+        let ty = item_type(&row.data);
+        let e = entry_of(row);
         let pos = match self.items.last_mut() {
             Some(last) if ty == ItemType::Work && last.ty == ItemType::Work => {
                 last.entries.push(e.clone());
@@ -701,7 +385,80 @@ impl ThreadState {
             let id = e.borrow().data.id.clone();
             self.tools.insert(id, (e.clone(), pos));
         }
-        e
+    }
+
+    /// A held row by its number, with its item's.
+    fn locate(&self, seq: usize) -> Option<(EntryRef, i64)> {
+        let first = |i: &Item| i.entries.first().map_or(0, |e| e.borrow().seq);
+        let ix = self.items.partition_point(|i| first(i) <= seq).checked_sub(1)?;
+        let item = &self.items[ix];
+        item.entries.iter().find(|e| e.borrow().seq == seq).map(|e| (e.clone(), item.pos))
+    }
+
+    /// Applies what the run changed to the rows held: new rows at the end, changed ones in
+    /// place, each measured again. A change to a row not held (let go of, or in an earlier
+    /// page) is nothing to show.
+    fn apply_changes(&mut self, changes: Vec<RowChange>) {
+        // Your messages changed (a turn's end, the files it changed): their turns' summaries
+        // are worked out again.
+        let mut turns_changed = false;
+        for change in changes {
+            match change {
+                RowChange::Added(row) => self.push(row),
+                RowChange::Changed { seq, text, input, row } => {
+                    let Some((e, pos)) = self.locate(seq) else { continue };
+                    {
+                        let mut b = e.borrow_mut();
+                        match row {
+                            Some(r) => {
+                                turns_changed |= r.data.kind == Kind::User;
+                                b.data = r.data;
+                                b.live = r.live;
+                                b.sub = r.sub;
+                                b.date = r.date;
+                                b.delivery = r.delivery;
+                            }
+                            None => {
+                                text.apply_to(&mut b.data.text);
+                                if input != TextPatch::Same {
+                                    input.apply_to(b.data.tool_input.get_or_insert_with(String::new));
+                                }
+                            }
+                        }
+                        b.version += 1;
+                    }
+                    self.touch_pos(pos);
+                }
+            }
+        }
+        if turns_changed {
+            let summaries: Vec<i64> = self.turns.iter().map(|t| t.items[0]).collect();
+            self.turns.clear();
+            self.refresh_folds();
+            for pos in summaries {
+                self.touch_pos(pos);
+            }
+        }
+    }
+
+    /// What the engine told of this thread: its live state now, and its rows' changes.
+    /// `plan`: the checklist is worked out again; `ended`: a turn ended or its `claude` went.
+    pub fn apply_update(&mut self, changes: Vec<RowChange>, live: LiveState, plan: bool, session_reset: bool, ended: bool) {
+        let was_running = self.run.running;
+        self.run = live;
+        self.apply_changes(changes);
+        if session_reset {
+            self.meta.session_id = None;
+        }
+        if plan {
+            self.refresh_plan();
+        }
+        if ended || was_running != self.run.running {
+            self.folds_dirty = true;
+        }
+        if self.folds_dirty {
+            self.refresh_folds();
+        }
     }
 
     /// The row has to be measured again.
@@ -709,42 +466,6 @@ impl ThreadState {
         if let Some(ix) = self.index(pos) {
             self.list.splice(ix..ix + 1, 1);
         }
-    }
-
-    fn touch(&mut self, e: &EntryRef) {
-        e.borrow_mut().version += 1;
-        self.dirty.insert(e.borrow().seq);
-        let id = e.borrow().data.id.clone();
-        // Tool entries know their row; anything else streaming is in the last rows.
-        if let Some((_, pos)) = self.tools.get(&id) {
-            let pos = *pos;
-            self.touch_pos(pos);
-            return;
-        }
-        let found = self.items.iter().rev().take(8).find(|i| i.entries.iter().any(|x| Rc::ptr_eq(x, e))).map(|i| i.pos);
-        if let Some(pos) = found {
-            self.touch_pos(pos);
-        }
-    }
-
-    /// Rows changed since the last call, for saving: (row number, row). A row still being
-    /// written is saved as it is and again when it's done.
-    pub fn take_changes(&mut self) -> Vec<(usize, Row)> {
-        let mut out = std::mem::take(&mut self.unsaved);
-        if self.dirty.is_empty() {
-            return out;
-        }
-        let dirty = std::mem::take(&mut self.dirty);
-        for item in &self.items {
-            for e in &item.entries {
-                let b = e.borrow();
-                if dirty.contains(&b.seq) {
-                    let full = if b.live { None } else { self.full_results.remove(&b.data.id) };
-                    out.push((b.seq, b.row(full)));
-                }
-            }
-        }
-        out
     }
 
     /// The first held row's number, if any: history is read from before it.
@@ -763,10 +484,6 @@ impl ThreadState {
             count += item.entries.len();
             for e in item.entries {
                 let b = e.borrow();
-                if self.dirty.remove(&b.seq) {
-                    let full = self.full_results.remove(&b.data.id);
-                    self.unsaved.push((b.seq, b.row(full)));
-                }
                 if b.data.kind == Kind::Tool {
                     self.tools.remove(&b.data.id);
                     if is_agent_entry(&b) {
@@ -785,7 +502,6 @@ impl ThreadState {
         self.items.clear();
         self.list.reset(0);
         self.before = 0;
-        self.blocks.clear();
         // Its sub-agents stay listed, summarized; the one read whole goes back to a summary.
         for (id, (e, _)) in self.tools.drain() {
             let b = e.borrow();
@@ -818,64 +534,9 @@ impl ThreadState {
         self.touch_pos(pos);
     }
 
-    /// Your message, as sent: `id` is what the CLI's lifecycle events name it by. Sent while
-    /// Claude works (`queued`), it waits above the composer and joins the transcript where
-    /// Claude picks it up: never in both places.
-    pub fn add_user(&mut self, text: &str, images: &[String], id: &str, queued: bool, delivery: Option<&str>) {
-        if queued {
-            self.queue.push(Queued { id: id.to_string(), text: text.to_string(), attachments: images.to_vec() });
-            return;
-        }
-        let mut data = EntryData::new(id, Kind::User, text);
-        data.attachments = images.to_vec();
-        let e = self.append(data);
-        e.borrow_mut().delivery = delivery.map(str::to_string);
-        self.refresh_folds();
-        // Jobs started from here on are what Claude waits on.
-        self.jobs.turn = Some(id.to_string());
-    }
-
-    /// The CLI says where your message is. True when the composer has to show it (a queued
-    /// message picked up or taken back).
-    fn lifecycle(&mut self, id: &str, state: &str) -> bool {
-        let Some(at) = self.queue.iter().position(|q| q.id == id) else { return false };
-        match state {
-            "started" | "completed" => {
-                // Claude has it now: into the transcript, where it entered the conversation.
-                let q = self.queue.remove(at);
-                let delivery = if self.composer.sending_now.remove(id) {
-                    Some("interrupted")
-                } else if self.running {
-                    Some("steered")
-                } else {
-                    // Picked up after the turn ended or was stopped for it: a turn of its own.
-                    None
-                };
-                self.running = true;
-                self.add_user(&q.text, &q.attachments, &q.id, false, delivery);
-                true
-            }
-            "cancelled" => {
-                let q = self.queue.remove(at);
-                self.composer.sending_now.remove(id);
-                if self.composer.restore_on_withdraw.remove(id) {
-                    self.composer.restored.push((q.id, q.text, q.attachments));
-                }
-                true
-            }
-            _ => false,
-        }
-    }
-
     /// Queued messages still waiting for Claude, oldest first: (id, text, attachments).
     pub fn queued_messages(&self) -> Vec<(String, String, usize)> {
-        self.queue.iter().map(|q| (q.id.clone(), q.text.clone(), q.attachments.len())).collect()
-    }
-
-    pub fn notice(&mut self, text: &str) {
-        let id = yh_core::library::new_uuid();
-        self.append(EntryData::new(id, Kind::Notice, text));
-        self.refresh_folds();
+        self.run.queued_messages()
     }
 
     /// What running foreground commands printed last, by tool call: rows whose line changed
@@ -899,10 +560,10 @@ impl ThreadState {
     /// Tool calls whose job's output shows (their step is open, the job running or in the
     /// background), with the file it writes to: what the ticker reads.
     pub fn open_job_files(&self) -> Vec<(String, String)> {
-        self.jobs
+        self.run.jobs
             .running
             .iter()
-            .chain(self.jobs.ended.values().filter(|j| j.background))
+            .chain(self.run.jobs.ended.values().filter(|j| j.background))
             .filter_map(|j| {
                 let tool = j.tool_id.clone()?;
                 let (e, _) = self.tools.get(&tool)?;
@@ -934,7 +595,7 @@ impl ThreadState {
     /// but them). Only those laid out in the list, so a clock off screen costs nothing.
     pub fn tick_job_clocks(&mut self) -> bool {
         let rows: Vec<i64> = self
-            .jobs
+            .run.jobs
             .running
             .iter()
             .filter_map(|j| self.tools.get(j.tool_id.as_deref()?).map(|(_, pos)| *pos))
@@ -946,40 +607,12 @@ impl ThreadState {
         !rows.is_empty()
     }
 
-    /// The files git saw a turn change, on the message that started it (by its id): saved, and
-    /// its summary says them.
-    pub fn set_changed_files(&mut self, message: &str, files: Vec<String>) {
-        let found = self.items.iter().flat_map(|i| i.entries.iter()).find(|e| e.borrow().data.id == message).cloned();
-        let Some(e) = found else { return };
-        {
-            let mut b = e.borrow_mut();
-            b.data.changed_files = Some(files);
-            self.dirty.insert(b.seq);
-        }
-        // Its turn's summary counts them: worked out again.
-        let summaries: Vec<i64> = self.turns.iter().map(|t| t.items[0]).collect();
-        self.turns.clear();
-        self.refresh_folds();
-        for pos in summaries {
-            self.touch_pos(pos);
-        }
-    }
-
     /// The message that started the turn going now, and its tool calls' inputs so far.
     pub fn turn_start_and_inputs(&self) -> Option<(String, String)> {
         let start = self.items.iter().rposition(|i| i.ty == ItemType::User && starts_turn(&i.entries[0].borrow()))?;
         let id = self.items[start].entries[0].borrow().data.id.clone();
         let inputs: Vec<String> = self.items[start..].iter().flat_map(|i| i.entries.iter()).filter_map(|e| e.borrow().data.tool_input.clone()).collect();
         Some((id, inputs.join("\n")))
-    }
-
-    /// A notice in the error colour (saved as such: `notice_style` "error").
-    pub fn error_notice(&mut self, text: &str) {
-        let id = yh_core::library::new_uuid();
-        let mut data = EntryData::new(id, Kind::Notice, text);
-        data.is_error = true;
-        self.append(data);
-        self.refresh_folds();
     }
 
     /// Opens or closes a finished turn's work, by its first folded row.
@@ -1025,7 +658,7 @@ impl ThreadState {
         let count = bounds.len();
         for (t, (s, e)) in bounds.into_iter().enumerate() {
             // The turn going now stays as it comes.
-            if t + 1 == count && self.running {
+            if t + 1 == count && self.run.running {
                 continue;
             }
             let user = starts.contains(&s).then_some(s);
@@ -1184,539 +817,6 @@ impl ThreadState {
         self.plan = plan;
     }
 
-    /// Applies one event from this thread's `claude`. True when what the sidebar shows changed.
-    pub fn apply(&mut self, event: Event, cx: &mut Context<Self>) -> bool {
-        let changed = self.apply_event(event, cx);
-        if self.folds_dirty {
-            self.refresh_folds();
-        }
-        changed
-    }
-
-    fn apply_event(&mut self, event: Event, _cx: &mut Context<Self>) -> bool {
-        match event {
-            Event::Session { id } => {
-                self.session_id = Some(id);
-                self.received_init = true;
-                false
-            }
-            Event::Status(status) => {
-                let activity = (status == "compacting").then(|| "Compacting the conversation…".to_string());
-                let changed = activity != self.activity;
-                self.activity = activity;
-                changed
-            }
-            Event::SubagentProgress { tool_id, activity, usage } => {
-                let tool_id = self.agent_alias.get(&tool_id).cloned().unwrap_or(tool_id);
-                if let Some(a) = &activity {
-                    self.jobs.agent_activity(&tool_id, a);
-                }
-                if let Some((e, pos)) = self.tools.get(&tool_id).cloned() {
-                    {
-                        let mut b = e.borrow_mut();
-                        if !is_agent_entry(&b) {
-                            return false;
-                        }
-                        let sub = b.sub.get_or_insert_with(|| Subagent::new(String::new()));
-                        if activity.is_some() {
-                            sub.activity = activity;
-                        }
-                        sub.apply(usage);
-                        b.version += 1;
-                    }
-                    self.subagents_version += 1;
-                    self.touch_pos(pos);
-                }
-                false
-            }
-            // Answered for you by the workspace (it holds the process), which takes it off the list.
-            Event::ElicitationComplete { .. } => false,
-            Event::Lifecycle { id, state } => self.lifecycle(&id, &state),
-            Event::CommandOutput { text, id } => {
-                // After `/compact` the CLI sends the outputs it kept again, same `uuid`: shown once.
-                let seen = id.as_deref().is_some_and(|id| self.items.iter().rev().flat_map(|i| i.entries.iter()).any(|e| {
-                    let b = e.borrow();
-                    b.data.kind == Kind::Command && b.data.id == id
-                }));
-                if seen {
-                    return false;
-                }
-                let id = id.unwrap_or_else(yh_core::library::new_uuid);
-                self.append(EntryData::new(id, Kind::Command, &text));
-                false
-            }
-            Event::ContextUsage(tokens) => {
-                self.composer.context_tokens = Some(tokens);
-                false
-            }
-            Event::ContextWindows(windows) => {
-                self.composer.context_window = windows.iter().map(|(_, w)| *w).max();
-                false
-            }
-            Event::ConversationReset => {
-                self.notice("Context cleared. Claude starts fresh from here.");
-                self.composer.context_tokens = None;
-                true
-            }
-            Event::McpServers(servers) => {
-                let changed = self.composer.mcp_servers != servers;
-                self.composer.mcp_servers = servers;
-                changed
-            }
-            Event::TitleChanged(_) | Event::Skills(_) => false,
-            Event::Catalog { .. } | Event::Limits(_) => false,
-            Event::BlockStart { message, index, parent, kind } => {
-                if let Some(parent) = parent {
-                    self.subagent_step(&parent);
-                    return false;
-                }
-                let key = format!("{message}:{index}");
-                if self.blocks.contains_key(&key) {
-                    return false;
-                }
-                let data = match kind {
-                    BlockKind::Text => EntryData::new(key.clone(), Kind::Assistant, ""),
-                    BlockKind::Thinking => EntryData::new(key.clone(), Kind::Thinking, ""),
-                    BlockKind::Tool { id, name } => {
-                        let mut d = EntryData::new(id, Kind::Tool, "");
-                        d.tool_name = Some(name);
-                        d
-                    }
-                };
-                let e = self.append(data);
-                e.borrow_mut().live = true;
-                self.blocks.insert(key, e);
-                // Claude woken by a job's end: a turn with no message of yours.
-                let woke = !self.running && self.jobs.version > 0;
-                if woke {
-                    self.running = true;
-                }
-                woke
-            }
-            Event::Delta { message, index, parent, kind, text } => {
-                if parent.is_some() {
-                    return false;
-                }
-                let key = format!("{message}:{index}");
-                let e = match self.blocks.get(&key) {
-                    Some(e) => e.clone(),
-                    None => {
-                        let k = if kind == DeltaKind::Thinking { Kind::Thinking } else { Kind::Assistant };
-                        let e = self.append(EntryData::new(key.clone(), k, ""));
-                        e.borrow_mut().live = true;
-                        self.blocks.insert(key, e.clone());
-                        e
-                    }
-                };
-                {
-                    let mut b = e.borrow_mut();
-                    if kind == DeltaKind::Input {
-                        b.data.tool_input.get_or_insert_with(String::new).push_str(&text);
-                    } else {
-                        b.data.text.push_str(&text);
-                    }
-                }
-                self.touch(&e);
-                false
-            }
-            Event::Assistant { message, parent, blocks } => {
-                if let Some(parent) = parent {
-                    for block in &blocks {
-                        if matches!(block, Block::Tool { .. }) {
-                            self.subagent_step(&parent);
-                        }
-                    }
-                    self.subagent_log(&parent, |log| {
-                        for block in blocks {
-                            let step = match block {
-                                Block::Text(text) => SubStep { tool: None, id: String::new(), text, result: None, is_error: false },
-                                Block::Tool { id, name, input } => SubStep { tool: Some(name), id, text: input, result: None, is_error: false },
-                                Block::Thinking(_) => continue,
-                            };
-                            // The CLI may send a block again as it grows: keep the latest.
-                            match log.iter_mut().rev().find(|s| (step.tool.is_some() && s.id == step.id) || (step.tool.is_none() && s.tool.is_none() && step.text.starts_with(&s.text))) {
-                                Some(existing) if step.tool.is_some() || !existing.text.is_empty() => {
-                                    existing.text = step.text;
-                                }
-                                _ => log.push(step),
-                            }
-                        }
-                    });
-                    return false;
-                }
-                // The CLI sends a message's blocks one `assistant` event each, all under the
-                // message's ID: a tool block is its tool call; a text or thinking block is the
-                // message's streamed block of that kind still being written, else one that
-                // already says the same, else a new row.
-                for (index, block) in blocks.into_iter().enumerate() {
-                    let mut key = format!("{message}:{index}");
-                    let existing = match &block {
-                        Block::Tool { id, .. } => self.tools.get(id).map(|(e, _)| e.clone()),
-                        Block::Text(text) | Block::Thinking(text) => {
-                            let kind = if matches!(block, Block::Text(_)) { Kind::Assistant } else { Kind::Thinking };
-                            let prefix = format!("{message}:");
-                            let mut candidates: Vec<(&String, &EntryRef)> = self
-                                .blocks
-                                .iter()
-                                .filter(|(k, e)| k.starts_with(&prefix) && e.borrow().data.kind == kind)
-                                .collect();
-                            candidates.sort_by_key(|(k, _)| k.rsplit(':').next().and_then(|n| n.parse::<u64>().ok()).unwrap_or(0));
-                            let found = candidates
-                                .iter()
-                                .find(|(_, e)| e.borrow().live)
-                                .or_else(|| candidates.iter().find(|(_, e)| e.borrow().data.text == *text))
-                                .map(|(k, e)| ((*k).clone(), (*e).clone()));
-                            match found {
-                                Some((k, e)) => {
-                                    key = k;
-                                    Some(e)
-                                }
-                                // A new block of this message: a key no stream block has.
-                                None => {
-                                    key = format!("{message}:a{}", candidates.len() + index);
-                                    None
-                                }
-                            }
-                        }
-                    };
-                    let e = match existing {
-                        Some(e) => e,
-                        None => {
-                            let data = match &block {
-                                Block::Text(_) => EntryData::new(key.clone(), Kind::Assistant, ""),
-                                Block::Thinking(_) => EntryData::new(key.clone(), Kind::Thinking, ""),
-                                Block::Tool { id, .. } => EntryData::new(id.clone(), Kind::Tool, ""),
-                            };
-                            let e = self.append(data);
-                            self.blocks.insert(key, e.clone());
-                            e
-                        }
-                    };
-                    {
-                        let mut b = e.borrow_mut();
-                        match block {
-                            Block::Text(t) | Block::Thinking(t) => b.data.text = t,
-                            Block::Tool { name, input, .. } => {
-                                b.data.tool_name = Some(name);
-                                b.data.tool_input = Some(input);
-                            }
-                        }
-                        b.live = false;
-                    }
-                    self.touch(&e);
-                }
-                false
-            }
-            Event::ToolResults { parent, results } => {
-                crate::state::pulls::note_results(self, parent.as_deref(), &results, |id| self.tools.get(id).map(|(e, _)| e.clone()));
-                if let Some(parent) = parent {
-                    self.subagent_log(&parent, |log| {
-                        for r in results {
-                            if let Some(step) = log.iter_mut().rev().find(|s| s.tool.is_some() && s.id == r.id) {
-                                step.result = Some(r.text);
-                                step.is_error = r.is_error;
-                            }
-                        }
-                    });
-                    return false;
-                }
-                let touches_plan = results.iter().any(|r| {
-                    self.tools.get(&r.id).is_some_and(|(e, _)| {
-                        {
-                            let b = e.borrow();
-                            b.data.tool_name.as_deref().is_some_and(|n| is_plan_tool(n, b.data.tool_input.as_deref().unwrap_or("")))
-                        }
-                    })
-                });
-                let jobs_before = self.jobs.running.len();
-                for r in results {
-                    self.jobs.tool_result(&r.id, &r.text);
-                    let Some((e, pos)) = self.tools.get(&r.id).cloned() else { continue };
-                    if let Some(full) = r.full {
-                        self.full_results.insert(r.id.clone(), full);
-                    }
-                    self.dirty.insert(e.borrow().seq);
-                    {
-                        let mut b = e.borrow_mut();
-                        b.data.tool_result = Some(r.text);
-                        b.data.result_len = r.len;
-                        b.data.is_error = r.is_error;
-                        b.live = false;
-                        b.version += 1;
-                    }
-                    self.touch_pos(pos);
-                }
-                if touches_plan {
-                    self.refresh_plan();
-                    return true;
-                }
-                self.jobs.running.len() != jobs_before
-            }
-            Event::SubagentStarted { tool_id, description, task_id, background } => {
-                // A sub-agent continued (`SendMessage` to it): the same task under a new call.
-                // Its steps keep coming under the call that started it; the run goes on there.
-                let original = task_id.as_deref().and_then(|t| self.agent_call_of(t)).filter(|call| *call != tool_id);
-                let resumed = original.is_some();
-                let tool_id = match original {
-                    Some(call) => {
-                        self.agent_alias.insert(tool_id, call.clone());
-                        call
-                    }
-                    None => tool_id,
-                };
-                // In the background it goes on after the turn: the thread isn't done.
-                if background {
-                    self.jobs.start_agent(task_id.clone(), tool_id.clone(), description.clone());
-                }
-                if let Some((e, pos)) = self.tools.get(&tool_id).cloned() {
-                    {
-                        let mut b = e.borrow_mut();
-                        // A task the CLI started for a call that isn't an agent's: none of ours.
-                        if !is_agent_entry(&b) {
-                            return background;
-                        }
-                        // Keep what it already did when the start comes after its first steps.
-                        match &mut b.sub {
-                            Some(sub) => sub.description = description,
-                            None => b.sub = Some(Subagent::new(description)),
-                        }
-                        if let Some(sub) = &mut b.sub {
-                            sub.task_id = task_id.or(sub.task_id.take());
-                            if resumed {
-                                sub.resume();
-                            }
-                        }
-                        if resumed {
-                            self.dirty.insert(b.seq);
-                        }
-                    }
-                    e.borrow_mut().version += 1;
-                    self.subagents_version += 1;
-                    self.touch_pos(pos);
-                }
-                background
-            }
-            Event::SubagentFinished { tool_id, status, summary, usage } => {
-                let tool_id = self.agent_alias.get(&tool_id).cloned().unwrap_or(tool_id);
-                let was_background = self.jobs.finish_agent(&tool_id);
-                if let Some((e, pos)) = self.tools.get(&tool_id).cloned() {
-                    {
-                        let mut b = e.borrow_mut();
-                        // A job's end the CLI no longer knew as one (a watch from before a
-                        // restart): never made a sub-agent of it.
-                        if !is_agent_entry(&b) {
-                            return was_background;
-                        }
-                        let sub = b.sub.get_or_insert_with(|| Subagent::new(String::new()));
-                        sub.status = status;
-                        sub.activity = None;
-                        sub.apply(usage);
-                        if summary.is_some() {
-                            sub.report = summary;
-                        }
-                        b.version += 1;
-                        self.dirty.insert(b.seq);
-                    }
-                    self.touch_pos(pos);
-                }
-                was_background
-            }
-            Event::Elicitation { request_id, server, message, mode, schema, url, elicitation_id } => {
-                // Several servers (or calls) can ask at once: each waits its turn.
-                let asked = Elicitation { id: request_id, server, message, mode, schema, url, elicitation_id };
-                match self.elicitations.iter_mut().find(|e| e.id == asked.id) {
-                    Some(e) => *e = asked,
-                    None => self.elicitations.push(asked),
-                }
-                true
-            }
-            Event::Permission { request_id, tool, description, input } => {
-                // The same request again (a resumed stream) replaces itself; a new one waits its turn.
-                let asked = Permission { id: request_id, tool, description, input };
-                match self.permissions.iter_mut().find(|p| p.id == asked.id) {
-                    Some(p) => *p = asked,
-                    None => self.permissions.push(asked),
-                }
-                true
-            }
-            Event::Notice(text) => {
-                self.notice(&text);
-                false
-            }
-            Event::Done { is_error, text } => {
-                self.end_turn();
-                // Stopped for a message sent now, which carries that on itself; stopped by you,
-                // a plain note (the CLI ends it as `error_during_execution`); anything else, the
-                // CLI's error.
-                let for_message = !self.composer.sending_now.is_empty();
-                if is_error && !for_message {
-                    if self.interrupt_requested {
-                        self.notice("Interrupted");
-                    } else if text.is_empty() || (text.starts_with("error_") && !text.contains(' ')) {
-                        let why = if text.is_empty() { String::new() } else { format!(" ({text})") };
-                        self.error_notice(&format!("Claude stopped with an error{why}."));
-                    } else {
-                        self.error_notice(&text);
-                    }
-                }
-                self.stopped_by_you = self.interrupt_requested || for_message;
-                self.interrupt_requested = false;
-                true
-            }
-            Event::JobStarted { task_id, tool_id, description, background, parent_task } => {
-                // A sub-agent's call isn't among the thread's tools: its log has it.
-                let tool = tool_id.as_ref().and_then(|id| self.tools.get(id)).and_then(|(e, _)| e.borrow().data.tool_name.clone()).or_else(|| {
-                    let id = tool_id.as_deref()?;
-                    let call = parent_task.as_deref().and_then(|t| self.agent_call_of(t))?;
-                    let (e, _) = self.tools.get(&call)?;
-                    let b = e.borrow();
-                    b.sub.as_ref()?.log.iter().rev().find(|s| s.id == id).and_then(|s| s.tool.clone())
-                });
-                let owner = parent_task.map(|t| {
-                    let call = self.agent_call_of(&t);
-                    (t, call)
-                });
-                // A sub-agent's: the Sub-agents panel lists it under that agent.
-                if owner.is_some() {
-                    self.subagents_version += 1;
-                }
-                self.jobs.start(task_id, tool_id, tool.as_deref(), description, background, owner);
-                true
-            }
-            Event::JobFinished { task_id, status, summary, output_file } => {
-                if self.jobs.running.iter().any(|j| j.id == task_id && j.owner_task.is_some()) {
-                    self.subagents_version += 1;
-                }
-                let code = summary.as_deref().and_then(yh_core::claude::job_exit_code);
-                match self.jobs.finish(&task_id, &status, code, output_file) {
-                    Some((note, true)) => self.error_notice(&note),
-                    Some((note, false)) => self.notice(&note),
-                    None => {}
-                }
-                true
-            }
-            Event::JobOutput { task_id, text } => {
-                self.jobs.saw(&task_id, &text);
-                false
-            }
-            Event::JobsRunning(ids) => {
-                let notes = self.jobs.keep_only(&ids);
-                for note in &notes {
-                    self.notice(note);
-                }
-                !notes.is_empty()
-            }
-            Event::AgentsRunning(ids) => {
-                let gone = self.jobs.keep_agents(&ids);
-                for (tool, note) in &gone {
-                    self.agent_stopped(tool);
-                    self.notice(note);
-                }
-                !gone.is_empty()
-            }
-            Event::Exit { code, tail } => {
-                self.cut_off_jobs("stopped when Claude exited");
-                self.end_turn();
-                // Whatever still waited never reached Claude: back to the composer.
-                self.restore_queued();
-                self.composer.sending_now.clear();
-                self.interrupt_requested = false;
-                self.elicitations.clear();
-                if code != 0 && !self.received_init && self.session_id.is_some() {
-                    // Its session couldn't be resumed (gone, or another folder's): start afresh.
-                    self.session_id = None;
-                    self.meta.session_id = None;
-                    self.error_notice("Couldn't resume the previous session. Your next message starts a new one.");
-                } else if code != 0 {
-                    let detail: Vec<&str> = tail.lines().filter(|l| !l.trim().is_empty()).collect();
-                    let detail = detail[detail.len().saturating_sub(3)..].join("\n");
-                    self.error_notice(&format!("Claude exited (code {code}). {detail}").trim_end().to_string());
-                }
-                self.received_init = false;
-                true
-            }
-        }
-    }
-
-    /// Its `claude` is going: the jobs it ran go with it, the thread says which, and the
-    /// sub-agents among them show as stopped. True when there were any.
-    pub fn cut_off_jobs(&mut self, outcome: &str) -> bool {
-        let agents: Vec<String> = self.jobs.agents.iter().filter_map(|j| j.tool_id.clone()).collect();
-        let notes = self.jobs.cut_off(outcome);
-        for tool in &agents {
-            self.agent_stopped(tool);
-        }
-        for note in &notes {
-            self.notice(note);
-        }
-        !notes.is_empty() || !agents.is_empty()
-    }
-
-    /// The Agent call of a sub-agent, by its task ID: a background one from the jobs, a
-    /// foreground one from its call's start.
-    fn agent_call_of(&self, task_id: &str) -> Option<String> {
-        self.jobs
-            .agent_call(task_id)
-            .or_else(|| self.tools.iter().find(|(_, (e, _))| e.borrow().sub.as_ref().is_some_and(|s| s.task_id.as_deref() == Some(task_id))).map(|(id, _)| id.clone()))
-            // One from before a restart: its call's result names it ("agentId: a5b8…").
-            .or_else(|| {
-                let named = format!("agentId: {task_id}");
-                self.tools
-                    .iter()
-                    .find(|(_, (e, _))| {
-                        let b = e.borrow();
-                        b.data.tool_name.as_deref().is_some_and(|n| AGENT_TOOLS.contains(&n)) && b.data.tool_result.as_deref().is_some_and(|r| r.contains(&named))
-                    })
-                    .map(|(id, _)| id.clone())
-            })
-    }
-
-    /// A background sub-agent that ended without word: its call says it stopped.
-    fn agent_stopped(&mut self, tool_id: &str) {
-        let Some((e, pos)) = self.tools.get(tool_id).cloned() else { return };
-        {
-            let mut b = e.borrow_mut();
-            let Some(sub) = b.sub.as_mut().filter(|s| s.status == "running") else { return };
-            sub.status = "stopped".into();
-            sub.activity = None;
-            b.version += 1;
-            self.dirty.insert(b.seq);
-        }
-        self.subagents_version += 1;
-        self.touch_pos(pos);
-    }
-
-    fn subagent_step(&mut self, parent: &str) {
-        let Some((e, pos)) = self.tools.get(parent).cloned() else { return };
-        self.dirty.insert(e.borrow().seq);
-        {
-            let mut b = e.borrow_mut();
-            let sub = b.sub.get_or_insert_with(|| Subagent::new("Sub-agent".into()));
-            sub.steps += 1;
-            b.version += 1;
-        }
-        self.touch_pos(pos);
-    }
-
-    /// Changes what a sub-agent did (its log), and tells whoever follows it.
-    fn subagent_log(&mut self, parent: &str, change: impl FnOnce(&mut Vec<SubStep>)) {
-        let Some((e, pos)) = self.tools.get(parent).cloned() else { return };
-        // Saved with its call (the `subagent` column).
-        self.dirty.insert(e.borrow().seq);
-        {
-            let mut b = e.borrow_mut();
-            let sub = b.sub.get_or_insert_with(|| Subagent::new("Sub-agent".into()));
-            change(&mut sub.log);
-            if sub.log.len() > SUBAGENT_LOG {
-                let extra = sub.log.len() - SUBAGENT_LOG;
-                sub.log.drain(..extra);
-            }
-            b.version += 1;
-        }
-        self.subagents_version += 1;
-        self.touch_pos(pos);
-    }
-
     /// The thread's sub-agents, oldest first: (Agent tool call id, its entry). The held rows'
     /// as they are (live, running ones among them), and the rest's as saved, summarized
     /// (`saved_runs`) unless read whole (`run_detail`).
@@ -1753,7 +853,7 @@ impl ThreadState {
             let (id, seq) = (call.id.clone(), call.seq);
             self.saved_runs.insert(id, (seq, summary_entry(call)));
         }
-        self.subagents_version += 1;
+        self.run.subagents_version += 1;
     }
 
     /// A run listed from its summary that the panel shows: its steps and report are to be read.
@@ -1788,33 +888,15 @@ impl ThreadState {
                 *slot = (seq, whole);
             }
         }
-        self.subagents_version += 1;
+        self.run.subagents_version += 1;
     }
 
-    fn end_turn(&mut self) {
-        let live: Vec<EntryRef> = self.blocks.values().filter(|e| e.borrow().live).cloned().collect();
-        for e in live {
-            e.borrow_mut().live = false;
-            self.touch(&e);
-        }
-        self.blocks.clear();
-        self.running = false;
-        self.activity = None;
-        self.permissions.clear();
-        // How long the turn took goes on the message that started it.
-        let start = self.items.iter().rev().filter(|i| i.ty == ItemType::User).map(|i| i.entries[0].clone()).find(|e| starts_turn(&e.borrow()));
-        if let Some(e) = start {
-            let mut b = e.borrow_mut();
-            b.data.turn_ended_at = Some(yh_core::library::now_ms() / 1000.0);
-            self.dirty.insert(b.seq);
-        }
-        self.folds_dirty = true;
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use yh_core::db::Row;
     use yh_core::db::SubagentCall;
     use yh_core::subagent_record::{SubagentEntry, SubagentRecord, SubagentSummary};
 
@@ -1837,6 +919,69 @@ mod tests {
             run: Some(SubagentSummary { description: description.into(), status: "completed".into(), tool_uses: Some(3), ..Default::default() }),
             ..Default::default()
         }
+    }
+
+    /// The recorded sessions and the synthetic one through the engine, as the app sends them,
+    /// into a database of its own, the thread built from what the engine tells
+    /// (`yh_core::golden`): what's saved must be exactly what the golden files say.
+    fn golden(name: &str, steps: Vec<yh_core::golden::Step>) -> String {
+        use yh_core::golden::Step;
+        use yh_engine::{Command, Output};
+        let dir = std::env::temp_dir().join(format!("yh-app-golden-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = std::sync::Arc::new(yh_core::db::Database::open(&dir).unwrap());
+        let engine = yh_engine::start(Some(db.clone()));
+        let mut t = ThreadState::new(ThreadMeta::new("T".into(), "P".into(), "t".into()));
+        t.in_deck = true;
+        t.loaded = true;
+        let id = t.id().to_string();
+        engine.send(Command::Open { thread: id.clone(), session_id: None, context_tokens: None, context_window: None });
+        for step in steps {
+            match step {
+                Step::Event(e) => engine.send(Command::Events { thread: id.clone(), events: vec![e] }),
+                Step::User { id: message, text, .. } => engine.send(Command::Send { thread: id.clone(), text: text.into(), attachments: vec![], message_id: message.into(), now: false, effort: None, deliver: None }),
+                Step::Interrupt => engine.send(Command::Stop { thread: id.clone() }),
+                Step::ChangedFiles { message, files } => engine.send(Command::ChangedFiles { thread: id.clone(), message: message.into(), files: files.into_iter().map(str::to_string).collect() }),
+            }
+            // Saved after every step, as the golden files were made.
+            engine.send(Command::Save { thread: id.clone() });
+        }
+        let (done, finished) = flume::bounded(1);
+        engine.send(Command::Quit { done });
+        finished.recv_timeout(std::time::Duration::from_secs(10)).expect("the engine quits");
+        for output in engine.outputs.try_iter() {
+            if let Output::Thread(u) = output {
+                t.apply_update(u.changes, u.live, u.plan, u.session_reset, u.turn_ended.is_some());
+            }
+        }
+        let saved: Vec<(usize, Row)> = db.read_rows(&id, 0, 100_000).into_iter().enumerate().collect();
+        let _ = std::fs::remove_dir_all(&dir);
+        // The rows shown, built from what the engine told, are what was saved.
+        for (seq, row) in &saved {
+            let (e, _) = t.locate(*seq).expect("a saved row not shown");
+            let shown = e.borrow().transcript_row().row(None);
+            assert_eq!((&shown.text, &shown.tool_input, &shown.tool_result, &shown.delivery, &shown.changed_files), (&row.text, &row.tool_input, &row.tool_result, &row.delivery, &row.changed_files), "{name} row {seq}");
+        }
+        let ids = |v: Vec<String>| v.join(",");
+        let state = vec![
+            format!("running {} activity {:?} session {:?} meta session {:?} stopped by you {}", t.run.running, t.run.activity, t.run.session_id, t.meta.session_id, t.run.stopped_by_you),
+            format!("permissions [{}] elicitations [{}]", ids(t.run.permissions.iter().map(|p| format!("{}:{}", p.id, p.description)).collect()), ids(t.run.elicitations.iter().map(|e| e.id.clone()).collect())),
+            format!("queue [{}] restored [{}]", ids(t.run.queue.iter().map(|q| q.id.clone()).collect()), ids(t.run.composer.restored.iter().map(|r| r.0.clone()).collect())),
+            format!("context {:?}/{:?} mcp {:?}", t.run.composer.context_tokens, t.run.composer.context_window, t.run.composer.mcp_servers),
+            format!("jobs running {} agents {} ended {} total {:?}", t.run.jobs.running.len(), t.run.jobs.agents.len(), t.run.jobs.ended.len(), t.run.total),
+            format!("subagents [{}]", ids(t.subagents().iter().map(|(id, e)| format!("{id}:{}", e.borrow().sub.as_ref().map_or("-".to_string(), |s| format!("{}/{}/{:?}", s.status, s.steps, s.activity)))).collect())),
+        ];
+        yh_core::golden::describe(&saved, &state)
+    }
+
+    #[test]
+    fn saves_what_the_golden_files_say() {
+        for (name, text) in yh_core::golden::SESSIONS {
+            let steps = yh_core::golden::session_events(text).into_iter().map(yh_core::golden::Step::Event).collect();
+            yh_core::golden::check(name, &golden(name, steps));
+        }
+        yh_core::golden::check("synthetic", &golden("synthetic", yh_core::golden::synthetic()));
     }
 
     #[test]

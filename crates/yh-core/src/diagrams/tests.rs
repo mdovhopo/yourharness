@@ -845,3 +845,11 @@ fn edge_label_frames_and_ports_stay_on_canvas() {
         }
     }
 }
+
+#[test]
+fn quoted_labels_run_over_lines() {
+    let chart = chart_of("flowchart LR\n  subgraph Phone[\"iPhone\"]\n    Client[\"yh-client (Rust): connection, retry,\n    SQLite cache\"]\n    UI <--> FFI <--> Client\n  end\n  Client <-->|\"over WS\"| Server\n");
+    let client = chart.nodes.iter().find(|n| n.id == "Client").unwrap();
+    assert_eq!(client.label, "yh-client (Rust): connection, retry,\nSQLite cache");
+    assert_eq!(chart.edges.len(), 3);
+}

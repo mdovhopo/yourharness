@@ -39,6 +39,21 @@ pub struct Plan {
 /// The calls that change or read the plan.
 pub const TOOLS: &[&str] = &["TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "TodoWrite"];
 
+/// A call that changes or reads the plan, or loads only the task tools (`ToolSearch`
+/// `select:TaskCreate,TaskUpdate`): shown as the plan it leaves.
+pub fn is_plan_tool(name: &str, input: &str) -> bool {
+    if TOOLS.contains(&name) {
+        return true;
+    }
+    if name != "ToolSearch" || !input.contains("select:") {
+        return false;
+    }
+    let query = serde_json::from_str::<serde_json::Value>(input).ok().and_then(|v| v["query"].as_str().map(str::to_string)).unwrap_or_default();
+    let Some(names) = query.strip_prefix("select:") else { return false };
+    let names: Vec<&str> = names.split(',').map(str::trim).filter(|n| !n.is_empty()).collect();
+    !names.is_empty() && names.iter().all(|n| TOOLS.contains(n))
+}
+
 fn string(v: &Value) -> Option<String> {
     match v {
         Value::String(s) => Some(s.clone()),

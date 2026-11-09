@@ -698,6 +698,12 @@ fn job_event(text: &str) -> Option<(String, String)> {
     (start <= end).then(|| (id.to_string(), text[start..end].to_string()))
 }
 
+/// A recorded session's stream-json lines as events, in order (fixtures, tools).
+pub fn parse_lines(text: &str) -> Vec<Event> {
+    let mut parser = Parser::default();
+    text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).flat_map(|o| parser.parse(&o)).collect()
+}
+
 /// stream-json lines into events. Unknown types and fields are ignored: the protocol changes.
 #[derive(Default)]
 struct Parser {

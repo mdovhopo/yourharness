@@ -1042,7 +1042,7 @@ fn agent_row(thread: &Entity<ThreadState>, item: &Item, theme: &Theme) -> AnyEle
                                 let id = tool_id.clone();
                                 follow_thread.update(cx, |t, cx| {
                                     t.inspected_subagent = Some(id);
-                                    t.subagents_version += 1;
+                                    t.run.subagents_version += 1;
                                     cx.notify();
                                 });
                                 show_panel(crate::state::workspace::Panel::Subagents, cx);
@@ -1535,9 +1535,9 @@ fn work_row(state: &ThreadState, ctx: &RowContext, item: &Item, theme: &Theme) -
     let last = item.entries.last().unwrap().borrow();
     let live = last.live
         || (last.data.kind == Kind::Tool && last.data.tool_result.is_none() && last.sub.as_ref().is_some_and(|s| s.status == "running"))
-        || (last.data.kind == Kind::Tool && last.data.tool_result.is_none() && state.running);
+        || (last.data.kind == Kind::Tool && last.data.tool_result.is_none() && state.run.running);
     // A foreground command that's taking a while: what it printed last, under the header.
-    let job_line = (last.data.kind == Kind::Tool && last.data.tool_result.is_none() && state.running).then(|| state.job_lines.get(&last.data.id).cloned()).flatten();
+    let job_line = (last.data.kind == Kind::Tool && last.data.tool_result.is_none() && state.run.running).then(|| state.job_lines.get(&last.data.id).cloned()).flatten();
     let latest = if last.data.kind == Kind::Tool {
         let input: serde_json::Value = serde_json::from_str(last.data.tool_input.as_deref().unwrap_or("")).unwrap_or_default();
         let p = steps::present(last.data.tool_name.as_deref().unwrap_or("Tool"), &input, None);
@@ -1813,7 +1813,7 @@ fn step(state: &ThreadState, ctx: &RowContext, pos: i64, n: usize, e: &EntryRef,
     let input: serde_json::Value = serde_json::from_str(b.data.tool_input.as_deref().unwrap_or("")).unwrap_or_default();
     let done = b.data.tool_result.is_some();
     // Still going: the turn's still on, and its result hasn't come.
-    let running = !done && (b.live || state.running);
+    let running = !done && (b.live || state.run.running);
     let failed = done && b.data.is_error;
     let p = steps::present(&name, &input, b.data.tool_result.as_deref());
     let target = ctx.root.as_deref().and_then(|root| steps::file_target(&name, &input, root));
@@ -1824,7 +1824,7 @@ fn step(state: &ThreadState, ctx: &RowContext, pos: i64, n: usize, e: &EntryRef,
     let last_line = (running && !open).then(|| state.job_lines.get(&id).cloned()).flatten().filter(|l| !l.is_empty());
     // A job it started (a command in the background, one taking a while): how long it's run or
     // how it ended, in the header; open, what it printed.
-    let job = state.jobs.for_tool(&id).map(|j| {
+    let job = state.run.jobs.for_tool(&id).map(|j| {
         let (label, failed) = j.status_label();
         (label, failed, j.status == crate::state::jobs::JobStatus::Running, j.background, j.output_file.is_some())
     });

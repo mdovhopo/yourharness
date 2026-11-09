@@ -8621,6 +8621,8 @@ dependencies = [
  "resvg 0.46.0",
  "serde_json",
  "yh-core",
+ "yh-engine",
+ "yh-server",
 ]
 
 [[package]]
@@ -8647,6 +8649,36 @@ dependencies = [
  "serde_json",
  "tungstenite",
  "yh-core",
+]
+
+[[package]]
+name = "yh-engine"
+version = "0.0.1"
+dependencies = [
+ "flume 0.11.1",
+ "serde_json",
+ "yh-core",
+]
+
+[[package]]
+name = "yh-proto"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "yh-server"
+version = "0.0.1"
+dependencies = [
+ "flume 0.11.1",
+ "rusqlite",
+ "serde_json",
+ "tungstenite",
+ "yh-core",
+ "yh-engine",
+ "yh-proto",
 ]
 
 [[package]]

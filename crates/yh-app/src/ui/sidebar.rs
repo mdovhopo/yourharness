@@ -43,21 +43,21 @@ const SHOW_ALL: &str = "sidebarShowAll";
 /// An idle thread with sub-agents in the background still working: it isn't done, so it
 /// shows as working, and its tooltip says why ("2 sub-agents running").
 fn agents_marker(t: &ThreadState) -> Option<SharedString> {
-    let agents = t.jobs.agents_running();
+    let agents = t.run.jobs.agents_running();
     if agents == 0 {
         return None;
     }
     // "1 command and 2 sub-agents running (1 command of theirs)": worded by who started what.
-    t.jobs.summary().map(Into::into)
+    t.run.jobs.summary().map(Into::into)
 }
 
 /// An idle thread with background jobs running: what its hourglass says.
 fn jobs_marker(t: &ThreadState, busy: bool) -> Option<SharedString> {
-    let count = t.jobs.background().count();
+    let count = t.run.jobs.background().count();
     if busy || count == 0 {
         return None;
     }
-    let waiting = t.jobs.waiting();
+    let waiting = t.run.jobs.waiting();
     Some(match waiting {
         0 if count == 1 => "1 command running".into(),
         0 => format!("{count} commands running").into(),
@@ -456,7 +456,7 @@ impl Sidebar {
         let threads: Vec<&Entity<ThreadState>> = ws.threads.iter().filter(|t| t.read(cx).meta.project_id == project.id && t.read(cx).meta.settled_at.is_none()).collect();
         let activity = threads.iter().any(|t| {
             let t = t.read(cx);
-            t.running || t.unread || t.waiting_for_you() || t.jobs.agents_running() > 0
+            t.run.running || t.unread || t.waiting_for_you() || t.run.jobs.agents_running() > 0
         });
         let count = threads.len();
         let selected = ws.page == Some(Page::Project(project.id.clone()));
@@ -652,8 +652,8 @@ impl Sidebar {
         let ws = self.workspace.read(cx);
         let waiting = t.waiting_for_you();
         // Sub-agents in the background after the turn: still working.
-        let agents = (!t.running && !waiting).then(|| agents_marker(t)).flatten();
-        let running = (t.running || agents.is_some()) && !waiting;
+        let agents = (!t.run.running && !waiting).then(|| agents_marker(t)).flatten();
+        let running = (t.run.running || agents.is_some()) && !waiting;
         let unread = t.unread && !is_selected;
         let pinned = t.meta.pinned;
         let settled = t.meta.settled_at.is_some();
@@ -666,10 +666,10 @@ impl Sidebar {
             this: cx.entity().downgrade(),
             ws: self.workspace.downgrade(),
             id: id.clone(),
-            session: t.session_id.clone(),
+            session: t.run.session_id.clone(),
             pinned,
             settled,
-            can_regenerate: !t.running && (t.session_id.is_some() || t.total.unwrap_or(0) > 0 || !t.items.is_empty()),
+            can_regenerate: !t.run.running && (t.run.session_id.is_some() || t.run.total.unwrap_or(0) > 0 || !t.items.is_empty()),
         };
         // Working, waiting on you, waiting on a job, unread, or nothing when idle: under the
         // project's icon. Still icons: the sidebar is cached, nothing in it spins.

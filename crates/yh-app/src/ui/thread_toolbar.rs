@@ -204,7 +204,7 @@ fn specialist(workspace: &Entity<Workspace>, cx: &App) -> Option<AnyElement> {
     let t = thread.read(cx);
     let id = t.id().to_string();
     let (role, project) = id.strip_prefix(crate::state::workspace::MEMORY_AGENT)?.split_once(':').map(|(a, b)| (a.to_string(), b.to_string()))?;
-    let started = t.running || !t.items.is_empty();
+    let started = t.run.running || !t.items.is_empty();
     let (model, effort) = (t.meta.model.clone(), t.meta.effort.clone());
     let w = workspace.downgrade();
     let menus = {

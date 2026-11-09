@@ -1,0 +1,67 @@
+#0 user u1
+  text "Fix the bug"
+  changed ["src\/a.rs","build\/"]
+  turn ended
+#1 thinking m1:0
+  text "Looking around"
+#2 tool t1
+  tool Bash "{\"command\":\"rm -rf build\"}"
+  result "removed" len=None error=Some(false)
+#3 user q1
+  text "Also the tests"
+  delivery steered
+#4 assistant m2:0
+  text "Done: the build is gone."
+#5 assistant m2:a2
+  text "And a second block."
+#6 commandOutput c1
+  text "Compacted."
+#7 commandOutput <uuid>
+  text "No id."
+#8 user u2
+  text "Run it"
+  turn ended
+#9 tool t2
+  tool Bash "{\"command\":\"make\"}"
+  result "make: *** [all] Error 2" len=None error=Some(true)
+#10 notice <uuid>
+  text "Interrupted"
+#11 user u3
+  text "Try again"
+  turn ended
+#12 notice <uuid>
+  text "Claude stopped with an error (error_during_execution)."
+  notice error
+#13 user u4
+  text "Once more"
+  turn ended
+#14 notice <uuid>
+  text "Overloaded"
+  notice error
+#15 notice <uuid>
+  text "Context cleared. Claude starts fresh from here."
+#16 notice <uuid>
+  text "A notice from the CLI"
+#17 user u5
+  text "Go on"
+  turn ended
+#18 tool t3
+  tool Agent "{\"description\":\"Look\",\"prompt\":\"look\"}"
+  sub "Look" stopped uses=Some(1) tokens=None ms=None report=None background=false type=None
+    assistant s0 "Reading" None None None
+    tool st1 "" Some("Read") Some("file") Some(false)
+#19 notice <uuid>
+  text "Claude exited (code 1). line two\nline three\nline four"
+  notice error
+#20 user u6
+  text "After the crash"
+  turn ended
+#21 notice <uuid>
+  text "Couldn't resume the previous session. Your next message starts a new one."
+  notice error
+= running false activity None session None meta session None stopped by you false
+= permissions [] elicitations []
+= queue [] restored [q3]
+= context None/Some(1000000) mcp [("linear", "needs-auth", "user")]
+= jobs running 0 agents 0 ended 0 total Some(22)
+= subagents [t3:running/1/Some("Reading a.txt")]

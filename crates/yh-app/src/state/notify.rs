@@ -79,7 +79,7 @@ impl Workspace {
             return "An MCP server is asking you something.".into();
         }
         // The newest request: the one that just came.
-        let Some(p) = thread.permissions.last() else { return "Claude is waiting for you.".into() };
+        let Some(p) = thread.run.permissions.last() else { return "Claude is waiting for you.".into() };
         let input: Value = serde_json::from_str(&p.input).unwrap_or(Value::Null);
         match p.tool.as_str() {
             "AskUserQuestion" => input["questions"][0]["question"].as_str().map(|q| format!("Claude asks: {q}")).unwrap_or_else(|| "Claude has a question for you.".into()),

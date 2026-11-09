@@ -150,6 +150,8 @@ struct OpenFile {
     carries: std::sync::Arc<Vec<yh_core::markdown::Carry>>,
     /// Its language, from its extension, for colouring.
     lang: String,
+    /// The widest line: the list measures it to know how far it scrolls sideways.
+    widest: usize,
 }
 
 impl OpenFile {
@@ -163,6 +165,7 @@ impl OpenFile {
         self.note = read.note;
         self.cut_lines = read.cut_lines;
         self.carries = read.carries;
+        self.widest = read.widest;
         // A wrapped list measures each line: made again for the new lines, at the same place.
         if let (Some(old), FileContent::Text(lines)) = (self.wrapped.take(), &self.content) {
             let state = gpui_kit::ListState::new(lines.len(), gpui_kit::ListAlignment::Top, px(400.));
@@ -179,6 +182,7 @@ struct ViewerRead {
     note: Option<String>,
     cut_lines: bool,
     carries: std::sync::Arc<Vec<yh_core::markdown::Carry>>,
+    widest: usize,
 }
 
 fn extension(path: &str) -> String {
@@ -188,11 +192,17 @@ fn extension(path: &str) -> String {
 /// `read_for_viewer`, with what each line starts inside worked out too.
 fn read_file(full: &str) -> ViewerRead {
     let (content, note, cut_lines) = read_for_viewer(full);
-    let carries = match &content {
-        FileContent::Text(lines) => yh_core::markdown::line_carries(lines, &extension(full)),
-        _ => vec![],
+    let (carries, widest) = match &content {
+        FileContent::Text(lines) => (yh_core::markdown::line_carries(lines, &extension(full)), widest_line(lines)),
+        _ => (vec![], 0),
     };
-    ViewerRead { content, note, cut_lines, carries: std::sync::Arc::new(carries) }
+    ViewerRead { content, note, cut_lines, carries: std::sync::Arc::new(carries), widest }
+}
+
+/// The line that's drawn widest in a monospaced font, a tab as four.
+fn widest_line(lines: &[SharedString]) -> usize {
+    let width = |l: &SharedString| l.chars().map(|c| if c == '\t' { 4 } else { 1 }).sum::<usize>();
+    lines.iter().enumerate().max_by_key(|(_, l)| width(l)).map_or(0, |(i, _)| i)
 }
 
 /// Lines longer than this are cut.
@@ -493,23 +503,23 @@ impl Inspector {
         if selected.as_ref().map(|t| t.entity_id()) != self.thread.as_ref().map(|t| t.entity_id()) {
             self.thread = selected.clone();
             self.prompt_open = false;
-            self.seen_subagents = selected.as_ref().map_or(0, |t| t.read(cx).subagents_version);
-            self.seen_agents = selected.as_ref().map_or(0, |t| t.read(cx).jobs.agents_running());
+            self.seen_subagents = selected.as_ref().map_or(0, |t| t.read(cx).run.subagents_version);
+            self.seen_agents = selected.as_ref().map_or(0, |t| t.read(cx).run.jobs.agents_running());
             self.thread_watch = selected.map(|t| {
                 cx.observe(&t, |this, t, cx| {
-                    let running = t.read(cx).running;
+                    let running = t.read(cx).run.running;
                     if this.was_running && !running && this.workspace.read(cx).panel == Panel::PullRequests {
                         this.refresh_pulls(cx);
                     }
                     this.was_running = running;
-                    let version = t.read(cx).subagents_version;
+                    let version = t.read(cx).run.subagents_version;
                     if version != this.seen_subagents && this.workspace.read(cx).panel == Panel::Subagents {
                         this.seen_subagents = version;
                         this.sub_scroll.scroll_to_bottom();
                         cx.notify();
                     }
                     // The tab's badge follows how many run, whichever tab shows.
-                    let agents = t.read(cx).jobs.agents_running();
+                    let agents = t.read(cx).run.jobs.agents_running();
                     if agents != this.seen_agents {
                         this.seen_agents = agents;
                         cx.notify();
@@ -684,7 +694,7 @@ impl Inspector {
         // Its running state and permission requests change the controls under it.
         let watch = cx.observe(&chat, |this, chat, cx| {
             let c = chat.read(cx);
-            let state = (c.running, c.permission().map(|p| p.id.clone()), c.permissions.len());
+            let state = (c.run.running, c.permission().map(|p| p.id.clone()), c.run.permissions.len());
             if this.side_state != state {
                 this.side_state = state;
                 cx.notify();
@@ -914,7 +924,7 @@ impl Inspector {
         let full = if relative.starts_with('/') { relative.clone() } else { format!("{}/{relative}", folder.trim_end_matches('/')) };
         let started = std::time::Instant::now();
         cx.spawn(async move |this, cx| {
-            let ViewerRead { content, note, cut_lines, carries } = cx.background_executor().spawn(async move { read_file(&full) }).await;
+            let ViewerRead { content, note, cut_lines, carries, widest } = cx.background_executor().spawn(async move { read_file(&full) }).await;
             let _ = this.update(cx, |this, cx| {
                 let state = this.folders.entry(folder).or_default();
                 let scroll = UniformListScrollHandle::new();
@@ -926,7 +936,7 @@ impl Inspector {
                     eprintln!("FILES opened {relative} ({n} lines) in {} ms", started.elapsed().as_millis());
                 }
                 let lang = extension(&relative);
-                let file = OpenFile { path: relative, content, note, cut_lines, scroll, wrapped: None, lines_picked: lines, preview, carries, lang };
+                let file = OpenFile { path: relative, content, note, cut_lines, scroll, wrapped: None, lines_picked: lines, preview, carries, lang, widest };
                 // A preview takes the last preview's place.
                 match state.files.iter().position(|f| f.preview).filter(|_| preview) {
                     Some(i) => {
@@ -1153,8 +1163,8 @@ impl Inspector {
     fn agent_command_files(&self, agent_call: &str, cx: &App) -> Vec<(String, String)> {
         let Some(thread) = self.thread.as_ref() else { return vec![] };
         let t = thread.read(cx);
-        let folder = t.jobs.folder.clone().or_else(|| t.session_id.as_ref().map(|s| crate::state::jobs::output_folder(&self.workspace.read(cx).folder_of(t), s)));
-        t.jobs
+        let folder = t.run.jobs.folder.clone().or_else(|| t.run.session_id.as_ref().map(|s| crate::state::jobs::output_folder(&self.workspace.read(cx).folder_of(t), s)));
+        t.run.jobs
             .owned_by(agent_call)
             .into_iter()
             .filter(|j| j.status == crate::state::jobs::JobStatus::Running || !self.agent_outputs.contains_key(&j.id))
@@ -1172,7 +1182,7 @@ impl Inspector {
             let files = this
                 .update(cx, |this, cx| {
                     let shown = this.workspace.read(cx).panel == Panel::Subagents
-                        && this.thread.as_ref().is_some_and(|t| t.read(cx).inspected_subagent.as_deref() == Some(agent_call.as_str()) || t.read(cx).jobs.owned_by(&agent_call).iter().any(|j| j.status == crate::state::jobs::JobStatus::Running));
+                        && this.thread.as_ref().is_some_and(|t| t.read(cx).inspected_subagent.as_deref() == Some(agent_call.as_str()) || t.read(cx).run.jobs.owned_by(&agent_call).iter().any(|j| j.status == crate::state::jobs::JobStatus::Running));
                     if shown { this.agent_command_files(&agent_call, cx) } else { vec![] }
                 })
                 .unwrap_or_default();
@@ -1215,7 +1225,7 @@ impl Inspector {
     /// it stands and the end of its output.
     fn agent_commands(&self, agent_call: &str, theme: &Theme, cx: &App) -> Option<gpui_kit::AnyElement> {
         let thread = self.thread.as_ref()?.read(cx);
-        let owned = thread.jobs.owned_by(agent_call);
+        let owned = thread.run.jobs.owned_by(agent_call);
         if owned.is_empty() {
             return None;
         }
@@ -1278,7 +1288,7 @@ impl Inspector {
         let raised = if theme.canvas.l < 0.5 { theme.bubble } else { theme.canvas };
         let mut track = div().flex_1().flex().items_center().gap(px(2.)).p(px(2.)).rounded(px(radius::MEDIUM + 1.)).bg(theme.selected);
         // Sub-agents still working in the background: a count on their tab.
-        let agents = self.thread.as_ref().map_or(0, |t| t.read(cx).jobs.agents_running());
+        let agents = self.thread.as_ref().map_or(0, |t| t.read(cx).run.jobs.agents_running());
         for p in Panel::ALL {
             let ws = self.workspace.clone();
             let on = p == panel;
@@ -1287,7 +1297,7 @@ impl Inspector {
                 Panel::SideChat => (crate::ui::icons::message_square(), "Side Chat".into()),
                 Panel::Subagents if agents > 0 => (
                     crate::ui::icons::bot(),
-                    format!("Sub-agents: {}", self.thread.as_ref().and_then(|t| t.read(cx).jobs.summary()).unwrap_or_default()).into(),
+                    format!("Sub-agents: {}", self.thread.as_ref().and_then(|t| t.read(cx).run.jobs.summary()).unwrap_or_default()).into(),
                 ),
                 Panel::Subagents => (crate::ui::icons::bot(), "Sub-agents".into()),
                 Panel::Files => (crate::ui::icons::files(), "Files".into()),
@@ -1364,7 +1374,7 @@ impl Inspector {
         };
         let picked = thread.read(cx).inspected_subagent.clone();
         // Running in the background now (this `claude`'s, not a stale saved status).
-        let live: std::collections::HashSet<String> = thread.read(cx).jobs.agents.iter().filter_map(|j| j.tool_id.clone()).collect();
+        let live: std::collections::HashSet<String> = thread.read(cx).run.jobs.agents.iter().filter_map(|j| j.tool_id.clone()).collect();
         let selected = picked
             .and_then(|id| runs.iter().find(|(r, _)| *r == id).cloned())
             .or_else(|| runs.iter().rev().find(|(_, e)| e.borrow().sub.as_ref().is_some_and(|s| s.status == "running")).cloned())
@@ -1410,7 +1420,7 @@ impl Inspector {
                         .on_click(move |_, _, cx| {
                             t.update(cx, |t, cx| {
                                 t.inspected_subagent = Some(id2.clone());
-                                t.subagents_version += 1;
+                                t.run.subagents_version += 1;
                                 cx.notify();
                             })
                         }),
@@ -1449,7 +1459,7 @@ impl Inspector {
         // While it works: what it's doing now and how long it's gone (since it was last started
         // or continued), as of the last word from it, which redraws this.
         let working_now = (status == "running").then(|| {
-            let since = thread.read(cx).jobs.agents.iter().find(|j| j.tool_id.as_deref() == Some(selected.0.as_str())).map(|j| j.started.elapsed().as_secs());
+            let since = thread.read(cx).run.jobs.agents.iter().find(|j| j.tool_id.as_deref() == Some(selected.0.as_str())).map(|j| j.started.elapsed().as_secs());
             let since = since.unwrap_or_else(|| (yh_core::library::now_ms() / 1000.0 - sub.as_ref().map_or(0.0, |s| s.started_at)).max(0.0) as u64);
             let doing = sub.as_ref().and_then(|s| s.activity.clone()).unwrap_or_else(|| if logged == 0 { "Starting…".into() } else { "Working…".into() });
             format!("{doing} · {}", crate::state::jobs::clock(since))
@@ -1928,6 +1938,15 @@ impl Inspector {
                 // Find's matches, when they're for this file.
                 let hits = if self.file_find_open && self.file_hits_for.as_deref() == Some(file.path.as_str()) { self.file_hits.clone() } else { Rc::new(vec![]) };
                 let hit = self.file_hit;
+                let widest = file.widest;
+                // Each line takes part in the window's text selection, after everything else
+                // in reading order, under an id that's this file's.
+                let file_key = {
+                    use std::hash::{Hash, Hasher};
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    file.path.hash(&mut hasher);
+                    hasher.finish()
+                };
                 let row = move |i: usize, wrap: bool| {
                     let on = picked.is_some_and(|(a, b)| i + 1 >= a && i + 1 <= b.max(a));
                     let first = hits.partition_point(|(l, _)| *l < i);
@@ -1944,7 +1963,13 @@ impl Inspector {
                         .when(!wrap, |d| d.whitespace_nowrap())
                         .when(on, |d| d.bg(theme3.warning.opacity(0.16)))
                         .child(div().flex_none().w(px(gutter)).pr(px(space::S + 2.)).text_right().text_color(if on { theme3.secondary } else { theme3.tertiary }).child(format!("{}", i + 1)))
-                        .child(div().when(!wrap, |d| d.flex_none()).when(wrap, |d| d.flex_1().min_w_0().overflow_hidden().whitespace_normal()).child(code_line(&lines[i], &lang, carry, &found, current, &theme3)))
+                        .child(div().when(!wrap, |d| d.flex_none()).when(wrap, |d| d.flex_1().min_w_0().overflow_hidden().whitespace_normal()).child(crate::ui::selectable::SelText::new(
+                            gpui_kit::ElementId::NamedInteger("file-line".into(), file_key ^ i as u64),
+                            lines[i].clone(),
+                            code_line(&lines[i], &lang, carry, &found, current, &theme3),
+                            (1 << 62) + i as u64,
+                            theme3.accent.opacity(0.28),
+                        )))
                 };
                 if let Some(state) = file.wrapped.clone().filter(|_| wraps) {
                     gpui_kit::list(state, move |i, _, _| {
@@ -1967,6 +1992,8 @@ impl Inspector {
                                 LINES_WORST_US.fetch_max(started.elapsed().as_micros() as u64, std::sync::atomic::Ordering::Relaxed);
                                 rows
                             })
+                            .with_horizontal_sizing_behavior(gpui_kit::ListHorizontalSizingBehavior::Unconstrained)
+                            .with_width_from_item(Some(widest))
                             .track_scroll(&file.scroll)
                             .size_full(),
                         )
@@ -2102,7 +2129,7 @@ impl Inspector {
         if self.stacks_installed != Some(true) || thread.read(cx).id().starts_with(crate::state::workspace::SIDE) {
             return None;
         }
-        let running = thread.read(cx).running;
+        let running = thread.read(cx).run.running;
         let ws = self.workspace.clone();
         let theme = Theme::get(cx);
         let tip = "Ask Claude to split this thread's work into a stack of small pull requests, with gh stack";
@@ -2227,7 +2254,7 @@ impl Inspector {
         let Some((chat, view, _)) = &self.side else { return empty("No thread open.", theme) };
         let (running, permission, empty_chat) = {
             let c = chat.read(cx);
-            (c.running, c.permission().cloned(), c.items.is_empty())
+            (c.run.running, c.permission().cloned(), c.items.is_empty())
         };
         let ws = self.workspace.clone();
         let parent = self.thread.as_ref().map(|t| t.read(cx).id().to_string()).unwrap_or_default();
@@ -2252,7 +2279,7 @@ impl Inspector {
             column = column.child(div().flex_1().min_h_0().child(gpui_kit::AnyView::from(view.clone()).cached(gpui_kit::StyleRefinement::default().size_full())));
         }
         if let Some(p) = permission {
-            let more = chat.read(cx).permissions.len().saturating_sub(1);
+            let more = chat.read(cx).run.permissions.len().saturating_sub(1);
             column = column.child(div().px(px(space::M)).pt(px(space::S)).child(crate::ui::composer::permission_card(&p, chat, ws.downgrade(), more, theme)));
         }
         column

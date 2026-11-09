@@ -1286,7 +1286,7 @@ impl ProjectPage {
         for id in ids {
             let Some(t) = ws.thread(id) else { continue };
             let t = t.read(cx);
-            let row = (id.clone(), t.title.clone(), t.running);
+            let row = (id.clone(), t.title.clone(), t.run.running);
             if t.meta.settled_at.is_some() { settled.push(row) } else { active.push(row) }
         }
         if active.is_empty() && settled.is_empty() {

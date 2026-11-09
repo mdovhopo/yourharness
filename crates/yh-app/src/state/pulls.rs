@@ -3,11 +3,9 @@
 //! the project's scan last saw them, GitHub and GitLab alike), and the ones that only came up
 //! (links pasted, PRs Claude looked at), each as its forge's CLI tells it now. All of it off
 //! the main thread. Claude touching PRs (`gh pr …`, `gh stack`, `glab mr`, a push) has them
-//! looked at again a moment later (`note_results`).
+//! looked at again a moment later (`note_activity`).
 
-use crate::state::thread::{EntryRef, ThreadState};
 use std::path::Path;
-use yh_core::claude::ToolResult;
 use yh_core::db::Database;
 use yh_core::forge::{self, Link, PullRequest, Target};
 use yh_core::github::LocalStack;
@@ -210,12 +208,6 @@ pub fn look_up(links: Vec<(Link, bool)>, path_env: Option<String>, open: &[PullR
 
 /// Whether a command changes PRs: merging, opening, pushing to one (its state is about to
 /// change).
-pub fn touches_pull_requests(input_json: &str) -> bool {
-    let v: serde_json::Value = serde_json::from_str(input_json).unwrap_or_default();
-    let command = v["command"].as_str().unwrap_or("");
-    ["gh pr", "gh stack", "glab mr", "git push", "gh api"].iter().any(|c| command.contains(c))
-}
-
 fn activity() -> &'static (flume::Sender<String>, flume::Receiver<String>) {
     static CHANNEL: std::sync::OnceLock<(flume::Sender<String>, flume::Receiver<String>)> = std::sync::OnceLock::new();
     CHANNEL.get_or_init(flume::unbounded)
@@ -227,31 +219,19 @@ pub fn activity_feed() -> flume::Receiver<String> {
     activity().1.clone()
 }
 
-/// From the thread's event handling, for each batch of tool results: a `Bash` call (the
+/// From the thread's event handling, when a batch of tool results had a `Bash` call (the
 /// thread's own, or a sub-agent's: its work is the thread's) that touched PRs and didn't fail
-/// sends the thread to `activity_feed`. `entry` finds a tool call's row by its id.
-pub fn note_results(thread: &ThreadState, parent: Option<&str>, results: &[ToolResult], entry: impl Fn(&str) -> Option<EntryRef>) {
-    let touched = results.iter().filter(|r| !r.is_error).any(|r| {
-        let input = match parent {
-            None => entry(&r.id).and_then(|e| {
-                let b = e.borrow();
-                (b.data.tool_name.as_deref() == Some("Bash")).then(|| b.data.tool_input.clone()).flatten()
-            }),
-            Some(p) => entry(p).and_then(|e| e.borrow().sub.as_ref().and_then(|s| s.log.iter().find(|s| s.id == r.id && s.tool.as_deref() == Some("Bash")).map(|s| s.text.clone()))),
-        };
-        input.is_some_and(|i| touches_pull_requests(&i))
-    });
-    if touched {
-        if std::env::var("YH_PR_PANEL_LOG").is_ok() {
-            eprintln!("PRS activity in {}", thread.id());
-        }
-        let _ = activity().0.send(thread.id().to_string());
+/// (`ThreadRun`'s `Outcome::pulls`): sends the thread to `activity_feed`.
+pub fn note_activity(thread_id: &str) {
+    if std::env::var("YH_PR_PANEL_LOG").is_ok() {
+        eprintln!("PRS activity in {thread_id}");
     }
+    let _ = activity().0.send(thread_id.to_string());
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use yh_core::forge::touches_pull_requests;
 
     #[test]
     fn knows_commands_that_touch_pull_requests() {

@@ -107,15 +107,15 @@ impl WorkingTimer {
         }
         // The turn is over but sub-agents it started in the background still work: not done.
         // How long the oldest has gone.
-        if !t.running {
-            let oldest = t.jobs.agents.first()?;
-            let label = match t.jobs.agents.len() {
+        if !t.run.running {
+            let oldest = t.run.jobs.agents.first()?;
+            let label = match t.run.jobs.agents.len() {
                 1 => "A sub-agent is working…".to_string(),
                 n => format!("{n} sub-agents working…"),
             };
             return Some((label, Some(crate::state::jobs::clock(oldest.started.elapsed().as_secs()))));
         }
-        let label = t.activity.clone().unwrap_or_else(|| "Working…".into());
+        let label = t.run.activity.clone().unwrap_or_else(|| "Working…".into());
         let elapsed = t.turn_started_at().map(|since| yh_core::clock::elapsed(yh_core::library::now_ms() / 1000.0 - since));
         Some((label, elapsed))
     }

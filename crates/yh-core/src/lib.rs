@@ -5,6 +5,9 @@
 pub mod attachments;
 pub mod agents;
 pub mod claude;
+pub mod golden;
+pub mod jobs;
+pub mod thread_run;
 pub mod dev_servers;
 pub mod db;
 pub mod diagrams;

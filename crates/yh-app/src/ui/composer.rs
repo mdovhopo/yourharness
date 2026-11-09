@@ -591,10 +591,13 @@ impl Composer {
     /// images and files attached again.
     fn take_restored(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(thread) = self.thread(cx) else { return };
-        if thread.read(cx).composer.restored.is_empty() {
+        if thread.read(cx).run.composer.restored.is_empty() {
             return;
         }
-        let restored = thread.update(cx, |t, _| std::mem::take(&mut t.composer.restored));
+        let restored = thread.update(cx, |t, _| std::mem::take(&mut t.run.composer.restored));
+        // Taken: the engine hands them back no more.
+        let ids = restored.iter().map(|(id, ..)| id.clone()).collect();
+        self.workspace.update(cx, |ws, cx| ws.took_restored(&thread, ids, cx));
         let key = thread.read(cx).id().to_string();
         let dir = self.workspace.read(cx).data_dir.clone();
         let mut draft = self.input.read(cx).value().to_string();
@@ -933,7 +936,7 @@ impl Render for Composer {
         let Some(thread) = self.thread(cx) else { return div() };
         let (running, permission, waiting) = {
             let t = thread.read(cx);
-            (t.running, t.permission().cloned(), t.permissions.len())
+            (t.run.running, t.permission().cloned(), t.run.permissions.len())
         };
         // While Claude works, what typing does: it steers, or with ⌘↩ goes now.
         if running != self.steering {
@@ -1004,7 +1007,7 @@ impl Render for Composer {
         }
         // Only while Claude works on it: a finished plan, or one left behind, is in the transcript.
         let plan = thread.read(cx).plan.clone();
-        if thread.read(cx).running && !plan.items.is_empty() && !plan.is_finished() {
+        if thread.read(cx).run.running && !plan.items.is_empty() && !plan.is_finished() {
             inner = inner.child(self.plan_strip(&plan, &theme, cx));
         }
         if let Some(menu) = self.suggestions(&theme, cx) {
@@ -1017,8 +1020,8 @@ impl Render for Composer {
         let (context, mcp_chip) = {
             let ws = self.workspace.read(cx);
             let t = thread.read(cx);
-            let context = t.composer.context_tokens.map(|tokens| (tokens, ws.context_window_of(t)));
-            (context, crate::state::workspace::mcp_needing_you(&t.composer.mcp_servers))
+            let context = t.run.composer.context_tokens.map(|tokens| (tokens, ws.context_window_of(t)));
+            (context, crate::state::workspace::mcp_needing_you(&t.run.composer.mcp_servers))
         };
         let stop_thread = thread.clone();
         // A narrow composer (a small window, the right sidebar open) shows effort and mode as
@@ -1223,7 +1226,7 @@ impl Composer {
         let mut list = div().flex().flex_col().gap(px(space::XS + 2.)).mb(px(space::S));
         for (i, (id, text, attachments)) in queued.into_iter().enumerate() {
             let (sending, taking) = {
-                let c = &thread.read(cx).composer;
+                let c = &thread.read(cx).run.composer;
                 (c.sending_now.contains(&id), c.restore_on_withdraw.contains(&id) || self.withdrawing.contains(&id))
             };
             let status = if sending {
