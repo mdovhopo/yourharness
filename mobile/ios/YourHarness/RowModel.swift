@@ -47,12 +47,7 @@ struct ToolSummary: Sendable {
         let tool = row.toolName ?? "Tool"
         failed = row.toolIsError == true
         running = row.toolResult == nil && row.toolResultLength == nil && row.toolIsError == nil
-        let parts = tool.split(separator: "__", omittingEmptySubsequences: true)
-        if tool.hasPrefix("mcp__"), parts.count >= 3 {
-            name = "\(parts[1]) · \(parts[2...].joined(separator: "_"))"
-        } else {
-            name = tool
-        }
+        name = ToolSummary.displayName(tool)
         symbol = switch tool {
         case "Bash", "BashOutput", "KillShell": "terminal"
         case "Read": "doc.text"
@@ -64,6 +59,13 @@ struct ToolSummary: Sendable {
         default: tool.hasPrefix("mcp__browser__") ? "safari" : "wrench.and.screwdriver"
         }
         target = ToolSummary.target(tool: tool, input: row.toolInput ?? "")
+    }
+
+    /// `mcp__browser__click` as "browser · click".
+    static func displayName(_ tool: String) -> String {
+        let parts = tool.split(separator: "__", omittingEmptySubsequences: true)
+        guard tool.hasPrefix("mcp__"), parts.count >= 3 else { return tool }
+        return "\(parts[1]) · \(parts[2...].joined(separator: "_"))"
     }
 
     /// The input field that says what the call was about. The input may be cut short on the

@@ -71,7 +71,12 @@ struct ThreadRow: View {
                     .lineLimit(1)
             }
             Spacer(minLength: 0)
-            if thread.active {
+            if thread.isWaiting {
+                Image(systemName: "hand.raised.fill")
+                    .font(.footnote)
+                    .foregroundStyle(.orange)
+                    .accessibilityLabel("Needs you")
+            } else if thread.isRunning {
                 Image(systemName: "circle.fill")
                     .font(.system(size: 8))
                     .foregroundStyle(.green)

@@ -147,9 +147,18 @@ and never asks for screen recording. Never `screencapture`.
 
 Recorded here so the MVP stays small. Roughly in order; Tailscale last.
 
-1. **Acting from the phone**, once the foundation's server exists: send, stop, queue, answer
-   permission, question and plan cards, new thread in a project, model, effort and mode.
-   The app moves from `yh-devserver` to `yh-server`.
+1. ✅ **Acting from the phone** over `yh-server` (protocol 2, the Mac app with `YH_SERVER=<port>`):
+   the composer sends, steers into a running turn and stops; your queued messages can be sent
+   now or taken back; permission cards are allowed or denied, plans approved or kept; the list
+   shows threads working and waiting on you. Checked 2026-11-09 with real Haiku turns in `ask`
+   mode, sent from the phone: a Write card allowed from the phone (the file written) and one
+   denied (no file, the step marked failed). Not checked by hand yet: stop, send now and
+   withdraw (the same path as send). Still answered on the Mac: Claude's questions with choices
+   (the protocol has allow or deny only) and MCP servers' questions. Not in the protocol yet: a
+   new thread in a project, model, effort and mode. `yh-devserver` (protocol 1) still serves a
+   data folder without the app, read-only. Test hooks: `YH_PHONE_SEND=<text>`,
+   `YH_PHONE_ANSWER=allow|deny`, `YH_PHONE_ANSWER_DELAY=<s>` (3), doing what the buttons do;
+   `DONE <action>` lines when the Mac answers.
 2. **Real streaming** (`TextAppended`), true `running` and "waiting on you" state.
 3. **A real phone on the local network:** `yh-devserver --lan` or the server with a token,
    found by Bonjour, paired by QR code, the token in the Keychain.
@@ -176,4 +185,6 @@ To raise with the foundation before its F2 settles `yh-proto`:
 - **Uploading attachments**, and **registering a device's push token**.
 - **`Attention` with its reason and request id**, so a notification can answer a card
   without opening the app.
+- **Answering Claude's questions** (`AskUserQuestion`) with the chosen options, not only allow
+  or deny; a **new thread** in a project; **model, effort and mode**.
 - If the phone ends up on a Rust client core, typeshare's Swift output isn't needed for it.

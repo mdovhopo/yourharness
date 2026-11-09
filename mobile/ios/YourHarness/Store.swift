@@ -15,6 +15,15 @@ final class Store {
     /// The navigation stack: thread IDs.
     var path: [String] = []
     var serverAddress: String
+    /// 1: the dev server, read-only; 2: the Mac app's server, which takes actions.
+    var serverProtocol = 0
+    /// The open thread's live state (protocol 2).
+    var live: Live?
+    /// Why the last action didn't happen, shown until dismissed.
+    var actionError: String?
+    /// Actions sent and not yet answered, by id: what to put back if one fails.
+    private var pending: [String: FromApp] = [:]
+    var canAct: Bool { serverProtocol >= 2 && state == .connected }
 
     @ObservationIgnored let connection: Connection
     /// The open thread's rows; not observed, the transcript applies its updates itself.
@@ -81,6 +90,7 @@ final class Store {
             askEarlier: { [weak self] before in self?.connection.send(.page(threadID, beforeSeq: before, limit: TranscriptModel.pageSize)) },
             resubscribe: { [weak self] in self?.connection.send(.subscribeThread(threadID, limit: TranscriptModel.pageSize)) })
         transcript = model
+        live = nil
         connection.send(.subscribeThread(threadID, limit: TranscriptModel.pageSize))
         return model
     }
@@ -88,8 +98,48 @@ final class Store {
     func close(_ model: TranscriptModel) {
         guard transcript === model else { return }
         transcript = nil
+        live = nil
         connection.send(.unsubscribeThread)
     }
+
+    // MARK: Actions (protocol 2), as the Mac's own buttons take them
+
+    /// Your message: starts a turn, or waits behind the one under way (`now`: stops it for this).
+    func send(_ text: String, to thread: String, now: Bool = false) {
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        act(.send(id: Self.newID(), thread: thread, text: text, now: now))
+    }
+
+    func stop(_ thread: String) {
+        act(.stop(id: Self.newID(), thread: thread))
+    }
+
+    func respond(_ request: Request, allow: Bool, in thread: String) {
+        act(.respond(id: Self.newID(), thread: thread, requestID: request.id, allow: allow))
+    }
+
+    func withdraw(_ queued: Queued, in thread: String) {
+        act(.withdraw(id: Self.newID(), thread: thread, message: queued.id))
+    }
+
+    func sendNow(_ queued: Queued, in thread: String) {
+        act(.sendNow(id: Self.newID(), thread: thread, message: queued.id))
+    }
+
+    /// A message that failed to send, given back to the composer that sent it.
+    var returnedDraft: (thread: String, text: String)?
+
+    private func act(_ action: FromApp) {
+        guard canAct, let id = action.actionID else {
+            actionError = "The Mac isn't taking actions over this connection."
+            return
+        }
+        pending[id] = action
+        connection.send(action)
+    }
+
+    private static func newID() -> String { UUID().uuidString.lowercased() }
 
     // MARK: Messages
 
@@ -107,8 +157,9 @@ final class Store {
         var rowsByThread: [String: [RowModel]] = [:]
         for message in batch {
             switch message {
-            case .hello(let server, _):
+            case .hello(let version, let server, _):
                 serverName = server
+                serverProtocol = version
                 connection.send(.subscribeApp)
                 if let t = transcript {
                     t.resubscribing()
@@ -140,6 +191,15 @@ final class Store {
                     flush(&rowsByThread, into: t)
                     t.applyPage(rows)
                 }
+            case .live(let thread, let state):
+                if transcript?.threadID == thread, live != state { live = state }
+            case .done(let id, let error):
+                let action = pending.removeValue(forKey: id)
+                if let error {
+                    actionError = error
+                    if case .send(_, let thread, let text, _)? = action { returnedDraft = (thread, text) }
+                }
+                Perf.shared.log("DONE \(action?.name ?? id)\(error.map { ": " + $0 } ?? "")")
             case .error(let message):
                 print("server: \(message)")
             case .unknown:

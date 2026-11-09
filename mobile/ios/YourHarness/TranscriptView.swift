@@ -11,18 +11,57 @@ struct TranscriptScreen: View {
     let threadID: String
     @Environment(Store.self) private var store
     @State private var model: TranscriptModel?
+    @State private var draft = ""
+    @State private var composerHeight: CGFloat = 0
+    private static let env = ProcessInfo.processInfo.environment
 
     var body: some View {
         Group {
             if let model {
-                TranscriptRepresentable(model: model).ignoresSafeArea(.container, edges: .bottom)
+                // Under the composer, so rows scroll beneath its glass; its height is the list's inset.
+                TranscriptRepresentable(model: model, bottomInset: composerHeight).ignoresSafeArea(.container, edges: .bottom)
             }
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            ComposerBar(threadID: threadID, draft: $draft)
+                .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { composerHeight = $0 }
+        }
+        .overlay(alignment: .top) {
+            if let error = store.actionError {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.footnote)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .glassEffect(in: .capsule)
+                    .padding(.top, 6)
+                    .onTapGesture { store.actionError = nil }
+                    .task(id: error) {
+                        try? await Task.sleep(for: .seconds(5))
+                        if store.actionError == error { store.actionError = nil }
+                    }
+            }
+        }
+        // Test hooks, doing what the buttons do: `YH_PHONE_SEND=<text>` once the thread is open,
+        // `YH_PHONE_ANSWER=allow|deny` to each request `YH_PHONE_ANSWER_DELAY` s (3) after it shows.
+        .task(id: store.canAct) {
+            guard store.canAct, let text = Self.env["YH_PHONE_SEND"] else { return }
+            try? await Task.sleep(for: .seconds(2))
+            Perf.shared.log("PHONE send: \(text)")
+            store.send(text, to: threadID)
+        }
+        .task(id: store.live?.requests.first?.id) {
+            guard let request = store.live?.requests.first, let answer = Self.env["YH_PHONE_ANSWER"] else { return }
+            Perf.shared.log("PHONE card: \(request.tool) · \(request.description)")
+            try? await Task.sleep(for: .seconds(Self.env["YH_PHONE_ANSWER_DELAY"].flatMap(Double.init) ?? 3))
+            guard store.live?.requests.first?.id == request.id else { return }
+            Perf.shared.log("PHONE \(answer) \(request.tool)")
+            store.respond(request, allow: answer == "allow", in: threadID)
         }
         .navigationTitle(store.threads[threadID]?.title ?? "Thread")
         .navigationSubtitle(store.threads[threadID].flatMap(store.projectName) ?? "")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            if store.threads[threadID]?.active == true {
+            if store.threads[threadID]?.isRunning == true {
                 ToolbarItem(placement: .topBarTrailing) {
                     Image(systemName: "circle.fill").font(.system(size: 8)).foregroundStyle(.green)
                         .symbolEffect(.pulse, options: .repeating)
@@ -37,12 +76,15 @@ struct TranscriptScreen: View {
 
 struct TranscriptRepresentable: UIViewControllerRepresentable {
     let model: TranscriptModel
+    var bottomInset: CGFloat = 0
 
     func makeUIViewController(context: Context) -> TranscriptViewController {
         TranscriptViewController(model: model)
     }
 
-    func updateUIViewController(_ controller: TranscriptViewController, context: Context) {}
+    func updateUIViewController(_ controller: TranscriptViewController, context: Context) {
+        controller.setBottomInset(bottomInset)
+    }
 }
 
 final class TranscriptViewController: UIViewController, UICollectionViewDataSource, UICollectionViewDelegate {
@@ -88,6 +130,19 @@ final class TranscriptViewController: UIViewController, UICollectionViewDataSour
             self.fonts = Fonts(self.traitCollection.preferredContentSizeCategory)
             self.enqueue(.reload)
         }
+    }
+
+    /// The composer's height: rows end above it, and scroll beneath it.
+    func setBottomInset(_ inset: CGFloat) {
+        guard isViewLoaded, collectionView.contentInset.bottom != inset else { return }
+        collectionView.contentInset.bottom = inset
+        collectionView.verticalScrollIndicatorInsets.bottom = inset
+        if followsBottom, !layouts.isEmpty { scrollToBottom() }
+    }
+
+    override func viewSafeAreaInsetsDidChange() {
+        super.viewSafeAreaInsetsDidChange()
+        if followsBottom, !layouts.isEmpty { scrollToBottom() }
     }
 
     override func viewDidLayoutSubviews() {
