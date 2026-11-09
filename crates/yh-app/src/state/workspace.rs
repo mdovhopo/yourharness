@@ -263,7 +263,7 @@ impl Workspace {
             }
         })
         .detach();
-        start_server(&engine, remote_actions.clone());
+        start_server(&engine, remote_actions.clone(), mac_id(&library));
         // Phones on this network (Settings → Phone): the paired list saved as it changes.
         let (devices_changed, devices) = flume::unbounded::<Vec<yh_server::pairing::Device>>();
         // Its port: `YH_PHONES_PORT` (tests, not kept), the one it got last time, 7878 for a Mac
@@ -3304,7 +3304,7 @@ impl Workspace {
 /// `YH_SERVER=<port>` (`1`: 7878): the server for the app's clients (`yh_server`, the phone app),
 /// on loopback, its token `YH_SERVER_TOKEN` or made up. Prints `SERVER <url>` and writes it to
 /// `server.json` in the data folder (only you can read it). Its actions come back here.
-fn start_server(engine: &yh_engine::EngineHandle, actions: flume::Sender<yh_server::Asked>) -> Option<()> {
+fn start_server(engine: &yh_engine::EngineHandle, actions: flume::Sender<yh_server::Asked>, mac_id: String) -> Option<()> {
     let asked = std::env::var("YH_SERVER").ok()?;
     let port: u16 = if asked == "1" { 7878 } else { asked.parse().ok()? };
     let token = std::env::var("YH_SERVER_TOKEN").ok().filter(|t| !t.is_empty()).unwrap_or_else(|| yh_core::library::new_uuid().replace('-', "").to_lowercase());
@@ -3328,12 +3328,24 @@ fn start_server(engine: &yh_engine::EngineHandle, actions: flume::Sender<yh_serv
     std::thread::Builder::new()
         .name("server".into())
         .spawn(move || {
-            if let Err(e) = yh_server::serve(listener, data, yh_server::Options { token: Some(token), name, pairing: None, stop: None }, Some(links)) {
+            if let Err(e) = yh_server::serve(listener, data, yh_server::Options { token: Some(token), name, pairing: None, stop: None, mac_id: Some(mac_id) }, Some(links)) {
                 eprintln!("SERVER stopped: {e}");
             }
         })
         .ok()?;
     Some(())
+}
+
+/// This Mac's lasting ID for phones (`macID`, made the first time): the same at any address,
+/// so a phone pairing again, or reaching it another way later (Tailscale), knows it's this Mac.
+/// It lives with the data, so another data folder is another Mac to a phone.
+pub fn mac_id(library: &yh_core::library::Library) -> String {
+    if let Some(id) = library.setting("macID").and_then(|v| v.as_str().map(str::to_string)) {
+        return id;
+    }
+    let id = yh_core::library::new_uuid().to_lowercase();
+    library.set_setting("macID", &Value::from(id.clone()));
+    id
 }
 
 /// What phones call this Mac: `YH_SERVER_NAME` (tests run two on one Mac), else its name.
@@ -3361,7 +3373,7 @@ impl Workspace {
 
     fn start_phones(&mut self) {
         let links = yh_server::Links { engine: self.engine.clone(), actions: self.remote_actions.clone() };
-        self.phones.start(self.data_dir.clone(), mac_name(), links);
+        self.phones.start(self.data_dir.clone(), mac_name(), mac_id(&self.library), links);
         // The port it got is kept, so paired phones find it there next time.
         if self.phones.running() && std::env::var("YH_PHONES_PORT").is_err() {
             self.library.set_setting("phonesPort", &Value::from(self.phones.port));

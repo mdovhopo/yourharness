@@ -27,6 +27,9 @@ final class Store: Identifiable {
     @ObservationIgnored var shown = false
     /// The Mac said who it is (its name is kept with its address).
     @ObservationIgnored var onHello: (() -> Void)?
+    /// The Mac's lasting ID (from its pairing link, then each `hello`): how the phone knows a Mac
+    /// it paired with before, at whatever address.
+    var macID: String?
     /// The Mac paired this phone: its token, kept in place of the pairing code.
     @ObservationIgnored var onPaired: ((String) -> Void)?
     /// Connecting with a pairing code (it works once): a refusal means it's used or out of date.
@@ -96,9 +99,10 @@ final class Store: Identifiable {
     static let defaultAddress = "ws://127.0.0.1:7878/"
 
     /// `selects`: `YH_SELECT` is for this one (the Mac shown at launch).
-    init(address: String, name: String? = nil, selects: Bool = false) {
+    init(address: String, name: String? = nil, macID: String? = nil, selects: Bool = false) {
         serverAddress = address
         serverName = name
+        self.macID = macID
         if selects { selectOnLoad = ProcessInfo.processInfo.environment["YH_SELECT"] }
         connection = Connection(url: URL(string: address) ?? URL(string: Store.defaultAddress)!)
         pairing = address.contains("pair=")
@@ -365,8 +369,9 @@ final class Store: Identifiable {
         var rowsByThread: [String: [RowModel]] = [:]
         for message in batch {
             switch message {
-            case .hello(let version, let server, _):
+            case .hello(let version, let server, _, let mac):
                 serverName = server
+                if let mac { macID = mac }
                 serverProtocol = version
                 onHello?()
                 connection.send(.subscribeApp)

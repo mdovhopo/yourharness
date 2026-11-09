@@ -115,12 +115,14 @@ final class Dictation {
         }
     }
 
-    private static func allowed() async -> Bool {
+    // Not on the main actor: iOS answers these on a queue of its own, and a handler tied to the
+    // main actor stops the app there (Swift's isolation check).
+    nonisolated private static func allowed() async -> Bool {
         guard await speechAllowed() else { return false }
         return await AVAudioApplication.requestRecordPermission()
     }
 
-    private static func speechAllowed() async -> Bool {
+    nonisolated private static func speechAllowed() async -> Bool {
         await withCheckedContinuation { done in
             SFSpeechRecognizer.requestAuthorization { done.resume(returning: $0 == .authorized) }
         }

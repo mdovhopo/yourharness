@@ -29,6 +29,8 @@ pub struct Phones {
     pub error: Option<String>,
     /// The Mac's addresses on its networks, the likeliest first.
     pub addresses: Vec<String>,
+    /// This Mac's lasting ID, in the pairing link.
+    pub mac_id: String,
 }
 
 impl Phones {
@@ -38,7 +40,7 @@ impl Phones {
         let pairing = Arc::new(Pairing::new(devices, Box::new(move |d| {
             let _ = changed.send(d.to_vec());
         })));
-        Phones { pairing, stop: None, port: port.unwrap_or(DEFAULT_PORT), error: None, addresses: vec![] }
+        Phones { pairing, stop: None, port: port.unwrap_or(DEFAULT_PORT), error: None, addresses: vec![], mac_id: String::new() }
     }
 
     pub fn running(&self) -> bool {
@@ -48,7 +50,7 @@ impl Phones {
     /// Listens on every network address (`YH_PHONES_BIND` for tests: 127.0.0.1, so no firewall
     /// question), its actions to `actions`. A pairing code is ready once it's on. When its port
     /// is taken, the next few are tried; the port it got is `self.port`, to keep.
-    pub fn start(&mut self, data_dir: std::path::PathBuf, name: String, links: yh_server::Links) {
+    pub fn start(&mut self, data_dir: std::path::PathBuf, name: String, mac_id: String, links: yh_server::Links) {
         if self.running() {
             return;
         }
@@ -82,7 +84,8 @@ impl Phones {
         self.addresses = addresses();
         let stop = Arc::new(AtomicBool::new(false));
         self.stop = Some(stop.clone());
-        let options = yh_server::Options { token: None, name, pairing: Some(self.pairing.clone()), stop: Some(stop) };
+        self.mac_id = mac_id.clone();
+        let options = yh_server::Options { token: None, name, pairing: Some(self.pairing.clone()), stop: Some(stop), mac_id: Some(mac_id) };
         eprintln!("PHONES listening on {bind}:{} ({})", self.port, self.addresses.join(", "));
         let _ = std::thread::Builder::new().name("phones".into()).spawn(move || {
             if let Err(e) = yh_server::serve(listener, data_dir, options, Some(links)) {
@@ -108,7 +111,7 @@ impl Phones {
         }
         let code = self.pairing.code().unwrap_or_else(|| self.pairing.new_code());
         let host = self.addresses.first()?;
-        Some(format!("yourharness://pair?host={host}&port={}&code={code}&name={}", self.port, encode(name)))
+        Some(format!("yourharness://pair?host={host}&port={}&code={code}&name={}&id={}", self.port, encode(name), encode(&self.mac_id)))
     }
 }
 
@@ -165,7 +168,7 @@ mod tests {
         p.addresses = vec!["192.168.1.20".into()];
         let link = p.pairing_link("Max's Mac").unwrap();
         assert!(link.starts_with("yourharness://pair?host=192.168.1.20&port=7979&code="), "{link}");
-        assert!(link.ends_with("&name=Max%27s%20Mac"), "{link}");
+        assert!(link.contains("&name=Max%27s%20Mac&id="), "{link}");
         assert_eq!(p.pairing_link("Max's Mac").unwrap(), link, "the same code until it's used");
     }
 }

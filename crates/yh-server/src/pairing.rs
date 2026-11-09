@@ -21,11 +21,13 @@ pub struct Device {
     /// Seconds since 1970.
     pub paired_at: f64,
     pub last_seen: Option<f64>,
+    /// The phone's own lasting ID: pairing it again replaces this entry rather than adding one.
+    pub phone_id: Option<String>,
 }
 
 impl Device {
     pub fn to_json(&self) -> Value {
-        json!({ "id": self.id, "name": self.name, "tokenHash": self.token_hash, "pairedAt": self.paired_at, "lastSeen": self.last_seen })
+        json!({ "id": self.id, "name": self.name, "tokenHash": self.token_hash, "pairedAt": self.paired_at, "lastSeen": self.last_seen, "phoneID": self.phone_id })
     }
 
     pub fn from_json(v: &Value) -> Option<Device> {
@@ -35,6 +37,7 @@ impl Device {
             token_hash: v["tokenHash"].as_str()?.to_string(),
             paired_at: v["pairedAt"].as_f64().unwrap_or(0.),
             last_seen: v["lastSeen"].as_f64(),
+            phone_id: v["phoneID"].as_str().map(str::to_string),
         })
     }
 }
@@ -70,8 +73,9 @@ impl Pairing {
         state.code.as_ref().filter(|(_, at)| at.elapsed() < CODE_LIFETIME).map(|(c, _)| c.clone())
     }
 
-    /// A phone pairing with `code`: its id and new token, or None for a wrong or used code.
-    pub fn pair(&self, code: &str, name: &str) -> Option<(String, String)> {
+    /// A phone pairing with `code`: its id and new token, or None for a wrong or used code. A
+    /// phone paired before (same `phone_id`) is replaced: its old token stops working.
+    pub fn pair(&self, code: &str, name: &str, phone_id: Option<&str>) -> Option<(String, String)> {
         let (devices, id, token) = {
             let mut state = self.state.lock().unwrap();
             let valid = state.code.as_ref().is_some_and(|(c, at)| at.elapsed() < CODE_LIFETIME && same(c, code));
@@ -83,7 +87,11 @@ impl Pairing {
             let id = random_hex(8);
             let name = name.trim().chars().take(60).collect::<String>();
             let now = now();
-            state.devices.push(Device { id: id.clone(), name: if name.is_empty() { "Phone".into() } else { name }, token_hash: hash(&token), paired_at: now, last_seen: Some(now) });
+            let phone_id = phone_id.map(|p| p.chars().take(64).collect::<String>()).filter(|p| !p.is_empty());
+            if let Some(p) = &phone_id {
+                state.devices.retain(|d| d.phone_id.as_ref() != Some(p));
+            }
+            state.devices.push(Device { id: id.clone(), name: if name.is_empty() { "Phone".into() } else { name }, token_hash: hash(&token), paired_at: now, last_seen: Some(now), phone_id });
             (state.devices.clone(), id, token)
         };
         (self.on_change)(&devices);
@@ -151,11 +159,14 @@ mod tests {
         let saved: Arc<Mutex<Vec<Device>>> = Arc::default();
         let s = saved.clone();
         let p = Pairing::new(vec![], Box::new(move |d| *s.lock().unwrap() = d.to_vec()));
-        assert!(p.pair("nope", "x").is_none(), "no code yet");
+        assert!(p.pair("nope", "x", None).is_none(), "no code yet");
         let code = p.new_code();
-        assert!(p.pair("0000", "x").is_none(), "a wrong code");
-        let (id, token) = p.pair(&code, "Max's iPhone").unwrap();
-        assert!(p.pair(&code, "again").is_none(), "used once");
+        assert!(p.pair("0000", "x", None).is_none(), "a wrong code");
+        let (first, first_token) = p.pair(&code, "Max's iPhone", Some("phone-1")).unwrap();
+        assert!(p.pair(&code, "again", None).is_none(), "used once");
+        // The same phone pairing again replaces itself, its old token gone.
+        let (id, token) = p.pair(&p.new_code(), "Max's iPhone", Some("phone-1")).unwrap();
+        assert!(p.check(&first_token).is_none() && !p.has(&first) && p.devices().len() == 1);
         assert_eq!(p.check(&token).as_deref(), Some(id.as_str()));
         assert!(p.check("not a token").is_none());
         let kept = saved.lock().unwrap().clone();

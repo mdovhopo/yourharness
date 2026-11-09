@@ -293,7 +293,9 @@ pub const RESULT_LIMIT: usize = 2000;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToApp {
-    Hello { protocol: u32, server: String, data: String },
+    /// `mac` (protocol 5): this Mac's lasting ID, the same whatever address it's reached at, so a
+    /// phone knows a Mac it paired with before.
+    Hello { protocol: u32, server: String, data: String, #[serde(default, skip_serializing_if = "Option::is_none")] mac: Option<String> },
     /// Every project and thread, in sidebar order.
     Threads { projects: Vec<Project>, threads: Vec<Thread> },
     ThreadUpserted { thread: Thread },

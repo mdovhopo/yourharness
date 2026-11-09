@@ -12,6 +12,16 @@ final class Fleet {
     struct Saved: Codable, Hashable {
         var address: String
         var name: String?
+        /// The Mac's lasting ID: one entry per Mac, whatever its address.
+        var id: String?
+    }
+
+    /// This phone's lasting ID, sent when it pairs: pairing again replaces it on the Mac.
+    static var phoneID: String {
+        if let id = UserDefaults.standard.string(forKey: "phoneID") { return id }
+        let id = UUID().uuidString.lowercased()
+        UserDefaults.standard.set(id, forKey: "phoneID")
+        return id
     }
 
     private(set) var stores: [Store]
@@ -39,7 +49,7 @@ final class Fleet {
         }
         let first = env["YH_PHONE_MAC"].flatMap(Int.init) ?? UserDefaults.standard.integer(forKey: "currentMac")
         let start = saved.indices.contains(first) ? first : 0
-        let stores = saved.enumerated().map { i, mac in Store(address: mac.address, name: mac.name, selects: i == start) }
+        let stores = saved.enumerated().map { i, mac in Store(address: mac.address, name: mac.name, macID: mac.id, selects: i == start) }
         self.stores = stores
         current = stores[start]
         tab = env["YH_PHONE_TAB"].flatMap(AppTab.init(rawValue:)) ?? .threads
@@ -87,20 +97,23 @@ final class Fleet {
         func item(_ name: String) -> String? { items.first { $0.name == name }?.value }
         guard let host = item("host"), let port = item("port"), let code = item("code") else { return false }
         let base = "ws://\(host):\(port)/"
+        let macID = item("id")
         let device = Self.deviceName.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? "Phone"
         // The guess a new install starts with goes now; the Mac it paired with before, once this
         // pairing works (a used code leaves the old pairing as it was), and any earlier try.
         let guess = { (s: Store) in s.serverAddress == Store.defaultAddress && !s.everConnected }
-        let earlier = { (s: Store) in s.pairing && s.serverAddress.hasPrefix(base) }
+        let earlier = { (s: Store) in s.pairing && (s.serverAddress.hasPrefix(base) || (macID != nil && s.macID == macID)) }
         stores.filter { guess($0) || earlier($0) }.forEach { $0.disconnect() }
         stores.removeAll { guess($0) || earlier($0) }
-        let store = Store(address: "\(base)?pair=\(code)&device=\(device)", name: item("name"))
+        let store = Store(address: "\(base)?pair=\(code)&device=\(device)&device_id=\(Self.phoneID)", name: item("name"), macID: macID)
         wire(store)
         store.onPaired = { [weak self, weak store] token in
             guard let self, let store else { return }
             store.paired(address: "\(base)?token=\(token)")
-            for old in stores where old !== store && old.serverAddress.hasPrefix(base) { old.disconnect() }
-            stores.removeAll { $0 !== store && $0.serverAddress.hasPrefix(base) }
+            // The same Mac paired before (by its ID, else its address) gives way to this.
+            let same = { (s: Store) in s !== store && (s.serverAddress.hasPrefix(base) || (store.macID != nil && s.macID == store.macID)) }
+            stores.filter(same).forEach { $0.disconnect() }
+            stores.removeAll(where: same)
             save()
         }
         stores.append(store)
@@ -137,13 +150,29 @@ final class Fleet {
 
     private func wire(_ store: Store) {
         store.onShow = { [weak self] in self?.tab = .threads }
-        store.onHello = { [weak self] in self?.save() }
+        store.onHello = { [weak self, weak store] in
+            guard let self, let store else { return }
+            merge(store)
+            save()
+        }
+    }
+
+    /// Two entries that turn out to be the same Mac (its ID, told on connecting) become one:
+    /// the one shown, else the one that just connected.
+    private func merge(_ store: Store) {
+        guard let id = store.macID, !store.pairing else { return }
+        let same = stores.filter { $0.macID == id && !$0.pairing }
+        guard same.count > 1 else { return }
+        let keep = same.contains { $0 === current } ? current : store
+        for s in same where s !== keep { s.disconnect() }
+        stores.removeAll { $0 !== keep && $0.macID == id && !$0.pairing }
+        Perf.shared.log("MERGED \(same.count) entries for \(keep.displayName)")
     }
 
     private func save() {
         guard saves else { return }
         // A Mac still pairing isn't kept: its code works only once.
-        let macs = stores.filter { !$0.pairing }.map { Saved(address: $0.serverAddress, name: $0.serverName) }
+        let macs = stores.filter { !$0.pairing }.map { Saved(address: $0.serverAddress, name: $0.serverName, id: $0.macID) }
         UserDefaults.standard.set(try? JSONEncoder().encode(macs), forKey: "macs")
         UserDefaults.standard.set(stores.firstIndex { $0 === current } ?? 0, forKey: "currentMac")
         Perf.shared.log("SAVED \(macs.count) Macs, showing \(stores.firstIndex { $0 === current } ?? 0)")

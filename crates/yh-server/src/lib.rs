@@ -53,6 +53,8 @@ pub struct Options {
     pub pairing: Option<Arc<pairing::Pairing>>,
     /// Set to stop serving: no more connections, and the open ones close.
     pub stop: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// This Mac's lasting ID, told in `hello`.
+    pub mac_id: Option<String>,
 }
 
 impl Options {
@@ -623,7 +625,8 @@ fn connection(id: u64, stream: TcpStream, shared: &Shared, options: &Options, di
         }
         if let (Some(code), Some(p)) = (param("pair"), options.pairing.as_ref()) {
             let name = param("device").unwrap_or_default();
-            return match p.pair(&code, &name) {
+            let phone = param("device_id");
+            return match p.pair(&code, &name, phone.as_deref()) {
                 Some((id, token)) => {
                     device = Some(id.clone());
                     paired = Some((id, token));
@@ -641,7 +644,7 @@ fn connection(id: u64, stream: TcpStream, shared: &Shared, options: &Options, di
     let source = Source::open(directory)?;
     let (outbox, inbox) = flume::bounded(OUTBOX);
     shared.clients.lock().unwrap().insert(id, Client { outbox, app: false, watching: vec![] });
-    let hello = ToApp::Hello { protocol: wire::PROTOCOL, server: options.name.clone(), data: name_of(directory) };
+    let hello = ToApp::Hello { protocol: wire::PROTOCOL, server: options.name.clone(), data: name_of(directory), mac: options.mac_id.clone() };
     write(&mut ws, &hello)?;
     if let Some((device, token)) = paired {
         eprintln!("client {id}: paired as {device}");

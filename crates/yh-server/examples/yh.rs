@@ -58,7 +58,7 @@ fn live_line(l: &Live) -> String {
 /// Prints a message; true when it says the watched thread's turn is over (after it began).
 fn print(m: &ToApp, began: &mut bool) -> bool {
     match m {
-        ToApp::Hello { server, data, protocol } => println!("HELLO {server} · {data} · protocol {protocol}"),
+        ToApp::Hello { server, data, protocol, mac } => println!("HELLO {server} · {data} · protocol {protocol}{}", mac.as_deref().map(|m| format!(" · mac {m}")).unwrap_or_default()),
         ToApp::Threads { projects, threads } => println!("THREADS {} projects, {} threads", projects.len(), threads.len()),
         ToApp::ThreadUpserted { thread: t } => println!("THREAD {} {:?} running={} waiting={}", t.id, t.title, t.running, t.waiting),
         ToApp::ThreadRemoved { id } => println!("REMOVED {id}"),
