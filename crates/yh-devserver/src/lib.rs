@@ -71,6 +71,8 @@ impl Shared {
 pub fn serve(listener: TcpListener, directory: PathBuf, options: Options) -> Result<(), String> {
     let shared = Arc::new(Shared::default());
     let source = Source::open(&directory)?;
+    // The list is read before anyone connects, so the first `threads` is never empty.
+    refresh_listing(&source, &shared, &HashMap::new(), true);
     let options = Arc::new(options);
     std::thread::Builder::new()
         .name("poller".into())
@@ -98,7 +100,6 @@ fn poll(source: Source, shared: &Shared) {
     let mut rev = source.max_rev().unwrap_or(0);
     let mut changed_at: HashMap<String, Instant> = HashMap::new();
     let mut tick = 0u32;
-    refresh_listing(&source, shared, &changed_at, true);
     loop {
         std::thread::sleep(POLL);
         tick += 1;
