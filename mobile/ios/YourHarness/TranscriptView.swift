@@ -232,6 +232,7 @@ final class TranscriptViewController: UIViewController, UICollectionViewDataSour
         collectionView.register(RowCell.self, forCellWithReuseIdentifier: "row")
         view.addSubview(collectionView)
         model.onUpdate = { [weak self] update in self?.enqueue(update) }
+        NotificationCenter.default.addObserver(self, selector: #selector(diagramReady(_:)), name: DiagramCache.ready, object: nil)
         if let seconds = ProcessInfo.processInfo.environment["YH_SCROLL_PROBE"].flatMap(Double.init) {
             probe = ScrollProbe(seconds: seconds, controller: self)
         }
@@ -293,6 +294,17 @@ final class TranscriptViewController: UIViewController, UICollectionViewDataSour
                     Perf.shared.log("OPEN row \(row.seq) \(wanted)")
                     openDetail(row)
                 }
+                // `YH_OPEN_PICTURE=1`: the newest row's pictures opened, as tapping one does.
+                if ProcessInfo.processInfo.environment["YH_OPEN_PICTURE"] == "1", !openedRow,
+                   let row = model.rows.last(where: { m in
+                       if case .user(_, let a) = m.content { return !Pictures.yours(a).isEmpty }
+                       if case .media(_, let p) = m.content { return !p.isEmpty }
+                       return false
+                   }) {
+                    openedRow = true
+                    Perf.shared.log("OPEN pictures \(row.seq)")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.openPictures(seq: row.seq, index: 0) }
+                }
             }
         case .prepended:
             guard let first = layouts.first?.seq else { return process() }
@@ -305,6 +317,9 @@ final class TranscriptViewController: UIViewController, UICollectionViewDataSour
                 reloadShowing()
                 collectionView.contentOffset.y = offset + added
             }
+        case .remeasure(let seqs):
+            let rows = seqs.compactMap { model.row($0) }
+            measureInBackground(rows) { [weak self] measured in self?.replace(measured) }
         case .changed(let appended, let changed):
             // Measured in the background as well: a long reply growing costs the main thread nothing.
             let rows = (changed + appended).compactMap { model.row($0) }
@@ -366,6 +381,29 @@ final class TranscriptViewController: UIViewController, UICollectionViewDataSour
         if follow { scrollToBottom() }
     }
 
+    /// Rows measured again with nothing new in them (a diagram drawn): put in place whatever
+    /// their copy, heights and cells updated.
+    private func replace(_ measured: [RowLayout]) {
+        guard let first = layouts.first?.seq else { return }
+        var reconfigure: [IndexPath] = []
+        var heightsChanged = false
+        for new in measured {
+            let i = new.seq - first
+            guard layouts.indices.contains(i), layouts[i].seq == new.seq else { continue }
+            heightsChanged = heightsChanged || new.height != layouts[i].height
+            layouts[i] = new
+            reconfigure.append(IndexPath(item: i, section: 0))
+        }
+        if heightsChanged {
+            layout.heights = layouts.map(\.height)
+            UIView.performWithoutAnimation { layout.invalidateLayout() }
+        }
+        for path in reconfigure {
+            (collectionView.cellForItem(at: path) as? RowCell)?.configure(layouts[path.item])
+        }
+        if followsBottom { scrollToBottom() }
+    }
+
     private func reloadShowing() {
         layout.heights = layouts.map(\.height)
         collectionView.reloadData()
@@ -387,6 +425,10 @@ final class TranscriptViewController: UIViewController, UICollectionViewDataSour
 
     func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
         let cell = collectionView.dequeueReusableCell(withReuseIdentifier: "row", for: indexPath) as! RowCell
+        let seq = layouts[indexPath.item].seq
+        cell.thread = model.threadID
+        cell.onPicture = { [weak self] index in self?.openPictures(seq: seq, index: index) }
+        cell.onDiagram = { [weak self] key in self?.openDiagram(key) }
         cell.configure(layouts[indexPath.item])
         return cell
     }
@@ -405,7 +447,54 @@ final class TranscriptViewController: UIViewController, UICollectionViewDataSour
         openDetail(row)
     }
 
+    /// A row's pictures full screen, from the one tapped.
+    fileprivate func openPictures(seq: Int, index: Int) {
+        guard let row = model.row(seq) else { return }
+        let count: Int = switch row.content {
+        case .user(_, let attachments): Pictures.yours(attachments).count
+        case .media(_, let pictures): pictures.count
+        default: 0
+        }
+        guard count > 0 else { return }
+        let viewer = UIHostingController(rootView: PictureViewer(thread: model.threadID, seq: seq, count: count, page: min(index, count - 1)))
+        viewer.modalPresentationStyle = .fullScreen
+        present(viewer, animated: true)
+    }
+
+    /// A diagram at its own size, to zoom and scroll.
+    fileprivate func openDiagram(_ key: String) {
+        guard let drawing = DiagramCache.shared.drawing(key) else { return }
+        let nav = UINavigationController(rootViewController: DiagramViewer(drawing: drawing))
+        nav.modalPresentationStyle = .fullScreen
+        present(nav, animated: true)
+        Perf.shared.log("OPEN diagram \(drawing.kind) \(Int(drawing.width))x\(Int(drawing.height))")
+    }
+
+    /// A diagram drawn by the Mac: the rows it's in measured again.
+    @objc private func diagramReady(_ note: Notification) {
+        guard let key = note.object as? String else { return }
+        let seqs = layouts.filter { $0.diagramKeys.contains(key) }.map(\.seq)
+        if !seqs.isEmpty { enqueue(.remeasure(seqs)) }
+        // `YH_OPEN_DIAGRAM=1`: the newest diagram opened once drawn, as a tap does.
+        if ProcessInfo.processInfo.environment["YH_OPEN_DIAGRAM"] == "1", !openedRow, layouts.last(where: { !$0.diagramKeys.isEmpty })?.diagramKeys.last == key {
+            openedRow = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.openDiagram(key) }
+        }
+    }
+
     fileprivate func openDetail(_ row: Row) {
+        if case .agent? = model.row(row.seq)?.content, let store {
+            let sheet = UIHostingController(rootView: SubagentSheet(thread: model.threadID, seq: row.seq, store: store))
+            if let s = sheet.sheetPresentationController {
+                s.detents = [.medium(), .large()]
+                s.prefersGrabberVisible = true
+            }
+            present(sheet, animated: true)
+            return
+        }
+        if case .media(_, let pictures)? = model.row(row.seq)?.content, !pictures.isEmpty {
+            return openPictures(seq: row.seq, index: 0)
+        }
         let sheet = UIHostingController(rootView: RowDetail(row: row, threadID: model.threadID, store: store))
         if let s = sheet.sheetPresentationController {
             s.detents = [.medium(), .large()]
@@ -493,6 +582,14 @@ final class RowCell: UICollectionViewCell {
     private var codes: [CodeBlockView] = []
     private var rules: [UIView] = []
     private var icons: [UIImageView] = []
+    private var cards: [UIView] = []
+    private var pictures: [PictureView] = []
+    private var diagrams: [DiagramView] = []
+    /// The thread its row is in, for its pictures.
+    var thread = ""
+    /// A picture tapped (its place among the row's), a diagram tapped (its key).
+    var onPicture: ((Int) -> Void)?
+    var onDiagram: ((String) -> Void)?
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -502,7 +599,7 @@ final class RowCell: UICollectionViewCell {
     required init?(coder: NSCoder) { fatalError() }
 
     func configure(_ layout: RowLayout) {
-        var used = (labels: 0, bubbles: 0, codes: 0, rules: 0, icons: 0)
+        var used = (labels: 0, bubbles: 0, codes: 0, rules: 0, icons: 0, cards: 0, pictures: 0, diagrams: 0)
         for part in layout.parts {
             switch part {
             case .text(let text, let frame, let lines):
@@ -545,8 +642,34 @@ final class RowCell: UICollectionViewCell {
                 i.image = UIImage(systemName: symbol)
                 i.tintColor = tint
                 i.frame = frame
+            case .card(let frame):
+                let c = take(&cards, &used.cards) { () -> UIView in
+                    let c = UIView()
+                    c.backgroundColor = .secondarySystemBackground
+                    c.layer.cornerRadius = 16
+                    c.layer.cornerCurve = .continuous
+                    c.layer.borderWidth = 1 / UIScreen.main.scale
+                    c.layer.borderColor = UIColor.separator.cgColor
+                    return c
+                }
+                c.frame = frame
+                contentView.sendSubviewToBack(c)
+            case .picture(let index, let frame):
+                let v = take(&pictures, &used.pictures) { PictureView(frame: .zero) }
+                v.frame = frame
+                v.load(thread: thread, seq: layout.seq, index: index)
+                v.onTap = { [weak self] in self?.onPicture?(index) }
+            case .diagram(let key, let frame):
+                let v = take(&diagrams, &used.diagrams) { DiagramView() }
+                v.frame = frame
+                v.key = key
+                v.drawing = DiagramCache.shared.drawing(key)
+                v.onTap = { [weak self] in self?.onDiagram?(key) }
             }
         }
+        hide(cards, from: used.cards)
+        hide(pictures, from: used.pictures)
+        hide(diagrams, from: used.diagrams)
         hide(labels, from: used.labels)
         hide(bubbles, from: used.bubbles)
         hide(codes, from: used.codes)

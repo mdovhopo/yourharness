@@ -20,6 +20,10 @@ enum RowContent: Sendable {
     case reply([MDBlock])
     case thinking(String)
     case tool(ToolSummary)
+    /// A sub-agent's call (`Agent`, `Task`): a card with its run.
+    case agent(ToolSummary, SubagentInfo?)
+    /// Pictures Claude showed you (`show_media`): their paths on the Mac.
+    case media(ToolSummary, pictures: [String])
     case notice(String, style: String?)
     case other(kind: String, text: String)
 
@@ -28,6 +32,10 @@ enum RowContent: Sendable {
         case "user": self = .user(row.text, attachments: row.attachments ?? [])
         case "assistant": self = .reply(Markdown.blocks(row.text))
         case "thinking": self = .thinking(row.text)
+        case "tool" where row.subagent != nil || ["Agent", "Task"].contains(row.toolName ?? ""):
+            self = .agent(ToolSummary(row), row.subagent)
+        case "tool" where row.toolName == Pictures.mediaTool:
+            self = .media(ToolSummary(row), pictures: Pictures.shown(row.toolInput))
         case "tool": self = .tool(ToolSummary(row))
         case "notice": self = .notice(row.text, style: row.noticeStyle)
         default: self = .other(kind: row.kind, text: row.text)
@@ -194,5 +202,24 @@ enum Markdown {
         }
         flush()
         return blocks
+    }
+}
+
+/// Which of a row's files are pictures the Mac sends (`media`): the same rule as its server's.
+enum Pictures {
+    static let mediaTool = "mcp__harness__show_media"
+    static func isPicture(_ name: String) -> Bool {
+        ["png", "jpg", "jpeg", "gif", "webp", "heic"].contains(name.split(separator: ".").last.map { $0.lowercased() } ?? "")
+    }
+    /// Your attachments that are pictures kept in the app's attachments folder.
+    static func yours(_ attachments: [String]) -> [String] {
+        attachments.filter { isPicture($0) && !$0.contains("/") && !$0.contains("..") }
+    }
+    /// What `show_media` showed: its `paths`, then `path`, the pictures among them.
+    static func shown(_ input: String?) -> [String] {
+        guard let object = input.flatMap({ try? JSONSerialization.jsonObject(with: Data($0.utf8)) }) as? [String: Any] else { return [] }
+        var paths = (object["paths"] as? [String]) ?? []
+        if let p = object["path"] as? String { paths.append(p) }
+        return paths.filter(isPicture)
     }
 }

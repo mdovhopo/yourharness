@@ -32,6 +32,8 @@ final class Store {
     var modes: [String] = []
     /// Rows' whole tool input and result, asked for from a row's sheet, by "thread#seq".
     var whole: [String: WholeOutput] = [:]
+    /// Sub-agents' whole runs, asked for from their sheet, by "thread#seq".
+    var subagentRuns: [String: SubagentRun] = [:]
 
     struct WholeOutput: Equatable {
         let input: String?
@@ -57,6 +59,9 @@ final class Store {
         connection.onState = { [weak self] in self?.state = $0 }
         connection.onMessages = { [weak self] in self?.apply($0) }
         connection.connect()
+        // Pictures and diagrams in rows are asked for as they're shown.
+        MediaCache.shared.ask = { [weak self] thread, seq, index in self?.connection.send(.media(thread: thread, seq: seq, index: index)) }
+        DiagramCache.shared.ask = { [weak self] key, source in self?.connection.send(.diagram(key: key, source: source)) }
     }
 
     func connect(to address: String) {
@@ -173,6 +178,12 @@ final class Store {
         connection.send(.toolResult(thread: thread, seq: seq))
     }
 
+    /// A sub-agent's whole run, into `subagentRuns`.
+    func askSubagent(thread: String, seq: Int) {
+        guard serverProtocol >= 4, state == .connected else { return }
+        connection.send(.subagent(thread: thread, seq: seq))
+    }
+
     /// The project a thread is in, and its permission mode.
     func project(of thread: String) -> Project? {
         guard let t = threads[thread] else { return nil }
@@ -268,6 +279,12 @@ final class Store {
                 self.modes = modes
             case .toolResult(let thread, let seq, let input, let result):
                 whole["\(thread)#\(seq)"] = WholeOutput(input: input, result: result)
+            case .subagent(let thread, let seq, let run):
+                subagentRuns["\(thread)#\(seq)"] = run
+            case .media(let thread, let seq, let index, let image, let error):
+                MediaCache.shared.deliver(thread: thread, seq: seq, index: index, image: image, error: error)
+            case .diagram(let key, let drawing, let error):
+                DiagramCache.shared.deliver(key: key, drawing: drawing, error: error)
             case .done(let id, let error, let made):
                 let action = pending.removeValue(forKey: id)
                 // A thread made from here: opened as soon as the list has it.
@@ -325,6 +342,8 @@ final class TranscriptModel {
         case reload
         case changed(appended: [Int], changed: [Int])
         case prepended(Int)
+        /// Rows to measure again with nothing new in them (a diagram in them was drawn).
+        case remeasure([Int])
     }
 
     static let pageSize = 160

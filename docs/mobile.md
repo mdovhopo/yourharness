@@ -3,7 +3,9 @@
 Status: the MVP works locally, on the `remote-foundation` branch (the `mobile` branch merged
 into it; the foundation's thread carries both). Nothing here is merged into `main`.
 
-**What works (checked 2026-11-09 in the Simulator with real Haiku turns, protocol 3):** the
+**What works (checked 2026-11-09 in the Simulator with real Haiku turns, protocol 4):** sub-agents
+as live cards with their runs, pictures (yours and Claude's) and Mermaid diagrams drawn as on the
+Mac; and the
 Mac's threads and transcripts live, Claude's reply streaming in as the Mac's Claude Code writes
 it; sending, steering, stopping; queued messages sent now or taken back; permission cards; Claude's
 questions answered (several questions, several choices, or your own words) or skipped; plans
@@ -210,6 +212,16 @@ Recorded here so the MVP stays small. Roughly in order; Tailscale last.
    use), Allow and Deny on the lock screen, a Live Activity for a running turn. Needs the
    Apple Developer Program account.
 5. **Composer extras:** photos and camera, voice, `@` files, slash commands.
+5b. ✅ **Sub-agents, pictures and diagrams** (protocol 4), checked 2026-11-09 with a real Haiku
+   turn sent from the phone: a sub-agent's card updated live ("Working · general-purpose · 1 tool
+   use · 30k tokens" and what it was running) and opened a sheet with its status, numbers, what it
+   was asked, its steps and report; a picture Claude showed with `show_media` drew in the
+   transcript and opened full screen, as did one sent from the phone (from the Mac's attachments
+   folder); a Mermaid flowchart in the reply drew as the Mac draws it (the Mac's painter, moved to
+   `yh_core::diagrams::paint`, recorded by the server as paths and labels in colour roles) and
+   opened at its own size to scroll and zoom. Wide ones too small to read say "Tap to zoom". A kind
+   the Mac doesn't draw stays code. Test hooks: `YH_OPEN_ROW=Agent` (the newest sub-agent's sheet),
+   `YH_OPEN_PICTURE=1`, `YH_OPEN_DIAGRAM=1`.
 6. **Richer transcript:** ✅ a tool row opens in a sheet (an edit as a line diff, a write's
    content, a command and its output, other inputs pretty-printed, the result's first 2000
    characters), thinking opens in full, your messages and replies copy with a long press

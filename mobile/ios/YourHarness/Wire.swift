@@ -1,8 +1,9 @@
 // The messages the Mac and the phone trade (docs/mobile.md, "The wire"), mirroring
-// crates/yh-proto (protocol 3: live state, actions, the whole app's controls). JSON text frames tagged with `type`, keys in snake_case.
+// crates/yh-proto (protocol 4: live state, actions, the whole app's controls, sub-agents, pictures, diagrams). JSON text frames tagged with `type`, keys in snake_case.
 // Unknown messages and fields are ignored.
 
 import Foundation
+import UIKit
 
 struct Project: Decodable, Sendable, Hashable, Identifiable {
     let id: String
@@ -117,6 +118,69 @@ struct Row: Decodable, Sendable {
     let turnEndedAt: Double?
     let attachments: [String]?
     let changedFiles: [String]?
+    /// Protocol 4: a sub-agent's call, its run summarized.
+    let subagent: SubagentInfo?
+}
+
+/// A sub-agent's run as its card shows it (protocol 4).
+struct SubagentInfo: Decodable, Sendable, Hashable {
+    let description: String
+    let status: String
+    let agentType: String?
+    let toolUses: Int?
+    let tokens: Int?
+    let durationMs: Int?
+    let activity: String?
+    let background: Bool?
+}
+
+struct SubagentStep: Decodable, Sendable, Hashable {
+    let tool: String?
+    let text: String
+    let result: String?
+    let isError: Bool?
+}
+
+struct SubagentRun: Decodable, Sendable {
+    let info: SubagentInfo
+    let prompt: String?
+    let steps: [SubagentStep]
+    let report: String?
+}
+
+/// A colour in a drawing: a role resolved in the phone's own light or dark, or the author's own.
+struct Ink: Decodable, Sendable {
+    let role: String?
+    let rgba: [Double]?
+    let alpha: Double
+}
+
+struct DrawnPath: Decodable, Sendable {
+    let d: String
+    let fill: Ink?
+    let stroke: Ink?
+    let width: Double?
+    let dashed: Bool?
+}
+
+struct DrawnLabel: Decodable, Sendable {
+    let lines: [String]
+    let x: Double
+    let y: Double
+    let width: Double?
+    let size: Double
+    let lineHeight: Double
+    let weight: Int
+    let color: Ink
+}
+
+/// A Mermaid diagram as the Mac draws it (protocol 4).
+struct Drawing: Decodable, Sendable {
+    let width: Double
+    let height: Double
+    let kind: String
+    let paths: [DrawnPath]
+    let labels: [DrawnLabel]
 }
 
 enum ToApp: Sendable {
@@ -134,6 +198,10 @@ enum ToApp: Sendable {
     case options(models: [ModelOption], modes: [String])
     /// Protocol 3: a row's whole tool input and result.
     case toolResult(thread: String, seq: Int, input: String?, result: String?)
+    /// Protocol 4: a sub-agent's whole run; a row's picture (decoded, or why not); a diagram drawn.
+    case subagent(thread: String, seq: Int, run: SubagentRun)
+    case media(thread: String, seq: Int, index: Int, image: UIImage?, error: String?)
+    case diagram(key: String, drawing: Drawing?, error: String?)
     case error(String)
     case unknown
 
@@ -143,6 +211,9 @@ enum ToApp: Sendable {
     private struct Done: Decodable { let id: String; let error: String?; let thread: String? }
     private struct Options: Decodable { let models: [ModelOption]; let modes: [String] }
     private struct Whole: Decodable { let thread: String; let seq: Int; let input: String?; let result: String? }
+    private struct Sub: Decodable { let thread: String; let seq: Int; let run: SubagentRun }
+    private struct Picture: Decodable { let thread: String; let seq: Int; let index: Int; let data: String?; let error: String? }
+    private struct Diagram: Decodable { let key: String; let drawing: Drawing?; let error: String? }
     private struct Threads: Decodable { let projects: [Project]; let threads: [ThreadInfo] }
     private struct Upserted: Decodable { let thread: ThreadInfo }
     private struct Removed: Decodable { let id: String }
@@ -150,6 +221,14 @@ enum ToApp: Sendable {
     private struct Changed: Decodable { let thread: String; let count: Int; let rows: [Row] }
     private struct Page: Decodable { let thread: String; let rows: [Row] }
     private struct Failure: Decodable { let message: String }
+
+    /// A picture scaled down to at most 1600 points on its longer side, decoded now.
+    static func fitted(_ image: UIImage) -> UIImage {
+        let longest = max(image.size.width, image.size.height)
+        guard longest > 1600 else { return image.preparingForDisplay() ?? image }
+        let scale = 1600 / longest
+        return image.preparingThumbnail(of: CGSize(width: image.size.width * scale, height: image.size.height * scale)) ?? image
+    }
 
     /// Decodes a frame and prepares its rows for drawing (markdown parsed): call it off the main thread.
     static func decode(_ data: Data) -> ToApp {
@@ -186,6 +265,17 @@ enum ToApp: Sendable {
             case "tool_result":
                 let m = try d.decode(Whole.self, from: data)
                 return .toolResult(thread: m.thread, seq: m.seq, input: m.input, result: m.result)
+            case "subagent":
+                let m = try d.decode(Sub.self, from: data)
+                return .subagent(thread: m.thread, seq: m.seq, run: m.run)
+            case "media":
+                let m = try d.decode(Picture.self, from: data)
+                // Decoded here, off the main thread, at most 1600 points on its longer side.
+                let image = m.data.flatMap { Data(base64Encoded: $0) }.flatMap(UIImage.init(data:)).map(ToApp.fitted)
+                return .media(thread: m.thread, seq: m.seq, index: m.index, image: image, error: image == nil ? (m.error ?? "The picture couldn't be read.") : nil)
+            case "diagram":
+                let m = try d.decode(Diagram.self, from: data)
+                return .diagram(key: m.key, drawing: m.drawing, error: m.error)
             case "error": return .error(try d.decode(Failure.self, from: data).message)
             default: return .unknown
             }
@@ -227,6 +317,10 @@ enum FromApp {
     case settle(id: String, thread: String, on: Bool)
     case delete(id: String, thread: String)
     case toolResult(thread: String, seq: Int)
+    // Protocol 4.
+    case subagent(thread: String, seq: Int)
+    case media(thread: String, seq: Int, index: Int)
+    case diagram(key: String, source: String)
 
     var actionID: String? {
         switch self {
@@ -291,6 +385,9 @@ enum FromApp {
         case .settle(let id, let t, let on): ["type": "settle", "id": id, "thread": t, "on": on]
         case .delete(let id, let t): ["type": "delete", "id": id, "thread": t]
         case .toolResult(let t, let seq): ["type": "tool_result", "thread": t, "seq": seq]
+        case .subagent(let t, let seq): ["type": "subagent", "thread": t, "seq": seq]
+        case .media(let t, let seq, let index): ["type": "media", "thread": t, "seq": seq, "index": index]
+        case .diagram(let key, let source): ["type": "diagram", "key": key, "source": source]
         }
         let data = try! JSONSerialization.data(withJSONObject: object)
         return String(decoding: data, as: UTF8.self)
