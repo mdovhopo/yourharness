@@ -429,9 +429,21 @@ impl Engine {
     fn command(&mut self, command: Command) {
         match command {
             Command::Open { thread, session_id, context_tokens, context_window } => {
-                if !self.runs.contains_key(&thread) {
-                    self.runs.insert(thread.clone(), ThreadRun::new(session_id, context_tokens, context_window));
-                    self.run_of(&thread);
+                match self.runs.get_mut(&thread) {
+                    // Made before the app told of it (a client's snapshot): what the app knows
+                    // fills in, or its next `claude` wouldn't resume the conversation.
+                    Some(run) => {
+                        let live = &mut run.live;
+                        if live.session_id.is_none() && !live.running {
+                            live.session_id = session_id;
+                        }
+                        live.composer.context_tokens = live.composer.context_tokens.or(context_tokens);
+                        live.composer.context_window = live.composer.context_window.or(context_window);
+                    }
+                    None => {
+                        self.runs.insert(thread.clone(), ThreadRun::new(session_id, context_tokens, context_window));
+                        self.run_of(&thread);
+                    }
                 }
             }
             Command::Send { thread, text, attachments, message_id, now, effort, deliver } => {
@@ -983,6 +995,25 @@ mod tests {
                 None => format!("{l}\n"),
             })
             .collect()
+    }
+
+    /// A phone watching a thread before the app opened it doesn't cost the thread its session.
+    #[test]
+    fn a_snapshot_first_keeps_the_session_the_app_tells() {
+        let engine = start(None);
+        let outputs = engine.subscribe();
+        let snapshot = |engine: &EngineHandle| {
+            engine.send(Command::Snapshot { thread: "t".into(), limit: 10, tag: 1, known: None });
+            loop {
+                if let Output::Snapshot { live, .. } = outputs.recv_timeout(Duration::from_secs(5)).expect("a snapshot") {
+                    return live;
+                }
+            }
+        };
+        assert_eq!(snapshot(&engine).session_id, None);
+        engine.send(Command::Open { thread: "t".into(), session_id: Some("s1".into()), context_tokens: Some(9), context_window: None });
+        let live = snapshot(&engine);
+        assert_eq!((live.session_id.as_deref(), live.composer.context_tokens), (Some("s1"), Some(9)));
     }
 
     #[test]

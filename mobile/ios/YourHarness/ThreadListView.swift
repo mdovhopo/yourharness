@@ -8,9 +8,41 @@ struct ThreadListView: View {
     @State private var renaming: ThreadInfo?
     @State private var title = ""
     @State private var deleting: ThreadInfo?
+    @State private var query = Self.env["YH_PHONE_SEARCH"] ?? ""
     private static let env = ProcessInfo.processInfo.environment
 
     var body: some View {
+        Group {
+            if store.state != .connected, !store.everConnected, store.sections.isEmpty, case .waiting = store.state {
+                Unreachable(showsServer: $showsServer)
+            } else if !query.trimmingCharacters(in: .whitespaces).isEmpty {
+                SearchResults(query: query)
+            } else {
+                list
+            }
+        }
+        .navigationTitle("Threads")
+        .navigationSubtitle(store.state == .connected ? store.serverName ?? "" : "")
+        .searchable(text: $query, prompt: "Titles and conversations")
+        .task(id: query) {
+            // Asked once typing pauses.
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled else { return }
+            store.search(query)
+            if !query.isEmpty { Perf.shared.log("SEARCH \(query)") }
+        }
+        .onChange(of: store.searchHits) { _, hits in
+            if !hits.isEmpty { Perf.shared.log("SEARCH found \(hits.count): \(hits[0].snippet.prefix(60))") }
+        }
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("Server", systemImage: "desktopcomputer") { showsServer = true }
+            }
+        }
+        .sheet(isPresented: $showsServer) { ServerSheet() }
+    }
+
+    private var list: some View {
         List {
             if store.state != .connected {
                 ConnectionRow(state: store.state, address: store.serverAddress)
@@ -45,6 +77,11 @@ struct ThreadListView: View {
                     }
                 }
             }
+            if !store.limits.isEmpty, !store.sections.isEmpty {
+                Section("Usage") {
+                    ForEach(store.limits) { LimitRow(window: $0) }
+                }
+            }
         }
         .listStyle(.insetGrouped)
         .overlay {
@@ -52,15 +89,7 @@ struct ThreadListView: View {
                 ContentUnavailableView("No Threads", systemImage: "bubble.left.and.text.bubble.right", description: Text("Threads you start on your Mac show up here."))
             }
         }
-        .navigationTitle("Threads")
-        .navigationSubtitle(store.state == .connected ? store.serverName ?? "" : "")
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button("Server", systemImage: "desktopcomputer") { showsServer = true }
-            }
-        }
         .refreshable { store.reconnect() }
-        .sheet(isPresented: $showsServer) { ServerSheet() }
         .alert("Rename Thread", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
             TextField("Title", text: $title)
             Button("Cancel", role: .cancel) { renaming = nil }
@@ -96,6 +125,137 @@ struct ThreadListView: View {
         Binding(get: { openShelves.contains(id) }, set: { open in
             if open { openShelves.insert(id) } else { openShelves.remove(id) }
         })
+    }
+}
+
+/// The Mac can't be reached and never was this time: what to do about it.
+private struct Unreachable: View {
+    @Binding var showsServer: Bool
+    @Environment(Store.self) private var store
+
+    var body: some View {
+        ContentUnavailableView {
+            Label("Can't Reach Your Mac", systemImage: "desktopcomputer.trianglebadge.exclamationmark")
+        } description: {
+            Text("Open YourHarness on your Mac with the phone server turned on. The phone keeps trying \(retry).")
+            Text(store.serverAddress).font(.footnote.monospaced())
+        } actions: {
+            Button("Try Again") { store.reconnect() }
+                .buttonStyle(.borderedProminent)
+            Button("Server Settings") { showsServer = true }
+        }
+    }
+
+    private var retry: String {
+        if case .waiting(_, let s) = store.state { return "every few seconds (next in \(s) s)" }
+        return "every few seconds"
+    }
+}
+
+/// Threads whose titles match, then rows where the words were said, from the Mac's index.
+private struct SearchResults: View {
+    let query: String
+    @Environment(Store.self) private var store
+
+    var body: some View {
+        let words = query.trimmingCharacters(in: .whitespaces)
+        let titled = store.sections.flatMap { $0.live + $0.settled }.filter { $0.title.localizedCaseInsensitiveContains(words) }
+        let hits = store.searchQuery == words ? store.searchHits : []
+        List {
+            if !titled.isEmpty {
+                Section("Threads") {
+                    ForEach(titled) { t in
+                        NavigationLink(value: t.id) { ThreadRow(thread: t) }
+                    }
+                }
+            }
+            if !hits.isEmpty {
+                Section("In Conversations") {
+                    ForEach(hits) { hit in
+                        NavigationLink(value: hit.thread) {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(store.threads[hit.thread]?.title ?? "Thread").font(.subheadline.weight(.semibold)).lineLimit(1)
+                                Text(Self.marked(hit.snippet)).font(.subheadline).foregroundStyle(.secondary).lineLimit(3)
+                            }
+                            .padding(.vertical, 2)
+                        }
+                    }
+                }
+            }
+        }
+        .listStyle(.insetGrouped)
+        .overlay {
+            if titled.isEmpty, hits.isEmpty {
+                if store.canSearch, store.searchQuery == words, words.count >= 2 {
+                    ContentUnavailableView.search(text: words)
+                } else if !store.canSearch, store.state == .connected {
+                    ContentUnavailableView("Titles Only", systemImage: "magnifyingglass", description: Text("Searching conversations needs a newer YourHarness on the Mac."))
+                }
+            }
+        }
+    }
+
+    /// The words found, in `[brackets]` from the Mac, in bold.
+    static func marked(_ snippet: String) -> AttributedString {
+        var out = AttributedString()
+        var rest = Substring(snippet)
+        while let open = rest.firstIndex(of: "["), let close = rest[open...].firstIndex(of: "]") {
+            out += AttributedString(String(rest[..<open]))
+            var found = AttributedString(String(rest[rest.index(after: open)..<close]))
+            found.inlinePresentationIntent = .stronglyEmphasized
+            found.foregroundColor = .primary
+            out += found
+            rest = rest[rest.index(after: close)...]
+        }
+        out += AttributedString(String(rest))
+        return out
+    }
+}
+
+/// A usage window as the Mac's footer shows it: how much is used, when it starts over.
+struct LimitRow: View {
+    let window: LimitWindow
+
+    /// Its reset time passed since the Mac last heard: what it says is from before.
+    private var stale: Bool { window.resetsAt.map { $0 < Date().timeIntervalSince1970 } ?? false }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(Self.name(window.name))
+                Spacer()
+                Text(window.used, format: .percent.precision(.fractionLength(0)))
+                    .monospacedDigit()
+                    .foregroundStyle(!stale && window.used >= 0.9 ? .red : .secondary)
+            }
+            ProgressView(value: min(max(window.used, 0), 1))
+                .tint(stale ? .gray : window.used >= 0.9 ? .red : window.used >= 0.7 ? .orange : .accentColor)
+            if let at = window.resetsAt {
+                let date = Date(timeIntervalSince1970: at)
+                Group {
+                    if stale {
+                        Text("Started over \(date, format: .relative(presentation: .named)); not heard from since")
+                    } else {
+                        Text("Resets \(date, format: .relative(presentation: .named))")
+                    }
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 2)
+        .opacity(stale ? 0.7 : 1)
+        .accessibilityElement(children: .combine)
+    }
+
+    static func name(_ raw: String) -> String {
+        switch raw {
+        case "five_hour": "5-hour limit"
+        case "seven_day": "Weekly limit"
+        case "seven_day_opus": "Weekly · Opus"
+        case "seven_day_sonnet": "Weekly · Sonnet"
+        default: raw.replacingOccurrences(of: "_", with: " ").capitalized
+        }
     }
 }
 

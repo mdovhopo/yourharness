@@ -1,5 +1,6 @@
 // The messages the Mac and the phone trade (docs/mobile.md, "The wire"), mirroring
-// crates/yh-proto (protocol 4: live state, actions, the whole app's controls, sub-agents, pictures, diagrams). JSON text frames tagged with `type`, keys in snake_case.
+// crates/yh-proto (protocol 5: live state, actions, the whole app's controls, sub-agents, pictures,
+// diagrams, search, files, commands, limits, side chats). JSON text frames tagged with `type`, keys in snake_case.
 // Unknown messages and fields are ignored.
 
 import Foundation
@@ -122,6 +123,40 @@ struct Row: Decodable, Sendable {
     let subagent: SubagentInfo?
 }
 
+extension Row {
+    /// The same row whatever its `rev`: a server started again numbers its copies anew.
+    func sameContent(as o: Row) -> Bool {
+        seq == o.seq && id == o.id && kind == o.kind && text == o.text && toolName == o.toolName && toolInput == o.toolInput
+            && toolResult == o.toolResult && toolResultLength == o.toolResultLength && toolIsError == o.toolIsError
+            && noticeStyle == o.noticeStyle && date == o.date && turnEndedAt == o.turnEndedAt && attachments == o.attachments
+            && changedFiles == o.changedFiles && subagent == o.subagent
+    }
+}
+
+/// A slash command the composer offers (protocol 5).
+struct SlashCommand: Decodable, Sendable, Hashable, Identifiable {
+    let name: String
+    let hint: String?
+    let description: String?
+    var id: String { name }
+}
+
+/// A usage window: how much is used (0 to 1), when it starts over (protocol 5).
+struct LimitWindow: Decodable, Sendable, Hashable, Identifiable {
+    let name: String
+    let used: Double
+    let resetsAt: Double?
+    var id: String { name }
+}
+
+/// Where a search found its words (protocol 5).
+struct SearchHit: Decodable, Sendable, Hashable, Identifiable {
+    let thread: String
+    let seq: Int
+    let snippet: String
+    var id: String { "\(thread)#\(seq)" }
+}
+
 /// A sub-agent's run as its card shows it (protocol 4).
 struct SubagentInfo: Decodable, Sendable, Hashable {
     let description: String
@@ -194,8 +229,12 @@ enum ToApp: Sendable {
     case live(thread: String, Live)
     /// An action carrying this id was taken, or why not; `thread`: the one it made.
     case done(id: String, error: String?, thread: String?)
-    /// Protocol 3: the models and permission modes to choose from.
-    case options(models: [ModelOption], modes: [String])
+    /// Protocol 3: the models and permission modes to choose from; 5: each project's slash commands.
+    case options(models: [ModelOption], modes: [String], commands: [String: [SlashCommand]])
+    /// Protocol 5: usage limits; what a search found; a thread's files for `@`.
+    case limits([LimitWindow])
+    case searchResults(query: String, hits: [SearchHit])
+    case files(thread: String, query: String, files: [String])
     /// Protocol 3: a row's whole tool input and result.
     case toolResult(thread: String, seq: Int, input: String?, result: String?)
     /// Protocol 4: a sub-agent's whole run; a row's picture (decoded, or why not); a diagram drawn.
@@ -209,7 +248,10 @@ enum ToApp: Sendable {
     private struct Hello: Decodable { let `protocol`: Int?; let server: String; let data: String }
     private struct LiveMessage: Decodable { let thread: String; let live: Live }
     private struct Done: Decodable { let id: String; let error: String?; let thread: String? }
-    private struct Options: Decodable { let models: [ModelOption]; let modes: [String] }
+    private struct Options: Decodable { let models: [ModelOption]; let modes: [String]; let commands: [String: [SlashCommand]]? }
+    private struct Limits: Decodable { let windows: [LimitWindow] }
+    private struct Found: Decodable { let query: String; let hits: [SearchHit] }
+    private struct Files: Decodable { let thread: String; let query: String; let files: [String] }
     private struct Whole: Decodable { let thread: String; let seq: Int; let input: String?; let result: String? }
     private struct Sub: Decodable { let thread: String; let seq: Int; let run: SubagentRun }
     private struct Picture: Decodable { let thread: String; let seq: Int; let index: Int; let data: String?; let error: String? }
@@ -261,7 +303,14 @@ enum ToApp: Sendable {
                 return .done(id: m.id, error: m.error, thread: m.thread)
             case "options":
                 let m = try d.decode(Options.self, from: data)
-                return .options(models: m.models, modes: m.modes)
+                return .options(models: m.models, modes: m.modes, commands: m.commands ?? [:])
+            case "limits": return .limits(try d.decode(Limits.self, from: data).windows)
+            case "search_results":
+                let m = try d.decode(Found.self, from: data)
+                return .searchResults(query: m.query, hits: m.hits)
+            case "files":
+                let m = try d.decode(Files.self, from: data)
+                return .files(thread: m.thread, query: m.query, files: m.files)
             case "tool_result":
                 let m = try d.decode(Whole.self, from: data)
                 return .toolResult(thread: m.thread, seq: m.seq, input: m.input, result: m.result)
@@ -293,7 +342,7 @@ struct OutgoingImage: Sendable, Hashable {
 
 enum FromApp {
     case subscribeApp
-    case subscribeThread(String, limit: Int)
+    case subscribeThread(String, limit: Int, known: Int? = nil)
     case unsubscribeThread
     case page(String, beforeSeq: Int, limit: Int)
     // Protocol 2's actions; each carries an id its `done` answers.
@@ -321,13 +370,17 @@ enum FromApp {
     case subagent(thread: String, seq: Int)
     case media(thread: String, seq: Int, index: Int)
     case diagram(key: String, source: String)
+    // Protocol 5.
+    case search(query: String)
+    case files(thread: String, query: String)
+    case askAside(id: String, thread: String, text: String)
 
     var actionID: String? {
         switch self {
         case .send(let id, _, _, _, _), .stop(let id, _), .respond(let id, _, _, _), .withdraw(let id, _, _), .sendNow(let id, _, _),
              .answer(let id, _, _, _), .skipQuestion(let id, _, _), .approvePlan(let id, _, _, _, _), .keepPlanning(let id, _, _, _),
              .answerQuestion(let id, _, _, _), .newThread(let id, _, _), .setModel(let id, _, _), .setEffort(let id, _, _),
-             .setMode(let id, _, _), .rename(let id, _, _), .pin(let id, _, _), .settle(let id, _, _), .delete(let id, _): id
+             .setMode(let id, _, _), .rename(let id, _, _), .pin(let id, _, _), .settle(let id, _, _), .delete(let id, _), .askAside(let id, _, _): id
         default: nil
         }
     }
@@ -353,6 +406,7 @@ enum FromApp {
         case .pin(_, _, let on): on ? "pin" : "unpin"
         case .settle(_, _, let on): on ? "settle" : "unsettle"
         case .delete: "delete"
+        case .askAside(_, _, let text): "ask aside \(text.prefix(40))"
         default: "\(self)"
         }
     }
@@ -360,7 +414,7 @@ enum FromApp {
     var json: String {
         let object: [String: Any] = switch self {
         case .subscribeApp: ["type": "subscribe_app"]
-        case .subscribeThread(let t, let limit): ["type": "subscribe_thread", "thread": t, "limit": limit]
+        case .subscribeThread(let t, let limit, let known): ["type": "subscribe_thread", "thread": t, "limit": limit, "known": known.map { $0 as Any } ?? NSNull()]
         case .unsubscribeThread: ["type": "unsubscribe_thread"]
         case .page(let t, let before, let limit): ["type": "page", "thread": t, "before_seq": before, "limit": limit]
         case .send(let id, let t, let text, let now, let images):
@@ -388,6 +442,9 @@ enum FromApp {
         case .subagent(let t, let seq): ["type": "subagent", "thread": t, "seq": seq]
         case .media(let t, let seq, let index): ["type": "media", "thread": t, "seq": seq, "index": index]
         case .diagram(let key, let source): ["type": "diagram", "key": key, "source": source]
+        case .search(let query): ["type": "search", "query": query]
+        case .files(let t, let query): ["type": "files", "thread": t, "query": query]
+        case .askAside(let id, let t, let text): ["type": "ask_aside", "id": id, "thread": t, "text": text]
         }
         let data = try! JSONSerialization.data(withJSONObject: object)
         return String(decoding: data, as: UTF8.self)

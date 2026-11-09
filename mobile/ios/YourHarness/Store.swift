@@ -34,6 +34,16 @@ final class Store {
     var whole: [String: WholeOutput] = [:]
     /// Sub-agents' whole runs, asked for from their sheet, by "thread#seq".
     var subagentRuns: [String: SubagentRun] = [:]
+    /// Protocol 5: each project's slash commands, the usage limits, the last search's hits, and
+    /// the open composer's `@` matches.
+    var commands: [String: [SlashCommand]] = [:]
+    var limits: [LimitWindow] = []
+    var searchQuery = ""
+    var searchHits: [SearchHit] = []
+    var fileMatches: (thread: String, query: String, files: [String])?
+    var canSearch: Bool { serverProtocol >= 5 && state == .connected }
+    /// Ever connected since launch: tells "can't reach the Mac" apart from "connecting".
+    var everConnected = false
 
     struct WholeOutput: Equatable {
         let input: String?
@@ -56,7 +66,10 @@ final class Store {
         let address = env ?? UserDefaults.standard.string(forKey: "server") ?? Store.defaultAddress
         serverAddress = address
         connection = Connection(url: URL(string: address) ?? URL(string: Store.defaultAddress)!)
-        connection.onState = { [weak self] in self?.state = $0 }
+        connection.onState = { [weak self] in
+            self?.state = $0
+            if $0 == .connected { self?.everConnected = true }
+        }
         connection.onMessages = { [weak self] in self?.apply($0) }
         connection.connect()
         // Pictures and diagrams in rows are asked for as they're shown.
@@ -220,6 +233,66 @@ final class Store {
 
     private static func newID() -> String { UUID().uuidString.lowercased() }
 
+    // MARK: Protocol 5
+
+    /// Searches every thread's words; hits arrive in `searchHits`. Titles are matched here.
+    func search(_ query: String) {
+        let query = query.trimmingCharacters(in: .whitespaces)
+        searchQuery = query
+        searchHits = []
+        guard canSearch, query.count >= 2 else { return }
+        connection.send(.search(query: query))
+    }
+
+    /// Files in a thread's folder matching what follows `@`; into `fileMatches`.
+    func findFiles(_ query: String, in thread: String) {
+        guard canSearch else { return }
+        connection.send(.files(thread: thread, query: query))
+    }
+
+    /// The slash commands a thread's composer offers.
+    func commands(for thread: String) -> [SlashCommand] {
+        // `/mcp` opens a sheet on the Mac; `/btw` always works, even before Claude listed the rest.
+        let listed = threads[thread].flatMap { commands[$0.projectId] } ?? []
+        let mine = listed.filter { $0.name != "mcp" }
+        return mine.contains { $0.name == "btw" } ? mine : [SlashCommand(name: "btw", hint: "<question>", description: "Ask a side question. Claude sees this thread; nothing is added to it.")] + mine
+    }
+
+    /// The side chat beside a thread (`/btw`): its rows, its live state.
+    @ObservationIgnored private(set) var aside: TranscriptModel?
+    var asideLive: Live?
+
+    static func asideID(of thread: String) -> String { "side:\(thread)" }
+
+    func openAside(of thread: String) -> TranscriptModel {
+        let id = Self.asideID(of: thread)
+        if let a = aside, a.threadID == id { return a }
+        if let a = aside { close(aside: a) }
+        let model = TranscriptModel(
+            threadID: id,
+            askEarlier: { [weak self] before in self?.connection.send(.page(id, beforeSeq: before, limit: TranscriptModel.pageSize)) },
+            resubscribe: { [weak self] in self?.connection.send(.subscribeThread(id, limit: TranscriptModel.pageSize)) })
+        aside = model
+        asideLive = nil
+        connection.send(.subscribeThread(id, limit: TranscriptModel.pageSize))
+        return model
+    }
+
+    func close(aside model: TranscriptModel) {
+        guard aside === model else { return }
+        aside = nil
+        asideLive = nil
+        // The server goes on following it beside the thread until the thread closes: cheap,
+        // and its rows are dropped here.
+    }
+
+    /// A question asked beside the thread, without disturbing its turn.
+    func askAside(_ text: String, in thread: String) {
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        act(.askAside(id: Self.newID(), thread: thread, text: text))
+    }
+
     // MARK: Messages
 
     private func apply(_ batch: [ToApp]) {
@@ -242,7 +315,12 @@ final class Store {
                 connection.send(.subscribeApp)
                 if let t = transcript {
                     t.resubscribing()
-                    connection.send(.subscribeThread(t.threadID, limit: TranscriptModel.pageSize))
+                    // Protocol 5: only what changed while away, from the rows held.
+                    connection.send(.subscribeThread(t.threadID, limit: TranscriptModel.pageSize, known: version >= 5 ? t.known : nil))
+                }
+                if let a = aside {
+                    a.resubscribing()
+                    connection.send(.subscribeThread(a.threadID, limit: TranscriptModel.pageSize, known: version >= 5 ? a.known : nil))
                 }
             case .threads(let projects, let list):
                 self.projects = projects
@@ -259,24 +337,32 @@ final class Store {
                 threads[id] = nil
                 order.removeAll { $0 == id }
             case .snapshot(let thread, let firstSeq, let count, let rows):
-                if let t = transcript, t.threadID == thread {
+                if let t = model(of: thread) {
                     flush(&rowsByThread, into: t)
                     t.applySnapshot(firstSeq: firstSeq, count: count, rows: rows)
                 }
             case .rowsChanged(let thread, let count, let rows):
-                guard let t = transcript, t.threadID == thread else { continue }
+                guard let t = model(of: thread) else { continue }
                 rowsByThread[thread, default: []] += rows
                 t.count = max(t.count, count)
             case .pageRows(let thread, let rows):
-                if let t = transcript, t.threadID == thread {
+                if let t = model(of: thread) {
                     flush(&rowsByThread, into: t)
                     t.applyPage(rows)
                 }
             case .live(let thread, let state):
                 if transcript?.threadID == thread, live != state { live = state }
-            case .options(let models, let modes):
+                if aside?.threadID == thread, asideLive != state { asideLive = state }
+            case .options(let models, let modes, let commands):
                 self.models = models
                 self.modes = modes
+                self.commands = commands
+            case .limits(let windows):
+                if limits != windows { limits = windows }
+            case .searchResults(let query, let hits):
+                if query == searchQuery { searchHits = hits }
+            case .files(let thread, let query, let files):
+                fileMatches = (thread, query, files)
             case .toolResult(let thread, let seq, let input, let result):
                 whole["\(thread)#\(seq)"] = WholeOutput(input: input, result: result)
             case .subagent(let thread, let seq, let run):
@@ -304,6 +390,13 @@ final class Store {
             }
         }
         if let t = transcript { flush(&rowsByThread, into: t) }
+        if let a = aside { flush(&rowsByThread, into: a) }
+    }
+
+    private func model(of thread: String) -> TranscriptModel? {
+        if let t = transcript, t.threadID == thread { return t }
+        if let a = aside, a.threadID == thread { return a }
+        return nil
     }
 
     /// Row changes gathered from a batch, applied to the transcript as one update.
@@ -375,7 +468,37 @@ final class TranscriptModel {
         asking = false
     }
 
-    func applySnapshot(firstSeq: Int, count: Int, rows: [RowModel]) {
+    /// The rows held up to, for resuming after a reconnect (protocol 5).
+    var known: Int? { loaded ? firstSeq + rows.count : nil }
+
+    func applySnapshot(firstSeq: Int, count: Int, rows incoming: [RowModel]) {
+        // Resuming: the snapshot starts inside what's held, so only what differs changes.
+        let end = self.firstSeq + rows.count
+        if loaded, firstSeq >= self.firstSeq, firstSeq <= end, count >= end {
+            var appended: [Int] = []
+            var changed: [Int] = []
+            for row in incoming.sorted(by: { $0.seq < $1.seq }) {
+                let i = row.seq - self.firstSeq
+                if rows.indices.contains(i) {
+                    if !row.row.sameContent(as: rows[i].row) {
+                        rows[i] = row
+                        changed.append(row.seq)
+                    } else if row.rev > rows[i].rev {
+                        // Same content, the server's newer number: kept so later changes compare right.
+                        rows[i] = row
+                    }
+                } else if i == rows.count {
+                    rows.append(row)
+                    appended.append(row.seq)
+                }
+            }
+            self.count = count
+            asking = false
+            Perf.shared.log("RESUME from \(firstSeq): \(changed.count) changed, \(appended.count) new")
+            if !appended.isEmpty || !changed.isEmpty { onUpdate?(.changed(appended: appended, changed: changed)) }
+            return
+        }
+        let rows = incoming
         self.firstSeq = firstSeq
         self.count = count
         self.rows = rows

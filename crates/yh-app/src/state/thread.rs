@@ -445,7 +445,13 @@ impl ThreadState {
     /// `plan`: the checklist is worked out again; `ended`: a turn ended or its `claude` went.
     pub fn apply_update(&mut self, changes: Vec<RowChange>, live: LiveState, plan: bool, session_reset: bool, ended: bool) {
         let was_running = self.run.running;
+        // A session the engine never heard of (its run made for a phone's snapshot before the
+        // app told it) isn't forgotten here; `/clear` clears it on purpose first.
+        let session = self.run.session_id.take();
         self.run = live;
+        if self.run.session_id.is_none() && !session_reset {
+            self.run.session_id = session;
+        }
         self.apply_changes(changes);
         if session_reset {
             self.meta.session_id = None;

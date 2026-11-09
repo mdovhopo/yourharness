@@ -207,9 +207,27 @@ pub fn live_of(s: &yh_core::thread_run::LiveState) -> Live {
 struct Client {
     outbox: flume::Sender<String>,
     app: bool,
-    thread: Option<String>,
-    /// Its thread's snapshot was sent: changes go to it from now on.
-    ready: bool,
+    /// The threads it watches: one, and a side chat beside it (`side:<thread>`); each with
+    /// whether its snapshot was sent, so changes go to it from now on.
+    watching: Vec<(String, bool)>,
+}
+
+impl Client {
+    fn watches(&self, thread: &str) -> bool {
+        self.watching.iter().any(|(t, _)| t == thread)
+    }
+
+    fn ready_for(&self, thread: &str) -> bool {
+        self.watching.iter().any(|(t, ready)| t == thread && *ready)
+    }
+
+    /// Starts watching a thread: a side chat replaces the side chat watched, any other thread
+    /// the other one.
+    fn watch(&mut self, thread: &str, ready: bool) {
+        let side = |t: &str| t.starts_with(yh_engine::ids::SIDE);
+        self.watching.retain(|(t, _)| side(t) != side(thread));
+        self.watching.push((thread.to_string(), ready));
+    }
 }
 
 #[derive(Default)]
@@ -357,8 +375,8 @@ fn follow(told: flume::Receiver<yh_engine::Output>, shared: &Shared, source: &So
                     let live = live_of(&live);
                     shared.live.lock().unwrap().insert(thread.clone(), live.clone());
                     shared.send_to(tag, &[snapshot, ToApp::Live { thread: thread.clone(), live }], |c| {
-                        if c.thread.as_deref() == Some(&thread) {
-                            c.ready = true;
+                        if let Some(w) = c.watching.iter_mut().find(|(t, _)| *t == thread) {
+                            w.1 = true;
                         }
                     });
                 }
@@ -380,10 +398,10 @@ fn follow(told: flume::Receiver<yh_engine::Output>, shared: &Shared, source: &So
                 continue;
             }
             let message = ToApp::RowsChanged { thread: thread.clone(), count: m.count as i64, rows };
-            shared.send(&message, |c| c.ready && c.thread.as_deref() == Some(&thread));
+            shared.send(&message, |c| c.ready_for(&thread));
         }
         // Threads nobody watches any more aren't held.
-        let watched: std::collections::HashSet<String> = shared.clients.lock().unwrap().values().filter_map(|c| c.thread.clone()).collect();
+        let watched: std::collections::HashSet<String> = shared.clients.lock().unwrap().values().flat_map(|c| c.watching.iter().map(|(t, _)| t.clone())).collect();
         shared.mirrors.lock().unwrap().retain(|t, _| watched.contains(t));
     }
 }
@@ -422,7 +440,7 @@ fn tell_live(shared: &Shared, thread: &str, live: Live) {
     if was.as_ref() == Some(&live) {
         return;
     }
-    shared.send(&ToApp::Live { thread: thread.to_string(), live: live.clone() }, |c| c.thread.as_deref() == Some(thread));
+    shared.send(&ToApp::Live { thread: thread.to_string(), live: live.clone() }, |c| c.watches(thread));
     let flags = |l: &Live| (l.running, !l.requests.is_empty() || !l.questions.is_empty());
     if was.as_ref().map(flags).unwrap_or((false, false)) != flags(&live) {
         let changed = {
@@ -466,7 +484,7 @@ fn poll(source: Source, shared: &Shared) {
         for (thread, mut rows) in threads {
             became_active |= changed_at.insert(thread.clone(), now).is_none_or(|t| now - t > ACTIVE_FOR);
             // With the engine, its changes stream instead (`follow`).
-            let watched = shared.engine.is_none() && shared.clients.lock().unwrap().values().any(|c| c.thread.as_deref() == Some(&thread));
+            let watched = shared.engine.is_none() && shared.clients.lock().unwrap().values().any(|c| c.watches(&thread));
             if !watched {
                 continue;
             }
@@ -475,7 +493,7 @@ fn poll(source: Source, shared: &Shared) {
             rows.dedup_by_key(|r| r.seq);
             let count = source.count(&thread).unwrap_or(0);
             let message = ToApp::RowsChanged { thread: thread.clone(), count, rows };
-            shared.send(&message, |c| c.thread.as_deref() == Some(&thread));
+            shared.send(&message, |c| c.watches(&thread));
         }
         let went_quiet = changed_at.values().any(|t| (now - *t > ACTIVE_FOR) && (now - *t <= ACTIVE_FOR + POLL * 2));
         if became_active || went_quiet || tick % LIST_EVERY == 0 {
@@ -564,7 +582,7 @@ fn connection(id: u64, stream: TcpStream, shared: &Shared, options: &Options, di
     eprintln!("client {id}: connected from {peer}");
     let source = Source::open(directory)?;
     let (outbox, inbox) = flume::bounded(OUTBOX);
-    shared.clients.lock().unwrap().insert(id, Client { outbox, app: false, thread: None, ready: false });
+    shared.clients.lock().unwrap().insert(id, Client { outbox, app: false, watching: vec![] });
     let hello = ToApp::Hello { protocol: wire::PROTOCOL, server: options.name.clone(), data: name_of(directory) };
     write(&mut ws, &hello)?;
     loop {
@@ -688,18 +706,12 @@ fn answer(id: u64, message: FromApp, shared: &Shared, source: &Source) -> Vec<To
             let limit = limit.unwrap_or(DEFAULT_ROWS).clamp(1, MAX_ROWS);
             // With the engine: its snapshot, in order with its changes, comes from `follow`.
             if let Some(engine) = &shared.engine {
-                set(&|c| {
-                    c.thread = Some(thread.clone());
-                    c.ready = false;
-                });
+                set(&|c| c.watch(&thread, false));
                 engine.send(yh_engine::Command::Snapshot { thread, limit: limit as usize, tag: id, known: known.map(|k| k.max(0) as usize) });
                 return vec![];
             }
             // Watch first, then read: a row written in between comes twice, and `rev` sorts it out.
-            set(&|c| {
-                c.thread = Some(thread.clone());
-                c.ready = true;
-            });
+            set(&|c| c.watch(&thread, true));
             let count = match source.count(&thread) {
                 Ok(n) => n,
                 Err(e) => return failed(e),
@@ -712,10 +724,7 @@ fn answer(id: u64, message: FromApp, shared: &Shared, source: &Source) -> Vec<To
             }
         }
         FromApp::UnsubscribeThread => {
-            set(&|c| {
-                c.thread = None;
-                c.ready = false;
-            });
+            set(&|c| c.watching.clear());
             vec![]
         }
         FromApp::Page { thread, before_seq, limit } => {

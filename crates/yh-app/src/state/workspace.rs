@@ -1592,7 +1592,10 @@ impl Workspace {
         // its thread's browser and the memory, read-only.
         if let Some(parent) = t.id().strip_prefix(SIDE).map(str::to_string) {
             let parent_thread = self.thread(&parent);
-            let fork = parent_thread.as_ref().and_then(|p| p.read(cx).run.session_id.clone());
+            let fork = parent_thread.as_ref().and_then(|p| {
+                let p = p.read(cx);
+                p.run.session_id.clone().or_else(|| p.meta.session_id.clone())
+            });
             let mut extra = vec!["--tools".to_string(), "Read,Glob,Grep,Bash,WebFetch,WebSearch".into(), "--strict-mcp-config".into(), "--no-session-persistence".into()];
             if fork.is_some() {
                 extra.push("--fork-session".into());

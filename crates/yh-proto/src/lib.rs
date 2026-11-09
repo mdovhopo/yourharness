@@ -333,7 +333,8 @@ pub enum ToApp {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum FromApp {
     SubscribeApp,
-    /// Watch this thread (one at a time): answered with a `snapshot`, then `rows_changed`.
+    /// Watch this thread (one at a time, plus a side chat beside it: `side:<thread>`; protocol
+    /// 5): answered with a `snapshot`, then `rows_changed`. `unsubscribe_thread` stops both.
     /// `known`: how many rows the client holds already (reconnecting): the snapshot then starts
     /// a little before them, and the client keeps what it has before that.
     SubscribeThread { thread: String, #[serde(default)] limit: Option<i64>, #[serde(default)] known: Option<i64> },

@@ -150,6 +150,14 @@ fn streams_what_claude_writes_and_takes_actions() {
     c.expect("done", |m| matches!(m, ToApp::Done { id, error: None, .. } if id == "a1"));
     assert_eq!(app.recv_timeout(Duration::from_secs(1)).unwrap(), yh_server::Action::Respond { thread: t(), request_id: "r1".into(), allow: true });
 
+    // Protocol 5: a side chat watched beside the thread; both go on streaming.
+    c.send(FromApp::SubscribeThread { thread: "side:t1".into(), limit: None, known: None });
+    c.expect("side snapshot", |m| matches!(m, ToApp::Snapshot { thread, count: 0, .. } if thread == "side:t1"));
+    engine.send(Command::Send { thread: "side:t1".into(), text: "why?".into(), attachments: vec![], message_id: "s1".into(), now: false, effort: None, deliver: None });
+    c.expect("the side question", |m| matches!(m, ToApp::RowsChanged { thread, rows, .. } if thread == "side:t1" && rows[0].text == "why?"));
+    engine.send(Command::Events { thread: t(), events: vec![delta("m", "!")] });
+    c.expect("the thread still streams", |m| matches!(m, ToApp::RowsChanged { thread, rows, .. } if thread == "t1" && rows.iter().any(|r| r.text == "Hello, world!")));
+
     // Protocol 3: an answer to Claude's question, a new thread (named in `done`), a picture with
     // a message, an action the app refuses, a mode it doesn't know.
     let answers: std::collections::BTreeMap<String, String> = [("Which?".to_string(), "Rust".to_string())].into();

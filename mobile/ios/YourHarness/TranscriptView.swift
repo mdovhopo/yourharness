@@ -11,11 +11,13 @@ struct TranscriptScreen: View {
     let threadID: String
     @Environment(Store.self) private var store
     @State private var model: TranscriptModel?
-    @State private var draft = ""
+    @State private var draft = ProcessInfo.processInfo.environment["YH_PHONE_DRAFT"] ?? ""
     @State private var images: [OutgoingImage] = []
     @State private var composerHeight: CGFloat = 0
     /// `YH_PHONE_QUEUE`'s message went.
     @State private var queued = false
+    @State private var askedAside = false
+    @State private var showsAside = ProcessInfo.processInfo.environment["YH_PHONE_ASIDE"] != nil
     private static let env = ProcessInfo.processInfo.environment
 
     var body: some View {
@@ -26,7 +28,7 @@ struct TranscriptScreen: View {
             }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            ComposerBar(threadID: threadID, draft: $draft, images: $images)
+            ComposerBar(threadID: threadID, draft: $draft, images: $images, showsAside: $showsAside)
                 .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { composerHeight = $0 }
         }
         .overlay(alignment: .top) {
@@ -165,6 +167,11 @@ struct TranscriptScreen: View {
         .navigationSubtitle([store.threads[threadID].flatMap(store.projectName), store.canControl ? ThreadSettings.summary(store.threads[threadID], models: store.models) : nil].compactMap { $0 }.joined(separator: " · "))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            if store.serverProtocol >= 5 {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Side Chat", systemImage: "bubble.left.and.text.bubble.right") { showsAside = true }
+                }
+            }
             if store.canControl {
                 ToolbarItem(placement: .topBarTrailing) { ThreadSettings(threadID: threadID) }
             }
@@ -175,6 +182,15 @@ struct TranscriptScreen: View {
                         .accessibilityLabel("Working")
                 }
             }
+        }
+        .sheet(isPresented: $showsAside) { AsideSheet(threadID: threadID) }
+        // `YH_PHONE_ASIDE=<question>`: asked in the side chat, which is open.
+        .task(id: store.canAct) {
+            guard store.canAct, let question = Self.env["YH_PHONE_ASIDE"], !askedAside else { return }
+            askedAside = true
+            try? await Task.sleep(for: .seconds(2))
+            Perf.shared.log("PHONE aside: \(question)")
+            store.askAside(question, in: threadID)
         }
         .onAppear { model = store.open(threadID) }
         .onDisappear { if let model { store.close(model) } }

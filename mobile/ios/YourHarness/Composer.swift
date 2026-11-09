@@ -11,6 +11,8 @@ struct ComposerBar: View {
     @Environment(Store.self) private var store
     @Binding var draft: String
     @Binding var images: [OutgoingImage]
+    /// The side chat's sheet, which `/btw` opens.
+    @Binding var showsAside: Bool
     @FocusState private var focused: Bool
     @State private var picked: [PhotosPickerItem] = []
     @State private var dictation = Dictation()
@@ -41,6 +43,7 @@ struct ComposerBar: View {
             }
             if store.canAct {
                 if !images.isEmpty { attachments }
+                if let typing { Suggestions(typing: typing, threadID: threadID, draft: $draft) }
                 field
             } else {
                 Text(store.serverProtocol == 1 ? "Read-only: this server doesn't take actions." : "Connecting to your Mac…")
@@ -147,9 +150,7 @@ struct ComposerBar: View {
             } else {
                 Button {
                     dictation.stop()
-                    store.send(draft, to: threadID, images: images)
-                    draft = ""
-                    images = []
+                    send()
                 } label: {
                     Image(systemName: "arrow.up")
                         .font(.system(size: 16, weight: .bold))
@@ -181,6 +182,128 @@ struct ComposerBar: View {
     }
 
     private var listening: Bool { dictation.state == .listening }
+
+    /// `/btw <question>` goes to the side chat, which opens; the rest to the Mac as typed.
+    private func send() {
+        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        if images.isEmpty, store.serverProtocol >= 5, text == "/btw" || text.hasPrefix("/btw ") {
+            let question = String(text.dropFirst(4)).trimmingCharacters(in: .whitespaces)
+            if !question.isEmpty { store.askAside(question, in: threadID) }
+            showsAside = true
+        } else {
+            store.send(draft, to: threadID, images: images)
+        }
+        draft = ""
+        images = []
+    }
+
+    /// What's being typed that the composer can finish: a command at the start, or a file
+    /// after `@`.
+    private var typing: Suggestions.Typing? {
+        guard store.serverProtocol >= 5 else { return nil }
+        if draft.hasPrefix("/"), !draft.contains(where: \.isWhitespace) { return .command(String(draft.dropFirst())) }
+        guard let last = draft.split(separator: " ", omittingEmptySubsequences: false).last, last.hasPrefix("@"), !last.contains("\n") else { return nil }
+        return .file(String(last.dropFirst()))
+    }
+}
+
+/// Commands or files matching what's typed, above the field; a tap writes it in.
+struct Suggestions: View {
+    enum Typing: Equatable {
+        case command(String)
+        case file(String)
+    }
+
+    let typing: Typing
+    let threadID: String
+    @Binding var draft: String
+    @Environment(Store.self) private var store
+
+    var body: some View {
+        let items = self.items
+        if !items.isEmpty {
+            ScrollView {
+                VStack(spacing: 0) {
+                    ForEach(items, id: \.insert) { item in
+                        Button {
+                            choose(item.insert)
+                        } label: {
+                            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                Image(systemName: item.icon).font(.footnote).foregroundStyle(.secondary).frame(width: 18)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    HStack(spacing: 4) {
+                                        Text(item.title).font(.body.monospaced()).lineLimit(1)
+                                        if let hint = item.hint { Text(hint).font(.footnote).foregroundStyle(.tertiary).lineLimit(1) }
+                                    }
+                                    if let detail = item.detail {
+                                        Text(detail).font(.footnote).foregroundStyle(.secondary).lineLimit(2)
+                                    }
+                                }
+                                Spacer(minLength: 0)
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 7)
+                            .contentShape(.rect)
+                        }
+                        .buttonStyle(.plain)
+                        if item.insert != items.last?.insert { Divider().padding(.leading, 38) }
+                    }
+                }
+            }
+            .scrollBounceBehavior(.basedOnSize)
+            .frame(maxHeight: 220)
+            .fixedSize(horizontal: false, vertical: true)
+            .glassEffect(in: .rect(cornerRadius: 18))
+            .transition(.opacity)
+        }
+        Color.clear.frame(height: 0)
+            .task(id: typing) {
+                guard case .file(let query) = typing else { return }
+                try? await Task.sleep(for: .milliseconds(150))
+                guard !Task.isCancelled else { return }
+                store.findFiles(query, in: threadID)
+            }
+            .onChange(of: items.count) { _, n in
+                if n > 0 { Perf.shared.log("SUGGEST \(n): \(items.prefix(3).map(\.title).joined(separator: ", "))") }
+            }
+    }
+
+    private struct Item {
+        let insert: String
+        let title: String
+        var hint: String?
+        var detail: String?
+        let icon: String
+    }
+
+    private var items: [Item] {
+        switch typing {
+        case .command(let typed):
+            let all = store.commands(for: threadID)
+            let starts = all.filter { $0.name.lowercased().hasPrefix(typed.lowercased()) }
+            let within = typed.isEmpty ? [] : all.filter { !$0.name.lowercased().hasPrefix(typed.lowercased()) && $0.name.localizedCaseInsensitiveContains(typed) }
+            return (starts + within).prefix(30).map {
+                Item(insert: "/\($0.name) ", title: "/\($0.name)", hint: $0.hint?.nilIfEmpty, detail: $0.description?.nilIfEmpty, icon: "command")
+            }
+        case .file(let typed):
+            guard let found = store.fileMatches, found.thread == threadID, found.query == typed else { return [] }
+            return found.files.map {
+                let name = ($0 as NSString).lastPathComponent
+                let folder = ($0 as NSString).deletingLastPathComponent
+                return Item(insert: "@\($0) ", title: name, detail: folder.isEmpty ? nil : folder, icon: $0.hasSuffix("/") ? "folder" : "doc")
+            }
+        }
+    }
+
+    private func choose(_ insert: String) {
+        switch typing {
+        case .command: draft = insert
+        case .file:
+            var words = draft.split(separator: " ", omittingEmptySubsequences: false).map(String.init)
+            words.removeLast()
+            draft = (words + [insert]).joined(separator: " ")
+        }
+    }
 }
 
 extension OutgoingImage {
@@ -281,7 +404,7 @@ struct ThreadSettings: View {
 }
 
 /// What the run is doing, and how full the context is.
-private struct StatusLine: View {
+struct StatusLine: View {
     let activity: String?
     let tokens: Int?
     let window: Int?

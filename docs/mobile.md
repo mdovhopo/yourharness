@@ -211,7 +211,32 @@ Recorded here so the MVP stays small. Roughly in order; Tailscale last.
 4. **Notifications:** APNs sent straight from the Mac with the app's key (no relay for personal
    use), Allow and Deny on the lock screen, a Live Activity for a running turn. Needs the
    Apple Developer Program account.
-5. **Composer extras:** photos and camera, voice, `@` files, slash commands.
+5. ✅ **Composer extras:** photos (2b), voice (5c), and, with protocol 5, slash commands and `@`
+   files: typing `/` lists the project's commands as Claude Code reported them (`/btw` always,
+   `/mcp` left out: a Mac sheet), filtered as you type; `@` asks the Mac for files in the thread's
+   folder matching what follows. A tap writes it in. Hooks: `YH_PHONE_DRAFT=<text>` (in the field
+   at launch; `/` or `look at @no` shows the list), `SUGGEST n: …` lines.
+5d. ✅ **Protocol 5, checked 2026-11-09 in the Simulator against the Mac test app**:
+   - **Search** from the thread list (`.searchable`): titles matched on the phone, then the Mac's
+     full-text index ("In Conversations", the words found in bold). `YH_PHONE_SEARCH=<words>`.
+   - **Usage limits** at the bottom of the list, as the Mac's footer has them; a window whose reset
+     time has passed says so instead of showing an old figure as current.
+   - **Can't reach your Mac**: until the phone has connected once, an empty state with the
+     address, Try Again and Server Settings in place of an empty list.
+   - **Side chats** (`/btw`, or the toolbar's bubbles): a sheet with the side chat's rows drawn by
+     the same transcript, asked through `ask_aside`; the server follows a `side:<thread>` beside
+     the thread a client watches. Checked with a real Haiku turn from the phone.
+     `YH_PHONE_ASIDE=<question>`.
+   - **Resuming** after a reconnect: `subscribe_thread` with `known` (the rows held), the snapshot
+     starting a little before them, merged by content (a restarted server numbers `rev`s anew),
+     so only what changed is drawn again: `RESUME from 0: 0 changed, 2 new` after a Mac restart
+     with a turn in between.
+   - Found doing it, fixed: a thread the phone opened before the Mac did lost its Claude session
+     (the engine made its run for the snapshot with none, then ignored the app's `Open`), so the
+     next message started a new conversation and its side chat saw nothing. `Open` now fills in a
+     missing session and the app keeps a session it knows (engine test
+     `a_snapshot_first_keeps_the_session_the_app_tells`); a phone send after a Mac restart
+     resumes the same session.
 5b. ✅ **Sub-agents, pictures and diagrams** (protocol 4), checked 2026-11-09 with a real Haiku
    turn sent from the phone: a sub-agent's card updated live ("Working · general-purpose · 1 tool
    use · 30k tokens" and what it was running) and opened a sheet with its status, numbers, what it
@@ -234,9 +259,9 @@ Recorded here so the MVP stays small. Roughly in order; Tailscale last.
 6. **Richer transcript:** ✅ a tool row opens in a sheet (an edit as a line diff, a write's
    content, a command and its output, other inputs pretty-printed, the result's first 2000
    characters), thinking opens in full, your messages and replies copy with a long press
-   (`YH_OPEN_ROW=<tool name|thinking>` opens the newest such row). Still to come: sub-agents,
-   Mermaid, images, full tool output on request (a protocol query), Find, search across
-   threads.
+   (`YH_OPEN_ROW=<tool name|thinking>` opens the newest such row). Sub-agents, Mermaid, images and
+   full output came with protocols 3 and 4, search across threads with 5. Still to come: Find
+   in a thread, opening a search hit at its row.
 7. **Shared Rust client core** (`yh-client`, `yh-ffi` through UniFFI): `yh-core`'s markdown
    so both apps render the same, an offline cache in SQLite; then **Android** in Compose over it.
 8. **iPad layout**, widgets, a share extension into a thread, Shortcuts.
@@ -248,8 +273,7 @@ Recorded here so the MVP stays small. Roughly in order; Tailscale last.
 
 To raise with the foundation before its F2 settles `yh-proto`:
 
-- **Resume from a cursor (`rev`)** on reconnect, not only a fresh snapshot: a phone
-  reconnects constantly.
+- ✅ **Resume** on reconnect, not only a fresh snapshot (protocol 5's `known`).
 - **Big tool output trimmed on the wire**, with a query for the rest; thumbnails for images.
 - **Uploading attachments**, and **registering a device's push token**.
 - **`Attention` with its reason and request id**, so a notification can answer a card
