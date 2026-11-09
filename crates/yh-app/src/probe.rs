@@ -1122,7 +1122,7 @@ impl Probe {
     async fn g_new_thread(&mut self, back: Option<Entity<ThreadState>>) {
         let was = self.selected();
         let project = self.read(|r, _, cx| r.current_project(cx));
-        // A new blank, or the project's untouched one again.
+        // A new blank (in memory only), or the project's unsent one again.
         let p = project.clone();
         let landed = move |_: &RootView, ws: &Workspace, cx: &gpui_kit::App| {
             ws.page.is_none() && ws.selected_thread().is_some_and(|t| t.read(cx).items.is_empty() && Some(&t.read(cx).meta.project_id) == p.as_ref())

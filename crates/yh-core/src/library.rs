@@ -422,17 +422,35 @@ impl Library {
 
     /// A new thread at the top of its project, saved. Its ID is a UUID, as 0.0.x's are.
     pub fn add_thread(&self, project_id: &str, title: &str) -> ThreadMeta {
-        let id = new_uuid();
+        let meta = ThreadMeta::new(new_uuid(), project_id.into(), title.into());
+        self.insert_thread(&meta);
+        meta
+    }
+
+    /// Saves a thread made in memory first (a new thread, kept once its first message goes),
+    /// with what was chosen for it meanwhile.
+    pub fn insert_thread(&self, meta: &ThreadMeta) {
         let now = iso_now();
         let mut object = Map::new();
-        object.insert("id".into(), id.clone().into());
-        object.insert("projectID".into(), project_id.into());
-        object.insert("title".into(), title.into());
+        object.insert("id".into(), meta.id.clone().into());
+        object.insert("projectID".into(), meta.project_id.clone().into());
+        object.insert("title".into(), meta.title.clone().into());
         object.insert("createdAt".into(), now.clone().into());
         object.insert("updatedAt".into(), now.into());
+        if let Some(model) = &meta.model {
+            object.insert("model".into(), model.clone().into());
+        }
+        if let Some(effort) = &meta.effort {
+            object.insert("effort".into(), effort.clone().into());
+        }
+        if meta.pinned {
+            object.insert("isPinned".into(), true.into());
+        }
+        if let Some(folder) = &meta.working_directory {
+            object.insert("workingDirectory".into(), folder.clone().into());
+        }
         self.records.lock().unwrap().threads.insert(0, object);
         self.save();
-        ThreadMeta::new(id, project_id.into(), title.into())
     }
 
     /// Removes a thread and its transcript.

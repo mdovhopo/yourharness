@@ -141,6 +141,9 @@ pub struct Workspace {
     /// A folder's files for `@` mentions, kept 30 seconds.
     files: HashMap<String, (Instant, Arc<Vec<String>>)>,
     new_count: usize,
+    /// Each project's new thread, made in memory only (no record, not in the sidebar) until its
+    /// first message goes; let go of when you leave it with nothing typed.
+    pending: HashMap<String, Entity<ThreadState>>,
     /// Where agents' thread tools ask the main thread (`thread_tools`).
     tool_requests: flume::Sender<ToolRequest>,
     /// Threads whose title is being rewritten (`update_title`), and how many messages the user
@@ -307,6 +310,7 @@ impl Workspace {
             commands: HashMap::new(),
             files: HashMap::new(),
             new_count: 0,
+            pending: HashMap::new(),
             tool_requests,
             titles_rewriting: Default::default(),
             page: None,
@@ -715,27 +719,72 @@ impl Workspace {
 
     // MARK: Threads and projects
 
+    /// A new thread in the project, opened: in memory only, so it's instant and leaves nothing
+    /// behind if you go elsewhere. Saved when its first message goes (`keep_pending`); the
+    /// project's one you left with a draft opens again.
     pub fn new_thread(&mut self, project_id: &str, cx: &mut Context<Self>) -> String {
-        self.make_thread(project_id, true, cx)
-    }
-
-    /// A new thread in the project, opened here only with `open` (one made from the phone
-    /// isn't: the Mac stays on what you have open).
-    fn make_thread(&mut self, project_id: &str, open: bool, cx: &mut Context<Self>) -> String {
-        // An untouched blank in the project is used again instead of piling up blanks.
-        let blank = self.threads.iter().find(|t| {
-            let t = t.read(cx);
-            t.meta.project_id == project_id && t.meta.settled_at.is_none() && t.run.session_id.is_none() && t.title == "New thread" && !t.run.running && t.items.is_empty() && t.run.total.unwrap_or(0) == 0
-        });
-        if let Some(blank) = blank {
-            let id = blank.read(cx).id().to_string();
-            if open {
-                self.select(&id, cx);
-            }
+        if let Some(pending) = self.pending.get(project_id) {
+            let id = pending.read(cx).id().to_string();
+            self.select(&id, cx);
             return id;
         }
+        let meta = ThreadMeta::new(yh_core::library::new_uuid(), project_id.into(), "New thread".into());
+        let thread = make_thread(meta, cx.entity().downgrade(), cx);
+        let id = thread.read(cx).id().to_string();
+        thread.update(cx, |t, _| {
+            t.loaded = true;
+            t.run.total = Some(0);
+        });
+        self.pending.insert(project_id.to_string(), thread.clone());
+        self.by_id.insert(id.clone(), thread);
+        self.select(&id, cx);
+        id
+    }
+
+    /// A new thread not saved yet.
+    pub fn is_pending(&self, id: &str, cx: &App) -> bool {
+        self.pending.values().any(|t| t.read(cx).id() == id)
+    }
+
+    /// A new thread let go of: nothing was typed in it.
+    fn drop_pending(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(project) = self.pending.iter().find(|(_, t)| t.read(cx).id() == id).map(|(p, _)| p.clone()) else { return };
+        self.pending.remove(&project);
+        self.by_id.remove(id);
+        crate::browser::Browsers::close_thread(id);
+        cx.emit(WorkspaceEvent::Removed(id.to_string()));
+        cx.notify();
+    }
+
+    /// Its first message goes: the new thread is saved and joins the sidebar.
+    fn keep_pending(&mut self, thread: &Entity<ThreadState>, cx: &mut Context<Self>) {
+        let (id, project) = {
+            let t = thread.read(cx);
+            (t.id().to_string(), t.meta.project_id.clone())
+        };
+        if !self.pending.get(&project).is_some_and(|p| p == thread) {
+            return;
+        }
+        self.pending.remove(&project);
+        if self.library.db.is_some() && !project.starts_with("dir:") {
+            self.library.insert_thread(&thread.read(cx).meta);
+            if self.selected.as_deref() == Some(id.as_str()) {
+                self.library.set_setting("selectedThreadID", &Value::from(id.as_str()));
+            }
+        }
+        thread.update(cx, |t, _| {
+            let now = yh_core::library::now_ms();
+            t.meta.created_at = now;
+            t.meta.updated_at = now;
+        });
+        self.threads.insert(0, thread.clone());
+        cx.notify();
+    }
+
+    /// A new thread in the project made from the phone: saved at once, the Mac staying on what
+    /// you have open.
+    fn make_thread(&mut self, project_id: &str, cx: &mut Context<Self>) -> String {
         self.new_count += 1;
-        // Saved in harness.sqlite right away; `new:` only without one.
         let meta = if self.library.db.is_some() && !project_id.starts_with("dir:") {
             self.library.add_thread(project_id, "New thread")
         } else {
@@ -746,11 +795,7 @@ impl Workspace {
         thread.update(cx, |t, _| t.loaded = true);
         self.threads.insert(0, thread.clone());
         self.by_id.insert(id.clone(), thread);
-        if open {
-            self.select(&id, cx);
-        } else {
-            cx.notify();
-        }
+        cx.notify();
         id
     }
 
@@ -849,6 +894,12 @@ impl Workspace {
 
     /// On its project's Settled shelf, its `claude` ended, history kept; or brought back.
     pub fn set_settled(&mut self, id: &str, on: bool, cx: &mut Context<Self>) {
+        // A new thread not saved yet has nothing to keep: it just goes.
+        if on && self.is_pending(id, cx) {
+            self.select_neighbour(id, cx);
+            self.drop_pending(id, cx);
+            return;
+        }
         if on {
             // Already on the shelf: nothing to do (and the selection stays).
             if self.thread(id).is_some_and(|t| t.read(cx).meta.settled_at.is_some()) {
@@ -880,6 +931,14 @@ impl Workspace {
     /// now, its rows when the app quits, so Undo brings it back whole. Without the store (a
     /// thread of no project), at once.
     pub fn delete(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.is_pending(id, cx) {
+            self.select_neighbour(id, cx);
+            if self.selected.as_deref() == Some(id) {
+                self.selected = None;
+            }
+            self.drop_pending(id, cx);
+            return;
+        }
         // Its run is read again from what's saved if Undo brings it back.
         self.forget_in_engine(id);
         crate::browser::Browsers::close_thread(id);
@@ -1452,6 +1511,11 @@ impl Workspace {
     pub fn save_draft(&mut self, id: &str, text: &str, cx: &mut Context<Self>) {
         let Some(thread) = self.thread(id) else { return };
         let draft = (!text.trim().is_empty()).then(|| text.to_string());
+        // A new thread left with nothing typed is gone; with a draft it waits in memory.
+        if draft.is_none() && self.selected.as_deref() != Some(id) && self.is_pending(id, cx) {
+            self.drop_pending(id, cx);
+            return;
+        }
         if thread.read(cx).meta.draft == draft {
             return;
         }
@@ -1576,6 +1640,7 @@ impl Workspace {
             }
             cx.notify();
         });
+        self.keep_pending(thread, cx);
         let new_title = thread.read(cx).title.clone();
         self.library.update_thread(&id, |r| {
             r.remove("draft");
@@ -2276,7 +2341,8 @@ impl Workspace {
         let messages = rows.iter().filter(|e| e.kind == yh_core::library::Kind::User).count();
         let folder = cwd.filter(|c| std::path::Path::new(c).is_dir());
         let title = first.unwrap_or_else(|| "Resumed session".into());
-        let id = self.new_thread(project, cx);
+        let id = self.make_thread(project, cx);
+        self.select(&id, cx);
         let project_path = self.project(project).map(|p| p.path.clone());
         let session = session.to_string();
         self.update_meta(&id, cx, |m, r| {
@@ -3481,7 +3547,7 @@ impl Workspace {
             if self.project(project).is_none() {
                 return Err("No such project.".into());
             }
-            let id = self.make_thread(project, false, cx);
+            let id = self.make_thread(project, cx);
             if let (Some(text), Some(thread)) = (text.as_deref().filter(|t| !t.trim().is_empty()), self.thread(&id)) {
                 self.send(&thread, text, false, cx);
             }
