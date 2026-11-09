@@ -225,9 +225,33 @@ pub fn live_of(s: &yh_core::thread_run::LiveState) -> Live {
         requests: s.permissions.iter().map(|p| wire::Request { id: p.id.clone(), tool: p.tool.clone(), description: p.description.clone(), input: wire::trim(p.input.clone(), wire::INPUT_LIMIT) }).collect(),
         questions: s.elicitations.iter().map(|e| wire::Question { id: e.id.clone(), server: e.server.clone(), message: e.message.clone(), mode: e.mode.clone(), url: e.url.clone() }).collect(),
         queue: s.queue.iter().map(|q| wire::Queued { id: q.id.clone(), text: q.text.clone() }).collect(),
+        jobs: jobs_of(&s.jobs),
         context_tokens: s.composer.context_tokens,
         context_window: s.composer.context_window,
     }
+}
+
+/// What runs in a thread, as the wire says it: the Mac's strip above the composer.
+fn jobs_of(jobs: &yh_core::jobs::Jobs) -> Vec<wire::Job> {
+    if !jobs.any_running() {
+        return vec![];
+    }
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
+    let job = |j: &yh_core::jobs::Job| wire::Job {
+        id: j.id.clone(),
+        kind: if j.agent { "agent" } else if j.watch { "watch" } else { "command" }.into(),
+        description: j.description.clone(),
+        background: j.background,
+        started_at: (now - j.started.elapsed().as_secs_f64()).round(),
+        last_line: j.last_line.clone(),
+        agent: j.owner_task.clone().filter(|_| jobs.in_agent(j)),
+    };
+    jobs.agents.iter().chain(&jobs.running).map(job).collect()
+}
+
+/// Commands and sub-agents running in the background, for the list.
+fn background_of(l: &Live) -> u32 {
+    l.jobs.iter().filter(|j| j.background && j.agent.is_none()).count() as u32
 }
 
 struct Client {
@@ -488,12 +512,12 @@ fn tell_live(shared: &Shared, thread: &str, live: Live) {
         return;
     }
     shared.send(&ToApp::Live { thread: thread.to_string(), live: live.clone() }, |c| c.watches(thread));
-    let flags = |l: &Live| (l.running, !l.requests.is_empty() || !l.questions.is_empty());
-    if was.as_ref().map(flags).unwrap_or((false, false)) != flags(&live) {
+    let flags = |l: &Live| (l.running, !l.requests.is_empty() || !l.questions.is_empty(), background_of(l));
+    if was.as_ref().map(flags).unwrap_or((false, false, 0)) != flags(&live) {
         let changed = {
             let mut listing = shared.listing.lock().unwrap();
             listing.1.iter_mut().find(|t| t.id == thread).map(|t| {
-                (t.running, t.waiting) = flags(&live);
+                (t.running, t.waiting, t.jobs) = flags(&live);
                 t.active |= t.running;
                 t.clone()
             })
@@ -588,6 +612,7 @@ fn refresh_listing(source: &Source, shared: &Shared, changed_at: &HashMap<String
         if let Some(l) = live.get(&t.id) {
             t.running = l.running;
             t.waiting = !l.requests.is_empty() || !l.questions.is_empty();
+            t.jobs = background_of(l);
         }
         t.active = t.running || changed_at.get(&t.id).is_some_and(|at| now - *at <= ACTIVE_FOR);
     }
@@ -958,6 +983,26 @@ mod tests {
         assert_eq!(super::decode_base64("aGVsbG8=").unwrap(), b"hello");
         assert_eq!(super::decode_base64("aGVsbG8gd29ybGQ").unwrap(), b"hello world");
         assert!(super::decode_base64("a$b").is_none());
+    }
+
+    #[test]
+    fn jobs_go_out_with_their_agent_and_count_in_the_list() {
+        let mut jobs = yh_core::jobs::Jobs::default();
+        assert!(super::jobs_of(&jobs).is_empty());
+        jobs.start_agent(Some("a1".into()), "toolu_a".into(), "Survey the docs".into());
+        jobs.agent_activity("toolu_a", "Reading a.md");
+        jobs.start("b1".into(), Some("toolu_b".into()), Some("Bash"), "npm run dev".into(), true, None);
+        jobs.start("b2".into(), None, Some("Bash"), "cargo test".into(), true, Some(("a1".into(), Some("toolu_a".into()))));
+        jobs.start("b3".into(), None, Some("Bash"), "make".into(), false, None);
+        let wire = super::jobs_of(&jobs);
+        let kinds: Vec<(&str, &str, Option<&str>)> = wire.iter().map(|j| (j.id.as_str(), j.kind.as_str(), j.agent.as_deref())).collect();
+        assert_eq!(kinds, [("a1", "agent", None), ("b1", "command", None), ("b2", "command", Some("a1")), ("b3", "command", None)]);
+        assert_eq!(wire[0].last_line.as_deref(), Some("Reading a.md"));
+        // Whole seconds: the same while it runs, so nothing goes out until something changes.
+        assert_eq!(wire, super::jobs_of(&jobs));
+        // The agent and the thread's own background command; not the agent's, nor the foreground one.
+        let live = super::wire::Live { jobs: wire, ..Default::default() };
+        assert_eq!(super::background_of(&live), 2);
     }
 }
 

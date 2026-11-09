@@ -61,6 +61,11 @@ final class Fleet {
     }
 
     /// Shows another Mac; its open thread, if it had one, comes back with it.
+    /// The app in the background or back: no Mac streams a thread nobody sees.
+    func setAway(_ away: Bool) {
+        stores.forEach { $0.setAway(away) }
+    }
+
     func select(_ store: Store) {
         guard store !== current, stores.contains(where: { $0 === store }) else { return }
         current.shown = false

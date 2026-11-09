@@ -1,5 +1,5 @@
 // The bottom of a thread: what waits on you (a tool to allow, a plan, Claude's question, an MCP
-// server's question), your queued messages, what the run is doing, the thread's model, effort
+// server's question), your queued messages, what Claude left running, what the run is doing, the thread's model, effort
 // and mode, and the field you type in (with pictures). Actions go to the Mac as its own buttons
 // would take them; the rows they cause arrive like any others.
 
@@ -37,6 +37,9 @@ struct ComposerBar: View {
             }
             ForEach(live?.queue ?? []) { queued in
                 QueuedRow(queued: queued, threadID: threadID)
+            }
+            if let jobs = live?.jobs, !jobs.isEmpty {
+                JobsCard(jobs: jobs)
             }
             if running {
                 StatusLine(activity: live?.activity, tokens: live?.contextTokens, window: live?.contextWindow)
@@ -425,6 +428,89 @@ struct StatusLine: View {
         }
         .padding(.horizontal, 6)
         .accessibilityElement(children: .combine)
+    }
+}
+
+/// What Claude left running, as the Mac's strip above its composer shows it: each sub-agent
+/// with what it's doing (its own commands as a count), then the thread's commands and watches,
+/// each with a clock. The clocks tick here, so the Mac sends nothing while they just run.
+private struct JobsCard: View {
+    let jobs: [Job]
+    @State private var expanded = false
+
+    /// The ones shown before "N more".
+    private static let folded = 3
+
+    private var shown: [Job] { jobs.filter { $0.agent == nil } }
+
+    var body: some View {
+        let rows = shown
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(expanded ? rows : Array(rows.prefix(Self.folded))) { job in
+                JobRow(job: job, commands: jobs.count { $0.agent == job.id })
+            }
+            if rows.count > Self.folded {
+                Button(expanded ? "Show Less" : "\(rows.count - Self.folded) More Running") {
+                    withAnimation(.snappy(duration: 0.25)) { expanded.toggle() }
+                }
+                .font(.footnote)
+                .buttonStyle(.borderless)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .glassEffect(in: .rect(cornerRadius: 16))
+    }
+}
+
+private struct JobRow: View {
+    let job: Job
+    /// Commands this sub-agent started that still run.
+    let commands: Int
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Image(systemName: symbol)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(job.description).font(.subheadline).lineLimit(1)
+                if let detail {
+                    Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+            }
+            Spacer(minLength: 0)
+            // Ticks by itself, only while on screen.
+            Text(Date(timeIntervalSince1970: job.startedAt), style: .timer)
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(kindName): \(job.description)\(detail.map { ", \($0)" } ?? "")")
+    }
+
+    private var symbol: String {
+        switch job.kind {
+        case "agent": "person.2"
+        case "watch": "eye"
+        default: job.background == true ? "terminal" : "hourglass"
+        }
+    }
+
+    private var kindName: String {
+        switch job.kind {
+        case "agent": "Sub-agent"
+        case "watch": "Watch"
+        default: job.background == true ? "Background command" : "Command"
+        }
+    }
+
+    private var detail: String? {
+        let theirs = commands == 0 ? nil : commands == 1 ? "1 command of its own" : "\(commands) commands of its own"
+        let parts = [job.lastLine, theirs].compactMap { $0 }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 }
 

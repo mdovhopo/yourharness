@@ -70,6 +70,7 @@ impl Source {
                     active: false,
                     running: false,
                     waiting: false,
+                    jobs: 0,
                 }
             })
         })

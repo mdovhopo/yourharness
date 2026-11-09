@@ -358,6 +358,12 @@ struct ThreadRow: View {
                     .foregroundStyle(.green)
                     .symbolEffect(.pulse, options: .repeating)
                     .accessibilityLabel("Working")
+            } else if thread.backgroundJobs > 0 {
+                // The turn's over, something it started still runs (a dev server, a sub-agent).
+                Image(systemName: "hourglass")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel(thread.backgroundJobs == 1 ? "1 job running" : "\(thread.backgroundJobs) jobs running")
             }
         }
         .padding(.vertical, 2)

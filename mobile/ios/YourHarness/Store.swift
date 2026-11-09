@@ -212,6 +212,32 @@ final class Store: Identifiable {
         return model
     }
 
+    /// Off screen (the app in the background, the phone locked): the open thread and its side
+    /// chat stop streaming, and pick up what changed, from the rows held, once back.
+    @ObservationIgnored private var away = false
+
+    func setAway(_ away: Bool) {
+        guard self.away != away else { return }
+        self.away = away
+        guard state == .connected else { return }
+        Perf.shared.log("\(away ? "AWAY" : "BACK") \(displayName)")
+        if away {
+            if let t = transcript { connection.send(.unsubscribe(t.threadID)) }
+            if let a = aside { connection.send(.unsubscribe(a.threadID)) }
+        } else {
+            resubscribe()
+        }
+    }
+
+    /// The threads on screen watched again (a reconnect, back from the background): protocol 5
+    /// sends only what changed from the rows held.
+    private func resubscribe() {
+        for model in [transcript, aside].compactMap({ $0 }) {
+            model.resubscribing()
+            connection.send(.subscribeThread(model.threadID, limit: TranscriptModel.pageSize, known: serverProtocol >= 5 ? model.known : nil))
+        }
+    }
+
     func close(_ model: TranscriptModel) {
         guard transcript === model else { return }
         transcript = nil
@@ -411,15 +437,7 @@ final class Store: Identifiable {
                 serverProtocol = version
                 onHello?()
                 connection.send(.subscribeApp)
-                if let t = transcript {
-                    t.resubscribing()
-                    // Protocol 5: only what changed while away, from the rows held.
-                    connection.send(.subscribeThread(t.threadID, limit: TranscriptModel.pageSize, known: version >= 5 ? t.known : nil))
-                }
-                if let a = aside {
-                    a.resubscribing()
-                    connection.send(.subscribeThread(a.threadID, limit: TranscriptModel.pageSize, known: version >= 5 ? a.known : nil))
-                }
+                if !away { resubscribe() }
             case .threads(let projects, let list):
                 self.projects = projects
                 order = list.map(\.id)

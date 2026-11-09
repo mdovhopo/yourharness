@@ -402,6 +402,17 @@ Recorded here so the MVP stays small. Roughly in order; Tailscale last.
 10. ✅ **Tailscale:** the tailnet's MagicDNS name in the pairing link and `hello`, the phone
     trying every address at once, `tailscale whois`, Over Tailscale only (see Tailscale above).
     `wss://` with `tailscale cert` left for later.
+11. ✅ **What's still running:** the open thread's `live` carries `jobs` (background commands,
+    long foreground ones, watches, background sub-agents with what each is doing; a running
+    sub-agent's own commands as `agent`, counted on its row), shown above the composer as the
+    Mac's strip does. Each has `started_at` in whole seconds, so it goes out again only when
+    something starts, ends or says something new: the clocks tick on the phone
+    (`Text(…, style: .timer)`), and no output is read for the phone. The list gets `jobs` per
+    thread (background commands and sub-agents), drawn as an hourglass once its turn is over.
+    The app in the background unwatches its thread (and side chat) and picks up from the rows
+    held when back (`AWAY`, `BACK` lines), so the Mac streams nothing nobody sees. Checked
+    2026-11-10 with a Haiku turn leaving two `sleep`s in the background: hourglass in the list,
+    both in the strip with ticking clocks, then the Settings app opened and YourHarness again.
 
 ### What the phone needs from the protocol
 

@@ -7,6 +7,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 ## [Unreleased]
 
 ### Added
+- The phone shows what Claude left running in a thread (background commands, watches, sub-agents) above the composer, with how long each has run, and an hourglass in the thread list while they run after the turn. A thread stops streaming to the phone while the app is in the background.
 - YourHarness has an icon: a Y of two threads joining into one, your agents gathered in one place. Development builds of YourHarness Next show it on night blue.
 
 ## [0.1.4] - 2026-11-10

@@ -114,6 +114,13 @@ pub struct Thread {
     /// Something waits on you: a tool to allow, a question, a plan.
     #[serde(default)]
     pub waiting: bool,
+    /// Commands and sub-agents running in the background: what goes on after its turn.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub jobs: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 /// One transcript row, as much of it as the phone draws.
@@ -304,6 +311,27 @@ pub struct Queued {
     pub text: String,
 }
 
+/// Something Claude left running: a command (in the background, or a foreground one that's
+/// taking a while), a watch (Monitor) or a sub-agent in the background. Only its start and
+/// what it says change it: the phone ticks its clock itself.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Job {
+    pub id: String,
+    /// `command`, `watch` or `agent`.
+    pub kind: String,
+    pub description: String,
+    #[serde(default)]
+    pub background: bool,
+    /// When it started, in seconds since 1970 (whole, so it never changes while it runs).
+    pub started_at: f64,
+    /// What a watch last saw, or what a sub-agent is doing now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_line: Option<String>,
+    /// The running sub-agent that started it (that job's `id`): it shows with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+}
+
 /// What a thread's run is doing, beyond its rows.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Live {
@@ -318,6 +346,9 @@ pub struct Live {
     pub questions: Vec<Question>,
     #[serde(default)]
     pub queue: Vec<Queued>,
+    /// What's running, oldest first: sub-agents, then commands and watches.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub jobs: Vec<Job>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -3,6 +3,7 @@ import SwiftUI
 @main
 struct YourHarnessApp: App {
     @State private var fleet = Fleet()
+    @Environment(\.scenePhase) private var phase
 
     init() {
         Perf.shared.start()
@@ -15,6 +16,10 @@ struct YourHarnessApp: App {
                 .preferredColorScheme(Self.appearance)
                 // The Mac's QR code, scanned with the Camera app: pairs with that Mac.
                 .onOpenURL { fleet.pair($0) }
+        }
+        // `.inactive` passes by (Control Center, the app switcher): only the background counts.
+        .onChange(of: phase) { _, phase in
+            if phase == .background { fleet.setAway(true) } else if phase == .active { fleet.setAway(false) }
         }
     }
 

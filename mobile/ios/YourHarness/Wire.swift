@@ -47,9 +47,12 @@ struct ThreadInfo: Decodable, Sendable, Hashable, Identifiable {
     /// Protocol 2: a turn is under way; something waits on you.
     let running: Bool?
     let waiting: Bool?
+    /// Commands and sub-agents running in the background, after its turn.
+    let jobs: Int?
 
     var isRunning: Bool { running ?? active }
     var isWaiting: Bool { waiting ?? false }
+    var backgroundJobs: Int { jobs ?? 0 }
 }
 
 /// A request waiting on you: a tool to allow, Claude's question (`AskUserQuestion`) or a plan
@@ -77,6 +80,22 @@ struct Queued: Decodable, Sendable, Hashable, Identifiable {
     let text: String
 }
 
+/// Something Claude left running: a command, a watch (Monitor) or a sub-agent in the
+/// background. Its clock ticks here; the Mac sends it again only when it changes.
+struct Job: Decodable, Sendable, Hashable, Identifiable {
+    let id: String
+    /// `command`, `watch` or `agent`.
+    let kind: String
+    let description: String
+    let background: Bool?
+    /// Seconds since 1970.
+    let startedAt: Double
+    /// What a watch last saw, or what a sub-agent is doing now.
+    let lastLine: String?
+    /// The running sub-agent that started it: it counts with that one.
+    let agent: String?
+}
+
 /// What the open thread's run is doing, beyond its rows.
 struct Live: Decodable, Sendable, Equatable {
     let running: Bool
@@ -84,10 +103,12 @@ struct Live: Decodable, Sendable, Equatable {
     let requests: [Request]
     let questions: [MCPQuestion]
     let queue: [Queued]
+    /// What's running, sub-agents first.
+    let jobs: [Job]
     let contextTokens: Int?
     let contextWindow: Int?
 
-    enum CodingKeys: String, CodingKey { case running, activity, requests, questions, queue, contextTokens, contextWindow }
+    enum CodingKeys: String, CodingKey { case running, activity, requests, questions, queue, jobs, contextTokens, contextWindow }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -96,6 +117,7 @@ struct Live: Decodable, Sendable, Equatable {
         requests = try c.decodeIfPresent([Request].self, forKey: .requests) ?? []
         questions = try c.decodeIfPresent([MCPQuestion].self, forKey: .questions) ?? []
         queue = try c.decodeIfPresent([Queued].self, forKey: .queue) ?? []
+        jobs = try c.decodeIfPresent([Job].self, forKey: .jobs) ?? []
         contextTokens = try c.decodeIfPresent(Int.self, forKey: .contextTokens)
         contextWindow = try c.decodeIfPresent(Int.self, forKey: .contextWindow)
     }
