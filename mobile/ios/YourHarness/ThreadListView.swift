@@ -182,7 +182,7 @@ private struct Unreachable: View {
         ContentUnavailableView {
             Label("Can't Reach Your Mac", systemImage: "desktopcomputer.trianglebadge.exclamationmark")
         } description: {
-            Text("Open YourHarness on your Mac with the phone server turned on. The phone keeps trying \(retry).")
+            Text("Open YourHarness on your Mac with the phone server turned on. Away from its Wi‑Fi, turn Tailscale on here and on the Mac. The phone keeps trying \(retry).")
             Text(store.shownAddress).font(.footnote.monospaced())
         } actions: {
             Button("Try Again") { store.reconnect() }
@@ -485,7 +485,7 @@ private struct MacRow: View {
                 } else {
                     Text(mac.pairing ? "Pairing…" : MacMenu.status(of: mac, waiting: false)).font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
                 }
-                Text(mac.shownAddress)
+                Text(mac.viaTailscale ? "\(mac.shownAddress) · Tailscale" : mac.shownAddress)
                     .font(.caption.monospaced()).foregroundStyle(.tertiary).lineLimit(1)
             }
             Spacer(minLength: 0)

@@ -45,7 +45,12 @@ const MAX_ROWS: i64 = 1000;
 
 pub mod pairing;
 mod pulls;
+pub mod tailscale;
 
+/// Where else phones may reach this Mac (its local and tailnet addresses), told in `hello`.
+pub type Hosts = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
+
+#[derive(Default)]
 pub struct Options {
     /// Required as `?token=` when set (or a paired phone's token, with `pairing`).
     pub token: Option<String>,
@@ -56,6 +61,12 @@ pub struct Options {
     pub stop: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// This Mac's lasting ID, told in `hello`.
     pub mac_id: Option<String>,
+    /// Connections from the tailnet are let in only from devices of this Mac's own Tailscale
+    /// user (`tailscale whois`).
+    pub tailscale: bool,
+    /// Only the tailnet (and this Mac itself) may connect, not the local network.
+    pub tailscale_only: bool,
+    pub hosts: Option<Hosts>,
 }
 
 impl Options {
@@ -604,6 +615,7 @@ fn refresh_listing(source: &Source, shared: &Shared, changed_at: &HashMap<String
 }
 
 fn connection(id: u64, stream: TcpStream, shared: &Arc<Shared>, options: &Options, directory: &Path) -> Result<(), String> {
+    let peer_ip = stream.peer_addr().ok().map(|a| a.ip());
     let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
     // In: the server's own token, a paired phone's, or a pairing code (`?pair=…&device=<name>`),
     // which pairs this phone and answers with its token.
@@ -613,6 +625,19 @@ fn connection(id: u64, stream: TcpStream, shared: &Arc<Shared>, options: &Option
         let query = request.uri().query().unwrap_or("");
         let param = |name: &str| query.split('&').find_map(|kv| kv.strip_prefix(name).and_then(|v| v.strip_prefix('='))).map(percent_decode);
         let refuse = |why: &str| Err(tungstenite::http::Response::builder().status(401).body(Some(why.to_string())).unwrap());
+        if let Some(ip) = peer_ip {
+            if options.tailscale_only && !ip.is_loopback() && !tailscale::is_tailnet(ip) {
+                eprintln!("client {id}: refused {ip}, not on the tailnet");
+                return Err(tungstenite::http::Response::builder().status(403).body(Some("This Mac takes phones over Tailscale only.".to_string())).unwrap());
+            }
+            if options.tailscale && tailscale::is_tailnet(ip) {
+                let me = tailscale::status().and_then(|s| s.user_id);
+                if let Err(why) = tailscale::admit(ip, me, tailscale::whois) {
+                    eprintln!("client {id}: refused {ip}: {why}");
+                    return Err(tungstenite::http::Response::builder().status(403).body(Some(why.to_string())).unwrap());
+                }
+            }
+        }
         if options.token.is_none() && options.pairing.is_none() {
             return Ok(response);
         }
@@ -647,7 +672,7 @@ fn connection(id: u64, stream: TcpStream, shared: &Arc<Shared>, options: &Option
     let source = Source::open(directory)?;
     let (outbox, inbox) = flume::bounded(OUTBOX);
     shared.clients.lock().unwrap().insert(id, Client { outbox, app: false, watching: vec![] });
-    let hello = ToApp::Hello { protocol: wire::PROTOCOL, server: options.name.clone(), data: name_of(directory), mac: options.mac_id.clone() };
+    let hello = ToApp::Hello { protocol: wire::PROTOCOL, server: options.name.clone(), data: name_of(directory), mac: options.mac_id.clone(), hosts: options.hosts.as_ref().map(|h| h()).unwrap_or_default() };
     write(&mut ws, &hello)?;
     if let Some((device, token)) = paired {
         eprintln!("client {id}: paired as {device}");

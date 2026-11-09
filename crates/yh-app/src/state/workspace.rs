@@ -269,7 +269,9 @@ impl Workspace {
         // Its port: `YH_PHONES_PORT` (tests, not kept), the one it got last time, 7878 for a Mac
         // whose phones paired with 0.1.3 (before the port was kept), else the default.
         let port = std::env::var("YH_PHONES_PORT").ok().and_then(|p| p.parse().ok()).or_else(|| library.setting("phonesPort").and_then(|v| v.as_u64()).map(|p| p as u16)).or_else(|| library.setting("phonesEnabled").is_some().then_some(crate::state::phones::FIRST_PORT));
-        let phones = crate::state::phones::Phones::new(library.setting("phoneDevices"), port, devices_changed);
+        let mut phones = crate::state::phones::Phones::new(library.setting("phoneDevices"), port, devices_changed);
+        // `YH_PHONES_TAILSCALE_ONLY=1` for tests, not saved.
+        phones.tailscale_only = std::env::var("YH_PHONES_TAILSCALE_ONLY").as_deref() == Ok("1") || library.setting("phonesTailscaleOnly").and_then(|v| v.as_bool()).unwrap_or(false);
         cx.spawn(async move |this, cx| {
             while let Ok(first) = devices.recv_async().await {
                 let list = devices.try_iter().last().unwrap_or(first);
@@ -387,8 +389,9 @@ impl Workspace {
         workspace.load_saved_limits();
         workspace.listen_for_notification_clicks(cx);
         if workspace.phones_on() {
-            workspace.start_phones();
+            workspace.start_phones(cx);
         }
+        workspace.watch_tailscale(cx);
         workspace
     }
 
@@ -3328,7 +3331,7 @@ fn start_server(engine: &yh_engine::EngineHandle, actions: flume::Sender<yh_serv
     std::thread::Builder::new()
         .name("server".into())
         .spawn(move || {
-            if let Err(e) = yh_server::serve(listener, data, yh_server::Options { token: Some(token), name, pairing: None, stop: None, mac_id: Some(mac_id) }, Some(links)) {
+            if let Err(e) = yh_server::serve(listener, data, yh_server::Options { token: Some(token), name, pairing: None, stop: None, mac_id: Some(mac_id), ..Default::default() }, Some(links)) {
                 eprintln!("SERVER stopped: {e}");
             }
         })
@@ -3359,7 +3362,7 @@ impl Workspace {
     pub fn set_phones(&mut self, on: bool, cx: &mut Context<Self>) {
         self.library.set_setting("phonesEnabled", &Value::Bool(on));
         if on {
-            self.start_phones();
+            self.start_phones(cx);
         } else {
             self.phones.stop();
         }
@@ -3371,7 +3374,68 @@ impl Workspace {
         std::env::var("YH_PHONES").as_deref() == Ok("1") || self.library.setting("phonesEnabled").and_then(|v| v.as_bool()).unwrap_or(false)
     }
 
-    fn start_phones(&mut self) {
+    /// Phones over Tailscale only, or the local network too (Settings → Phone), saved; the
+    /// server starts again listening where it should.
+    pub fn set_phones_tailscale_only(&mut self, only: bool, cx: &mut Context<Self>) {
+        self.library.set_setting("phonesTailscaleOnly", &Value::Bool(only));
+        self.phones.tailscale_only = only;
+        self.phones.stop();
+        self.phones.error = None;
+        if self.phones_on() {
+            self.start_phones(cx);
+        }
+        cx.notify();
+    }
+
+    /// Reads Tailscale off the main thread, then starts the server.
+    fn start_phones(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let status = cx.background_executor().spawn(async { yh_server::tailscale::status() }).await;
+            let _ = this.update(cx, |ws, cx| {
+                ws.phones.tailscale = status;
+                if ws.phones_on() {
+                    ws.start_phones_now();
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Tailscale read again every 15 s while phones may connect: Settings shows it, and over
+    /// Tailscale only, the server follows its address (waiting while it's down).
+    fn watch_tailscale(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(Duration::from_secs(15)).await;
+            let Ok(on) = this.update(cx, |ws, _| ws.phones_on()) else { break };
+            if !on {
+                continue;
+            }
+            let status = cx.background_executor().spawn(async { yh_server::tailscale::status() }).await;
+            if this
+                .update(cx, |ws, cx| {
+                    if ws.phones.tailscale == status {
+                        return;
+                    }
+                    eprintln!("PHONES tailscale {}", status.as_ref().map(|s| if s.running { s.ipv4().unwrap_or("?").to_string() } else { s.state.clone() }).unwrap_or_else(|| "not installed".into()));
+                    ws.phones.tailscale = status;
+                    let p = &ws.phones;
+                    let moved = p.tailscale_only && std::env::var("YH_PHONES_BIND").is_err() && (if p.running() { p.bound_tailnet != p.tailnet_ip() } else { p.tailnet_ip().is_some() });
+                    if moved {
+                        ws.phones.stop();
+                        ws.start_phones_now();
+                    }
+                    cx.notify();
+                })
+                .is_err()
+            {
+                break;
+            }
+        })
+        .detach();
+    }
+
+    fn start_phones_now(&mut self) {
         let links = yh_server::Links { engine: self.engine.clone(), actions: self.remote_actions.clone() };
         self.phones.start(self.data_dir.clone(), mac_name(), mac_id(&self.library), links);
         // The port it got is kept, so paired phones find it there next time.

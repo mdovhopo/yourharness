@@ -91,7 +91,7 @@ fn start_with(dir: &std::path::Path, token: Option<&str>, links: Option<yh_serve
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let (dir, token) = (dir.to_path_buf(), token.map(str::to_string));
-    std::thread::spawn(move || yh_server::serve(listener, dir, yh_server::Options { token, name: "test".into(), pairing: None, stop: None, mac_id: None }, links).unwrap());
+    std::thread::spawn(move || yh_server::serve(listener, dir, yh_server::Options { token, name: "test".into(), pairing: None, stop: None, mac_id: None, ..Default::default() }, links).unwrap());
     format!("ws://127.0.0.1:{port}/")
 }
 
@@ -274,7 +274,7 @@ fn a_phone_pairs_with_a_code_and_is_cut_off_when_forgotten() {
     let stop = Arc::new(AtomicBool::new(false));
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("ws://{}/", listener.local_addr().unwrap());
-    let options = yh_server::Options { token: None, name: "test".into(), pairing: Some(pairing.clone()), stop: Some(stop.clone()), mac_id: Some("mac-1".into()) };
+    let options = yh_server::Options { token: None, name: "test".into(), pairing: Some(pairing.clone()), stop: Some(stop.clone()), mac_id: Some("mac-1".into()), ..Default::default() };
     let served = std::thread::spawn(move || yh_server::serve(listener, dir, options, None));
     assert!(Client::connect(&url).is_err(), "nothing without a token");
     assert!(Client::connect(&format!("{url}?pair=nope&device=x")).is_err(), "a wrong code");

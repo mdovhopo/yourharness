@@ -251,7 +251,7 @@ struct Drawing: Decodable, Sendable {
 
 enum ToApp: Sendable {
     /// `mac` (protocol 5): the Mac's lasting ID.
-    case hello(protocol: Int, server: String, data: String, mac: String?)
+    case hello(protocol: Int, server: String, data: String, mac: String?, hosts: [String])
     case threads(projects: [Project], threads: [ThreadInfo])
     case threadUpserted(ThreadInfo)
     case threadRemoved(String)
@@ -283,7 +283,7 @@ enum ToApp: Sendable {
     private struct Tag: Decodable { let type: String }
     private struct Pulls: Decodable { let project: String; let pulls: [PullInfo]; let errors: [String]?; let accounts: [String]? }
     private struct Paired: Decodable { let device: String; let token: String }
-    private struct Hello: Decodable { let `protocol`: Int?; let server: String; let data: String; let mac: String? }
+    private struct Hello: Decodable { let `protocol`: Int?; let server: String; let data: String; let mac: String?; let hosts: [String]? }
     private struct LiveMessage: Decodable { let thread: String; let live: Live }
     private struct Done: Decodable { let id: String; let error: String?; let thread: String? }
     private struct Options: Decodable { let models: [ModelOption]; let modes: [String]; let commands: [String: [SlashCommand]]? }
@@ -318,7 +318,7 @@ enum ToApp: Sendable {
             switch try d.decode(Tag.self, from: data).type {
             case "hello":
                 let m = try d.decode(Hello.self, from: data)
-                return .hello(protocol: m.protocol ?? 1, server: m.server, data: m.data, mac: m.mac)
+                return .hello(protocol: m.protocol ?? 1, server: m.server, data: m.data, mac: m.mac, hosts: m.hosts ?? [])
             case "threads":
                 let m = try d.decode(Threads.self, from: data)
                 return .threads(projects: m.projects, threads: m.threads)

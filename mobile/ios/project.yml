@@ -38,9 +38,15 @@ targets:
     info:
       path: YourHarness/Info.plist
       properties:
-        # ws:// to the Mac on the local network (and 127.0.0.1 from the Simulator).
+        # ws:// to the Mac on the local network (and 127.0.0.1 from the Simulator), and over
+        # Tailscale by its MagicDNS name: ATS counts only private ranges as local, not the
+        # tailnet's 100.64/10, and an exception can't name an IP; WireGuard encrypts that way.
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
+          NSExceptionDomains:
+            ts.net:
+              NSIncludesSubdomains: true
+              NSExceptionAllowsInsecureHTTPLoads: true
         # yourharness://pair?… from the Mac's QR code: the Camera app opens the app with it.
         CFBundleURLTypes:
           - CFBundleURLName: com.mdovhopo.yourharness.mobile.pair

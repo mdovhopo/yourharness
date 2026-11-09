@@ -2,7 +2,7 @@
 
 Status: in progress. Done: F0 (`yh_core::thread_run`), F1's first step (`yh-engine`: turns on
 the engine's thread), and a first `yh-proto` and `yh-server` (see "The order changed" below).
-Next: Tailscale (F3), then F1's steps 2 and 3.
+Tailscale for phones is in too (docs/mobile.md, Tailscale). Next: F1's steps 2 and 3.
 
 ## The order changed (2026-11-09)
 

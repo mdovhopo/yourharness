@@ -755,18 +755,29 @@ impl SettingsView {
         let name = crate::state::workspace::mac_name();
         let link = ws.phones.pairing_link(&name);
         let port = ws.phones.port;
-        let address = match (&ws.phones.error, ws.phones.addresses.first()) {
+        let only = ws.phones.tailscale_only;
+        let address = match (&ws.phones.error, ws.phones.hosts().first()) {
             (Some(e), _) if on => e.clone(),
             _ if !running => "Off".into(),
             (_, Some(ip)) => format!("{ip}:{port}"),
             (_, None) => "Not on a network".into(),
         };
+        // Tailscale as last read: where phones find the Mac on the tailnet.
+        let (tailscale, tailscale_up) = match &ws.phones.tailscale {
+            None => ("Not installed".to_string(), false),
+            Some(t) if !t.running => (if t.state == "NeedsLogin" { "Not logged in".into() } else { "Not connected".into() }, false),
+            Some(t) => {
+                let at = t.dns_name.as_deref().and_then(|n| n.split('.').next()).or(t.ipv4()).unwrap_or_default().to_string();
+                (if running { format!("{at} · {}:{port}", t.ipv4().unwrap_or_default()) } else { at }, true)
+            }
+        };
         let mut devices = ws.phones.pairing.devices();
         devices.sort_by(|a, b| b.paired_at.total_cmp(&a.paired_at));
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.);
         let switch_ws = self.workspace.clone();
+        let only_ws = self.workspace.clone();
         let mut page = div().flex().flex_col().gap(px(space::L)).child(
-            section("Phones on This Network")
+            section("Phones")
                 .child(row(
                     "Let phones connect",
                     Switch::new("phones-enabled").checked(on).on_change(move |on, _, cx| {
@@ -775,7 +786,19 @@ impl SettingsView {
                     }),
                 ))
                 .child(row("Address", div().text_color(if ws.phones.error.is_some() && on { theme.warning } else { theme.secondary }).child(address)))
-                .footer("Your iPhone or iPad on the same Wi‑Fi follows and runs your threads, with YourHarness on the phone. What they send isn't encrypted on the network yet: use it on networks you trust."),
+                .child(row("Tailscale", div().text_color(if tailscale_up { theme.secondary } else { theme.tertiary }).child(tailscale)))
+                .child(row(
+                    "Over Tailscale only",
+                    Switch::new("phones-tailscale-only").checked(only).on_change(move |only, _, cx| {
+                        let only = *only;
+                        only_ws.update(cx, |ws, cx| ws.set_phones_tailscale_only(only, cx));
+                    }),
+                ))
+                .footer(if only {
+                    "Your iPhone or iPad follows and runs your threads, with YourHarness on the phone, from anywhere over Tailscale: only your own devices on your tailnet can connect, and the way is encrypted."
+                } else {
+                    "Your iPhone or iPad follows and runs your threads, with YourHarness on the phone: on the same Wi‑Fi, and from anywhere when both have Tailscale on (only your own devices on your tailnet; encrypted). On Wi‑Fi it isn't encrypted: use it on networks you trust, or Tailscale only."
+                }),
         );
         if let Some(link) = link {
             let new_ws = self.workspace.clone();

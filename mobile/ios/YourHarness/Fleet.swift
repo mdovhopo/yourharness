@@ -14,6 +14,8 @@ final class Fleet {
         var name: String?
         /// The Mac's lasting ID: one entry per Mac, whatever its address.
         var id: String?
+        /// Every address it may be reached at (Wi‑Fi, Tailscale).
+        var hosts: [String]?
     }
 
     /// This phone's lasting ID, sent when it pairs: pairing again replaces it on the Mac.
@@ -49,7 +51,7 @@ final class Fleet {
         }
         let first = env["YH_PHONE_MAC"].flatMap(Int.init) ?? UserDefaults.standard.integer(forKey: "currentMac")
         let start = saved.indices.contains(first) ? first : 0
-        let stores = saved.enumerated().map { i, mac in Store(address: mac.address, name: mac.name, macID: mac.id, selects: i == start) }
+        let stores = saved.enumerated().map { i, mac in Store(address: mac.address, name: mac.name, macID: mac.id, hosts: mac.hosts ?? [], selects: i == start) }
         self.stores = stores
         current = stores[start]
         tab = env["YH_PHONE_TAB"].flatMap(AppTab.init(rawValue:)) ?? .threads
@@ -87,7 +89,8 @@ final class Fleet {
         return true
     }
 
-    /// A pairing link from the Mac's QR code (`yourharness://pair?host=…&port=…&code=…&name=…`):
+    /// A pairing link from the Mac's QR code (`yourharness://pair?host=…&hosts=…&port=…&code=…&name=…`,
+    /// `hosts` every address it may be reached at, tried at once):
     /// connects with the code, and once the Mac answers with this phone's token, keeps the Mac
     /// with that. Pairing again with a Mac already listed replaces it.
     @discardableResult
@@ -97,6 +100,7 @@ final class Fleet {
         func item(_ name: String) -> String? { items.first { $0.name == name }?.value }
         guard let host = item("host"), let port = item("port"), let code = item("code") else { return false }
         let base = "ws://\(host):\(port)/"
+        let hosts = item("hosts").map { $0.split(separator: ",").map(String.init) } ?? [host]
         let macID = item("id")
         let device = Self.deviceName.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? "Phone"
         // The guess a new install starts with goes now; the Mac it paired with before, once this
@@ -105,7 +109,7 @@ final class Fleet {
         let earlier = { (s: Store) in s.pairing && (s.serverAddress.hasPrefix(base) || (macID != nil && s.macID == macID)) }
         stores.filter { guess($0) || earlier($0) }.forEach { $0.disconnect() }
         stores.removeAll { guess($0) || earlier($0) }
-        let store = Store(address: "\(base)?pair=\(code)&device=\(device)&device_id=\(Self.phoneID)", name: item("name"), macID: macID)
+        let store = Store(address: "\(base)?pair=\(code)&device=\(device)&device_id=\(Self.phoneID)", name: item("name"), macID: macID, hosts: hosts)
         wire(store)
         store.onPaired = { [weak self, weak store] token in
             guard let self, let store else { return }
@@ -172,7 +176,7 @@ final class Fleet {
     private func save() {
         guard saves else { return }
         // A Mac still pairing isn't kept: its code works only once.
-        let macs = stores.filter { !$0.pairing }.map { Saved(address: $0.serverAddress, name: $0.serverName, id: $0.macID) }
+        let macs = stores.filter { !$0.pairing }.map { Saved(address: $0.serverAddress, name: $0.serverName, id: $0.macID, hosts: $0.hosts.isEmpty ? nil : $0.hosts) }
         UserDefaults.standard.set(try? JSONEncoder().encode(macs), forKey: "macs")
         UserDefaults.standard.set(stores.firstIndex { $0 === current } ?? 0, forKey: "currentMac")
         Perf.shared.log("SAVED \(macs.count) Macs, showing \(stores.firstIndex { $0 === current } ?? 0)")

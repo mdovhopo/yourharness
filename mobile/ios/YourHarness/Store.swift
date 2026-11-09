@@ -37,10 +37,25 @@ final class Store: Identifiable {
     /// Why pairing didn't work, shown on its row.
     var pairingFailed: String?
 
-    /// Where it connects, for showing: host and port, never its token or pairing code.
+    /// Where it connects, for showing: host and port, never its token or pairing code; the
+    /// address it reached the Mac at once connected.
     var shownAddress: String {
-        guard let url = URL(string: serverAddress), let host = url.host() else { return serverAddress }
+        guard let url = URL(string: serverAddress), let host = route ?? url.host() else { return serverAddress }
         return url.port.map { "\(host):\($0)" } ?? host
+    }
+
+    /// Every address the Mac may be reached at (its pairing link, then each `hello`), tried at
+    /// once on every connect.
+    var hosts: [String] = [] {
+        didSet { connection.hosts = hosts }
+    }
+    /// The address the open connection reached the Mac at.
+    var route: String?
+    /// Reached over Tailscale (its MagicDNS name, or 100.64.0.0/10) rather than the local network.
+    var viaTailscale: Bool {
+        if route?.lowercased().hasSuffix(".ts.net") == true { return true }
+        guard let parts = route?.split(separator: ".").compactMap({ Int($0) }), parts.count == 4 else { return route?.lowercased().hasPrefix("fd7a:115c:a1e0") ?? false }
+        return parts[0] == 100 && (64..<128).contains(parts[1])
     }
 
     /// What the Mac is called here: its name once heard, else its address's host.
@@ -99,17 +114,25 @@ final class Store: Identifiable {
     static let defaultAddress = "ws://127.0.0.1:7878/"
 
     /// `selects`: `YH_SELECT` is for this one (the Mac shown at launch).
-    init(address: String, name: String? = nil, macID: String? = nil, selects: Bool = false) {
+    init(address: String, name: String? = nil, macID: String? = nil, hosts: [String] = [], selects: Bool = false) {
         serverAddress = address
+        self.hosts = hosts
         serverName = name
         self.macID = macID
         if selects { selectOnLoad = ProcessInfo.processInfo.environment["YH_SELECT"] }
         connection = Connection(url: URL(string: address) ?? URL(string: Store.defaultAddress)!)
         pairing = address.contains("pair=")
+        connection.hosts = hosts
         connection.onState = { [weak self] in
             guard let self else { return }
             state = $0
-            if $0 == .connected { everConnected = true }
+            if $0 == .connected {
+                everConnected = true
+                route = connection.host
+                Perf.shared.log("ROUTE \(displayName) via \(route ?? "?")\(viaTailscale ? " (Tailscale)" : "")")
+            } else {
+                route = nil
+            }
             // A pairing code the Mac refused won't work on a retry: stop, and say what to do.
             if pairing, case .waiting(let reason, _) = $0, reason.contains("refused") {
                 pairingFailed = "That code is used or out of date. Show a new one on the Mac (Settings → Phone)."
@@ -381,9 +404,10 @@ final class Store: Identifiable {
         var rowsByThread: [String: [RowModel]] = [:]
         for message in batch {
             switch message {
-            case .hello(let version, let server, _, let mac):
+            case .hello(let version, let server, _, let mac, let hosts):
                 serverName = server
                 if let mac { macID = mac }
+                if !hosts.isEmpty, hosts != self.hosts { self.hosts = hosts }
                 serverProtocol = version
                 onHello?()
                 connection.send(.subscribeApp)

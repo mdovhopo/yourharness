@@ -12,8 +12,8 @@ questions answered (several questions, several choices, or your own words) or sk
 approved into a mode or sent back with feedback; MCP servers' questions accepted or declined;
 pictures sent with a message; a new thread in a project; model, effort and the project's
 permission mode; rename, pin, settle and bring back, delete; a tool call's whole output; the
-phone reconnecting by itself when the Mac app restarts. Tailscale and a real iPhone come next
-(see Post-MVP).
+phone reconnecting by itself when the Mac app restarts; reaching the Mac over Tailscale from
+anywhere (see Tailscale below).
 
 ## The MVP goal
 
@@ -195,8 +195,38 @@ or reaching it at a new address replaces the old one, and two saved entries that
 same Mac (Macs saved before the ID) become one when it connects. The phone has one too (`phoneID`,
 sent as `device_id` when pairing): the Mac replaces that phone's entry instead of adding one. Checked:
 the same Mac paired again on another port, then twice, left one entry on each side. A thread made from the phone (its project's ✎) isn't opened on
-the Mac: the Mac stays on what you have open, the new thread in its sidebar with an unread dot. Not encrypted on the network yet (plain
-WebSocket): Tailscale is to carry it.
+the Mac: the Mac stays on what you have open, the new thread in its sidebar with an unread dot. Plain
+WebSocket on the Wi‑Fi (not encrypted); over Tailscale, WireGuard encrypts it.
+
+### Tailscale
+
+With Tailscale connected on the Mac (`yh_server::tailscale`: the CLI's `status --json`, read off the
+main thread at start and every 15 s while phones may connect), the pairing link and every `hello`
+carry `hosts`: the Mac's Wi‑Fi addresses, then its MagicDNS name (`mac.tailXXXX.ts.net`; the 100.x
+address only when MagicDNS is off). The phone keeps a Mac's hosts with it (`Saved.hosts`, updated by
+each `hello`, so phones paired before learn the tailnet name the first time they connect on Wi‑Fi)
+and on every connect opens a socket to each at once, keeping the first to say `hello`; the Macs page
+shows the address in use with "· Tailscale". **Why the name, not the address:** iOS's App Transport
+Security counts only private ranges as local, not the tailnet's 100.64/10 (plain `ws://` to it
+fails with -1022), and an ATS exception can't name an IP, so the app has an exception for `ts.net`
+and its subdomains; WireGuard already encrypts that way. `wss://` with `tailscale cert` would need
+the tailnet's HTTPS turned on: later, if ever needed.
+
+The server listens on every address as before (only the tailnet's, `100.x`, with **Over Tailscale
+only** in Settings → Phone, saved as `phonesTailscaleOnly`; it follows the address when Tailscale
+comes back, and waits while it's down). A connection from the tailnet's ranges is checked with
+`tailscale whois` before its token: only devices logged in as the Mac's own tailnet user get in,
+others get 403 ("This device isn't logged in to Tailscale as you."). Over Tailscale only, anything
+off the tailnet is refused too. Test hooks: `YH_TAILSCALE=0`, `YH_TAILSCALE_STATUS=<status.json>`,
+`YH_TAILSCALE_WHOIS=<{"<ip>": user id}>`, `YH_PHONES_TAILSCALE_ONLY=1` (not saved). The phone prints
+`ROUTE <Mac> via <host>` and `CONNECT <host> failed: …` for each try that didn't work.
+
+Checked 2026-11-10 against this Mac's tailnet: the Simulator paired from a link whose Wi‑Fi address
+was dead (`10.255.255.1`) plus the `ts.net` name, over Tailscale, and showed the threads; the `yh`
+client paired over `100.78.55.9` (`whois` saying it's you), was refused with a faked other user,
+and still got in over Wi‑Fi; Over Tailscale only listened on `100.78.55.9` alone (Wi‑Fi refused)
+and a Haiku turn sent over the `ts.net` name streamed its reply back. Not yet: a real iPhone on
+cellular.
 
 Test hooks: `YH_PHONES=1` (on at launch, not saved), `YH_PHONES_LOG=1` (prints `PHONES pair
 <link>`), `YH_PHONES_BIND=127.0.0.1` (listens on loopback only: with the Mac's firewall on, listening
@@ -356,8 +386,9 @@ Recorded here so the MVP stays small. Roughly in order; Tailscale last.
    and the phone got none of it (`UNWATCH`, then `rows=0`). Hooks: `YH_SERVER=<a>,<b>` (Macs, not
    saved), `YH_PHONE_MAC=<index>` (shown at launch), `YH_PHONE_SWITCH=<index>` (shown 6 s later),
    `YH_PHONE_ADD_MAC=<address>`; `WATCH`, `UNWATCH` and `MAC` lines.
-10. **Tailscale:** the server on the tailnet's addresses, `tailscale whois`, `wss://` with
-    `tailscale cert`, as [remote.md](remote.md) plans.
+10. ✅ **Tailscale:** the tailnet's MagicDNS name in the pairing link and `hello`, the phone
+    trying every address at once, `tailscale whois`, Over Tailscale only (see Tailscale above).
+    `wss://` with `tailscale cert` left for later.
 
 ### What the phone needs from the protocol
 
