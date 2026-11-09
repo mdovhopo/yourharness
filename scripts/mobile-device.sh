@@ -60,7 +60,7 @@ BUILT="$ROOT/mobile/ios/build/Device"
 EXTRA=()
 [[ -n ${BUNDLE_ID:-} ]] && EXTRA+=(PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID")
 xcodebuild -project "$ROOT/mobile/ios/YourHarnessMobile.xcodeproj" -scheme YourHarnessMobile -configuration Debug \
-  -destination "id=$UDID" -derivedDataPath "$BUILT" -allowProvisioningUpdates \
+  -destination "id=$UDID" -derivedDataPath "$BUILT" -allowProvisioningUpdates -allowProvisioningDeviceRegistration \
   DEVELOPMENT_TEAM="$TEAM" CODE_SIGN_STYLE=Automatic "${EXTRA[@]}" build -quiet
 APP="$BUILT/Build/Products/Debug-iphoneos/YourHarness.app"
 xcrun devicectl device install app --device "$UDID" "$APP"
