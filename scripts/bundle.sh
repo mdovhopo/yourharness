@@ -29,11 +29,12 @@ grep -E "^(error|warning: unused)|Finished" -A6 "$LOG" >&2 || true
 rm -f "$LOG"
 BIN="$ROOT/target/release/YourHarness"
 [[ -x $BIN ]] || { echo "build failed" >&2; exit 1; }
+# The icon (scripts/icons.sh): graphite for releases, night blue for Next.
 if [[ -n "${RELEASE:-}" ]]; then
-    NAME="YourHarness"; BUNDLE_ID="com.mdovhopo.yourharness"
+    NAME="YourHarness"; BUNDLE_ID="com.mdovhopo.yourharness"; ICON="YourHarness"
     APP="${APP:-$ROOT/build/YourHarness.app}"
 else
-    NAME="YourHarness Next"; BUNDLE_ID="com.mdovhopo.yourharness.next"
+    NAME="YourHarness Next"; BUNDLE_ID="com.mdovhopo.yourharness.next"; ICON="YourHarnessNext"
     APP="${APP:-$ROOT/build/YourHarness Next.app}"
 fi
 BUILD="$(git -C "$ROOT" rev-list --count HEAD 2>/dev/null || echo 1)"
@@ -41,6 +42,7 @@ COMMIT="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)$([[
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/YourHarness"
+cp "$ROOT/assets/icons/$ICON.icns" "$APP/Contents/Resources/AppIcon.icns"
 VERSION="${VERSION_OVERRIDE:-$(cat "$ROOT/VERSION")}"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -51,6 +53,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
     <key>CFBundleName</key><string>$NAME</string>
     <key>CFBundleDisplayName</key><string>$NAME</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>YHGitCommit</key><string>$COMMIT</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>$VERSION</string>

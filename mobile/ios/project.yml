@@ -26,6 +26,9 @@ targets:
         PRODUCT_NAME: YourHarness
         TARGETED_DEVICE_FAMILY: "1,2"
         GENERATE_INFOPLIST_FILE: YES
+        # The icon (scripts/icons.sh): Next (night blue) for local builds and TestFlight; the App
+        # Store build sets ASSETCATALOG_COMPILER_APPICON_NAME=AppIcon (graphite).
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIconNext
         INFOPLIST_KEY_CFBundleDisplayName: YourHarness
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight

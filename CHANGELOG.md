@@ -6,6 +6,9 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+### Added
+- YourHarness has an icon: a Y of two threads joining into one, your agents gathered in one place. Development builds of YourHarness Next show it on night blue.
+
 ## [0.1.4] - 2026-11-10
 
 ### Added
