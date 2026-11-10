@@ -12,6 +12,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ### Changed
 - New Thread opens at once and creates nothing: the thread is saved, and joins the sidebar, when you send its first message. Leave it empty and it's gone; leave it with something typed and New Thread in that project brings your draft back (until you quit).
+- On the phone too: New Thread opens a sheet to write the first message, and the thread is made on the Mac when you send it. Close the sheet and nothing is made; what you typed waits for that project's next New Thread.
 
 ## [0.1.4] - 2026-11-10
 

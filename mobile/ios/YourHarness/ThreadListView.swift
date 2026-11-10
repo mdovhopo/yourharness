@@ -10,6 +10,8 @@ struct ThreadListView: View {
     @State private var deleting: ThreadInfo?
     /// The project whose PRs are open in a sheet.
     @State private var pullsFor: Project?
+    /// The project a new thread is being written in.
+    @State private var composingIn: Project?
     private static let env = ProcessInfo.processInfo.environment
 
     var body: some View {
@@ -79,7 +81,7 @@ struct ThreadListView: View {
                                 .accessibilityLabel("Pull requests in \(section.project.name)")
                         }
                         if store.canControl {
-                            Button("New Thread", systemImage: "square.and.pencil") { store.newThread(in: section.project.id) }
+                            Button("New Thread", systemImage: "square.and.pencil") { composingIn = section.project }
                                 .labelStyle(.iconOnly)
                                 .font(.body)
                                 .accessibilityLabel("New thread in \(section.project.name)")
@@ -100,6 +102,7 @@ struct ThreadListView: View {
         }
         .refreshable { store.reconnect() }
         .sheet(item: $pullsFor) { PullsSheet(project: $0).environment(store) }
+        .sheet(item: $composingIn) { NewThreadSheet(project: $0).environment(store) }
         // `YH_PHONE_PULLS=<project name>`: its PRs open, as its header's button does.
         .task(id: store.projects.count) {
             guard let name = Self.env["YH_PHONE_PULLS"], pullsFor == nil, let p = store.projects.first(where: { $0.name == name }) else { return }
@@ -123,6 +126,16 @@ struct ThreadListView: View {
         }
         // `YH_PHONE_NEW_THREAD=<first message>`: a new thread in `YH_PHONE_PROJECT` (a project's
         // name) or the first project, as its header's button does.
+        // `YH_PHONE_COMPOSE=<draft>`: New Thread pressed in `YH_PHONE_PROJECT` or the first
+        // project, the draft waiting in it (its sheet, for screenshots).
+        .task(id: store.canControl && !store.projects.isEmpty) {
+            guard store.canControl, let draft = Self.env["YH_PHONE_COMPOSE"], composingIn == nil, !madeThread else { return }
+            let wanted = Self.env["YH_PHONE_PROJECT"]
+            guard let project = store.projects.first(where: { wanted == nil || $0.name == wanted }) else { return }
+            madeThread = true
+            if !draft.isEmpty { store.newThreadDrafts[project.id] = draft }
+            composingIn = project
+        }
         .task(id: store.canControl && !store.projects.isEmpty) {
             guard store.canControl, let text = Self.env["YH_PHONE_NEW_THREAD"], !madeThread else { return }
             let wanted = Self.env["YH_PHONE_PROJECT"]
@@ -601,6 +614,52 @@ private struct ThreadActions: ViewModifier {
                 }
         } else {
             content
+        }
+    }
+}
+
+/// A new thread's first message. Nothing is made on the Mac until it's sent; closed unsent, what's
+/// typed waits for the project's next New Thread.
+struct NewThreadSheet: View {
+    let project: Project
+    @Environment(Store.self) private var store
+    @Environment(\.dismiss) private var dismiss
+    @State private var text = ""
+    @FocusState private var focused: Bool
+
+    private var empty: Bool { text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                TextField("What are we working on?", text: $text, axis: .vertical)
+                    .lineLimit(4...16)
+                    .focused($focused)
+            }
+            .navigationTitle("New Thread")
+            .navigationSubtitle(project.name)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close", systemImage: "xmark") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Send", systemImage: "arrow.up") {
+                        store.newThread(in: project.id, text: text.trimmingCharacters(in: .whitespacesAndNewlines))
+                        text = ""
+                        dismiss()
+                    }
+                    .disabled(empty || !store.canAct)
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+        .onAppear {
+            text = store.newThreadDrafts[project.id] ?? ""
+            focused = true
+        }
+        .onDisappear {
+            store.newThreadDrafts[project.id] = empty ? nil : text
         }
     }
 }

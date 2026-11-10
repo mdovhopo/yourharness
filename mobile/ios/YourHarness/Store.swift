@@ -279,10 +279,15 @@ final class Store: Identifiable {
         act(.answerQuestion(id: Self.newID(), thread: thread, requestID: question.id, accept: accept))
     }
 
-    /// A new thread in `project`; opened once the Mac has made it.
+    /// A new thread in `project` with its first message; opened once the Mac has made it. Until
+    /// it's sent nothing exists on the Mac: what's typed waits here (`newThreadDrafts`).
     func newThread(in project: String, text: String? = nil) {
+        newThreadDrafts[project] = nil
         act(.newThread(id: Self.newID(), project: project, text: text))
     }
+
+    /// What's typed in each project's new thread, not sent yet: kept while the app runs.
+    var newThreadDrafts: [String: String] = [:]
 
     func setModel(_ model: String?, of thread: String) { act(.setModel(id: Self.newID(), thread: thread, model: model)) }
     func setEffort(_ effort: String?, of thread: String) { act(.setEffort(id: Self.newID(), thread: thread, effort: effort)) }
