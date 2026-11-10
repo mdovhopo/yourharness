@@ -123,7 +123,7 @@ struct Live: Decodable, Sendable, Equatable {
     }
 }
 
-struct Row: Decodable, Sendable {
+struct Row: Codable, Sendable {
     let seq: Int
     /// Of two copies of a row, the higher `rev` is newer, whichever message brought it.
     let rev: Int
@@ -211,7 +211,7 @@ struct SearchHit: Decodable, Sendable, Hashable, Identifiable {
 }
 
 /// A sub-agent's run as its card shows it (protocol 4).
-struct SubagentInfo: Decodable, Sendable, Hashable {
+struct SubagentInfo: Codable, Sendable, Hashable {
     let description: String
     let status: String
     let agentType: String?

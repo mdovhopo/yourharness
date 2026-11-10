@@ -214,8 +214,64 @@ final class Store: Identifiable {
         transcript = model
         live = nil
         Perf.shared.log("WATCH \(displayName) \(threadID.prefix(8))")
-        connection.send(.subscribeThread(threadID, limit: TranscriptModel.pageSize))
+        let file = Self.rowsFile(threadID)
+        guard offersSearch, ProcessInfo.processInfo.environment["YH_PHONE_CACHE"] != "0", FileManager.default.fileExists(atPath: file.path) else {
+            connection.send(.subscribeThread(threadID, limit: TranscriptModel.pageSize))
+            return model
+        }
+        // The rows it showed last time, read and parsed off the main thread, drawn at once; then
+        // the Mac sends only what changed after them (protocol 5's `known`).
+        Task { @MainActor [weak self] in
+            let cached = await Task.detached(priority: .userInitiated) { Self.readRows(file) }.value
+            guard let self, transcript === model else { return }
+            if let cached, !model.loaded {
+                model.applySnapshot(firstSeq: cached.firstSeq, count: cached.count, rows: cached.rows)
+                Perf.shared.log("CACHE \(cached.rows.count) rows of \(threadID.prefix(8))")
+            }
+            guard !away else { return }
+            connection.send(.subscribeThread(threadID, limit: TranscriptModel.pageSize, known: model.known))
+        }
         return model
+    }
+
+    // MARK: Each thread's last rows
+
+    /// Kept per thread (its ID is unique across Macs): enough that the Mac's resume, which starts
+    /// 40 rows before what's held, lands inside them.
+    private static let rowsKept = 60
+
+    private static func rowsFile(_ thread: String) -> URL {
+        let safe = String(thread.map { $0.isLetter || $0.isNumber || $0 == "-" ? $0 : "_" })
+        return FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appending(path: "threads/\(safe).json")
+    }
+
+    private struct CachedRows: Codable {
+        var firstSeq: Int
+        var count: Int
+        var rows: [Row]
+    }
+
+    private nonisolated static func readRows(_ file: URL) -> (firstSeq: Int, count: Int, rows: [RowModel])? {
+        let d = JSONDecoder()
+        d.keyDecodingStrategy = .convertFromSnakeCase
+        guard let data = try? Data(contentsOf: file), let c = try? d.decode(CachedRows.self, from: data), !c.rows.isEmpty,
+              c.firstSeq == c.rows[0].seq else { return nil }
+        return (c.firstSeq, c.count, c.rows.map(RowModel.init))
+    }
+
+    /// The thread's newest rows written for next time, off the main thread.
+    private func saveRows(of model: TranscriptModel) {
+        guard model.loaded, offersSearch, !model.rows.isEmpty else { return }
+        let rows = model.rows.suffix(Self.rowsKept).map(\.row)
+        let c = CachedRows(firstSeq: rows[rows.startIndex].seq, count: model.count, rows: Array(rows))
+        let file = Self.rowsFile(model.threadID)
+        Task.detached(priority: .utility) {
+            let e = JSONEncoder()
+            e.keyEncodingStrategy = .convertToSnakeCase
+            guard let data = try? e.encode(c) else { return }
+            try? FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? data.write(to: file, options: .atomic)
+        }
     }
 
     /// Off screen (the app in the background, the phone locked): the open thread and its side
@@ -225,6 +281,7 @@ final class Store: Identifiable {
     func setAway(_ away: Bool) {
         guard self.away != away else { return }
         self.away = away
+        if away, let t = transcript { saveRows(of: t) }
         guard state == .connected else { return }
         Perf.shared.log("\(away ? "AWAY" : "BACK") \(displayName)")
         if away {
@@ -246,6 +303,7 @@ final class Store: Identifiable {
 
     func close(_ model: TranscriptModel) {
         guard transcript === model else { return }
+        saveRows(of: model)
         transcript = nil
         live = nil
         Perf.shared.log("UNWATCH \(displayName) \(model.threadID.prefix(8))")
@@ -465,6 +523,7 @@ final class Store: Identifiable {
                 selectIfAsked()
                 if openWhenListed == thread.id { path = [thread.id]; openWhenListed = nil }
             case .threadRemoved(let id):
+                try? FileManager.default.removeItem(at: Self.rowsFile(id))
                 threads[id] = nil
                 order.removeAll { $0 == id }
             case .snapshot(let thread, let firstSeq, let count, let rows):
