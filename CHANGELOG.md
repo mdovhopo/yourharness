@@ -6,6 +6,8 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-11-10
+
 ### Fixed
 - New Thread on the phone lets you pick the model, reasoning effort and permissions before the first message goes, and remembers your pick for that project.
 
