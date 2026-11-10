@@ -6,6 +6,8 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-11-10
+
 ### Fixed
 - Links in Claude's replies on the phone open in Safari when you tap them, web addresses written out without a link too.
 - The phone opens on the thread list it last had, even before it reaches the Mac, and a reconnect no longer moves anything: a spinner shows in the corner, and in a thread the send button spins until it's back.
