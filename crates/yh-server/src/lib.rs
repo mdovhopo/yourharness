@@ -840,6 +840,35 @@ fn answer(id: u64, message: FromApp, shared: &Arc<Shared>, source: &Source) -> V
             });
             vec![]
         }
+        // A PR in full and merging it: aside (the forge takes a second or two), to this client.
+        FromApp::Pull { url } => {
+            let shared = shared.clone();
+            std::thread::spawn(move || shared.send_to(id, &[pulls::detail(&url)], |_| {}));
+            vec![]
+        }
+        FromApp::MergePull { id: action, url, method, auto } => {
+            if shared.actions.is_none() {
+                return match action {
+                    Some(a) => vec![ToApp::Done { id: a, error: Some("This server only reads.".into()), thread: None }],
+                    None => vec![ToApp::Error { message: "This server only reads.".into() }],
+                };
+            }
+            let shared = shared.clone();
+            std::thread::spawn(move || {
+                let error = pulls::merge(&url, &method, auto).err();
+                eprintln!("client {id}: merge {url} {method}: {}", error.as_deref().unwrap_or("done"));
+                // Its page is drawn again from what the forge says now: merged, or waiting to.
+                let mut replies = vec![];
+                if let Some(a) = action {
+                    replies.push(ToApp::Done { id: a, error: error.clone(), thread: None });
+                } else if let Some(message) = error {
+                    replies.push(ToApp::Error { message });
+                }
+                replies.push(pulls::detail(&url));
+                shared.send_to(id, &replies, |_| {});
+            });
+            vec![]
+        }
         FromApp::Files { thread, query } => {
             let folder = match source.folder_of(&thread) {
                 Ok(Some(f)) => f,
@@ -954,7 +983,7 @@ fn to_action(m: FromApp) -> Result<Action, String> {
         F::Pin { thread, on, .. } => Action::Pin { thread, on },
         F::Settle { thread, on, .. } => Action::Settle { thread, on },
         F::Delete { thread, .. } => Action::Delete { thread },
-        F::SubscribeApp | F::SubscribeThread { .. } | F::UnsubscribeThread { .. } | F::Page { .. } | F::ToolResult { .. } | F::Subagent { .. } | F::Media { .. } | F::Diagram { .. } | F::Search { .. } | F::Files { .. } | F::Pulls { .. } | F::Unknown => return Err("Not an action.".into()),
+        F::SubscribeApp | F::SubscribeThread { .. } | F::UnsubscribeThread { .. } | F::Page { .. } | F::ToolResult { .. } | F::Subagent { .. } | F::Media { .. } | F::Diagram { .. } | F::Search { .. } | F::Files { .. } | F::Pulls { .. } | F::Pull { .. } | F::MergePull { .. } | F::Unknown => return Err("Not an action.".into()),
     })
 }
 

@@ -11,6 +11,7 @@ struct AsideSheet: View {
     @State private var model: TranscriptModel?
     @State private var question = ""
     @FocusState private var focused: Bool
+    @State private var pull: PullLink?
 
     private var running: Bool { store.asideLive?.running ?? false }
 
@@ -19,7 +20,7 @@ struct AsideSheet: View {
             ZStack {
                 Color.clear
                 if let model {
-                    TranscriptRepresentable(model: model, store: store, bottomInset: 0)
+                    TranscriptRepresentable(model: model, store: store, bottomInset: 0, onPull: { pull = $0 })
                 }
             }
             .overlay {
@@ -34,6 +35,7 @@ struct AsideSheet: View {
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) { Button("Done", role: .confirm) { dismiss() } }
             }
+            .navigationDestination(item: $pull) { PullScreen(link: $0) }
         }
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)

@@ -17,7 +17,11 @@ final class Store: Identifiable {
     private var order: [String] = []
     /// The navigation stack: thread IDs.
     var path: [String] = [] {
-        didSet { if let open = path.last, let project = threads[open]?.projectId { usedProject(project) } }
+        didSet {
+            if let open = path.last, let project = threads[open]?.projectId { usedProject(project) }
+            // Left from a PR's page over it (back to the list at once): the thread closes too.
+            if let t = transcript, !path.contains(t.threadID) { openPull = nil; close(t) }
+        }
     }
     /// A thread opened from anywhere: over the thread list (the fleet turns to Threads).
     func show(_ thread: String) {
@@ -446,6 +450,47 @@ final class Store: Identifiable {
         connection.send(.pulls(project: project, fresh: fresh))
     }
 
+    // MARK: Protocol 6
+
+    /// Each PR's review page as last answered, by its URL (`PullLink.url`).
+    var pullPages: [String: PullPage] = [:]
+    /// The PR a link tap opened: pushed over the thread.
+    var openPull: PullLink?
+    /// The Mac reads and merges PRs for their review page.
+    var offersPullReview: Bool { serverProtocol >= 6 }
+
+    struct PullPage: Equatable {
+        var detail: PullDetail?
+        var error: String?
+        var loading = false
+        var merging = false
+        var mergeError: String?
+    }
+
+    /// A PR read again from its forge.
+    func askPull(_ link: PullLink) {
+        guard offersPullReview, state == .connected else {
+            pullPages[link.url, default: PullPage()].error = "Not connected to your Mac yet."
+            return
+        }
+        pullPages[link.url, default: PullPage()].loading = true
+        connection.send(.pull(url: link.url))
+    }
+
+    /// Merges a PR (`auto`: once its checks and reviews allow); its page is read again after.
+    func mergePull(_ link: PullLink, method: String, auto: Bool) {
+        pullPages[link.url, default: PullPage()].merging = true
+        pullPages[link.url]?.mergeError = nil
+        guard canAct else {
+            pullPages[link.url]?.merging = false
+            pullPages[link.url]?.mergeError = "Not connected to your Mac yet. Try again in a moment."
+            return
+        }
+        let action = FromApp.mergePull(id: Self.newID(), url: link.url, method: method, auto: auto)
+        if let id = action.actionID { pending[id] = action }
+        connection.send(action)
+    }
+
     /// Searches every thread's words; hits arrive in `searchHits`. Titles are matched here.
     func search(_ query: String) {
         let query = query.trimmingCharacters(in: .whitespaces)
@@ -583,6 +628,13 @@ final class Store: Identifiable {
                 DiagramCache.shared.deliver(key: key, drawing: drawing, error: error)
             case .done(let id, let error, let made):
                 let action = pending.removeValue(forKey: id)
+                // A merge says how it went on its PR's page, not over the thread.
+                if case .mergePull(_, let url, _, _)? = action {
+                    pullPages[url]?.merging = false
+                    pullPages[url]?.mergeError = error
+                    Perf.shared.log("DONE \(action?.name ?? id)\(error.map { ": " + $0 } ?? "")")
+                    continue
+                }
                 // A thread made from here: opened as soon as the list has it.
                 if case .newThread? = action, let made, error == nil {
                     openWhenListed = made
@@ -597,6 +649,12 @@ final class Store: Identifiable {
                 pulls[project] = answer
                 askingPulls.remove(project)
                 Perf.shared.log("PULLS \(answer.pulls.count) in \(projects.first { $0.id == project }?.name ?? project)")
+            case .pull(let url, let detail, let error):
+                var page = pullPages[url] ?? PullPage()
+                page.loading = false
+                if let detail { page.detail = detail; page.error = nil } else { page.error = error }
+                pullPages[url] = page
+                Perf.shared.log("PULL \(url) \(detail.map { "\($0.state) checks \($0.checks?.count ?? 0) comments \($0.comments?.count ?? 0) merge \($0.mergeStatus ?? "-") \(($0.mergeMethods ?? []).joined(separator: "/"))" } ?? "! \(error ?? "")")")
             case .paired(_, let token):
                 onPaired?(token)
                 Perf.shared.log("PAIRED \(displayName)")

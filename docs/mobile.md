@@ -247,9 +247,31 @@ page does (`yh_core::workspace`, `gh`/`glab`, `YH_MOCK_PULLS` in tests), aside o
 kept a minute (`fresh` asks again; pull to refresh). The sheet lists Needs Your Review, Yours and
 Others, each stack together on a rail, with draft, review, conflicts, behind, auto-merge and merge
 queue badges and the checks' state; chips filter the sections and drafts (kept between launches).
-A PR opens on GitHub; long press copies its link. Hooks: `YH_PHONE_PULLS=<project name>` (its sheet
+A PR opens its review page (below); long press copies its link. Hooks: `YH_PHONE_PULLS=<project name>` (its sheet
 open; filters reset), `YH_PHONE_PULLS_HIDE=others,drafts`, and `YH_WAIT=<s>` for `yh … raw`. Checked
 with mock PRs (a stack of three, one for review, a draft, conflicts, auto-merge) and real `gh`.
+
+### Reviewing a PR
+
+A PR's link tapped in a thread (or in a side chat, or a row of the PRs sheet) opens its review page,
+pushed over the thread instead of the browser, when the Mac speaks protocol 6; with an older Mac the
+link opens in the browser as before. Any form of the address works (`…/pull/12/files#r3`): it's read
+as `https://host/owner/repo/pull/12` (`PullLink`). The phone asks `pull { url }`; the Mac answers
+`pull { url, pull }` from `gh pr view --json …`, `gh repo view` (how the repo merges, its default
+first) and `gh api …/pulls/<n>/comments` (comments on lines of code), three calls at once, aside
+(`yh_server::pulls::detail`; GitLab: `glab mr view` and its notes, the pipeline as one check). The
+page: state, title, branches, size, labels; the review decision, the checks summed up and whether
+it can merge (conflicts, behind, blocked, ready, auto-merge on); the checks, failing and running
+first, each opening its run; the description and the conversation (comments, reviews with their
+verdict, code comments with their file and line) as markdown, GitHub's template HTML left out, long
+ones folded. It's asked again every 20 s while checks run, and on pull to refresh. The merge bar
+offers the repo's methods (Squash and Merge, Rebase and Merge, Merge), or Merge When Ready
+(`gh pr merge --auto`) when GitHub wouldn't merge it now; a confirmation first, then `merge_pull`
+(an action: `done`, then the page read again). Safari and Copy Link in the toolbar. The thread
+stays watched under the page. Hooks: `YH_PHONE_OPEN_PULL=<url>` (pushed over the open thread),
+`YH_PHONE_MERGE=<method>[:auto]` (pressed and confirmed once the page is read); on the Mac,
+`YH_MOCK_PULLS`' object form serves the page (its `mergeMethods` and `codeComments` stand in for
+`gh repo view` and `gh api`) and merging only prints `PULL merge <url> <method>`.
 
 ### On your own iPhone or iPad
 

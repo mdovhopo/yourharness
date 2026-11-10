@@ -186,6 +186,61 @@ struct PullsAnswer: Sendable {
     let accounts: [String]
 }
 
+/// One PR in full, for its review page (protocol 6): the Mac reads it through `gh` or `glab`.
+struct PullDetail: Decodable, Sendable, Hashable {
+    let repo: String
+    let number: Int
+    let title: String
+    let url: String
+    /// `open`, `merged`, `closed`.
+    let state: String
+    let draft: Bool
+    let author: String?
+    let body: String?
+    let head: String
+    let base: String
+    let additions: Int?
+    let deletions: Int?
+    let changedFiles: Int?
+    let commits: Int?
+    let createdAt: String?
+    let updatedAt: String?
+    let mergedAt: String?
+    let labels: [String]?
+    /// `approved`, `changesRequested`, `required` or empty.
+    let review: String?
+    /// `CLEAN`, `BLOCKED`, `BEHIND`, `DIRTY`, `UNSTABLE`, `DRAFT`, `UNKNOWN`.
+    let mergeStatus: String?
+    let autoMerge: Bool?
+    /// Failing first.
+    let checks: [PullCheck]?
+    /// Oldest first.
+    let comments: [PullComment]?
+    /// Of `squash`, `merge`, `rebase`, the repo's default first.
+    let mergeMethods: [String]?
+}
+
+struct PullCheck: Decodable, Sendable, Hashable {
+    let name: String
+    let workflow: String?
+    /// `passing`, `failing`, `pending`, `skipped`.
+    let state: String
+    let url: String?
+}
+
+struct PullComment: Decodable, Sendable, Hashable {
+    let author: String?
+    let body: String
+    let at: String?
+    /// `comment`, `review` or `code`.
+    let kind: String
+    /// `approved`, `changesRequested`, `commented`, `dismissed`.
+    let verdict: String?
+    let path: String?
+    let line: Int?
+    let url: String?
+}
+
 /// A slash command the composer offers (protocol 5).
 struct SlashCommand: Codable, Sendable, Hashable, Identifiable {
     let name: String
@@ -311,6 +366,8 @@ enum ToApp: Sendable {
     case pulls(project: String, answer: PullsAnswer)
     /// Protocol 5: paired with the Mac (the connection carried a pairing code): its token.
     case paired(device: String, token: String)
+    /// Protocol 6: a PR in full, or why it couldn't be read.
+    case pull(url: String, detail: PullDetail?, error: String?)
     case unknown
 
     /// Changes what the phone keeps of this Mac between launches (`Store`'s cache).
@@ -324,6 +381,7 @@ enum ToApp: Sendable {
     private struct Tag: Decodable { let type: String }
     private struct Pulls: Decodable { let project: String; let pulls: [PullInfo]; let errors: [String]?; let accounts: [String]? }
     private struct Paired: Decodable { let device: String; let token: String }
+    private struct Pull: Decodable { let url: String; let pull: PullDetail?; let error: String? }
     private struct Hello: Decodable { let `protocol`: Int?; let server: String; let data: String; let mac: String?; let hosts: [String]? }
     private struct LiveMessage: Decodable { let thread: String; let live: Live }
     private struct Done: Decodable { let id: String; let error: String?; let thread: String? }
@@ -410,6 +468,9 @@ enum ToApp: Sendable {
             case "pulls":
                 let m = try d.decode(Pulls.self, from: data)
                 return .pulls(project: m.project, answer: PullsAnswer(pulls: m.pulls, errors: m.errors ?? [], accounts: m.accounts ?? []))
+            case "pull":
+                let m = try d.decode(Pull.self, from: data)
+                return .pull(url: m.url, detail: m.pull, error: m.error)
             case "paired":
                 let m = try d.decode(Paired.self, from: data)
                 return .paired(device: m.device, token: m.token)
@@ -464,13 +525,15 @@ enum FromApp {
     case files(thread: String, query: String)
     case askAside(id: String, thread: String, text: String)
     case pulls(project: String, fresh: Bool)
+    case pull(url: String)
+    case mergePull(id: String, url: String, method: String, auto: Bool)
 
     var actionID: String? {
         switch self {
         case .send(let id, _, _, _, _), .stop(let id, _), .respond(let id, _, _, _), .withdraw(let id, _, _), .sendNow(let id, _, _),
              .answer(let id, _, _, _), .skipQuestion(let id, _, _), .approvePlan(let id, _, _, _, _), .keepPlanning(let id, _, _, _),
              .answerQuestion(let id, _, _, _), .newThread(let id, _, _, _, _, _), .setModel(let id, _, _), .setEffort(let id, _, _),
-             .setMode(let id, _, _), .rename(let id, _, _), .pin(let id, _, _), .settle(let id, _, _), .delete(let id, _), .askAside(let id, _, _): id
+             .setMode(let id, _, _), .rename(let id, _, _), .pin(let id, _, _), .settle(let id, _, _), .delete(let id, _), .askAside(let id, _, _), .mergePull(let id, _, _, _): id
         default: nil
         }
     }
@@ -497,6 +560,7 @@ enum FromApp {
         case .settle(_, _, let on): on ? "settle" : "unsettle"
         case .delete: "delete"
         case .askAside(_, _, let text): "ask aside \(text.prefix(40))"
+        case .mergePull(_, let url, let method, let auto): "merge \(url) \(method)\(auto ? " auto" : "")"
         default: "\(self)"
         }
     }
@@ -539,6 +603,8 @@ enum FromApp {
         case .files(let t, let query): ["type": "files", "thread": t, "query": query]
         case .askAside(let id, let t, let text): ["type": "ask_aside", "id": id, "thread": t, "text": text]
         case .pulls(let project, let fresh): ["type": "pulls", "project": project, "fresh": fresh]
+        case .pull(let url): ["type": "pull", "url": url]
+        case .mergePull(let id, let url, let method, let auto): ["type": "merge_pull", "id": id, "url": url, "method": method, "auto": auto]
         }
         let data = try! JSONSerialization.data(withJSONObject: object)
         return String(decoding: data, as: UTF8.self)

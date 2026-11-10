@@ -1,6 +1,6 @@
 // A project's open PRs, as its page on the Mac lists them: what waits for your review, yours,
 // everyone else's, each stack together and drawn as a rail. Filters show or hide each section
-// and drafts (kept between launches). A PR opens on GitHub.
+// and drafts (kept between launches). A PR opens its review page (on GitHub with older Macs).
 
 import SwiftUI
 
@@ -24,6 +24,7 @@ struct PullsSheet: View {
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done", role: .confirm) { dismiss() } } }
                 .refreshable { store.askPulls(project.id, fresh: true) }
+                .navigationDestination(for: PullLink.self) { PullScreen(link: $0) }
         }
         .task {
             // `YH_PHONE_PULLS_HIDE=others,drafts`: those filters off, as tapping them does.
@@ -62,10 +63,17 @@ struct PullsSheet: View {
                     if shown(section.key), !rows.isEmpty {
                         Section(section.title) {
                             ForEach(Array(rows.enumerated()), id: \.element.id) { i, pull in
-                                Button { if let url = URL(string: pull.url) { openURL(url) } } label: {
-                                    PullRow(pull: pull, stacked: Self.stacked(pull, rows: rows, at: i))
+                                Group {
+                                    // Its review page when the Mac reads PRs (protocol 6), else GitHub.
+                                    if store.offersPullReview, let link = PullLink(pull.url) {
+                                        NavigationLink(value: link) { PullRow(pull: pull, stacked: Self.stacked(pull, rows: rows, at: i)) }
+                                    } else {
+                                        Button { if let url = URL(string: pull.url) { openURL(url) } } label: {
+                                            PullRow(pull: pull, stacked: Self.stacked(pull, rows: rows, at: i))
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
                                 }
-                                .buttonStyle(.plain)
                                 .contextMenu {
                                     Button("Open on GitHub", systemImage: "safari") { if let url = URL(string: pull.url) { openURL(url) } }
                                     Button("Copy Link", systemImage: "link") { UIPasteboard.general.string = pull.url }

@@ -19,6 +19,7 @@ struct TranscriptScreen: View {
     @State private var askedAside = false
     @State private var showsAside = ProcessInfo.processInfo.environment["YH_PHONE_ASIDE"] != nil
     private static let env = ProcessInfo.processInfo.environment
+    private static var openedPull = false
 
     var body: some View {
         // Something always there, so it appears (and opens the thread) wherever it's placed:
@@ -27,7 +28,7 @@ struct TranscriptScreen: View {
             Color.clear
             if let model {
                 // Under the composer, so rows scroll beneath its glass; its height is the list's inset.
-                TranscriptRepresentable(model: model, store: store, bottomInset: composerHeight).ignoresSafeArea(.container, edges: .bottom)
+                TranscriptRepresentable(model: model, store: store, bottomInset: composerHeight, onPull: { store.openPull = $0 }).ignoresSafeArea(.container, edges: .bottom)
             }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
@@ -187,6 +188,8 @@ struct TranscriptScreen: View {
             }
         }
         .sheet(isPresented: $showsAside) { AsideSheet(threadID: threadID) }
+        // A PR's link: its review page, pushed over the thread (which stays watched beneath).
+        .navigationDestination(item: Bindable(store).openPull) { PullScreen(link: $0) }
         // `YH_PHONE_ASIDE=<question>`: asked in the side chat, which is open.
         .task(id: store.canAct) {
             guard store.canAct, let question = Self.env["YH_PHONE_ASIDE"], !askedAside else { return }
@@ -195,8 +198,17 @@ struct TranscriptScreen: View {
             Perf.shared.log("PHONE aside: \(question)")
             store.askAside(question, in: threadID)
         }
+        // `YH_PHONE_OPEN_PULL=<url>`: that PR's page pushed over the thread, as tapping its link does.
+        .task(id: store.offersPullReview) {
+            guard store.offersPullReview, let pull = Self.env["YH_PHONE_OPEN_PULL"].flatMap(PullLink.init(_:)), !Self.openedPull else { return }
+            Self.openedPull = true
+            try? await Task.sleep(for: .seconds(1))
+            Perf.shared.log("OPEN pull \(pull.url)")
+            store.openPull = pull
+        }
         .onAppear { model = store.open(threadID) }
-        .onDisappear { if let model { store.close(model) } }
+        // A PR's page pushed over it keeps the thread open; leaving the thread closes it (`path`).
+        .onDisappear { if let model, store.openPull == nil { store.close(model) } }
     }
 }
 
@@ -205,15 +217,19 @@ struct TranscriptRepresentable: UIViewControllerRepresentable {
     /// For a row's sheet: its whole output is asked of the Mac.
     let store: Store
     var bottomInset: CGFloat = 0
+    /// A PR's link tapped: its review page (protocol 6), instead of the browser.
+    var onPull: ((PullLink) -> Void)?
 
     func makeUIViewController(context: Context) -> TranscriptViewController {
         let controller = TranscriptViewController(model: model)
         controller.store = store
+        controller.onPull = onPull
         return controller
     }
 
     func updateUIViewController(_ controller: TranscriptViewController, context: Context) {
         controller.setBottomInset(bottomInset)
+        controller.onPull = onPull
     }
 }
 
@@ -230,6 +246,17 @@ final class TranscriptViewController: UIViewController, UICollectionViewDataSour
     private var followsBottom = true
     private var probe: ScrollProbe?
     private var openedRow = false
+    var onPull: ((PullLink) -> Void)?
+
+    /// A link tapped: a PR's opens its review page when the Mac can read it, the rest the browser.
+    func openLink(_ url: URL) {
+        Perf.shared.log("OPEN link \(url.absoluteString)")
+        if let onPull, store?.offersPullReview == true, let pull = PullLink(url) {
+            onPull(pull)
+        } else {
+            UIApplication.shared.open(url)
+        }
+    }
     fileprivate var view_: UICollectionView { collectionView }
     fileprivate var transcript: TranscriptModel { model }
 
@@ -336,8 +363,7 @@ final class TranscriptViewController: UIViewController, UICollectionViewDataSour
                         let cells = collectionView.indexPathsForVisibleItems.sorted().reversed().compactMap { self.collectionView.cellForItem(at: $0) as? RowCell }
                         guard let cell = cells.first(where: { $0.lastLinkPoint() != nil }), let point = cell.lastLinkPoint(),
                               let url = cell.link(at: point) else { return Perf.shared.log("OPEN link none") }
-                        Perf.shared.log("OPEN link \(url.absoluteString)")
-                        UIApplication.shared.open(url)
+                        self.openLink(url)
                     }
                 }
             }
@@ -464,6 +490,7 @@ final class TranscriptViewController: UIViewController, UICollectionViewDataSour
         cell.thread = model.threadID
         cell.onPicture = { [weak self] index in self?.openPictures(seq: seq, index: index) }
         cell.onDiagram = { [weak self] key in self?.openDiagram(key) }
+        cell.onLink = { [weak self] url in self?.openLink(url) }
         cell.configure(layouts[indexPath.item])
         return cell
     }
@@ -625,6 +652,7 @@ final class RowCell: UICollectionViewCell, UIGestureRecognizerDelegate {
     /// A picture tapped (its place among the row's), a diagram tapped (its key).
     var onPicture: ((Int) -> Void)?
     var onDiagram: ((String) -> Void)?
+    var onLink: ((URL) -> Void)?
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -645,6 +673,7 @@ final class RowCell: UICollectionViewCell, UIGestureRecognizerDelegate {
 
     @objc private func tapped(_ recognizer: UITapGestureRecognizer) {
         guard let url = link(at: recognizer.location(in: contentView)) else { return }
+        if let onLink { return onLink(url) }
         Perf.shared.log("OPEN link \(url.absoluteString)")
         UIApplication.shared.open(url)
     }

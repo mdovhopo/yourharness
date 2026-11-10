@@ -46,7 +46,7 @@ impl Link {
         links
     }
 
-    fn parse(url: &str) -> Option<Link> {
+    pub fn parse(url: &str) -> Option<Link> {
         let after = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://"))?;
         let (host, path) = after.split_once('/')?;
         if host.is_empty() || !host.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-') {

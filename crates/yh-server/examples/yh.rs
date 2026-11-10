@@ -91,6 +91,8 @@ fn print(m: &ToApp, began: &mut bool) -> bool {
         ToApp::Error { message } => println!("ERROR {message}"),
         ToApp::Pulls { project, pulls, errors, .. } => println!("PULLS {project} {} PRs{}{}", pulls.len(), pulls.iter().take(4).map(|p| format!(" | {}#{} {} [{} d{}]", p.repo, p.number, p.title, p.section, p.depth)).collect::<String>(), errors.iter().map(|e| format!(" ! {e}")).collect::<String>()),
         ToApp::Paired { device, token } => println!("PAIRED {device} token={token}"),
+        ToApp::Pull { url, pull: Some(p), .. } => println!("PULL {url} {} [{}] checks {} comments {} merge {:?} {}", p.title, p.state, p.checks.len(), p.comments.len(), p.merge_status, p.merge_methods.join("/")),
+        ToApp::Pull { url, error, .. } => println!("PULL {url} ! {}", error.as_deref().unwrap_or("")),
     }
     false
 }

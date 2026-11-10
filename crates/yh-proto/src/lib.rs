@@ -14,7 +14,9 @@ use serde::{Deserialize, Serialize};
 /// 4: a row's sub-agent summary, a sub-agent's whole run, a row's pictures, a diagram drawn.
 /// 5: search across threads, files for `@`, slash commands in `options`, usage limits, asking on
 /// the side, and a snapshot from what the client already holds.
-pub const PROTOCOL: u32 = 5;
+/// 6: one PR in full (`pull`: its description, checks, comments and reviews) and merging it
+/// (`merge_pull`), for reviewing a PR on the phone.
+pub const PROTOCOL: u32 = 6;
 
 /// A slash command the composer offers: `/name hint`, and what it does.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -83,6 +85,97 @@ pub struct PullInfo {
     pub section: String,
     pub stack: String,
     pub depth: u32,
+}
+
+/// One PR as its review page shows it (protocol 6), read through `gh` (or `glab`) on the Mac.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PullDetail {
+    /// `owner/repo`.
+    pub repo: String,
+    pub number: u64,
+    pub title: String,
+    pub url: String,
+    /// `open`, `merged`, `closed`.
+    pub state: String,
+    pub draft: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    /// The description, markdown.
+    #[serde(default)]
+    pub body: String,
+    pub head: String,
+    pub base: String,
+    #[serde(default)]
+    pub additions: u64,
+    #[serde(default)]
+    pub deletions: u64,
+    #[serde(default)]
+    pub changed_files: u64,
+    #[serde(default)]
+    pub commits: u64,
+    /// ISO 8601.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
+    /// `approved`, `changesRequested`, `required` or empty.
+    #[serde(default)]
+    pub review: String,
+    /// `CLEAN`, `BLOCKED`, `BEHIND`, `DIRTY` (conflicts), `UNSTABLE`, `DRAFT`, `UNKNOWN`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_status: Option<String>,
+    #[serde(default)]
+    pub auto_merge: bool,
+    /// Every check, failing first.
+    #[serde(default)]
+    pub checks: Vec<PullCheck>,
+    /// Comments, reviews and comments on lines of code, oldest first.
+    #[serde(default)]
+    pub comments: Vec<PullComment>,
+    /// How the repo lets it be merged, of `squash`, `merge`, `rebase`; the default first.
+    #[serde(default)]
+    pub merge_methods: Vec<String>,
+}
+
+/// A check on a PR: a CI job or a commit status.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PullCheck {
+    pub name: String,
+    /// The workflow it's part of, when it's an Actions job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow: Option<String>,
+    /// `passing`, `failing`, `pending`, `skipped`.
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+/// Something said on a PR.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PullComment {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    /// Markdown.
+    pub body: String,
+    /// ISO 8601.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
+    /// `comment`, `review` or `code` (on a line of the diff).
+    pub kind: String,
+    /// A review's verdict: `approved`, `changesRequested`, `commented`, `dismissed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict: Option<String>,
+    /// A code comment's file and line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
 }
 
 /// Where a search found its words: a thread's row, the words around them in `[brackets]`.
@@ -418,6 +511,8 @@ pub enum ToApp {
     /// Protocol 5: paired with this Mac (the connection carried a pairing code): connect with
     /// `?token=` from now on. Sent once, right after `hello`.
     Paired { device: String, token: String },
+    /// Protocol 6: one PR in full, asked for with `pull` (`error`: why it couldn't be read).
+    Pull { url: String, #[serde(default, skip_serializing_if = "Option::is_none")] pull: Option<PullDetail>, #[serde(default, skip_serializing_if = "Option::is_none")] error: Option<String> },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -499,6 +594,11 @@ pub enum FromApp {
     /// Protocol 5: a project's open PRs (`fresh`: asked of the forges again, not the last
     /// minute's answer); answered with `pulls`.
     Pulls { project: String, #[serde(default)] fresh: bool },
+    /// Protocol 6: a PR by its URL, read from its forge: answered with `pull`.
+    Pull { url: String },
+    /// Protocol 6: merges a PR (`method`: `squash`, `merge` or `rebase`; `auto`: once its checks
+    /// and reviews allow), as `gh pr merge` does: answered with `done`, then a fresh `pull`.
+    MergePull { #[serde(default)] id: Option<String>, url: String, method: String, #[serde(default)] auto: bool },
     #[serde(other)]
     Unknown,
 }
@@ -508,7 +608,7 @@ impl FromApp {
     pub fn action_id(&self) -> Option<&str> {
         use FromApp::*;
         match self {
-            Send { id, .. } | Stop { id, .. } | Respond { id, .. } | Withdraw { id, .. } | SendNow { id, .. } | AskAside { id, .. } | Answer { id, .. } | SkipQuestion { id, .. } | ApprovePlan { id, .. } | KeepPlanning { id, .. } | AnswerQuestion { id, .. } | NewThread { id, .. } | SetModel { id, .. } | SetEffort { id, .. } | SetMode { id, .. } | Rename { id, .. } | Pin { id, .. } | Settle { id, .. } | Delete { id, .. } => id.as_deref(),
+            Send { id, .. } | Stop { id, .. } | Respond { id, .. } | Withdraw { id, .. } | SendNow { id, .. } | AskAside { id, .. } | Answer { id, .. } | SkipQuestion { id, .. } | ApprovePlan { id, .. } | KeepPlanning { id, .. } | AnswerQuestion { id, .. } | NewThread { id, .. } | SetModel { id, .. } | SetEffort { id, .. } | SetMode { id, .. } | Rename { id, .. } | Pin { id, .. } | Settle { id, .. } | Delete { id, .. } | MergePull { id, .. } => id.as_deref(),
             _ => None,
         }
     }
@@ -555,6 +655,15 @@ mod tests {
         assert_eq!(m, FromApp::NewThread { id: None, project: "p".into(), text: Some("hi".into()), model: None, effort: None, mode: None });
         let m: FromApp = serde_json::from_str(r#"{"type":"new_thread","project":"p","text":"hi","model":"haiku","effort":"low","mode":"plan"}"#).unwrap();
         assert!(matches!(m, FromApp::NewThread { model: Some(ref m), effort: Some(ref e), mode: Some(ref p), .. } if m == "haiku" && e == "low" && p == "plan"));
+    }
+
+    #[test]
+    fn pull_messages() {
+        let m: FromApp = serde_json::from_str(r#"{"type":"merge_pull","id":"m1","url":"https://github.com/o/r/pull/1","method":"squash"}"#).unwrap();
+        assert_eq!(m, FromApp::MergePull { id: Some("m1".into()), url: "https://github.com/o/r/pull/1".into(), method: "squash".into(), auto: false });
+        assert_eq!(m.action_id(), Some("m1"));
+        let s = serde_json::to_string(&ToApp::Pull { url: "u".into(), pull: None, error: Some("no".into()) }).unwrap();
+        assert_eq!(s, r#"{"type":"pull","url":"u","error":"no"}"#);
     }
 
     /// A first-version client's thread (no `running`, `waiting`) still reads.

@@ -229,18 +229,36 @@ impl Updater {
     }
 
     pub fn check(&mut self, cx: &mut Context<Self>) {
-        if matches!(self.phase, Phase::Checking | Phase::Downloading(..) | Phase::Preparing(_) | Phase::Ready(_)) {
+        if matches!(self.phase, Phase::Checking | Phase::Downloading(..) | Phase::Preparing(_)) {
             return;
         }
         let Some(current) = self.current.clone() else { return };
         let previous = self.phase.clone();
-        self.set(Phase::Checking, cx);
+        // A version already downloaded stays ready (Restart shown) while it looks for a newer one.
+        let staged = match &previous {
+            Phase::Ready(v) => Some(v.clone()),
+            _ => None,
+        };
+        if staged.is_none() {
+            self.set(Phase::Checking, cx);
+        }
         let feed = self.feed.clone();
         let announced = self.announces;
         cx.spawn(async move |this, cx| {
             let c = current.to_string();
             let result = cx.background_executor().spawn(async move { updates::fetch_latest(feed.as_deref(), &c) }).await;
             let _ = this.update(cx, |u, cx| match result {
+                // Released since that one was downloaded: the newest replaces it, so a copy
+                // several versions behind lands on the latest in one restart.
+                Ok(r) if staged.as_ref().is_some_and(|s| r.version > *s) => {
+                    log(format!("replacing {} with {}", staged.as_ref().map(|s| s.to_string()).unwrap_or_default(), r.version));
+                    if let Some(app) = &u.bundle {
+                        let _ = std::fs::remove_dir_all(updates::staged_path(app));
+                    }
+                    u.set(Phase::Available(r), cx);
+                    u.download(cx);
+                }
+                Ok(_) | Err(_) if staged.is_some() => {}
                 Ok(r) if r.version > current => {
                     u.set(Phase::Available(r), cx);
                     if std::env::var("YH_UPDATE_DOWNLOAD").as_deref() == Ok("1") {
@@ -339,6 +357,9 @@ impl Updater {
                     u.set(Phase::Ready(release.version.clone()), cx);
                     if std::env::var("YH_UPDATE_RESTART").as_deref() == Ok("1") {
                         u.restart_now(cx);
+                    } else {
+                        // One may have come out while this one downloaded.
+                        u.check(cx);
                     }
                 }
                 Err(e) => u.set(Phase::Failed(e, Some(release)), cx),
