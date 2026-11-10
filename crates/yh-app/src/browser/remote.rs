@@ -35,9 +35,12 @@ pub fn start(hub: Arc<Hub>, project_of: impl Fn(&str, &App) -> Option<String> + 
     let mut paces: HashMap<String, Pace> = HashMap::new();
     let mut ticks = 0u64;
     #[allow(clippy::infinite_loop)]
+    let mut idle = true;
     cx.spawn(async move |cx| loop {
-        cx.background_executor().timer(Duration::from_millis(40)).await;
+        // Quick while a phone watches a browser; twice a second otherwise, for the summaries.
+        cx.background_executor().timer(Duration::from_millis(if idle { 500 } else { 40 })).await;
         let watched = hub.watched();
+        idle = watched.is_empty();
         for (thread, changed) in results.try_iter() {
             if let Some(p) = paces.get_mut(&thread) {
                 p.busy = false;
@@ -50,7 +53,7 @@ pub fn start(hub: Arc<Hub>, project_of: impl Fn(&str, &App) -> Option<String> + 
         // Every browser in a few words, twice a second: a phone with its thread open learns
         // when the agent opens a page there.
         ticks += 1;
-        if ticks % 12 == 0 {
+        if idle || ticks % 12 == 0 {
             let summaries = Browsers::with(|b| {
                 let mut out: Vec<(String, BrowserSummary)> = b
                     .sessions
