@@ -73,6 +73,12 @@ flowchart TB
 
 ## Threads and their `claude`
 
+New Thread makes nothing: the thread lives in memory only (`Workspace::pending`, one per
+project, not in the sidebar or `harness.sqlite`) until its first message goes, which saves it
+(`keep_pending`). Left with nothing typed it's dropped; left with a draft it waits until that
+project's next New Thread or the app quits. The phone does the same with a sheet: the Mac makes
+the thread only when the phone sends its first message.
+
 A thread that's been talked to has its own `claude` process (`yh_core::claude`), started in
 the thread's folder with stream-json in and out, partial messages, the model, effort and
 permission mode picked in the composer, and `--resume` with the thread's session once it has

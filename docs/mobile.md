@@ -194,7 +194,8 @@ sent in `hello` and in the pairing link (`&id=`): the phone keeps one entry per 
 or reaching it at a new address replaces the old one, and two saved entries that turn out to be the
 same Mac (Macs saved before the ID) become one when it connects. The phone has one too (`phoneID`,
 sent as `device_id` when pairing): the Mac replaces that phone's entry instead of adding one. Checked:
-the same Mac paired again on another port, then twice, left one entry on each side. A thread made from the phone (its project's ✎) isn't opened on
+the same Mac paired again on another port, then twice, left one entry on each side. A thread made from the phone (its project's ✎ opens a sheet for
+the first message; nothing is made until it's sent) isn't opened on
 the Mac: the Mac stays on what you have open, the new thread in its sidebar with an unread dot. Plain
 WebSocket on the Wi‑Fi (not encrypted); over Tailscale, WireGuard encrypts it.
 
@@ -308,7 +309,8 @@ Recorded here so the MVP stays small. Roughly in order; Tailscale last.
    effort set; a queued message removed, another sent now (the command interrupted, the reply
    to it given); a 13,892-character result fetched whole; pin, rename, settle, bring back,
    delete; a new thread from a project's header; the Mac app restarted mid-session, the phone
-   back on its own. Test hooks: `YH_PHONE_NEW_THREAD=<text>` (with `YH_PHONE_PROJECT=<name>`),
+   back on its own. Test hooks: `YH_PHONE_NEW_THREAD=<text>` (with `YH_PHONE_PROJECT=<name>`; `YH_PHONE_COMPOSE=<draft>` only
+   opens the sheet),
    `YH_PHONE_CHOOSE=<label>[,<label>]` (answers Claude's question; `YH_PHONE_ANSWER=deny` skips
    it), `YH_PHONE_PLAN=approve:<mode>|keep:<feedback>`, `YH_PHONE_MCP=accept|decline`,
    `YH_PHONE_SET=model=…,effort=…,mode=…`, `YH_PHONE_QUEUE=<text>` with
