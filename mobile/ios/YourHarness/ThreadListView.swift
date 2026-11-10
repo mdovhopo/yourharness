@@ -30,10 +30,16 @@ struct ThreadListView: View {
             // Several Macs: the title is the Mac shown, and switches to another.
             if fleet.stores.count > 1 { MacMenu() }
         }
+        .toolbar {
+            // Reconnecting with the list on screen: a spinner up here, nothing in the list moves.
+            if store.state != .connected, !store.sections.isEmpty {
+                ToolbarItem(placement: .topBarTrailing) { ConnectionIndicator() }
+            }
+        }
     }
 
     private var subtitle: String {
-        guard fleet.stores.count > 1 else { return store.state == .connected ? store.serverName ?? "" : "" }
+        guard fleet.stores.count > 1 else { return store.serverName ?? "" }
         let others = fleet.waitingElsewhere
         return others > 0 ? "\(others) waiting on another Mac" : "\(fleet.stores.count) Macs"
     }
@@ -50,7 +56,7 @@ struct ThreadListView: View {
     }
 
     @ViewBuilder private var rows: some View {
-            if store.state != .connected {
+            if store.state != .connected, store.sections.isEmpty {
                 ConnectionRow(state: store.state, address: store.shownAddress)
             }
             ForEach(store.sections) { section in
@@ -74,13 +80,13 @@ struct ThreadListView: View {
                     HStack {
                         Text(section.project.name)
                         Spacer()
-                        if store.canSearch {
+                        if store.offersSearch {
                             Button("Pull Requests", systemImage: "arrow.triangle.pull") { pullsFor = section.project }
                                 .labelStyle(.iconOnly)
                                 .font(.body)
                                 .accessibilityLabel("Pull requests in \(section.project.name)")
                         }
-                        if store.canControl {
+                        if store.offersControl {
                             Button("New Thread", systemImage: "square.and.pencil") { composingIn = section.project }
                                 .labelStyle(.iconOnly)
                                 .font(.body)
@@ -396,6 +402,28 @@ struct ThreadRow: View {
     }
 }
 
+/// Not connected this moment: a spinner while it tries, a warning while it waits to try again.
+/// Tapping it tries now.
+private struct ConnectionIndicator: View {
+    @Environment(Store.self) private var store
+
+    var body: some View {
+        Button { store.reconnect() } label: {
+            if case .waiting = store.state {
+                Image(systemName: "wifi.exclamationmark").foregroundStyle(.orange)
+            } else {
+                ProgressView()
+            }
+        }
+        .accessibilityLabel(accessibilityTitle)
+    }
+
+    private var accessibilityTitle: String {
+        if case .waiting(let reason, _) = store.state { return "Can't reach your Mac: \(reason). Try again" }
+        return "Connecting to your Mac"
+    }
+}
+
 struct ConnectionRow: View {
     let state: Connection.State
     let address: String
@@ -592,7 +620,8 @@ private struct ThreadActions: ViewModifier {
     @Environment(Store.self) private var store
 
     func body(content: Content) -> some View {
-        if store.canControl {
+        // What the Mac offers, not whether it's connected now: a reconnect mustn't rebuild every row.
+        if store.offersControl {
             content
                 .swipeActions(edge: .leading) {
                     Button(thread.pinned ? "Unpin" : "Pin", systemImage: thread.pinned ? "pin.slash" : "pin") { store.pin(thread.id, !thread.pinned) }

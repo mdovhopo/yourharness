@@ -6,7 +6,7 @@
 import Foundation
 import UIKit
 
-struct Project: Decodable, Sendable, Hashable, Identifiable {
+struct Project: Codable, Sendable, Hashable, Identifiable {
     let id: String
     let name: String
     /// Protocol 3: its permission mode (`auto`, `ask`, `acceptEdits`, `plan`, `bypass`).
@@ -14,7 +14,7 @@ struct Project: Decodable, Sendable, Hashable, Identifiable {
 }
 
 /// A model a thread can use (protocol 3's `options`).
-struct ModelOption: Decodable, Sendable, Hashable, Identifiable {
+struct ModelOption: Codable, Sendable, Hashable, Identifiable {
     let id: String
     let name: String
     let efforts: [String]
@@ -30,7 +30,7 @@ struct ModelOption: Decodable, Sendable, Hashable, Identifiable {
     }
 }
 
-struct ThreadInfo: Decodable, Sendable, Hashable, Identifiable {
+struct ThreadInfo: Codable, Sendable, Hashable, Identifiable {
     let id: String
     let projectId: String
     let title: String
@@ -187,7 +187,7 @@ struct PullsAnswer: Sendable {
 }
 
 /// A slash command the composer offers (protocol 5).
-struct SlashCommand: Decodable, Sendable, Hashable, Identifiable {
+struct SlashCommand: Codable, Sendable, Hashable, Identifiable {
     let name: String
     let hint: String?
     let description: String?
@@ -301,6 +301,14 @@ enum ToApp: Sendable {
     /// Protocol 5: paired with the Mac (the connection carried a pairing code): its token.
     case paired(device: String, token: String)
     case unknown
+
+    /// Changes what the phone keeps of this Mac between launches (`Store`'s cache).
+    var changesCache: Bool {
+        switch self {
+        case .hello, .threads, .threadUpserted, .threadRemoved, .options: true
+        default: false
+        }
+    }
 
     private struct Tag: Decodable { let type: String }
     private struct Pulls: Decodable { let project: String; let pulls: [PullInfo]; let errors: [String]?; let accounts: [String]? }

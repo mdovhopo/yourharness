@@ -167,7 +167,7 @@ struct TranscriptScreen: View {
         }
         .navigationTitle(store.threads[threadID]?.title ?? "Thread")
         // The project, then the model and effort it runs with.
-        .navigationSubtitle([store.threads[threadID].flatMap(store.projectName), store.canControl ? ThreadSettings.summary(store.threads[threadID], models: store.models) : nil].compactMap { $0 }.joined(separator: " · "))
+        .navigationSubtitle([store.threads[threadID].flatMap(store.projectName), store.offersControl ? ThreadSettings.summary(store.threads[threadID], models: store.models) : nil].compactMap { $0 }.joined(separator: " · "))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             if store.serverProtocol >= 5 {
@@ -175,7 +175,7 @@ struct TranscriptScreen: View {
                     Button("Side Chat", systemImage: "bubble.left.and.text.bubble.right") { showsAside = true }
                 }
             }
-            if store.canControl {
+            if store.offersControl {
                 ToolbarItem(placement: .topBarTrailing) { ThreadSettings(threadID: threadID) }
             }
             if store.threads[threadID]?.isRunning == true {

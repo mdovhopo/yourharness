@@ -76,6 +76,11 @@ final class Store: Identifiable {
     /// Actions sent and not yet answered, by id: what to put back if one fails.
     private var pending: [String: FromApp] = [:]
     var canAct: Bool { serverProtocol >= 2 && state == .connected }
+    /// What the Mac offers whether or not it's connected this moment (from the last connection,
+    /// or the cache): what's drawn, so a reconnect changes nothing on screen.
+    var offersActions: Bool { serverProtocol >= 2 }
+    var offersControl: Bool { serverProtocol >= 3 }
+    var offersSearch: Bool { serverProtocol >= 5 }
     /// Protocol 3: answering questions and plans, new threads, model, effort and mode, thread
     /// actions, pictures, whole tool output.
     var canControl: Bool { serverProtocol >= 3 && state == .connected }
@@ -140,6 +145,7 @@ final class Store: Identifiable {
             }
         }
         connection.onMessages = { [weak self] in self?.apply($0) }
+        restoreCache()
         connection.connect()
     }
 
@@ -340,7 +346,8 @@ final class Store: Identifiable {
 
     private func act(_ action: FromApp) {
         guard canAct, let id = action.actionID else {
-            actionError = "The Mac isn't taking actions over this connection."
+            actionError = offersActions ? "Not connected to your Mac yet. Try again in a moment." : "The Mac isn't taking actions over this connection."
+            if case .send(_, let thread, let text, _, _) = action { returnedDraft = (thread, text) }
             return
         }
         pending[id] = action
@@ -444,9 +451,12 @@ final class Store: Identifiable {
                 connection.send(.subscribeApp)
                 if !away { resubscribe() }
             case .threads(let projects, let list):
-                self.projects = projects
-                order = list.map(\.id)
-                threads = Dictionary(list.map { ($0.id, $0) }, uniquingKeysWith: { $1 })
+                // Only what changed: the list the cache drew stays as it is when the Mac agrees.
+                if self.projects != projects { self.projects = projects }
+                let ids = list.map(\.id)
+                if order != ids { order = ids }
+                let byID = Dictionary(list.map { ($0.id, $0) }, uniquingKeysWith: { $1 })
+                if threads != byID { threads = byID }
                 selectIfAsked()
                 if let wanted = openWhenListed, threads[wanted] != nil { path = [wanted]; openWhenListed = nil }
             case .threadUpserted(let thread):
@@ -475,9 +485,9 @@ final class Store: Identifiable {
                 if transcript?.threadID == thread, live != state { live = state }
                 if aside?.threadID == thread, asideLive != state { asideLive = state }
             case .options(let models, let modes, let commands):
-                self.models = models
-                self.modes = modes
-                self.commands = commands
+                if self.models != models { self.models = models }
+                if self.modes != modes { self.modes = modes }
+                if self.commands != commands { self.commands = commands }
             case .limits(let windows):
                 if limits != windows { limits = windows }
             case .searchResults(let query, let hits):
@@ -519,6 +529,72 @@ final class Store: Identifiable {
         }
         if let t = transcript { flush(&rowsByThread, into: t) }
         if let a = aside { flush(&rowsByThread, into: a) }
+        if batch.contains(where: \.changesCache) { saveCacheSoon() }
+    }
+
+    // MARK: The cache
+
+    /// What the thread list and composer need to draw before the Mac answers, kept per Mac: the
+    /// app opens on the list as it was, and the Mac's answer changes only what differs.
+    private struct Cached: Codable {
+        var serverProtocol: Int
+        var serverName: String?
+        var projects: [Project]
+        var threads: [ThreadInfo]
+        var models: [ModelOption]
+        var modes: [String]
+        var commands: [String: [SlashCommand]]
+    }
+
+    /// Kept by the Mac's lasting ID and by its address (host and port, never the token): a Mac
+    /// whose ID isn't known yet at launch is still found.
+    private var cacheFiles: [URL] {
+        var keys: [String] = []
+        if let macID { keys.append(macID) }
+        if let url = URL(string: serverAddress), let host = url.host() { keys.append("\(host)-\(url.port ?? 0)") }
+        let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appending(path: "macs", directoryHint: .isDirectory)
+        return keys.map { key in dir.appending(path: String(key.map { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "." ? $0 : "_" }) + ".json") }
+    }
+
+    @ObservationIgnored private var cacheSave: Task<Void, Never>?
+
+    private func restoreCache() {
+        // `YH_PHONE_CACHE=0`: start empty, as a new install does.
+        guard ProcessInfo.processInfo.environment["YH_PHONE_CACHE"] != "0", !pairing,
+              let data = cacheFiles.lazy.compactMap({ try? Data(contentsOf: $0) }).first else { return }
+        let d = JSONDecoder()
+        d.keyDecodingStrategy = .convertFromSnakeCase
+        guard let c = try? d.decode(Cached.self, from: data) else { return }
+        serverProtocol = c.serverProtocol
+        if serverName == nil { serverName = c.serverName }
+        projects = c.projects
+        order = c.threads.map(\.id)
+        threads = Dictionary(c.threads.map { ($0.id, $0) }, uniquingKeysWith: { $1 })
+        models = c.models
+        modes = c.modes
+        commands = c.commands
+        Perf.shared.log("CACHE \(displayName): \(c.threads.count) threads")
+        selectIfAsked()
+    }
+
+    /// Written a moment after the last change, off the main thread.
+    private func saveCacheSoon() {
+        let files = cacheFiles
+        guard !pairing, serverProtocol > 0, !files.isEmpty else { return }
+        cacheSave?.cancel()
+        cacheSave = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(1))
+            guard let self, !Task.isCancelled else { return }
+            let c = Cached(serverProtocol: serverProtocol, serverName: serverName, projects: projects,
+                           threads: order.compactMap { self.threads[$0] }, models: models, modes: modes, commands: commands)
+            Task.detached(priority: .utility) {
+                let e = JSONEncoder()
+                e.keyEncodingStrategy = .convertToSnakeCase
+                guard let data = try? e.encode(c) else { return }
+                try? FileManager.default.createDirectory(at: files[0].deletingLastPathComponent(), withIntermediateDirectories: true)
+                for file in files { try? data.write(to: file, options: .atomic) }
+            }
+        }
     }
 
     private func model(of thread: String) -> TranscriptModel? {

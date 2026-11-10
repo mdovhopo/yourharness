@@ -44,7 +44,8 @@ struct ComposerBar: View {
             if running {
                 StatusLine(activity: live?.activity, tokens: live?.contextTokens, window: live?.contextWindow)
             }
-            if store.canAct {
+            // The field stays while reconnecting (send shows a spinner): a reconnect moves nothing.
+            if store.serverProtocol != 1 {
                 if !images.isEmpty { attachments }
                 if let typing { Suggestions(typing: typing, threadID: threadID, draft: $draft) }
                 field
@@ -105,7 +106,7 @@ struct ComposerBar: View {
 
     private var field: some View {
         HStack(alignment: .bottom, spacing: 8) {
-            if store.canControl {
+            if store.offersControl {
                 PhotosPicker(selection: $picked, maxSelectionCount: 4, matching: .images) {
                     Image(systemName: "photo.on.rectangle")
                         .font(.system(size: 16, weight: .medium))
@@ -155,14 +156,19 @@ struct ComposerBar: View {
                     dictation.stop()
                     send()
                 } label: {
-                    Image(systemName: "arrow.up")
-                        .font(.system(size: 16, weight: .bold))
-                        .frame(width: 38, height: 38)
+                    Group {
+                        if store.canAct {
+                            Image(systemName: "arrow.up").font(.system(size: 16, weight: .bold))
+                        } else {
+                            ProgressView().controlSize(.small)
+                        }
+                    }
+                    .frame(width: 38, height: 38)
                 }
                 .buttonStyle(.glassProminent)
                 .buttonBorderShape(.circle)
-                .disabled(empty)
-                .accessibilityLabel("Send")
+                .disabled(empty || !store.canAct)
+                .accessibilityLabel(store.canAct ? "Send" : "Connecting to your Mac")
             }
         }
         .sensoryFeedback(.impact(weight: .light), trigger: running)

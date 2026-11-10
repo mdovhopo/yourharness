@@ -80,7 +80,7 @@ private struct ToolDetail: View {
         } else if row.toolIsError == nil {
             Label("No result yet", systemImage: "hourglass").font(.footnote).foregroundStyle(.secondary)
         }
-        if cutShort, store?.canControl == true {
+        if cutShort, store?.offersControl == true {
             Button("Show All", systemImage: "arrow.down.doc") { store?.askWhole(thread: threadID, seq: row.seq) }
                 .buttonStyle(.glass)
         } else if whole == nil, input.count >= 4000 {

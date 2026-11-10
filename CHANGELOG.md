@@ -6,6 +6,9 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+### Fixed
+- The phone opens on the thread list it last had, even before it reaches the Mac, and a reconnect no longer moves anything: a spinner shows in the corner, and in a thread the send button spins until it's back.
+
 ## [0.1.5] - 2026-11-10
 
 ### Added
