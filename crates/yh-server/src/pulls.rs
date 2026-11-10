@@ -114,6 +114,15 @@ fn run(tool: &str, args: &[String]) -> Result<Vec<u8>, String> {
     Ok(output.stdout)
 }
 
+/// `glab api <path>` on the MR's own host: outside a repo, glab would ask gitlab.com.
+fn glab_api(link: &Link, path: &str) -> Result<Value, String> {
+    let mut args = vec!["api".to_string(), path.to_string()];
+    if link.host != "gitlab.com" {
+        args.extend(["--hostname".into(), link.host.clone()]);
+    }
+    run("glab", &args).and_then(json)
+}
+
 fn json(bytes: Vec<u8>) -> Result<Value, String> {
     serde_json::from_slice(&bytes).map_err(|e| e.to_string())
 }
@@ -239,7 +248,7 @@ pub fn from_github(link: &Link, v: &Value, settings: Option<&Value>, code: Optio
 fn gitlab_detail(link: &Link) -> Result<PullDetail, String> {
     let notes_path = format!("projects/{}/merge_requests/{}/notes?sort=asc&per_page=100", link.path.replace('/', "%2F"), link.number);
     let (mr, notes) = std::thread::scope(|s| {
-        let notes = s.spawn(|| run("glab", &["api".into(), notes_path.clone()]).and_then(json));
+        let notes = s.spawn(|| glab_api(link, &notes_path));
         let mr = run("glab", &["mr".into(), "view".into(), link.url.clone(), "--output".into(), "json".into()]).and_then(json);
         (mr, notes.join().unwrap_or_else(|_| Err("".into())))
     });
@@ -334,7 +343,7 @@ pub fn files(url: &str) -> Result<Vec<FileDiff>, String> {
     let mut all = vec![];
     for page in 1..=30 {
         let v = if link.gitlab {
-            run("glab", &["api".into(), format!("projects/{}/merge_requests/{}/diffs?per_page=100&page={page}", link.path.replace('/', "%2F"), link.number)]).and_then(json)?
+            glab_api(&link, &format!("projects/{}/merge_requests/{}/diffs?per_page=100&page={page}", link.path.replace('/', "%2F"), link.number))?
         } else {
             let mut args = vec!["api".into(), format!("repos/{}/pulls/{}/files?per_page=100&page={page}", link.path, link.number)];
             if link.host != "github.com" {
