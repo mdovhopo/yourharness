@@ -5,48 +5,79 @@ struct ThreadListView: View {
     @Environment(Fleet.self) private var fleet
     @State private var openShelves: Set<String> = []
     /// The thread being renamed, and the title being typed.
-    @State private var renaming: ThreadInfo?
+    @State private var renaming: ThreadTarget?
     @State private var title = ""
-    @State private var deleting: ThreadInfo?
-    /// The project whose PRs are open in a sheet.
+    @State private var deleting: ThreadTarget?
+    /// The project whose PRs are open in a sheet, and its Mac (the one shown, if nil).
     @State private var pullsFor: Project?
-    /// New Thread's sheet, open on this project.
+    @State private var pullsOn: Store?
+    /// New Thread's sheet, open on this project, and its Mac (the one shown, if nil).
     @State private var composingIn: Project?
+    @State private var composingOn: Store?
     private static let env = ProcessInfo.processInfo.environment
 
     var body: some View {
         Group {
-            if store.state != .connected, !store.everConnected, store.sections.isEmpty, case .waiting = store.state {
+            if !fleet.mixesMacs, store.state != .connected, !store.everConnected, store.sections.isEmpty, case .waiting = store.state {
                 Unreachable()
             } else {
                 list
             }
         }
-        .navigationTitle(fleet.stores.count > 1 ? store.displayName : "Threads")
+        .navigationTitle(fleet.stores.count > 1 && !fleet.mixesMacs ? store.displayName : "Threads")
         .navigationSubtitle(subtitle)
-        // Inline with several Macs: the title shows its menu's chevron.
-        .navigationBarTitleDisplayMode(fleet.stores.count > 1 ? .inline : .automatic)
+        // Inline with several Macs shown one at a time: the title shows its menu's chevron.
+        .navigationBarTitleDisplayMode(fleet.stores.count > 1 && !fleet.mixesMacs ? .inline : .automatic)
         .toolbarTitleMenu {
             // Several Macs: the title is the Mac shown, and switches to another.
-            if fleet.stores.count > 1 { MacMenu() }
+            if fleet.stores.count > 1, !fleet.mixesMacs { MacMenu() }
         }
         .toolbar {
             // Reconnecting with the list on screen: a spinner up here, nothing in the list moves.
-            if store.state != .connected, !store.sections.isEmpty {
-                ToolbarItem(placement: .topBarTrailing) { ConnectionIndicator() }
+            if let mac = reconnecting {
+                ToolbarItem(placement: .topBarTrailing) { ConnectionIndicator().environment(mac) }
             }
-            // One New Thread for every project: its sheet picks the project, the last used first.
-            if store.offersControl {
+            if fleet.mixesMacs {
+                // Every Mac listed: New Thread asks which Mac first.
+                let macs = fleet.stores.filter(\.offersControl)
+                if !macs.isEmpty {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Menu("New Thread", systemImage: "square.and.pencil") {
+                            Section("New Thread On") {
+                                ForEach(macs) { mac in
+                                    Button(mac.displayName, systemImage: "desktopcomputer") { compose(on: mac, in: mac.newThreadProject) }
+                                        .disabled(mac.projects.isEmpty)
+                                }
+                            }
+                        }
+                    }
+                }
+            } else if store.offersControl {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("New Thread", systemImage: "square.and.pencil") { composingIn = store.newThreadProject }
+                    Button("New Thread", systemImage: "square.and.pencil") { compose(on: nil, in: store.newThreadProject) }
                         .disabled(store.projects.isEmpty)
                 }
             }
         }
     }
 
+    /// The Mac whose spinner shows: not connected, its list on screen.
+    private var reconnecting: Store? {
+        if fleet.mixesMacs { return fleet.stores.first { $0.state != .connected && !$0.sections.isEmpty } }
+        return store.state != .connected && !store.sections.isEmpty ? store : nil
+    }
+
+    private func compose(on mac: Store?, in project: Project?) {
+        composingOn = mac
+        composingIn = project
+    }
+
     private var subtitle: String {
         guard fleet.stores.count > 1 else { return store.serverName ?? "" }
+        if fleet.mixesMacs {
+            let waiting = fleet.stores.reduce(0) { $0 + $1.waitingCount }
+            return waiting > 0 ? "\(fleet.stores.count) Macs · \(waiting) waiting on you" : "\(fleet.stores.count) Macs"
+        }
         let others = fleet.waitingElsewhere
         return others > 0 ? "\(others) waiting on another Mac" : "\(fleet.stores.count) Macs"
     }
@@ -63,6 +94,10 @@ struct ThreadListView: View {
     }
 
     @ViewBuilder private var rows: some View {
+        if fleet.mixesMacs { mixedRows } else { macRows }
+    }
+
+    @ViewBuilder private var macRows: some View {
             if store.state != .connected, store.sections.isEmpty {
                 ConnectionRow(state: store.state, address: store.shownAddress)
             }
@@ -88,7 +123,7 @@ struct ThreadListView: View {
                         Text(section.project.name)
                         Spacer()
                         if store.offersSearch {
-                            Button("Pull Requests", systemImage: "arrow.triangle.pull") { pullsFor = section.project }
+                            Button("Pull Requests", systemImage: "arrow.triangle.pull") { pullsOn = nil; pullsFor = section.project }
                                 .labelStyle(.iconOnly)
                                 .font(.body)
                                 .accessibilityLabel("Pull requests in \(section.project.name)")
@@ -98,18 +133,87 @@ struct ThreadListView: View {
             }
     }
 
+    /// Every Mac's threads in one list: projects of the same name together, each row saying its Mac.
+    /// A row opens its thread on its own Mac, which becomes the one shown.
+    @ViewBuilder private var mixedRows: some View {
+        // A Mac that hasn't sent its list this time: how it's getting on, above the rest.
+        ForEach(fleet.stores.filter { $0.state != .connected && $0.sections.isEmpty }) { mac in
+            ConnectionRow(state: mac.state, address: "\(mac.displayName) · \(mac.shownAddress)")
+        }
+        ForEach(fleet.mixedSections) { section in
+            Section {
+                ForEach(section.live) { mixedRow($0) }
+                if !section.settled.isEmpty {
+                    DisclosureGroup(isExpanded: shelfBinding("mixed:" + section.id)) {
+                        ForEach(section.settled) { mixedRow($0) }
+                    } label: {
+                        Label("Settled · \(section.settled.count)", systemImage: "tray")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            } header: {
+                HStack {
+                    Text(section.name)
+                    Spacer()
+                    let withPulls = section.projects.filter { $0.mac.offersSearch }
+                    if withPulls.count == 1, let only = withPulls.first {
+                        Button("Pull Requests", systemImage: "arrow.triangle.pull") { pullsOn = only.mac; pullsFor = only.project }
+                            .labelStyle(.iconOnly)
+                            .font(.body)
+                            .accessibilityLabel("Pull requests in \(section.name)")
+                    } else if withPulls.count > 1 {
+                        // The same project on several Macs: its PRs as each Mac sees them.
+                        Menu("Pull Requests", systemImage: "arrow.triangle.pull") {
+                            Section("Pull Requests From") {
+                                ForEach(withPulls, id: \.mac.id) { p in
+                                    Button(p.mac.displayName, systemImage: "desktopcomputer") { pullsOn = p.mac; pullsFor = p.project }
+                                }
+                            }
+                        }
+                        .labelStyle(.iconOnly)
+                        .font(.body)
+                        .accessibilityLabel("Pull requests in \(section.name)")
+                    }
+                }
+            }
+        }
+    }
+
+    private func mixedRow(_ item: Fleet.MixedThread) -> some View {
+        let open = selection != nil && item.mac === fleet.current && item.mac.path.last == item.thread.id
+        return Button { fleet.open(item.thread.id, on: item.mac) } label: {
+            HStack(spacing: 8) {
+                ThreadRow(thread: item.thread, mac: item.mac.displayName)
+                // Drawn as a pushed row's chevron (iPhone); beside the open thread (iPad), none.
+                if selection == nil {
+                    Image(systemName: "chevron.forward")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .listRowBackground(open ? Color(.systemFill) : Color(.secondarySystemGroupedBackground))
+        .modifier(ThreadActions(thread: item.thread, renaming: $renaming, title: $title, deleting: $deleting))
+        .environment(item.mac)
+    }
+
     /// The list's look, alerts and hooks, whichever way it chooses rows.
     private func styled(_ content: some View) -> some View {
         content
         .listStyle(.insetGrouped)
         .overlay {
-            if store.state == .connected, store.sections.isEmpty {
+            if fleet.mixesMacs ? fleet.stores.allSatisfy({ $0.state == .connected && $0.sections.isEmpty }) : (store.state == .connected && store.sections.isEmpty) {
                 ContentUnavailableView("No Threads", systemImage: "bubble.left.and.text.bubble.right", description: Text("Threads you start on your Mac show up here."))
             }
         }
-        .refreshable { store.reconnect() }
-        .sheet(item: $pullsFor) { PullsSheet(project: $0).environment(store) }
-        .sheet(item: $composingIn) { NewThreadSheet(project: $0).environment(store) }
+        .refreshable { if fleet.mixesMacs { fleet.stores.forEach { $0.reconnect() } } else { store.reconnect() } }
+        .sheet(item: $pullsFor) { PullsSheet(project: $0).environment(pullsOn ?? store) }
+        .sheet(item: $composingIn) { project in
+            let mac = composingOn ?? store
+            NewThreadSheet(project: project, mac: fleet.mixesMacs ? mac.displayName : nil).environment(mac)
+        }
         // `YH_PHONE_PULLS=<project name>`: its PRs open, as its header's button does.
         .task(id: store.projects.count) {
             guard let name = Self.env["YH_PHONE_PULLS"], pullsFor == nil, let p = store.projects.first(where: { $0.name == name }) else { return }
@@ -119,13 +223,13 @@ struct ThreadListView: View {
             TextField("Title", text: $title)
             Button("Cancel", role: .cancel) { renaming = nil }
             Button("Rename") {
-                if let t = renaming, !title.trimmingCharacters(in: .whitespaces).isEmpty { store.rename(t.id, to: title) }
+                if let t = renaming, !title.trimmingCharacters(in: .whitespaces).isEmpty { t.store.rename(t.thread.id, to: title) }
                 renaming = nil
             }
         }
-        .confirmationDialog("Delete “\(deleting?.title ?? "")”?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }), titleVisibility: .visible) {
+        .confirmationDialog("Delete “\(deleting?.thread.title ?? "")”?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }), titleVisibility: .visible) {
             Button("Delete", role: .destructive) {
-                if let t = deleting { store.delete(t.id) }
+                if let t = deleting { t.store.delete(t.thread.id) }
                 deleting = nil
             }
         } message: {
@@ -360,6 +464,8 @@ struct LimitRow: View {
 
 struct ThreadRow: View {
     let thread: ThreadInfo
+    /// The Mac it's on, said first under its title (the list of every Mac).
+    var mac: String? = nil
 
     var body: some View {
         HStack(spacing: 10) {
@@ -371,7 +477,7 @@ struct ThreadRow: View {
                     }
                     Text(thread.title).lineLimit(1)
                 }
-                Text(Self.subtitle(thread))
+                Text(mac.map { "\($0) · \(Self.subtitle(thread))" } ?? Self.subtitle(thread))
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -499,6 +605,14 @@ struct MacView: View {
                 Text(fleet.stores.count > 1 ? "Your Macs" : "Your Mac")
             } footer: {
                 if fleet.stores.count > 1 { Text("All stay connected; tap one to show it. Only the one shown streams a thread.") }
+            }
+            if fleet.stores.count > 1 {
+                Section {
+                    @Bindable var fleet = fleet
+                    Toggle("Show All Macs Together", isOn: $fleet.showsAllMacs)
+                } footer: {
+                    Text("Threads lists every Mac’s projects in one list, a project on several Macs once, each thread saying its Mac. Opening a thread shows its Mac.")
+                }
             }
             Section {
                 TextField("Pairing link or ws:// address", text: $address)
@@ -705,11 +819,17 @@ private struct SubscriptionHeader: View {
 
 /// What a thread's row offers, as the Mac's sidebar does: pin and settle by swiping, rename and
 /// delete from its menu.
+/// A thread an action waits on (renamed, deleted), and the Mac it's on.
+struct ThreadTarget {
+    let store: Store
+    let thread: ThreadInfo
+}
+
 private struct ThreadActions: ViewModifier {
     let thread: ThreadInfo
-    @Binding var renaming: ThreadInfo?
+    @Binding var renaming: ThreadTarget?
     @Binding var title: String
-    @Binding var deleting: ThreadInfo?
+    @Binding var deleting: ThreadTarget?
     @Environment(Store.self) private var store
 
     func body(content: Content) -> some View {
@@ -727,12 +847,12 @@ private struct ThreadActions: ViewModifier {
                 .contextMenu {
                     Button("Rename…", systemImage: "pencil") {
                         title = thread.title
-                        renaming = thread
+                        renaming = ThreadTarget(store: store, thread: thread)
                     }
                     Button(thread.pinned ? "Unpin" : "Pin", systemImage: thread.pinned ? "pin.slash" : "pin") { store.pin(thread.id, !thread.pinned) }
                     Button(thread.settled ? "Bring Back" : "Settle", systemImage: thread.settled ? "tray.and.arrow.up" : "checkmark.circle") { store.settle(thread.id, !thread.settled) }
                     Divider()
-                    Button("Delete…", systemImage: "trash", role: .destructive) { deleting = thread }
+                    Button("Delete…", systemImage: "trash", role: .destructive) { deleting = ThreadTarget(store: store, thread: thread) }
                 }
         } else {
             content
@@ -746,7 +866,12 @@ private struct ThreadActions: ViewModifier {
 struct NewThreadSheet: View {
     /// The project it starts in; the sheet's picker can choose another.
     @State private var projectID: String
-    init(project: Project) { _projectID = State(initialValue: project.id) }
+    /// The Mac it's made on, named in the title (the list of every Mac).
+    private let mac: String?
+    init(project: Project, mac: String? = nil) {
+        _projectID = State(initialValue: project.id)
+        self.mac = mac
+    }
     @Environment(Store.self) private var store
     @Environment(\.dismiss) private var dismiss
     @State private var text = ""
@@ -802,7 +927,7 @@ struct NewThreadSheet: View {
                 .pickerStyle(.menu)
             }
             .navigationTitle("New Thread")
-            .navigationSubtitle(project?.name ?? "")
+            .navigationSubtitle([project?.name, mac].compactMap { $0 }.joined(separator: " · "))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {

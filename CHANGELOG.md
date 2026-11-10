@@ -8,6 +8,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ### Added
 
+- Phone: with several Macs, Show All Macs Together (on the Mac tab, off by default) lists every Mac's threads in one Threads list. A project on more than one Mac shows once, and each thread says which Mac it's on. Opening one switches to its Mac.
 - Phone: the Mac tab shows each Mac's battery level, and whether it's charging.
 - Phone: look through the thread's files on your Mac, read only. The folder button in a thread's toolbar opens Files: **Changed** lists what's different since the last commit (new files too), each opening its diff; **All Files** walks the folder as it is on disk, with what git ignores dimmed; and Go to File finds any file by name. A file opens with its lines numbered and coloured as on the Mac, a page at a time so even long ones open at once, with Find in File and Wrap Lines; while it's open, an edit Claude makes shows within a few seconds. File paths in Claude's replies (`src/app.rs:12`) are links that open the file at those lines, and a Read, Edit or Write step has Open File. Only files inside the thread's folder can be read. Needs the Mac on this version.
 

@@ -547,6 +547,15 @@ Recorded here so the MVP stays small. Roughly in order; Tailscale last.
    and the phone got none of it (`UNWATCH`, then `rows=0`). Hooks: `YH_SERVER=<a>,<b>` (Macs, not
    saved), `YH_PHONE_MAC=<index>` (shown at launch), `YH_PHONE_SWITCH=<index>` (shown 6 s later),
    `YH_PHONE_ADD_MAC=<address>`; `WATCH`, `UNWATCH` and `MAC` lines.
+   **Show All Macs Together** (the Mac tab, with two or more; off by default, saved as
+   `threads.allMacs`): Threads lists every Mac's projects in one list (`Fleet.mixedSections`), a
+   project of the same name on several Macs as one section, each row naming its Mac; a row opens
+   its thread on its own Mac, which becomes the one shown, the list keeping its place. New Thread
+   and a shared project's PRs ask which Mac; the tab's badge goes, what waits is in the list.
+   Checked with two test Macs (7979 "MacBook Pro", 7980 "Mac Studio", same preset): merged list,
+   a Mac Studio row opened from it (`MAC Mac Studio`, `WATCH Mac Studio …`). Hooks:
+   `YH_PHONE_ALL_MACS=0|1` (not saved), `YH_PHONE_OPEN_ON=<index>:<thread title>` (opened as its
+   row does, 6 s after launch).
 10. ✅ **Tailscale:** the tailnet's MagicDNS name in the pairing link and `hello`, the phone
     trying every address at once, `tailscale whois`, Over Tailscale only (see Tailscale above).
     `wss://` with `tailscale cert` left for later.

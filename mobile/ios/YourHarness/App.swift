@@ -43,9 +43,11 @@ struct RootView: View {
         // Each tab draws the Mac shown; switching Macs builds them anew for it.
         TabView(selection: $fleet.tab) {
             Tab("Threads", systemImage: "bubble.left.and.bubble.right", value: .threads) {
-                ThreadsTab(store: store).environment(store).id(store.id)
+                // Every Mac in one list: the same list whichever Mac a thread opens on, so it keeps its place.
+                ThreadsTab(store: store).environment(store).id(fleet.mixesMacs ? nil : store.id)
             }
-            .badge(fleet.waitingElsewhere)
+            // Every Mac listed: what waits elsewhere is in the list already.
+            .badge(fleet.mixesMacs ? 0 : fleet.waitingElsewhere)
             Tab("Usage", systemImage: "gauge.with.dots.needle.33percent", value: .usage) {
                 NavigationStack { UsageView() }.environment(store).id(store.id)
             }
@@ -61,6 +63,16 @@ struct RootView: View {
             guard let link = ProcessInfo.processInfo.environment["YH_PHONE_PAIR"].flatMap(URL.init(string:)) else { return }
             try? await Task.sleep(for: .seconds(2))
             fleet.pair(link)
+        }
+        // `YH_PHONE_OPEN_ON=<index>:<thread title>`: that Mac's thread opened 6 s after launch, as its
+        // row in the list of every Mac does.
+        .task {
+            guard let spec = ProcessInfo.processInfo.environment["YH_PHONE_OPEN_ON"], let colon = spec.firstIndex(of: ":"),
+                  let i = Int(spec[..<colon]) else { return }
+            try? await Task.sleep(for: .seconds(6))
+            let title = String(spec[spec.index(after: colon)...])
+            guard fleet.stores.indices.contains(i), let t = fleet.stores[i].sections.flatMap({ $0.live + $0.settled }).first(where: { $0.title == title }) else { return }
+            fleet.open(t.id, on: fleet.stores[i])
         }
         // `YH_PHONE_SWITCH=<index>`: that Mac shown 6 s after launch, as its menu does.
         .task {

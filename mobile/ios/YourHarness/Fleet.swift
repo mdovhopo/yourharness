@@ -30,6 +30,16 @@ final class Fleet {
     private(set) var current: Store
     /// The dock's tab (`YH_PHONE_TAB=usage|mac|search` at launch).
     var tab: AppTab
+    /// Threads lists every Mac's projects together, not the shown Mac's alone (opt in, saved;
+    /// `YH_PHONE_ALL_MACS=0|1` at launch, not saved).
+    var showsAllMacs: Bool {
+        didSet {
+            guard saves, ProcessInfo.processInfo.environment["YH_PHONE_ALL_MACS"] == nil else { return }
+            UserDefaults.standard.set(showsAllMacs, forKey: "threads.allMacs")
+        }
+    }
+    /// The list mixes Macs: asked for, and there's more than one.
+    var mixesMacs: Bool { showsAllMacs && stores.count > 1 }
     /// `YH_SERVER` (addresses, commas between) is for tests: nothing is saved then.
     @ObservationIgnored private let saves: Bool
 
@@ -55,6 +65,7 @@ final class Fleet {
         self.stores = stores
         current = stores[start]
         tab = env["YH_PHONE_TAB"].flatMap(AppTab.init(rawValue:)) ?? .threads
+        showsAllMacs = env["YH_PHONE_ALL_MACS"].map { $0 == "1" } ?? UserDefaults.standard.bool(forKey: "threads.allMacs")
         stores.forEach(wire)
         current.shown = true
         current.becomeCurrent()
@@ -150,6 +161,51 @@ final class Fleet {
         stores.remove(at: i)
         if current === store { select(stores[min(i, stores.count - 1)]) }
         save()
+    }
+
+    /// A thread opened from the list of every Mac: its Mac is shown, the thread over the list.
+    func open(_ thread: String, on store: Store) {
+        select(store)
+        store.show(thread)
+    }
+
+    /// A thread in the list of every Mac, with the Mac it's on.
+    struct MixedThread: Identifiable {
+        let mac: Store
+        let thread: ThreadInfo
+        var id: String { "\(mac.id)/\(thread.id)" }
+    }
+
+    /// A project as the list of every Mac has it: projects of the same name on several Macs are one.
+    struct MixedSection: Identifiable {
+        let name: String
+        /// Each Mac's project of that name, in the order the Macs are listed.
+        let projects: [(mac: Store, project: Project)]
+        let live: [MixedThread]
+        let settled: [MixedThread]
+        var id: String { name }
+    }
+
+    /// Every Mac's sections, mixed: in the order the Macs list their projects, each thread with
+    /// its Mac; pinned first, then newest made first; settled ones on the shelf, last changed first.
+    var mixedSections: [MixedSection] {
+        var names: [String] = []
+        var groups: [String: [(mac: Store, section: Store.Section)]] = [:]
+        for mac in stores {
+            for section in mac.sections {
+                let name = section.project.name
+                if groups[name] == nil { names.append(name) }
+                groups[name, default: []].append((mac, section))
+            }
+        }
+        return names.map { name in
+            let group = groups[name] ?? []
+            let live = group.flatMap { g in g.section.live.map { MixedThread(mac: g.mac, thread: $0) } }
+                .sorted { ($0.thread.pinned ? 1 : 0, $0.thread.createdAt) > ($1.thread.pinned ? 1 : 0, $1.thread.createdAt) }
+            let settled = group.flatMap { g in g.section.settled.map { MixedThread(mac: g.mac, thread: $0) } }
+                .sorted { $0.thread.updatedAt > $1.thread.updatedAt }
+            return MixedSection(name: name, projects: group.map { ($0.mac, $0.section.project) }, live: live, settled: settled)
+        }
     }
 
     /// Threads waiting on you on Macs not shown.
