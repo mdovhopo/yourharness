@@ -6,6 +6,8 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-11-10
+
 ### Added
 
 - Phone: tapping a pull request's link in a thread opens a review page right in the app instead of the browser: its status (reviews, checks, conflicts), checks, description and conversation, with Squash and Merge (or Merge When Ready) and a button to open it on GitHub. PRs in a project's PR list open it too. Needs the Mac on this version.
