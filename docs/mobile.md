@@ -335,7 +335,11 @@ Recorded here so the MVP stays small. Roughly in order; Tailscale last.
      ("In Conversations", the words found in bold); a result opens its thread in Threads.
      `YH_PHONE_SEARCH=<words>` (with `YH_PHONE_TAB=search`).
    - **Usage limits** on the Usage tab, not on the thread list; a window whose reset time has
-     passed says so instead of showing an old figure as current.
+     passed says so instead of showing an old figure as current. Since 0.1.8 `limits` carries the
+     `subscription` they belong to (`{plan, email, org}`, from the Mac's `claude auth status`;
+     one per Mac for now), and the tab has a section per subscription across every connected Mac,
+     the shown one first: Macs signed in to the same account share a section, each window its
+     freshest reading.
    - **Can't reach your Mac**: until the phone has connected once, an empty state with the
      address, Try Again and Server Settings in place of an empty list.
    - **Side chats** (`/btw`, or the toolbar's bubbles): a sheet with the side chat's rows drawn by

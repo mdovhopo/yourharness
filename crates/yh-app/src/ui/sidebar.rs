@@ -32,6 +32,8 @@ const ROW_INSET: f32 = 6.;
 const CHEVRON: f32 = 12.;
 const ICON: f32 = 14.;
 const GAP: f32 = 6.;
+/// A limit meter's bar: thick enough to read at a glance.
+const BAR: f32 = 6.;
 /// Where titles start, from the row's edge.
 const TITLE_X: f32 = ROW_INSET + CHEVRON + GAP + ICON + GAP;
 
@@ -902,16 +904,48 @@ impl Sidebar {
             .flex()
             .items_center()
             .gap(px(space::S))
-            .h(px(16.))
+            .h(px(18.))
             .text_size(px(text::CAPTION))
-            .child(div().w(px(22.)).flex_none().font_weight(FontWeight::MEDIUM).text_color(theme.secondary).child(yh_core::limits::short_label(name)))
+            .child(div().w(px(38.)).flex_none().whitespace_nowrap().font_weight(FontWeight::MEDIUM).text_color(theme.secondary).child(yh_core::limits::short_label(name)))
             .child(
-                div().flex_1().h(px(4.)).rounded_full().bg(theme.selected).when_some(used, |d, u| {
-                    d.child(div().h_full().rounded_full().min_w(px(4.)).w(gpui_kit::relative(u as f32)).bg(tint))
+                div().flex_1().h(px(BAR)).rounded_full().bg(theme.selected).overflow_hidden().when_some(used, |d, u| {
+                    d.child(div().h_full().rounded_full().min_w(px(BAR)).w(gpui_kit::relative(u as f32)).bg(tint))
                 }),
             )
             .child(div().w(px(30.)).flex_none().flex().justify_end().text_color(theme.secondary).child(used.map(|u| format!("{}%", (u * 100.).round() as i64)).unwrap_or_else(|| "–".into())))
             .child(div().w(px(44.)).flex_none().flex().justify_end().text_color(theme.tertiary).whitespace_nowrap().child(countdown))
+            .tooltip(tooltip(tip))
+            .into_any_element()
+    }
+
+    /// A subscription's name over its meters: `Claude Max  a@b.c`. One per Mac for now, so the
+    /// footer shows one; more would stack.
+    fn subscription_row(sub: Option<&yh_core::limits::Subscription>, theme: &Theme) -> gpui_kit::AnyElement {
+        let plan = sub.map(|s| s.plan_name()).unwrap_or_else(|| "Claude".into());
+        let who = sub.and_then(|s| s.who()).map(str::to_string);
+        let tip = match sub {
+            Some(s) => {
+                let mut t = format!("Claude Code is signed in to {plan}");
+                if let Some(email) = &s.email {
+                    t.push_str(&format!(" as {email}"));
+                }
+                // Without an email, the organization is already its name.
+                if let Some(org) = s.org.as_ref().filter(|_| s.email.is_some()) {
+                    t.push_str(&format!("\n{org}"));
+                }
+                t
+            }
+            None => "Who Claude Code is signed in as isn't known yet".into(),
+        };
+        div()
+            .id("subscription")
+            .flex()
+            .items_baseline()
+            .gap(px(space::S - 2.))
+            .min_w_0()
+            .text_size(px(text::CAPTION))
+            .child(div().flex_none().font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(plan))
+            .when_some(who, |d, who| d.child(div().min_w_0().flex_1().overflow_hidden().text_ellipsis().whitespace_nowrap().text_color(theme.tertiary).child(who)))
             .tooltip(tooltip(tip))
             .into_any_element()
     }
@@ -939,7 +973,8 @@ impl Sidebar {
             .id("limits")
             .flex()
             .flex_col()
-            .gap(px(space::XS))
+            .gap(px(2.))
+            .child(Self::subscription_row(ws.subscription.as_ref(), theme))
             .on_click(move |_, _, cx| {
                 usage_ws.update(cx, |ws, cx| {
                     if ws.page != Some(Page::Usage) {

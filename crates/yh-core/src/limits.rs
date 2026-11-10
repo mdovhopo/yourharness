@@ -1,6 +1,7 @@
 //! Claude's usage limits (the 5-hour and weekly windows) as the CLI reports them in a
 //! `rate_limit_event`, saved as 0.0.x saved them (`rateLimit`, `rateLimitUpdatedAt`),
 //! read for the sidebar's meters, and refreshed on demand with the smallest request there is.
+//! They belong to the subscription `claude` is signed in with (`Subscription`).
 
 use serde_json::{json, Value};
 use std::io::Read;
@@ -119,6 +120,92 @@ pub fn utilization(w: &Window, now: f64) -> f64 {
     if w.resets_at.is_some_and(|at| at <= now) { 0. } else { w.utilization.clamp(0., 1.) }
 }
 
+/// The subscription the limits belong to: who `claude` is signed in as, from `claude auth
+/// status` (never its credentials). One per Mac for now.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Subscription {
+    pub email: Option<String>,
+    pub org: Option<String>,
+    /// `max`, `pro`, `team`, `enterprise`; `None` with an API key.
+    pub plan: Option<String>,
+    /// `claude.ai`, `apiKey`…
+    pub method: Option<String>,
+}
+
+impl Subscription {
+    /// "Claude Max", "Claude Pro", "API key": the plan's name.
+    pub fn plan_name(&self) -> String {
+        match self.plan.as_deref() {
+            Some(p) if !p.is_empty() => format!("Claude {}", capitalize(p)),
+            _ if self.method.as_deref().is_some_and(|m| m != "claude.ai") => "API key".into(),
+            _ => "Claude".into(),
+        }
+    }
+
+    /// Who it is: the email, else the organization.
+    pub fn who(&self) -> Option<&str> {
+        self.email.as_deref().or(self.org.as_deref()).filter(|s| !s.is_empty())
+    }
+
+    /// Kept as `claudeSubscription`: `{email, org, plan, method}`.
+    pub fn to_saved(&self) -> Value {
+        json!({"email": self.email, "org": self.org, "plan": self.plan, "method": self.method})
+    }
+
+    pub fn from_saved(v: &Value) -> Option<Subscription> {
+        let s = |k: &str| v[k].as_str().filter(|s| !s.is_empty()).map(str::to_string);
+        let sub = Subscription { email: s("email"), org: s("org"), plan: s("plan"), method: s("method") };
+        (sub != Subscription::default()).then_some(sub)
+    }
+
+    /// The same subscription as `other`: same account, or no way to tell them apart.
+    pub fn same_account(&self, other: &Subscription) -> bool {
+        self.email == other.email && self.org == other.org
+    }
+}
+
+/// `claude auth status --json`'s answer; `None` when signed out.
+pub fn parse_subscription(json: &str) -> Option<Subscription> {
+    let v: Value = serde_json::from_str(json.trim()).ok()?;
+    if v["loggedIn"] == false {
+        return None;
+    }
+    let s = |k: &str| v[k].as_str().filter(|s| !s.is_empty()).map(str::to_string);
+    Some(Subscription { email: s("email"), org: s("orgName"), plan: s("subscriptionType"), method: s("authMethod") })
+}
+
+/// Who `claude` is signed in as (about 0.1 s, nothing sent to Claude). Blocks (10 s at most).
+/// `Ok(None)`: signed out.
+pub fn subscription(executable: &Path, path_env: Option<&str>) -> Result<Option<Subscription>, String> {
+    let mut command = Command::new(executable);
+    command.args(["auth", "status", "--json"]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    crate::shell_env::apply(&mut command);
+    if let Some(path) = path_env {
+        command.env("PATH", path);
+    }
+    let mut child = command.spawn().map_err(|e| e.to_string())?;
+    let mut stdout = child.stdout.take().unwrap();
+    let out = std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = stdout.read_to_string(&mut s);
+        s
+    });
+    let started = Instant::now();
+    while child.try_wait().ok().flatten().is_none() {
+        if started.elapsed() > Duration::from_secs(10) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("Claude Code didn't say who's signed in.".into());
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let out = out.join().unwrap_or_default();
+    if out.trim().is_empty() {
+        return Err("Claude Code didn't say who's signed in.".into());
+    }
+    Ok(parse_subscription(&out))
+}
+
 /// The CLI only reports limits alongside a real request, so this sends the smallest one it
 /// can: Haiku, one word, no tools, no MCP, none of your settings or hooks, nothing saved to
 /// session history. About 600 tokens, a couple of seconds. Blocks (45 s at most).
@@ -235,6 +322,21 @@ mod tests {
         assert_eq!(short_label("weekly_extra"), "Week");
         assert_eq!(title("seven_day_sonnet"), "Weekly Sonnet limit");
         assert_eq!(title("odd_window"), "Odd Window");
+    }
+
+    #[test]
+    fn reads_the_subscription() {
+        let sub = parse_subscription(r#"{"loggedIn": true, "authMethod": "claude.ai", "email": "a@b.c", "orgName": "A's Org", "subscriptionType": "max", "newField": 1}"#).unwrap();
+        assert_eq!(sub.plan_name(), "Claude Max");
+        assert_eq!(sub.who(), Some("a@b.c"));
+        assert_eq!(Subscription::from_saved(&sub.to_saved()), Some(sub.clone()));
+        assert!(parse_subscription(r#"{"loggedIn": false}"#).is_none());
+        assert!(parse_subscription("not json").is_none());
+        let key = parse_subscription(r#"{"loggedIn": true, "authMethod": "apiKey"}"#).unwrap();
+        assert_eq!(key.plan_name(), "API key");
+        assert_eq!(key.who(), None);
+        assert!(!sub.same_account(&key));
+        assert_eq!(Subscription::from_saved(&json!(null)), None);
     }
 
     #[test]

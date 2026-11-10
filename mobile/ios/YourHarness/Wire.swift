@@ -195,6 +195,17 @@ struct SlashCommand: Codable, Sendable, Hashable, Identifiable {
 }
 
 /// A usage window: how much is used (0 to 1), when it starts over (protocol 5).
+/// The Claude subscription a Mac's limits belong to (one per Mac for now). Sent by Macs since
+/// 0.1.8; older ones leave it out.
+struct Subscription: Decodable, Sendable, Hashable {
+    /// "Claude Max", "Claude Pro", "API key".
+    let plan: String
+    let email: String?
+    let org: String?
+    /// Which account: Macs signed in to the same one show their limits together.
+    var account: String { email ?? org ?? plan }
+}
+
 struct LimitWindow: Decodable, Sendable, Hashable, Identifiable {
     let name: String
     let used: Double
@@ -286,7 +297,7 @@ enum ToApp: Sendable {
     /// Protocol 3: the models and permission modes to choose from; 5: each project's slash commands.
     case options(models: [ModelOption], modes: [String], commands: [String: [SlashCommand]])
     /// Protocol 5: usage limits; what a search found; a thread's files for `@`.
-    case limits([LimitWindow])
+    case limits([LimitWindow], Subscription?)
     case searchResults(query: String, hits: [SearchHit])
     case files(thread: String, query: String, files: [String])
     /// Protocol 3: a row's whole tool input and result.
@@ -317,7 +328,7 @@ enum ToApp: Sendable {
     private struct LiveMessage: Decodable { let thread: String; let live: Live }
     private struct Done: Decodable { let id: String; let error: String?; let thread: String? }
     private struct Options: Decodable { let models: [ModelOption]; let modes: [String]; let commands: [String: [SlashCommand]]? }
-    private struct Limits: Decodable { let windows: [LimitWindow] }
+    private struct Limits: Decodable { let windows: [LimitWindow]; let subscription: Subscription? }
     private struct Found: Decodable { let query: String; let hits: [SearchHit] }
     private struct Files: Decodable { let thread: String; let query: String; let files: [String] }
     private struct Whole: Decodable { let thread: String; let seq: Int; let input: String?; let result: String? }
@@ -372,7 +383,9 @@ enum ToApp: Sendable {
             case "options":
                 let m = try d.decode(Options.self, from: data)
                 return .options(models: m.models, modes: m.modes, commands: m.commands ?? [:])
-            case "limits": return .limits(try d.decode(Limits.self, from: data).windows)
+            case "limits":
+                let m = try d.decode(Limits.self, from: data)
+                return .limits(m.windows, m.subscription)
             case "search_results":
                 let m = try d.decode(Found.self, from: data)
                 return .searchResults(query: m.query, hits: m.hits)

@@ -80,7 +80,7 @@ fn print(m: &ToApp, began: &mut bool) -> bool {
             }
         }
         ToApp::Done { id, error, thread } => println!("DONE {id} {}{}", error.as_deref().unwrap_or("ok"), thread.as_deref().map(|t| format!(" thread={t}")).unwrap_or_default()),
-        ToApp::Limits { windows } => println!("LIMITS {}", windows.iter().map(|w| format!("{} {:.0}%", w.name, w.used * 100.)).collect::<Vec<_>>().join(", ")),
+        ToApp::Limits { windows, subscription } => println!("LIMITS {}{}", subscription.as_ref().map(|s| format!("[{} {}] ", s.plan, s.email.as_deref().unwrap_or_default())).unwrap_or_default(), windows.iter().map(|w| format!("{} {:.0}%", w.name, w.used * 100.)).collect::<Vec<_>>().join(", ")),
         ToApp::SearchResults { query, hits } => println!("SEARCH {query:?} {} hits{}", hits.len(), hits.first().map(|h| format!(": {}", h.snippet)).unwrap_or_default()),
         ToApp::Files { query, files, .. } => println!("FILES {query:?} {}", files.join(", ")),
         ToApp::Options { models, modes, .. } => println!("OPTIONS models=[{}] modes=[{}]", models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>().join(","), modes.join(",")),

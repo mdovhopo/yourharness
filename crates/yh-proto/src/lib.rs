@@ -26,6 +26,17 @@ pub struct SlashCommand {
     pub description: String,
 }
 
+/// The Claude subscription a Mac's `claude` is signed in with: whose limits they are.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Subscription {
+    /// "Claude Max", "Claude Pro", "API key".
+    pub plan: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org: Option<String>,
+}
+
 /// A usage window: how much of it is used (0 to 1) and when it starts over.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct LimitWindow {
@@ -385,8 +396,9 @@ pub enum ToApp {
     /// The models and permission modes to choose from, and each project's slash commands: after
     /// `threads`, and when they change.
     Options { models: Vec<ModelOption>, modes: Vec<String>, #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")] commands: std::collections::BTreeMap<String, Vec<SlashCommand>> },
-    /// Usage limits as Claude last reported them: after `options`, and when they change.
-    Limits { windows: Vec<LimitWindow> },
+    /// Usage limits as Claude last reported them: after `options`, and when they change. With
+    /// the subscription they belong to (one per Mac for now), from Macs that know it.
+    Limits { windows: Vec<LimitWindow>, #[serde(default, skip_serializing_if = "Option::is_none")] subscription: Option<Subscription> },
     /// What `search` found, best first.
     SearchResults { query: String, hits: Vec<SearchHit> },
     /// A thread's files matching `query`, for `@`.

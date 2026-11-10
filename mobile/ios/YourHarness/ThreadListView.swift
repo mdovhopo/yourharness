@@ -308,18 +308,27 @@ struct LimitRow: View {
 
     /// Its reset time passed since the Mac last heard: what it says is from before.
     private var stale: Bool { window.resetsAt.map { $0 < Date().timeIntervalSince1970 } ?? false }
+    private var used: Double { min(max(window.used, 0), 1) }
+    private var tint: Color { stale ? .gray : used >= 0.9 ? .red : used >= 0.7 ? .orange : .accentColor }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text(Self.name(window.name))
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(Self.name(window.name)).font(.body.weight(.medium))
                 Spacer()
                 Text(window.used, format: .percent.precision(.fractionLength(0)))
+                    .font(.body.weight(.semibold))
                     .monospacedDigit()
-                    .foregroundStyle(!stale && window.used >= 0.9 ? .red : .secondary)
+                    .foregroundStyle(!stale && used >= 0.9 ? .red : .primary)
             }
-            ProgressView(value: min(max(window.used, 0), 1))
-                .tint(stale ? .gray : window.used >= 0.9 ? .red : window.used >= 0.7 ? .orange : .accentColor)
+            // A thick bar, as the Mac's footer draws it: easy to read at a glance.
+            GeometryReader { box in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color(.tertiarySystemFill))
+                    Capsule().fill(tint).frame(width: max(box.size.width * used, used > 0 ? 10 : 0))
+                }
+            }
+            .frame(height: 10)
             if let at = window.resetsAt {
                 let date = Date(timeIntervalSince1970: at)
                 Group {
@@ -333,7 +342,7 @@ struct LimitRow: View {
                 .foregroundStyle(.secondary)
             }
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, 4)
         .opacity(stale ? 0.7 : 1)
         .accessibilityElement(children: .combine)
     }
@@ -587,28 +596,89 @@ struct MacMenu: View {
     }
 }
 
-/// The dock's Usage page: Claude's limits as the Mac last heard them.
+/// The dock's Usage page: Claude's limits as the Macs last heard them, a section for each
+/// subscription (one per Mac for now; Macs signed in to the same account share one), the shown
+/// Mac's first.
 struct UsageView: View {
     @Environment(Store.self) private var store
+    @Environment(Fleet.self) private var fleet
+
+    /// A subscription's limits and the Macs signed in to it.
+    @MainActor struct SubscriptionGroup: Identifiable {
+        let id: String
+        let subscription: Subscription?
+        var macs: [Store]
+        /// Each window's freshest reading among its Macs: the latest reset, then the most used.
+        var windows: [LimitWindow] {
+            var best: [String: LimitWindow] = [:]
+            var order: [String] = []
+            for w in macs.flatMap({ $0.limits }) {
+                guard let held = best[w.name] else { best[w.name] = w; order.append(w.name); continue }
+                if (w.resetsAt ?? 0, w.used) > (held.resetsAt ?? 0, held.used) { best[w.name] = w }
+            }
+            return order.compactMap { best[$0] }
+        }
+    }
+
+    private var groups: [SubscriptionGroup] {
+        var out: [SubscriptionGroup] = []
+        for mac in [store] + fleet.stores.filter({ $0 !== store }) {
+            let key = mac.subscription.map { "sub:\($0.account)" } ?? "mac:\(mac.id)"
+            if let i = out.firstIndex(where: { $0.id == key }) { out[i].macs.append(mac) }
+            else { out.append(SubscriptionGroup(id: key, subscription: mac.subscription, macs: [mac])) }
+        }
+        return out.filter { !$0.windows.isEmpty }
+    }
 
     var body: some View {
+        let groups = groups
         List {
-            if !store.limits.isEmpty {
+            ForEach(groups) { group in
                 Section {
-                    ForEach(store.limits) { LimitRow(window: $0) }
-                } footer: {
-                    Text("As your Mac last heard from Claude. It hears again with each turn.")
+                    ForEach(group.windows) { LimitRow(window: $0) }
+                } header: {
+                    SubscriptionHeader(subscription: group.subscription, macs: group.macs.map { $0.displayName })
+                }
+            }
+            if !groups.isEmpty {
+                Section {} footer: {
+                    Text("As your Macs last heard from Claude. They hear again with each turn.")
                 }
             }
         }
         .listStyle(.insetGrouped)
         .overlay {
-            if store.limits.isEmpty {
+            if groups.isEmpty {
                 ContentUnavailableView("No Usage Yet", systemImage: "gauge.with.dots.needle.33percent", description: Text(store.state == .connected ? "Your Mac hasn't heard Claude's limits yet. They come with its next turn." : "Connect to your Mac to see Claude's limits."))
             }
         }
         .navigationTitle("Usage")
-        .navigationSubtitle(store.displayName)
+    }
+}
+
+/// "Claude Max · a@b.c", and the Macs signed in to it.
+private struct SubscriptionHeader: View {
+    let subscription: Subscription?
+    let macs: [String]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Image(systemName: "person.crop.circle")
+                Text(subscription?.plan ?? "Claude").fontWeight(.semibold)
+                if let who = subscription?.email ?? subscription?.org {
+                    Text(who).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                }
+            }
+            .font(.subheadline)
+            .foregroundStyle(.primary)
+            Text(macs.joined(separator: " · "))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+        .textCase(nil)
+        .accessibilityElement(children: .combine)
     }
 }
 

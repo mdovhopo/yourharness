@@ -136,6 +136,8 @@ pub struct Workspace {
     pub limits_updated_at: Option<f64>,
     pub limits_refreshing: bool,
     pub limits_error: Option<String>,
+    /// The subscription they belong to: who `claude` is signed in as (one per Mac for now).
+    pub subscription: Option<yh_core::limits::Subscription>,
     /// Each project's slash commands and skills, as the CLI last listed them (`slashCommands`).
     commands: HashMap<String, Vec<SlashCommand>>,
     /// A folder's files for `@` mentions, kept 30 seconds.
@@ -307,6 +309,7 @@ impl Workspace {
             limits_updated_at: None,
             limits_refreshing: false,
             limits_error: None,
+            subscription: None,
             commands: HashMap::new(),
             files: HashMap::new(),
             new_count: 0,
@@ -391,6 +394,7 @@ impl Workspace {
         workspace.ensure_home(cx);
         workspace.recover_cut_off_turns(cx);
         workspace.load_saved_limits();
+        workspace.check_subscription(cx);
         workspace.listen_for_notification_clicks(cx);
         if workspace.phones_on() {
             workspace.start_phones(cx);

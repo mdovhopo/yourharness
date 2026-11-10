@@ -97,6 +97,8 @@ final class Store: Identifiable {
     /// the open composer's `@` matches.
     var commands: [String: [SlashCommand]] = [:]
     var limits: [LimitWindow] = []
+    /// The subscription they belong to, when the Mac says (0.1.8 and later).
+    var subscription: Subscription?
     var searchQuery = ""
     var searchHits: [SearchHit] = []
     var fileMatches: (thread: String, query: String, files: [String])?
@@ -564,8 +566,9 @@ final class Store: Identifiable {
                 if self.models != models { self.models = models }
                 if self.modes != modes { self.modes = modes }
                 if self.commands != commands { self.commands = commands }
-            case .limits(let windows):
+            case .limits(let windows, let subscription):
                 if limits != windows { limits = windows }
+                if self.subscription != subscription { self.subscription = subscription }
             case .searchResults(let query, let hits):
                 if query == searchQuery { searchHits = hits }
             case .files(let thread, let query, let files):

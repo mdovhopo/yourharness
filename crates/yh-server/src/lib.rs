@@ -108,6 +108,10 @@ pub struct Asked {
 }
 
 impl Shared {
+    fn limits(&self) -> ToApp {
+        ToApp::Limits { windows: self.limits.lock().unwrap().clone(), subscription: self.subscription.lock().unwrap().clone() }
+    }
+
     fn options(&self) -> ToApp {
         ToApp::Options { models: self.models.lock().unwrap().clone(), modes: MODES.iter().map(|m| m.to_string()).collect(), commands: self.commands.lock().unwrap().clone() }
     }
@@ -291,6 +295,8 @@ struct Shared {
     commands: Mutex<std::collections::BTreeMap<String, Vec<wire::SlashCommand>>>,
     /// Usage limits as last heard (from the engine, or as saved).
     limits: Mutex<Vec<wire::LimitWindow>>,
+    /// The subscription they belong to, as the Mac last checked.
+    subscription: Mutex<Option<wire::Subscription>>,
     /// Folders' files for `@`, kept 30 seconds.
     files: Mutex<HashMap<String, (Instant, Arc<Vec<String>>)>>,
     /// Each project's PRs as last read, for a minute.
@@ -419,9 +425,9 @@ fn follow(told: flume::Receiver<yh_engine::Output>, shared: &Shared, source: &So
                             let windows = source::limit_windows(info);
                             let mut held = shared.limits.lock().unwrap();
                             if !windows.is_empty() && *held != windows {
-                                *held = windows.clone();
+                                *held = windows;
                                 drop(held);
-                                shared.send(&ToApp::Limits { windows }, |c| c.app);
+                                shared.send(&shared.limits(), |c| c.app);
                             }
                         }
                     }
@@ -594,14 +600,21 @@ fn refresh_listing(source: &Source, shared: &Shared, changed_at: &HashMap<String
     if options_changed && !first {
         shared.send(&shared.options(), |c| c.app);
     }
-    // Saved limits, until the engine says newer.
-    if let Ok(limits) = source.limits() {
+    // Saved limits, until the engine says newer; all of them again when the Mac signs in to
+    // another subscription (it drops the last one's reading).
+    if let (Ok(limits), Ok(subscription)) = (source.limits(), source.subscription()) {
         let mut held = shared.limits.lock().unwrap();
-        if held.is_empty() && !limits.is_empty() {
-            *held = limits.clone();
-            drop(held);
+        let mut held_sub = shared.subscription.lock().unwrap();
+        let changed = *held_sub != subscription;
+        let other_account = held_sub.as_ref().is_some_and(|h| subscription.as_ref().is_none_or(|s| (&s.email, &s.org) != (&h.email, &h.org)));
+        if changed || (held.is_empty() && !limits.is_empty()) {
+            if other_account || held.is_empty() {
+                *held = limits;
+            }
+            *held_sub = subscription;
+            drop((held, held_sub));
             if !first {
-                shared.send(&ToApp::Limits { windows: limits }, |c| c.app);
+                shared.send(&shared.limits(), |c| c.app);
             }
         }
     }
@@ -758,8 +771,7 @@ fn answer(id: u64, message: FromApp, shared: &Arc<Shared>, source: &Source) -> V
         FromApp::SubscribeApp => {
             set(&|c| c.app = true);
             let (projects, threads) = shared.listing.lock().unwrap().clone();
-            let limits = shared.limits.lock().unwrap().clone();
-            vec![ToApp::Threads { projects, threads }, shared.options(), ToApp::Limits { windows: limits }]
+            vec![ToApp::Threads { projects, threads }, shared.options(), shared.limits()]
         }
         FromApp::ToolResult { thread, seq } => match source.whole(&thread, seq) {
             Ok((input, result)) => vec![ToApp::ToolResult { thread, seq, input, result }],

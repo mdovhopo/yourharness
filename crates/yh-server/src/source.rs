@@ -128,6 +128,12 @@ impl Source {
         Ok(yh_core::limits::from_saved(&saved).map(|info| limit_windows(&info)).unwrap_or_default())
     }
 
+    /// Who the Mac's `claude` is signed in as, as last checked (`claudeSubscription`).
+    pub fn subscription(&self) -> rusqlite::Result<Option<yh_proto::Subscription>> {
+        let saved = self.setting("claudeSubscription")?.unwrap_or_default();
+        Ok(yh_core::limits::Subscription::from_saved(&saved).map(|s| yh_proto::Subscription { plan: s.plan_name(), email: s.email, org: s.org }))
+    }
+
     fn setting(&self, key: &str) -> rusqlite::Result<Option<Value>> {
         let json: Option<Vec<u8>> = self.c.query_row("SELECT value FROM settings WHERE key = ?", [key], |r| r.get(0)).optional()?;
         Ok(json.and_then(|j| serde_json::from_slice(&j).ok()))
