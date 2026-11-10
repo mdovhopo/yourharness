@@ -194,28 +194,45 @@ fn select_probe(thread: Entity<ThreadState>, window: &mut Window, cx: &mut Conte
     cx.spawn_in(window, async move |_, cx| {
         let delay = std::env::var("YH_SELECT_PROBE_DELAY").ok().and_then(|d| d.parse().ok()).unwrap_or(2.0);
         cx.background_executor().timer(Duration::from_secs_f64(delay)).await;
-        let _ = cx.update(|window, cx| {
+        let m = Modifiers::default();
+        let ends = cx.update(|window, cx| {
             let t = thread.read(cx);
-            let Some(item) = t.items.iter().rev().find(|i| i.ty == crate::state::thread::ItemType::Text) else { return eprintln!("SELECT FAIL: no reply") };
+            let Some(item) = t.items.iter().rev().find(|i| i.ty == crate::state::thread::ItemType::Text) else {
+                eprintln!("SELECT FAIL: no reply");
+                return None;
+            };
             // From the start of the reply's first paragraph to the end of its last, where they
             // were laid out.
             let md = yh_core::markdown::parse(&item.entries[0].borrow().data.text);
             let paragraphs: Vec<String> = md.blocks.iter().filter_map(|b| if let yh_core::markdown::MdBlock::Paragraph(s) = b { Some(s.text.clone()) } else { None }).collect();
             let (Some(first), Some(last)) = (paragraphs.first().and_then(|p| crate::ui::selectable::place_of(p)), paragraphs.last().and_then(|p| crate::ui::selectable::place_of(p))) else {
-                return eprintln!("SELECT FAIL: the reply isn't laid out");
+                eprintln!("SELECT FAIL: the reply isn't laid out");
+                return None;
             };
             let from = point(first.left() + px(1.), first.top() + px(6.));
             let to = point(last.right() - px(1.), last.bottom() - px(6.));
-            let m = Modifiers::default();
             window.dispatch_event(PlatformInput::MouseMove(MouseMoveEvent { position: from, pressed_button: None, modifiers: m }), cx);
             window.dispatch_event(PlatformInput::MouseDown(MouseDownEvent { button: MouseButton::Left, position: from, modifiers: m, click_count: 1, first_mouse: false }), cx);
-            for step in 1..=8 {
-                let f = step as f32 / 8.;
-                let at = point(from.x + (to.x - from.x) * f, from.y + (to.y - from.y) * f);
-                window.dispatch_event(PlatformInput::MouseMove(MouseMoveEvent { position: at, pressed_button: Some(MouseButton::Left), modifiers: m }), cx);
+            Some((from, to))
+        });
+        let Ok(Some((from, to))) = ends else { return };
+        // A move a frame or so apart, as a hand drags: what's selected must show as it grows.
+        let drawn_before = crate::ui::selectable::drawn_selected();
+        for step in 1..=8 {
+            cx.background_executor().timer(Duration::from_millis(40)).await;
+            let f = step as f32 / 8.;
+            let at = point(from.x + (to.x - from.x) * f, from.y + (to.y - from.y) * f);
+            let _ = cx.update(|window, cx| window.dispatch_event(PlatformInput::MouseMove(MouseMoveEvent { position: at, pressed_button: Some(MouseButton::Left), modifiers: m }), cx));
+        }
+        cx.background_executor().timer(Duration::from_millis(100)).await;
+        let drawn = crate::ui::selectable::drawn_selected() - drawn_before;
+        eprintln!("SELECT drawn while dragging: {drawn} {}", if drawn >= 4 { "PASS" } else { "FAIL" });
+        let _ = cx.update(|window, cx| {
+            // `hold`: the button kept down, so a snapshot shows the selection as it's being made.
+            if std::env::var("YH_SELECT_PROBE").as_deref() != Ok("hold") {
+                window.dispatch_event(PlatformInput::MouseUp(MouseUpEvent { button: MouseButton::Left, position: to, modifiers: m, click_count: 1 }), cx);
+                window.refresh();
             }
-            window.dispatch_event(PlatformInput::MouseUp(MouseUpEvent { button: MouseButton::Left, position: to, modifiers: m, click_count: 1 }), cx);
-            window.refresh();
         });
         cx.background_executor().timer(Duration::from_millis(300)).await;
         let _ = cx.update(|window, cx| {
@@ -223,7 +240,7 @@ fn select_probe(thread: Entity<ThreadState>, window: &mut Window, cx: &mut Conte
             let shown: String = text.chars().take(160).collect();
             eprintln!("SELECT {} ({} chars): {shown:?}", if text.trim().is_empty() { "FAIL" } else { "PASS" }, text.chars().count());
         });
-        if std::env::var("YH_SELECT_PROBE").as_deref() == Ok("keep") {
+        if matches!(std::env::var("YH_SELECT_PROBE").as_deref(), Ok("keep" | "hold")) {
             return;
         }
         // A click elsewhere ends it.

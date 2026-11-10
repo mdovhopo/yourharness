@@ -478,6 +478,14 @@ final class TranscriptViewController: UIViewController, UICollectionViewDataSour
                     Perf.shared.log("OPEN row \(row.seq) \(wanted)")
                     openDetail(row)
                 }
+                // `YH_SELECT_TEXT=<n>`: the newest reply's Select Text, n characters selected from its 10th.
+                if let n = ProcessInfo.processInfo.environment["YH_SELECT_TEXT"].flatMap(Int.init), !openedRow,
+                   let layout = layouts.last(where: { model.row($0.seq)?.row.kind == "assistant" }) {
+                    openedRow = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+                        self?.openSelectText(layout, selected: NSRange(location: 10, length: n))
+                    }
+                }
                 // `YH_OPEN_PICTURE=1`: the newest row's pictures opened, as tapping one does.
                 if ProcessInfo.processInfo.environment["YH_OPEN_PICTURE"] == "1", !openedRow,
                    let row = model.rows.last(where: { m in
@@ -700,15 +708,39 @@ final class TranscriptViewController: UIViewController, UICollectionViewDataSour
         UISelectionFeedbackGenerator().selectionChanged()
     }
 
-    /// Your messages and Claude's replies copy with a long press.
+    /// Your messages and Claude's replies copy with a long press, or open to select some of them.
     func collectionView(_ collectionView: UICollectionView, contextMenuConfigurationForItemsAt indexPaths: [IndexPath], point: CGPoint) -> UIContextMenuConfiguration? {
         guard let path = indexPaths.first, let row = model.row(layouts[path.item].seq)?.row, !row.text.isEmpty,
               row.kind == "user" || row.kind == "assistant" else { return nil }
-        return UIContextMenuConfiguration(actionProvider: { _ in
-            UIMenu(children: [UIAction(title: "Copy", image: UIImage(systemName: "doc.on.doc")) { _ in
-                UIPasteboard.general.string = row.text
-            }])
+        let layout = layouts[path.item]
+        return UIContextMenuConfiguration(actionProvider: { [weak self] _ in
+            UIMenu(children: [
+                UIAction(title: "Copy", image: UIImage(systemName: "doc.on.doc")) { _ in
+                    UIPasteboard.general.string = row.text
+                },
+                UIAction(title: "Select Text", image: UIImage(systemName: "character.cursor.ibeam")) { _ in
+                    self?.openSelectText(layout)
+                },
+            ])
         })
+    }
+
+    /// A row's words as it draws them, its code blocks included, in a sheet to select from.
+    fileprivate func openSelectText(_ layout: RowLayout, selected: NSRange? = nil) {
+        let text = NSMutableAttributedString()
+        for part in layout.parts {
+            let piece: NSAttributedString
+            switch part {
+            case .text(let s, _, _): piece = s
+            case .code(_, let code, _, _): piece = code
+            default: continue
+            }
+            guard piece.length > 0 else { continue }
+            if text.length > 0 { text.append(NSAttributedString(string: "\n\n", attributes: piece.attributes(at: 0, effectiveRange: nil))) }
+            text.append(piece)
+        }
+        guard text.length > 0 else { return }
+        present(UIHostingController(rootView: SelectTextSheet(text: text, selected: selected)), animated: true)
     }
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {

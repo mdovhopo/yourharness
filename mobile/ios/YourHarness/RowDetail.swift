@@ -21,7 +21,7 @@ struct RowDetail: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     if row.kind == "thinking" {
-                        Text(row.text).font(.body).textSelection(.enabled)
+                        SelectableText(text: .plain(row.text, .preferredFont(forTextStyle: .body)))
                     } else {
                         ToolDetail(row: row, threadID: threadID, store: store)
                     }
@@ -69,7 +69,7 @@ private struct ToolDetail: View {
 
     var body: some View {
         if let target = ToolSummary.target(tool: tool, input: input) {
-            Text(target).font(.subheadline.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
+            SelectableText(text: .plain(target, .monospacedSystemFont(ofSize: UIFont.preferredFont(forTextStyle: .subheadline).pointSize, weight: .regular), .secondaryLabel))
         }
         switch tool {
         case "Edit":
@@ -121,13 +121,94 @@ private struct Box: View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title).font(.caption).foregroundStyle(tint ?? .secondary)
             ScrollView(.horizontal, showsIndicators: false) {
-                Text(text.isEmpty ? " " : text)
-                    .font(.footnote.monospaced())
-                    .textSelection(.enabled)
-                    .padding(12)
+                SelectableText(text: .plain(text.isEmpty ? " " : text, .monospacedSystemFont(ofSize: UIFont.preferredFont(forTextStyle: .footnote).pointSize, weight: .regular)),
+                               wraps: false, inset: UIEdgeInsets(top: 12, left: 12, bottom: 12, right: 12))
             }
             .background(.quaternary.opacity(0.5), in: .rect(cornerRadius: 10))
         }
+    }
+}
+
+/// Text you can select any part of, as UIKit's text view does: SwiftUI's `textSelection` on
+/// iOS only copies the whole of it.
+struct SelectableText: UIViewRepresentable {
+    let text: NSAttributedString
+    /// Scrolls itself (a sheet of its own), or is as tall as its text (inside a scroll view).
+    var scrolls = false
+    /// Lines run on to the right, for code in a box that scrolls sideways.
+    var wraps = true
+    var inset: UIEdgeInsets = .zero
+    /// Selected once it's shown (`YH_SELECT_TEXT`).
+    var selected: NSRange?
+
+    func makeUIView(context: Context) -> UITextView {
+        let v = UITextView()
+        v.isEditable = false
+        v.isSelectable = true
+        v.backgroundColor = .clear
+        v.textContainer.lineFragmentPadding = 0
+        v.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return v
+    }
+
+    func updateUIView(_ v: UITextView, context: Context) {
+        v.isScrollEnabled = scrolls
+        v.textContainerInset = inset
+        v.textContainer.widthTracksTextView = wraps
+        if !wraps { v.textContainer.size = CGSize(width: CGFloat.greatestFiniteMagnitude, height: .greatestFiniteMagnitude) }
+        if v.attributedText != text { v.attributedText = text }
+        if let selected, !context.coordinator.selected {
+            context.coordinator.selected = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                v.becomeFirstResponder()
+                v.selectedRange = NSIntersectionRange(selected, NSRange(location: 0, length: text.length))
+                Perf.shared.log("SELECT text \(text.length) chars, selected \"\((text.string as NSString).substring(with: v.selectedRange))\"")
+            }
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+    final class Coordinator { var selected = false }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: UITextView, context: Context) -> CGSize? {
+        if scrolls { return nil }
+        let across = inset.left + inset.right
+        let width = wraps ? (proposal.width ?? 320) - across : .greatestFiniteMagnitude
+        let r = text.boundingRect(with: CGSize(width: width, height: .greatestFiniteMagnitude), options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil)
+        return CGSize(width: wraps ? width + across : ceil(r.width) + across + 1, height: ceil(r.height) + inset.top + inset.bottom)
+    }
+}
+
+extension NSAttributedString {
+    static func plain(_ s: String, _ font: UIFont, _ color: UIColor = .label) -> NSAttributedString {
+        NSAttributedString(string: s, attributes: [.font: font, .foregroundColor: color])
+    }
+}
+
+/// A message opened from its long press to select some of it, as it reads in the transcript.
+struct SelectTextSheet: View {
+    let text: NSAttributedString
+    var selected: NSRange?
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            SelectableText(text: text, scrolls: true, inset: UIEdgeInsets(top: 8, left: 20, bottom: 24, right: 20), selected: selected)
+                .ignoresSafeArea(edges: .bottom)
+                .navigationTitle("Select Text")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button("Copy All", systemImage: "doc.on.doc") {
+                            UIPasteboard.general.string = text.string
+                            UINotificationFeedbackGenerator().notificationOccurred(.success)
+                        }
+                    }
+                }
+        }
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
     }
 }
 

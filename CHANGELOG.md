@@ -6,9 +6,14 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+### Added
+
+- Phone: **Select Text** in a message's long-press menu opens it in a sheet where you can select any part of it, not only copy the whole; a tool's details and thinking select the same way.
+
 ### Fixed
 
 - Phone: Settings no longer closes by itself while the phone hasn't reached your Mac yet.
+- Selecting text in a thread shows the selection as you drag, not only once you let go.
 
 ## [0.1.11] - 2026-11-10
 

@@ -523,7 +523,10 @@ Recorded here so the MVP stays small. Roughly in order; Tailscale last.
    once allowed (`say -o x.aiff "…"` makes one).
 6. **Richer transcript:** ✅ a tool row opens in a sheet (an edit as a line diff, a write's
    content, a command and its output, other inputs pretty-printed, the result's first 2000
-   characters), thinking opens in full, your messages and replies copy with a long press
+   characters), thinking opens in full, your messages and replies copy with a long press, or open
+   in Select Text to select any part (a `UITextView`: SwiftUI's `textSelection` on iOS copies only
+   the whole text, so the row sheets use `SelectableText` too; `YH_SELECT_TEXT=<n>` opens the
+   newest reply's, n characters selected, printing `SELECT text …`)
    (`YH_OPEN_ROW=<tool name|thinking>` opens the newest such row). Sub-agents, Mermaid, images and
    full output came with protocols 3 and 4, search across threads with 5. Still to come: Find
    in a thread, opening a search hit at its row.

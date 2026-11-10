@@ -154,8 +154,8 @@ sidebar's version card open), `YH_SETTLE_MERGED_AFTER=<s>` (when threads whose P
 clicked`; real notifications go through a `UNUserNotificationCenter` delegate, never from a test).
 Transcript: `YH_SCROLL_TO=<row>` (the open
 thread's transcript starts at that row; negative counts from the end), `YH_SELECT_PROBE=1` (drags across the
-last reply through the window's events, prints `SELECT PASS` and what ⌘C would copy, then clicks it away;
-`=keep` leaves it selected for a snapshot; `YH_SELECT_PROBE_DELAY`), `YH_OPEN_STEP_FILE=<Read|Edit|Write>`
+last reply through the window's events a move every 40 ms, prints `SELECT drawn while dragging: n PASS` (the rows painted the selection as it grew), `SELECT PASS` and what ⌘C would copy, then clicks it away;
+`=keep` leaves it selected for a snapshot, `=hold` keeps the button down, mid-drag; `YH_SELECT_PROBE_DELAY`), `YH_OPEN_STEP_FILE=<Read|Edit|Write>`
 (the newest such step's file opens in the Files tab as clicking its path does), `YH_OPEN_DIAGRAM=<file.mmd>`
 (its diagram in the Open Large window; `YH_DIAGRAM_EXPORT=<file.png>` saves it as Save as PNG does,
 `YH_DIAGRAM_SNAPSHOT=<file.png>` draws that window). These need a selected thread (`YH_SELECT`): any

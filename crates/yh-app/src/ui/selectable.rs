@@ -5,11 +5,11 @@
 //! is drawn again only when it goes on or off one (`InteractiveText` redraws its view at every
 //! character the pointer crosses).
 
-use gpui_kit::base::{TextSelectionHandle, TextSelectionRegistration, TextSelectionRun};
+use gpui_kit::base::{TextSelectionEvent, TextSelectionHandle, TextSelectionRegistration, TextSelectionRun};
 use gpui_kit::{
     App, BorderStyle, Bounds, Corners, CursorStyle, DispatchPhase, Edges, Element, ElementId, GlobalElementId, Hitbox, HitboxBehavior, Hsla,
     HighlightStyle, InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
-    SharedString, StyledText, TextRun, TextStyle, Window, transparent_black,
+    SharedString, StyledText, Subscription, TextRun, TextStyle, Window, transparent_black,
 };
 use std::cell::Cell;
 use std::ops::Range;
@@ -27,6 +27,16 @@ thread_local! {
 /// Where `text` was last laid out (`YH_SELECT_PROBE` runs).
 pub fn place_of(text: &str) -> Option<Bounds<Pixels>> {
     PLACES.with(|p| p.borrow().as_ref().and_then(|p| p.get(text).copied()))
+}
+
+thread_local! {
+    /// How many times a text was drawn with some of it selected (`YH_SELECT_PROBE` runs).
+    static DRAWN: Cell<usize> = const { Cell::new(0) };
+}
+
+/// How many times a text has been drawn with some of it selected (`YH_SELECT_PROBE` runs).
+pub fn drawn_selected() -> usize {
+    DRAWN.with(|d| d.get())
 }
 
 pub struct SelText {
@@ -50,6 +60,9 @@ pub struct State {
     down: Rc<Cell<Option<usize>>>,
     /// The link the pointer is over.
     hovered: Rc<Cell<Option<usize>>>,
+    /// Draws the view it's in again when its part of the selection changes: the window's
+    /// selection moves with the pointer, but a cached row replays its last frame until told.
+    _redraw: Rc<Subscription>,
 }
 
 impl SelText {
@@ -141,8 +154,20 @@ impl Element for SelText {
     }
 
     fn request_layout(&mut self, id: Option<&GlobalElementId>, inspector_id: Option<&InspectorElementId>, window: &mut Window, cx: &mut App) -> (LayoutId, State) {
+        let view = window.current_view();
         let state = window.with_element_state(id.expect("SelText has an id"), |kept: Option<State>, _| {
-            let state = kept.unwrap_or_else(|| State { handle: TextSelectionHandle::new(self.text.clone(), cx), down: Default::default(), hovered: Default::default() });
+            let state = kept.unwrap_or_else(|| {
+                let handle = TextSelectionHandle::new(self.text.clone(), cx);
+                let redraw = handle.subscribe(
+                    move |event, cx| {
+                        if matches!(event, TextSelectionEvent::SelectionChanged(_)) {
+                            cx.notify(view);
+                        }
+                    },
+                    cx,
+                );
+                State { handle, down: Default::default(), hovered: Default::default(), _redraw: Rc::new(redraw) }
+            });
             (state.clone(), state)
         });
         if let Some((highlights, mono)) = self.rich.take() {
@@ -174,6 +199,9 @@ impl Element for SelText {
         // The text first, then what's selected over it: an inline code's background would hide it.
         self.styled.paint(id, inspector_id, bounds, &mut (), &mut (), window, cx);
         let projection = state.handle.update_runs(&[TextSelectionRun::new(self.text.clone(), layout.clone(), bounds).with_document_order(self.order)], cx);
+        if projection.ranges().iter().any(|r| r.is_some()) && PLACES.with(|p| p.borrow().is_some()) {
+            DRAWN.with(|d| d.set(d.get() + 1));
+        }
         for range in projection.ranges().iter().flatten() {
             let (Some(start), Some(end)) = (layout.position_for_index(range.start), layout.position_for_index(range.end)) else { continue };
             for b in quads(start, end, layout.bounds(), layout.line_height()) {
