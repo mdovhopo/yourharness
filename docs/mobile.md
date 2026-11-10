@@ -547,8 +547,9 @@ Recorded here so the MVP stays small. Roughly in order; Tailscale last.
    and the phone got none of it (`UNWATCH`, then `rows=0`). Hooks: `YH_SERVER=<a>,<b>` (Macs, not
    saved), `YH_PHONE_MAC=<index>` (shown at launch), `YH_PHONE_SWITCH=<index>` (shown 6 s later),
    `YH_PHONE_ADD_MAC=<address>`; `WATCH`, `UNWATCH` and `MAC` lines.
-   **Show All Macs Together** (the Mac tab, with two or more; off by default, saved as
-   `threads.allMacs`): Threads lists every Mac's projects in one list (`Fleet.mixedSections`), a
+   **Show All Macs Together** (Settings, the gear at the top of Threads: `SettingsSheet`, which also
+   holds Wrap Lines for diffs and files, a way to the Mac tab and the version; `YH_PHONE_SETTINGS=1` opens
+   it at launch. Off by default, it takes two or more Macs; saved as `threads.allMacs`): Threads lists every Mac's projects in one list (`Fleet.mixedSections`), a
    project of the same name on several Macs as one section, each row naming its Mac; a row opens
    its thread on its own Mac, which becomes the one shown, the list keeping its place. New Thread
    and a shared project's PRs ask which Mac; the tab's badge goes, what waits is in the list.

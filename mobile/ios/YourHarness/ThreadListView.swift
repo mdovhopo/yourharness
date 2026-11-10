@@ -14,6 +14,8 @@ struct ThreadListView: View {
     /// New Thread's sheet, open on this project, and its Mac (the one shown, if nil).
     @State private var composingIn: Project?
     @State private var composingOn: Store?
+    /// The phone's settings (`YH_PHONE_SETTINGS=1` at launch).
+    @State private var settingsOpen = ProcessInfo.processInfo.environment["YH_PHONE_SETTINGS"] == "1"
     private static let env = ProcessInfo.processInfo.environment
 
     var body: some View {
@@ -33,6 +35,9 @@ struct ThreadListView: View {
             if fleet.stores.count > 1, !fleet.mixesMacs { MacMenu() }
         }
         .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Button("Settings", systemImage: "gearshape") { settingsOpen = true }
+            }
             // Reconnecting with the list on screen: a spinner up here, nothing in the list moves.
             if let mac = reconnecting {
                 ToolbarItem(placement: .topBarTrailing) { ConnectionIndicator().environment(mac) }
@@ -209,6 +214,7 @@ struct ThreadListView: View {
             }
         }
         .refreshable { if fleet.mixesMacs { fleet.stores.forEach { $0.reconnect() } } else { store.reconnect() } }
+        .sheet(isPresented: $settingsOpen) { SettingsSheet() }
         .sheet(item: $pullsFor) { PullsSheet(project: $0).environment(pullsOn ?? store) }
         .sheet(item: $composingIn) { project in
             let mac = composingOn ?? store
@@ -605,14 +611,6 @@ struct MacView: View {
                 Text(fleet.stores.count > 1 ? "Your Macs" : "Your Mac")
             } footer: {
                 if fleet.stores.count > 1 { Text("All stay connected; tap one to show it. Only the one shown streams a thread.") }
-            }
-            if fleet.stores.count > 1 {
-                Section {
-                    @Bindable var fleet = fleet
-                    Toggle("Show All Macs Together", isOn: $fleet.showsAllMacs)
-                } footer: {
-                    Text("Threads lists every Mac’s projects in one list, a project on several Macs once, each thread saying its Mac. Opening a thread shows its Mac.")
-                }
             }
             Section {
                 TextField("Pairing link or ws:// address", text: $address)
