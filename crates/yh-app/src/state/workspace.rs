@@ -410,6 +410,18 @@ impl Workspace {
         })
         .detach();
         workspace.ensure_home(cx);
+        // Claude Code's model list: read again when it's old, soon after launch, then hourly
+        // (not in perf runs).
+        if std::env::var("YH_PERF").is_err() {
+            cx.spawn(async move |this, cx| loop {
+                cx.background_executor().timer(Duration::from_secs(3)).await;
+                if this.update(cx, |ws, cx| ws.refresh_models(cx)).is_err() {
+                    break;
+                }
+                cx.background_executor().timer(Duration::from_secs(3600)).await;
+            })
+            .detach();
+        }
         workspace.recover_cut_off_turns(cx);
         workspace.load_saved_limits();
         workspace.check_subscription(cx);
@@ -2296,7 +2308,12 @@ impl Workspace {
             }
         }
         let parsed: Vec<ModelInfo> = models.as_array().map(|a| a.iter().filter_map(ModelInfo::from_json).collect()).unwrap_or_default();
-        if parsed.is_empty() || parsed == self.models {
+        if parsed.is_empty() {
+            return;
+        }
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+        self.library.set_setting("claudeModelsAt", &Value::from(now));
+        if parsed == self.models {
             return;
         }
         self.models = parsed;
@@ -2884,6 +2901,42 @@ pub enum CommandHandling {
 /// Reasoning effort levels, as `/effort` takes them.
 const EFFORTS: &[(&str, &str)] = &[("low", "Low"), ("medium", "Medium"), ("high", "High"), ("xhigh", "Extra High"), ("max", "Max")];
 
+/// Claude Code's catalog (its models and the folder's commands and skills), from a throwaway
+/// `claude` there that's only asked for it: no request is made, nothing's saved. Blocks, 20 s
+/// at most.
+fn read_catalog(folder: String) -> Option<(Value, Value)> {
+    let options = LaunchOptions {
+        cwd: folder,
+        session_id: None,
+        model: None,
+        mode: None,
+        effort: None,
+        add_dirs: vec![],
+        env: vec![],
+        append_system_prompt: None,
+        allowed_tools: vec![],
+        servers: vec![],
+        extra_args: vec!["--no-session-persistence".into()],
+    };
+    let (tx, rx) = flume::unbounded();
+    let mut process = yh_core::claude::ClaudeProcess::spawn(options, tx).ok()?;
+    process.initialize();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut found = None;
+    while let Ok(event) = rx.recv_deadline(deadline) {
+        match event {
+            Event::Catalog { models, commands } => {
+                found = Some((models, commands));
+                break;
+            }
+            Event::Exit { .. } => break,
+            _ => {}
+        }
+    }
+    process.terminate();
+    found
+}
+
 /// Commands the app answers itself, first in the "/" menu.
 pub fn app_commands() -> Vec<SlashCommand> {
     vec![
@@ -2891,6 +2944,9 @@ pub fn app_commands() -> Vec<SlashCommand> {
         SlashCommand::new("btw", "<question>", "Ask a side question in the sidebar. Claude sees this thread; nothing is added to it."),
     ]
 }
+
+/// How long Claude Code's saved model list is trusted before it's read again.
+const MODELS_MAX_AGE: Duration = Duration::from_secs(6 * 3600);
 
 /// Only mean something in the terminal UI.
 const TERMINAL_ONLY: &[&str] = &["color", "focus", "heapdump"];
@@ -2906,41 +2962,7 @@ impl Workspace {
         let Some(folder) = self.project(project_id).map(|p| p.path.clone()).filter(|p| std::path::Path::new(p).is_dir()) else { return };
         let project = project_id.to_string();
         cx.spawn(async move |this, cx| {
-            let catalog = cx
-                .background_executor()
-                .spawn(async move {
-                    let options = LaunchOptions {
-                        cwd: folder,
-                        session_id: None,
-                        model: None,
-                        mode: None,
-                        effort: None,
-                        add_dirs: vec![],
-                        env: vec![],
-                        append_system_prompt: None,
-                        allowed_tools: vec![],
-                        servers: vec![],
-                        extra_args: vec!["--no-session-persistence".into()],
-                    };
-                    let (tx, rx) = flume::unbounded();
-                    let mut process = yh_core::claude::ClaudeProcess::spawn(options, tx).ok()?;
-                    process.initialize();
-                    let deadline = Instant::now() + Duration::from_secs(20);
-                    let mut found = None;
-                    while let Ok(event) = rx.recv_deadline(deadline) {
-                        match event {
-                            Event::Catalog { models, commands } => {
-                                found = Some((models, commands));
-                                break;
-                            }
-                            Event::Exit { .. } => break,
-                            _ => {}
-                        }
-                    }
-                    process.terminate();
-                    found
-                })
-                .await;
+            let catalog = cx.background_executor().spawn(async move { read_catalog(folder) }).await;
             let Some((models, commands)) = catalog else { return };
             let _ = this.update(cx, |ws, cx| {
                 if std::env::var("YH_DATA_DIR").is_ok() {
@@ -2951,6 +2973,20 @@ impl Workspace {
             });
         })
         .detach();
+    }
+
+    /// Claude Code's model list, read again from a throwaway `claude` in the Home project
+    /// when the one saved is missing or older than `MODELS_MAX_AGE` (any thread's `claude`
+    /// also brings it, fresh, as it starts). Checked at launch and every hour.
+    pub fn refresh_models(&mut self, cx: &mut Context<Self>) {
+        let at = self.library.setting("claudeModelsAt").and_then(|v| v.as_u64()).unwrap_or(0);
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+        if !self.models.is_empty() && now.saturating_sub(at) < MODELS_MAX_AGE.as_millis() as u64 {
+            return;
+        }
+        let Some(project) = self.home_project().or_else(|| self.projects.first().map(|p| p.id.clone())) else { return };
+        self.command_loads.remove(&project);
+        self.load_commands(&project, cx);
     }
 
     /// What the "/" menu offers in a project: the app's own, then the CLI's.

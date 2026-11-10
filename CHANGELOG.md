@@ -9,6 +9,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 ### Fixed
 
 - Phone: tapping the microphone no longer closes the app once you've allowed it to listen.
+- The model menus list the models your Claude Code offers, read from it soon after launch and again every six hours, so new models show up without an app update.
 
 ## [0.1.10] - 2026-11-10
 
