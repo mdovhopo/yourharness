@@ -51,9 +51,7 @@ final class Dictation {
         request.addsPunctuation = true
         if recognizer.supportsOnDeviceRecognition { request.requiresOnDeviceRecognition = true }
         self.request = request
-        let input = engine.inputNode
-        nonisolated(unsafe) let feed = request
-        input.installTap(onBus: 0, bufferSize: 1024, format: input.outputFormat(forBus: 0)) { buffer, _ in feed.append(buffer) }
+        Self.feed(engine.inputNode, to: request)
         engine.prepare()
         do {
             try engine.start()
@@ -63,14 +61,30 @@ final class Dictation {
             return
         }
         state = .listening
-        task = recognizer.recognitionTask(with: request) { [weak self] result, error in
+        task = Self.recognize(request, with: recognizer) { [weak self] text, done in
+            guard let self else { return }
+            if let text { self.transcript = text }
+            if done { self.finish() }
+        }
+    }
+
+    // These two hand iOS closures it calls off the main thread: the microphone's on its audio
+    // thread, the recognizer's on a queue of its own. Made here, not on the main actor, so Swift's
+    // isolation check doesn't stop the app when they're called.
+    nonisolated private static func feed(_ input: AVAudioInputNode, to request: SFSpeechAudioBufferRecognitionRequest) {
+        nonisolated(unsafe) let request = request
+        input.installTap(onBus: 0, bufferSize: 1024, format: input.outputFormat(forBus: 0)) { buffer, _ in request.append(buffer) }
+    }
+
+    nonisolated private static func recognize(
+        _ request: SFSpeechAudioBufferRecognitionRequest,
+        with recognizer: SFSpeechRecognizer,
+        heard: @escaping @MainActor @Sendable (String?, Bool) -> Void
+    ) -> SFSpeechRecognitionTask {
+        recognizer.recognitionTask(with: request) { result, error in
             let text = result?.bestTranscription.formattedString
             let done = (result?.isFinal ?? false) || error != nil
-            Task { @MainActor in
-                guard let self else { return }
-                if let text { self.transcript = text }
-                if done { self.finish() }
-            }
+            Task { @MainActor in heard(text, done) }
         }
     }
 

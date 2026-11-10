@@ -6,6 +6,10 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+### Fixed
+
+- Phone: tapping the microphone no longer closes the app once you've allowed it to listen.
+
 ## [0.1.10] - 2026-11-10
 
 ### Added
