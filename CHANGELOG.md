@@ -6,6 +6,8 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-11-10
+
 ### Changed
 
 - Usage limits show which subscription they belong to (Claude Max; the account in its tooltip) and have thicker, easier to read bars, on the Mac and on the phone. The phone's Usage tab shows each connected Mac's subscription; signing in to another account drops the last one's figures instead of showing them as yours.
