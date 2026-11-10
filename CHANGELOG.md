@@ -8,7 +8,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ### Changed
 
-- Usage limits show which subscription they belong to (Claude Max and the account Claude Code is signed in with) and have thicker, easier to read bars, on the Mac and on the phone. The phone's Usage tab shows each connected Mac's subscription; signing in to another account drops the last one's figures instead of showing them as yours.
+- Usage limits show which subscription they belong to (Claude Max; the account in its tooltip) and have thicker, easier to read bars, on the Mac and on the phone. The phone's Usage tab shows each connected Mac's subscription; signing in to another account drops the last one's figures instead of showing them as yours.
 - Phone: one New Thread button at the top of the thread list instead of one per project; its sheet picks the project, starting on the last one you used.
 
 ## [0.1.7] - 2026-11-10

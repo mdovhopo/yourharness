@@ -918,11 +918,10 @@ impl Sidebar {
             .into_any_element()
     }
 
-    /// A subscription's name over its meters: `Claude Max  a@b.c`. One per Mac for now, so the
-    /// footer shows one; more would stack.
+    /// A subscription's name over its meters: `Claude Max`, the account only in its tooltip.
+    /// One per Mac for now, so the footer shows one; more would stack.
     fn subscription_row(sub: Option<&yh_core::limits::Subscription>, theme: &Theme) -> gpui_kit::AnyElement {
         let plan = sub.map(|s| s.plan_name()).unwrap_or_else(|| "Claude".into());
-        let who = sub.and_then(|s| s.who()).map(str::to_string);
         let tip = match sub {
             Some(s) => {
                 let mut t = format!("Claude Code is signed in to {plan}");
@@ -940,12 +939,8 @@ impl Sidebar {
         div()
             .id("subscription")
             .flex()
-            .items_baseline()
-            .gap(px(space::S - 2.))
-            .min_w_0()
             .text_size(px(text::CAPTION))
             .child(div().flex_none().font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(plan))
-            .when_some(who, |d, who| d.child(div().min_w_0().flex_1().overflow_hidden().text_ellipsis().whitespace_nowrap().text_color(theme.tertiary).child(who)))
             .tooltip(tooltip(tip))
             .into_any_element()
     }
