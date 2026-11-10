@@ -6,6 +6,8 @@
 
 #![allow(deprecated)]
 
+pub mod remote;
+
 use crate::webview::{WebEvent, WebView};
 use gpui_kit::App;
 use serde_json::{json, Value};
@@ -239,6 +241,8 @@ pub struct Browsers {
     logs_told: Option<Instant>,
     /// A menu is open over the page (the window draws it under the web view): pages step aside.
     covered: bool,
+    /// Threads whose browser a phone watches: looked at, so never closed for being idle.
+    pub remote: std::collections::HashSet<String>,
 }
 
 impl Browsers {
@@ -455,7 +459,7 @@ impl Browsers {
         for (thread, s) in self.sessions.iter_mut() {
             let idle = s.last_active.is_none_or(|t| t.elapsed() > limit);
             // On screen in its own window counts as looked at.
-            if s.tabs.is_empty() || !idle || shown.as_deref() == Some(thread.as_str()) || self.popped.contains_key(thread) {
+            if s.tabs.is_empty() || !idle || shown.as_deref() == Some(thread.as_str()) || self.popped.contains_key(thread) || self.remote.contains(thread) {
                 continue;
             }
             s.restorable = s.tabs.iter().filter_map(|t| t.web.url()).filter(|u| u != "about:blank").collect();
@@ -677,6 +681,22 @@ pub fn start(
         }
     })
     .detach();
+}
+
+/// Runs `f` on the main thread with the browsers, soon.
+fn run_on_main(f: impl FnOnce(&mut Browsers, &mut App) + Send + 'static) {
+    if let Some(jobs) = JOBS.get() {
+        let _ = jobs.send(Box::new(f));
+    }
+}
+
+/// Tells the panel (and a browser window) to draw again: something changed from elsewhere.
+fn notify_panel(cx: &mut App) {
+    let changed = Browsers::with(|b| b.changed.take());
+    if let Some(f) = changed {
+        f(cx);
+        Browsers::with(|b| b.changed = Some(f));
+    }
 }
 
 /// What a page reported, taken in; whether the panel should draw again.

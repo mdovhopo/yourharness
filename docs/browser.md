@@ -175,6 +175,12 @@ What it gives you:
 4. **Hidden rendering.** WebKit treats a page in an occluded or off-screen window as hidden: timers drop to 1 Hz, `requestAnimationFrame` stops, `visibilityState` is `hidden`. With `_setWindowOcclusionDetectionEnabled:` off, a page in any window that's ordered in runs at full speed and screenshots fine; out of a window it's suspended either way. So pages not on screen wait in an off-screen, never-key panel (it doesn't keep the app open), and moving a web view between windows keeps its state. Occlusion detection is off only while the agent is using the browser and for two minutes after. Both switches are private WebKit API, looked up first: without them, pages are throttled and the agent's clicks take focus, but nothing breaks.
 5. **Snapshots.** Measured on real pages: a login form 1 KB, TodoMVC 1 KB, Hacker News' front page 17.5 KB with all 30 stories, a long Wikipedia article and apple.com capped at 18 KB with text and off-screen parts dropped first. Layout tables are flattened, boxes around a single link collapse into it, and punctuation between links is dropped.
 
+## On the phone
+
+The phone shows a thread's browser and acts in it (protocol 7): its shown tab streamed as JPEGs
+while a phone watches, taps, scrolls, typing and addresses sent back. See docs/mobile.md, "The
+thread's browser" (`browser/remote.rs`, `yh_server::browser`).
+
 ## Still to build
 
 - Recordings and annotations.

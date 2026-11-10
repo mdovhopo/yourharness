@@ -285,6 +285,54 @@ as `diff.wrap`); the bottom bar steps to the previous and next file. Huge and bi
 gives no diff) say so, with the forge's Files page a tap away. Hooks: `YH_PHONE_PULL_FILE=<path or
 index>` (that diff opened), `YH_PHONE_DIFF_WRAP=0|1`, `YH_PHONE_PULL_SCROLL=files`.
 
+### The thread's browser
+
+The thread's browser on the Mac (the one Claude drives, docs/browser.md) is shown on the phone
+(protocol 7). It's the same browser, streamed as pictures, not a second one on the phone, so you
+see what the agent sees and do things in its tabs. The globe in a thread's toolbar pushes it over
+the thread, which stays watched beneath. A `localhost` link tapped in a reply (`LocalLink`) opens
+there too: `browser_input { open }` makes a tab in the thread's browser on the Mac, then the page is
+pushed.
+
+- **Wire:** `watch_browser { thread, width }` (one per client; `width`: the most pixels across it
+  can use, the screen's longer side up to 1600), `unwatch_browser`. The Mac answers `browser
+  { thread, state }` (tabs, the shown one, back and forward, the page's size in CSS pixels,
+  Take Control, whether a field has the focus, a waiting dialog) when it changes, and
+  `browser_frame { thread, tab, seq, width, height, data }`, a JPEG of the shown tab. The phone
+  acks each one it draws (`browser_ack { seq }`), and the next goes out only then, so a slow link
+  gets fewer pictures and never a queue of old ones (a lost ack is given up on after 5 s).
+  `browser_input { id, thread, input }` carries `tap`, `scroll`, `text`, `key`, `navigate`,
+  `back`, `forward`, `reload`, `open`, `select_tab`, `close_tab`, `size` and `dialog`, answered
+  with `done`.
+- **On the Mac** (`browser/remote.rs`, `yh_server::browser::Hub`): watched browsers are kept from
+  being closed for idleness and reopen their saved tabs, as the panel showing does. The shown tab is
+  captured with `takeSnapshot` and encoded off the main thread with ImageIO (quality 0.6). A capture
+  runs every 100 ms while the page changes or the phone acts, every 300 ms for 15 s after, then once
+  a second. A frame identical to the last is dropped, so a page that sits still costs nothing. Taps
+  are the agent's clicks (real events, not taking the keyboard from the composer), scrolls scroll
+  what's under the point in the page, text is `insertText:`, keys are the agent's `press`. Measured:
+  a 1512×982 page at 1200 px is about 28 KB a frame. Both servers share the hub.
+- **On the phone** (`Browser.swift`): the picture is fitted and pinned to the top. A tap clicks
+  (with a ripple where it went), one finger scrolls the page (with a little coasting after a
+  flick), two fingers pinch and pan the picture. A field focused by your tap brings up a keyboard
+  whose typing goes to the page (`KeyInputView`: Return, Delete, Tab, the arrows and Escape as
+  keys). The bar has back, forward, the address (an address or words to search for) and reload;
+  More lists the tabs, closes one, opens a new one, and sets the page size (This Phone lays the
+  page out at exactly the phone's page area, so it reads like a phone page; Tablet, Laptop, or
+  fitting the Mac's panel). Alerts, confirms and prompts show as alerts. In the background the
+  phone stops watching, and starts again when back.
+- **Hooks:** `YH_PHONE_OPEN_BROWSER=1` (pushed over the selected thread), `YH_PHONE_BROWSER=tap:x,y;
+  type:text;key:Enter;scroll:dy;size:phone;go:url;back;keyboard` (after the first picture, 1.5 s
+  apart), and `YH_OPEN_LINK=1` on a `localhost` link; `BROWSER watch`, `BROWSER frame n WxH` lines.
+  On the Mac, `BROWSER phone …` for each input. `yh <url> browser <thread> <seconds> [out.jpg]
+  ['{"kind":"tap","x":10,"y":20}'…]` watches without the phone, acking each frame and saving the last.
+- Checked 2026-11-10 in the Simulator against a test copy: taps counted on a test page, a field
+  tapped and typed into from the phone's keyboard, scrolling, This Phone, and a real Haiku turn
+  whose reply held `http://localhost:8765/`, tapped on the phone, opened on the Mac and shown.
+- **Not yet:** binary frames (base64 costs a quarter more), sending only the parts that changed, a
+  video codec while things move, the phone's own WKWebView through the Mac as a proxy (native
+  scrolling, but a second browser, not the agent's), and the element picker.
+
 ### On your own iPhone or iPad
 
 `scripts/mobile-device.sh [device]` builds the app signed with your Apple team, installs it on a

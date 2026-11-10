@@ -3,6 +3,7 @@
 
 import Foundation
 import Observation
+import UIKit
 
 @Observable @MainActor
 final class Store: Identifiable {
@@ -19,8 +20,8 @@ final class Store: Identifiable {
     var path: [String] = [] {
         didSet {
             if let open = path.last, let project = threads[open]?.projectId { usedProject(project) }
-            // Left from a PR's page over it (back to the list at once): the thread closes too.
-            if let t = transcript, !path.contains(t.threadID) { openPull = nil; close(t) }
+            // Left from a PR's page or the browser over it (back to the list at once): the thread closes too.
+            if let t = transcript, !path.contains(t.threadID) { openPull = nil; openBrowser = nil; close(t) }
         }
     }
     /// A thread opened from anywhere: over the thread list (the fleet turns to Threads).
@@ -295,6 +296,7 @@ final class Store: Identifiable {
         if away {
             if let t = transcript { connection.send(.unsubscribe(t.threadID)) }
             if let a = aside { connection.send(.unsubscribe(a.threadID)) }
+            if browserThread != nil { connection.send(.unwatchBrowser) }
         } else {
             resubscribe()
         }
@@ -307,6 +309,54 @@ final class Store: Identifiable {
             model.resubscribing()
             connection.send(.subscribeThread(model.threadID, limit: TranscriptModel.pageSize, known: serverProtocol >= 5 ? model.known : nil))
         }
+        if let thread = browserThread, offersBrowser { connection.send(.watchBrowser(thread: thread, width: Self.frameWidth)) }
+    }
+
+    // MARK: Protocol 7: the thread's browser
+
+    /// The Mac streams its threads' browsers.
+    var offersBrowser: Bool { serverProtocol >= 7 }
+    /// The thread whose browser is pushed over it.
+    var openBrowser: String?
+    /// The browser watched, its tabs and the newest picture of its shown tab.
+    private(set) var browserThread: String?
+    private(set) var browserState: BrowserState?
+    private(set) var browserFrame: UIImage?
+    /// Pictures drawn since the browser opened, for logs and tests.
+    @ObservationIgnored private(set) var browserFrames = 0
+
+    /// The most pixels across a picture can use: the screen's longer side, at most 1600.
+    static var frameWidth: Int {
+        let screen = UIApplication.shared.connectedScenes.compactMap { ($0 as? UIWindowScene)?.screen }.first
+        let native = screen?.nativeBounds.size ?? CGSize(width: 1206, height: 2622)
+        return Int(min(1600, max(native.width, native.height)))
+    }
+
+    func watchBrowser(_ thread: String) {
+        guard browserThread != thread else { return }
+        browserThread = thread
+        browserState = nil
+        browserFrame = nil
+        browserFrames = 0
+        Perf.shared.log("BROWSER watch \(thread.prefix(8))")
+        if state == .connected, offersBrowser, !away { connection.send(.watchBrowser(thread: thread, width: Self.frameWidth)) }
+    }
+
+    func unwatchBrowser() {
+        guard browserThread != nil else { return }
+        Perf.shared.log("BROWSER unwatch, \(browserFrames) frames")
+        browserThread = nil
+        browserState = nil
+        browserFrame = nil
+        if state == .connected { connection.send(.unwatchBrowser) }
+    }
+
+    /// A tap, scroll, typing or going somewhere in the watched browser; errors show as an action's do.
+    func browserInput(_ input: BrowserInput, in thread: String) {
+        guard canAct else { actionError = "Not connected to your Mac yet. Try again in a moment."; return }
+        let action = FromApp.browserInput(id: Self.newID(), thread: thread, input: input)
+        if let id = action.actionID { pending[id] = action }
+        connection.send(action)
     }
 
     func close(_ model: TranscriptModel) {
@@ -696,6 +746,16 @@ final class Store: Identifiable {
             case .pullPatch(let url, let path, let lines, let error):
                 patches[Self.patchKey(url, path)] = PatchPage(lines: lines, error: error)
                 Perf.shared.log("PULL patch \(path) \(lines?.count ?? 0) lines\(error.map { " ! " + $0 } ?? "")")
+            case .browser(let thread, let state):
+                if thread == browserThread, browserState != state { browserState = state }
+            case .browserFrame(let thread, _, let seq, let image):
+                // Drawn, so the next may come; only the newest of a batch is shown.
+                connection.send(.browserAck(seq: seq))
+                if thread == browserThread, let image {
+                    browserFrame = image
+                    browserFrames += 1
+                    if browserFrames == 1 || browserFrames % 20 == 0 { Perf.shared.log("BROWSER frame \(browserFrames) \(Int(image.size.width * image.scale))x\(Int(image.size.height * image.scale))") }
+                }
             case .paired(_, let token):
                 onPaired?(token)
                 Perf.shared.log("PAIRED \(displayName)")

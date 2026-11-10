@@ -20,6 +20,17 @@ struct TranscriptScreen: View {
     @State private var showsAside = ProcessInfo.processInfo.environment["YH_PHONE_ASIDE"] != nil
     private static let env = ProcessInfo.processInfo.environment
     private static var openedPull = false
+    private static var openedBrowser = false
+
+    /// A link to a page on the Mac itself (`localhost`): opened in the thread's browser there and
+    /// shown here, when the Mac streams it; else nil, and it opens as any link.
+    private var openLocal: ((URL) -> Void)? {
+        guard store.offersBrowser else { return nil }
+        return { [store, threadID] url in
+            store.browserInput(.open(url.absoluteString), in: threadID)
+            store.openBrowser = threadID
+        }
+    }
 
     var body: some View {
         // Something always there, so it appears (and opens the thread) wherever it's placed:
@@ -28,7 +39,7 @@ struct TranscriptScreen: View {
             Color.clear
             if let model {
                 // Under the composer, so rows scroll beneath its glass; its height is the list's inset.
-                TranscriptRepresentable(model: model, store: store, bottomInset: composerHeight, onPull: { store.openPull = $0 }).ignoresSafeArea(.container, edges: .bottom)
+                TranscriptRepresentable(model: model, store: store, bottomInset: composerHeight, onPull: { store.openPull = $0 }, onLocal: openLocal).ignoresSafeArea(.container, edges: .bottom)
             }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
@@ -171,6 +182,11 @@ struct TranscriptScreen: View {
         .navigationSubtitle([store.threads[threadID].flatMap(store.projectName), store.offersControl ? ThreadSettings.summary(store.threads[threadID], models: store.models) : nil].compactMap { $0 }.joined(separator: " · "))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            if store.offersBrowser {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Browser", systemImage: "globe") { store.openBrowser = threadID }
+                }
+            }
             if store.serverProtocol >= 5 {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Side Chat", systemImage: "bubble.left.and.text.bubble.right") { showsAside = true }
@@ -190,6 +206,18 @@ struct TranscriptScreen: View {
         .sheet(isPresented: $showsAside) { AsideSheet(threadID: threadID) }
         // A PR's link: its review page, pushed over the thread (which stays watched beneath).
         .navigationDestination(item: Bindable(store).openPull) { PullScreen(link: $0) }
+        // The thread's browser on the Mac, streamed: pushed over the thread (watched beneath).
+        .navigationDestination(isPresented: Binding(get: { store.openBrowser == threadID }, set: { if !$0, store.openBrowser == threadID { store.openBrowser = nil } })) {
+            BrowserScreen(threadID: threadID)
+        }
+        // `YH_PHONE_OPEN_BROWSER=1`: the thread's browser pushed, as its button does.
+        .task(id: store.offersBrowser) {
+            guard store.offersBrowser, Self.env["YH_PHONE_OPEN_BROWSER"] == "1", !Self.openedBrowser else { return }
+            Self.openedBrowser = true
+            try? await Task.sleep(for: .seconds(1))
+            Perf.shared.log("OPEN browser")
+            store.openBrowser = threadID
+        }
         // `YH_PHONE_ASIDE=<question>`: asked in the side chat, which is open.
         .task(id: store.canAct) {
             guard store.canAct, let question = Self.env["YH_PHONE_ASIDE"], !askedAside else { return }
@@ -208,7 +236,7 @@ struct TranscriptScreen: View {
         }
         .onAppear { model = store.open(threadID) }
         // A PR's page pushed over it keeps the thread open; leaving the thread closes it (`path`).
-        .onDisappear { if let model, store.openPull == nil { store.close(model) } }
+        .onDisappear { if let model, store.openPull == nil, store.openBrowser == nil { store.close(model) } }
     }
 }
 
@@ -219,17 +247,21 @@ struct TranscriptRepresentable: UIViewControllerRepresentable {
     var bottomInset: CGFloat = 0
     /// A PR's link tapped: its review page (protocol 6), instead of the browser.
     var onPull: ((PullLink) -> Void)?
+    /// A `localhost` link tapped: the Mac's browser (protocol 7), instead of the phone's.
+    var onLocal: ((URL) -> Void)?
 
     func makeUIViewController(context: Context) -> TranscriptViewController {
         let controller = TranscriptViewController(model: model)
         controller.store = store
         controller.onPull = onPull
+        controller.onLocal = onLocal
         return controller
     }
 
     func updateUIViewController(_ controller: TranscriptViewController, context: Context) {
         controller.setBottomInset(bottomInset)
         controller.onPull = onPull
+        controller.onLocal = onLocal
     }
 }
 
@@ -247,11 +279,15 @@ final class TranscriptViewController: UIViewController, UICollectionViewDataSour
     private var probe: ScrollProbe?
     private var openedRow = false
     var onPull: ((PullLink) -> Void)?
+    var onLocal: ((URL) -> Void)?
 
-    /// A link tapped: a PR's opens its review page when the Mac can read it, the rest the browser.
+    /// A link tapped: a PR's opens its review page when the Mac can read it, a page on the Mac
+    /// (`localhost`) its browser, the rest the phone's browser.
     func openLink(_ url: URL) {
         Perf.shared.log("OPEN link \(url.absoluteString)")
-        if let onPull, store?.offersPullReview == true, let pull = PullLink(url) {
+        if let onLocal, LocalLink.isLocal(url) {
+            onLocal(url)
+        } else if let onPull, store?.offersPullReview == true, let pull = PullLink(url) {
             onPull(pull)
         } else {
             UIApplication.shared.open(url)

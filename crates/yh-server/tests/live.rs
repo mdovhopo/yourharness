@@ -122,7 +122,7 @@ fn streams_what_claude_writes_and_takes_actions() {
             a.reply.send(answer).unwrap();
         }
     });
-    let url = start_with(&dir, None, Some(yh_server::Links { engine: engine.clone(), actions }));
+    let url = start_with(&dir, None, Some(yh_server::Links { engine: engine.clone(), actions, browser: None }));
     let mut c = Client::connect(&url).unwrap();
     c.expect("hello", |m| matches!(m, ToApp::Hello { .. }));
     c.send(FromApp::SubscribeApp);

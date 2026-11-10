@@ -17,7 +17,10 @@ use serde::{Deserialize, Serialize};
 /// 6: one PR in full (`pull`: its description, checks, comments and reviews) and merging it
 /// (`merge_pull`), for reviewing a PR on the phone; its files changed (`pull_files`) and each
 /// one's diff (`pull_patch`).
-pub const PROTOCOL: u32 = 6;
+/// 7: a thread's browser on the phone: what it shows streamed as pictures (`watch_browser`,
+/// `browser`, `browser_frame`, `browser_ack`), and taps, scrolls, typing and going places sent
+/// back (`browser_input`).
+pub const PROTOCOL: u32 = 7;
 
 /// A slash command the composer offers: `/name hint`, and what it does.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -478,6 +481,85 @@ pub struct Live {
     pub context_window: Option<u64>,
 }
 
+/// One tab of a thread's browser (protocol 7).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct BrowserTab {
+    pub id: u32,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub loading: bool,
+}
+
+/// A thread's browser around its pictures (protocol 7): its tabs, where the shown one is, and
+/// the page's size in CSS pixels, which is where a tap on a picture lands.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct BrowserState {
+    #[serde(default)]
+    pub tabs: Vec<BrowserTab>,
+    /// The tab shown (and streamed); None with no tabs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected: Option<u32>,
+    #[serde(default)]
+    pub can_back: bool,
+    #[serde(default)]
+    pub can_forward: bool,
+    #[serde(default)]
+    pub width: f64,
+    #[serde(default)]
+    pub height: f64,
+    /// Taken over on the Mac (Take Control): the agent's actions wait; yours still work.
+    #[serde(default)]
+    pub user_control: bool,
+    /// The focused element takes typing (a field, a text area, something editable).
+    #[serde(default)]
+    pub editing: bool,
+    /// An alert, confirm or prompt the page waits on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dialog: Option<BrowserDialog>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct BrowserDialog {
+    /// `alert`, `confirm` or `prompt`.
+    pub kind: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_text: Option<String>,
+}
+
+/// What the phone does to a thread's browser (protocol 7), as you'd do it in the Mac's panel.
+/// Points are in the page's CSS pixels (`BrowserState`'s `width` × `height`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BrowserInput {
+    Tap { x: f64, y: f64 },
+    /// Scrolls what's under the point (the page when nothing there scrolls) by `dx`, `dy`.
+    Scroll { x: f64, y: f64, dx: f64, dy: f64 },
+    /// Text typed into the focused element.
+    Text { text: String },
+    /// A key with modifiers, named as the agent's `press` names them (`Enter`, `Backspace`,
+    /// `Shift+Tab`).
+    Key { key: String },
+    /// The shown tab goes to an address (a new tab when there's none).
+    Navigate { url: String },
+    Back,
+    Forward,
+    Reload,
+    /// A new tab at an address, shown: a `localhost` link tapped on the phone.
+    Open { url: String },
+    SelectTab { tab: u32 },
+    CloseTab { tab: u32 },
+    /// The page laid out at a size: `phone`, `tablet`, `laptop`, `desktop`, or `fit` (the Mac's
+    /// panel), as the agent's `resize` presets; `width` × `height` CSS pixels instead when given
+    /// (the phone's own screen, so the page fits it exactly).
+    Size { preset: String, #[serde(default, skip_serializing_if = "Option::is_none")] width: Option<f64>, #[serde(default, skip_serializing_if = "Option::is_none")] height: Option<f64> },
+    /// The waiting alert, confirm or prompt answered.
+    Dialog { accept: bool, #[serde(default, skip_serializing_if = "Option::is_none")] text: Option<String> },
+}
+
 pub const INPUT_LIMIT: usize = 4000;
 pub const RESULT_LIMIT: usize = 2000;
 
@@ -537,6 +619,12 @@ pub enum ToApp {
     /// Protocol 6: one file's unified diff (its hunks, as `git diff` prints them after the
     /// header), asked for with `pull_patch`.
     PullPatch { url: String, path: String, #[serde(default, skip_serializing_if = "Option::is_none")] patch: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] error: Option<String> },
+    /// Protocol 7: the watched browser's tabs and page: after `watch_browser`, and when they change.
+    Browser { thread: String, state: BrowserState },
+    /// Protocol 7: what the watched browser's shown tab looks like now, a JPEG (base64)
+    /// `width` × `height` pixels. The next comes once this one's `browser_ack` is in, and only
+    /// when the page changed.
+    BrowserFrame { thread: String, tab: u32, seq: u64, width: u32, height: u32, data: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -627,6 +715,15 @@ pub enum FromApp {
     PullFiles { url: String },
     /// Protocol 6: one of them's diff: answered with `pull_patch`.
     PullPatch { url: String, path: String },
+    /// Protocol 7: streams a thread's browser to this client (one at a time): `browser`, then
+    /// `browser_frame`s. `width`: the most pixels across it can use.
+    WatchBrowser { thread: String, #[serde(default)] width: Option<u32> },
+    UnwatchBrowser,
+    /// Protocol 7: the frame `seq` is drawn: the next may come.
+    BrowserAck { seq: u64 },
+    /// Protocol 7: a tap, scroll, typing or going somewhere in a thread's browser; `done` when
+    /// it carries an `id`.
+    BrowserInput { #[serde(default)] id: Option<String>, thread: String, input: BrowserInput },
     #[serde(other)]
     Unknown,
 }
@@ -636,7 +733,7 @@ impl FromApp {
     pub fn action_id(&self) -> Option<&str> {
         use FromApp::*;
         match self {
-            Send { id, .. } | Stop { id, .. } | Respond { id, .. } | Withdraw { id, .. } | SendNow { id, .. } | AskAside { id, .. } | Answer { id, .. } | SkipQuestion { id, .. } | ApprovePlan { id, .. } | KeepPlanning { id, .. } | AnswerQuestion { id, .. } | NewThread { id, .. } | SetModel { id, .. } | SetEffort { id, .. } | SetMode { id, .. } | Rename { id, .. } | Pin { id, .. } | Settle { id, .. } | Delete { id, .. } | MergePull { id, .. } => id.as_deref(),
+            Send { id, .. } | Stop { id, .. } | Respond { id, .. } | Withdraw { id, .. } | SendNow { id, .. } | AskAside { id, .. } | Answer { id, .. } | SkipQuestion { id, .. } | ApprovePlan { id, .. } | KeepPlanning { id, .. } | AnswerQuestion { id, .. } | NewThread { id, .. } | SetModel { id, .. } | SetEffort { id, .. } | SetMode { id, .. } | Rename { id, .. } | Pin { id, .. } | Settle { id, .. } | Delete { id, .. } | MergePull { id, .. } | BrowserInput { id, .. } => id.as_deref(),
             _ => None,
         }
     }
@@ -683,6 +780,21 @@ mod tests {
         assert_eq!(m, FromApp::NewThread { id: None, project: "p".into(), text: Some("hi".into()), model: None, effort: None, mode: None });
         let m: FromApp = serde_json::from_str(r#"{"type":"new_thread","project":"p","text":"hi","model":"haiku","effort":"low","mode":"plan"}"#).unwrap();
         assert!(matches!(m, FromApp::NewThread { model: Some(ref m), effort: Some(ref e), mode: Some(ref p), .. } if m == "haiku" && e == "low" && p == "plan"));
+    }
+
+    #[test]
+    fn browser_messages() {
+        let m: FromApp = serde_json::from_str(r#"{"type":"browser_input","id":"b1","thread":"t","input":{"kind":"tap","x":10,"y":20.5}}"#).unwrap();
+        assert_eq!(m, FromApp::BrowserInput { id: Some("b1".into()), thread: "t".into(), input: BrowserInput::Tap { x: 10., y: 20.5 } });
+        assert_eq!(m.action_id(), Some("b1"));
+        let m: FromApp = serde_json::from_str(r#"{"type":"browser_input","thread":"t","input":{"kind":"back"}}"#).unwrap();
+        assert_eq!(m, FromApp::BrowserInput { id: None, thread: "t".into(), input: BrowserInput::Back });
+        let m: FromApp = serde_json::from_str(r#"{"type":"watch_browser","thread":"t","width":1179}"#).unwrap();
+        assert_eq!(m, FromApp::WatchBrowser { thread: "t".into(), width: Some(1179) });
+        let m: FromApp = serde_json::from_str(r#"{"type":"browser_ack","seq":3}"#).unwrap();
+        assert_eq!(m, FromApp::BrowserAck { seq: 3 });
+        let s = serde_json::to_string(&ToApp::Browser { thread: "t".into(), state: BrowserState { selected: Some(1), ..Default::default() } }).unwrap();
+        assert_eq!(s, r#"{"type":"browser","thread":"t","state":{"tabs":[],"selected":1,"can_back":false,"can_forward":false,"width":0.0,"height":0.0,"user_control":false,"editing":false}}"#);
     }
 
     #[test]

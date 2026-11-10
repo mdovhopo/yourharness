@@ -115,6 +115,8 @@ pub struct Workspace {
     pub phones: crate::state::phones::Phones,
     /// Where both servers send what clients ask.
     remote_actions: flume::Sender<yh_server::Asked>,
+    /// Threads' browsers streamed to phones that watch them (both servers).
+    browser_hub: Arc<yh_server::browser::Hub>,
     pub library: Arc<Library>,
     pub data_dir: PathBuf,
     pub projects: Vec<ProjectMeta>,
@@ -259,16 +261,31 @@ impl Workspace {
         .detach();
         // The server for the app's clients (the phone): off unless asked for.
         // What clients ask (the phone), from either server: taken here as clicks would be.
-        let (remote_actions, remote) = flume::unbounded();
+        let (remote_actions, remote) = flume::unbounded::<yh_server::Asked>();
         cx.spawn(async move |this, cx| {
             while let Ok(action) = remote.recv_async().await {
+                // The browser's own: done outside the workspace, which opening a page may update.
+                if let yh_server::Action::Browser { thread, input } = &action.action {
+                    let Some(ws) = this.upgrade() else { break };
+                    let result = cx.update(|cx| {
+                        let project = ws.read(cx).thread(thread).map(|t| t.read(cx).meta.project_id.clone()).ok_or("No such thread.")?;
+                        crate::browser::remote::input(thread, Some(&project), input.clone(), cx)
+                    });
+                    let _ = action.reply.send(result.map(|_| None));
+                    continue;
+                }
                 if this.update(cx, |ws, cx| ws.remote_action(action, cx)).is_err() {
                     break;
                 }
             }
         })
         .detach();
-        start_server(&engine, remote_actions.clone(), mac_id(&library));
+        let browser_hub = yh_server::browser::Hub::new();
+        {
+            let ws = cx.weak_entity();
+            crate::browser::remote::start(browser_hub.clone(), move |thread, cx| ws.upgrade().and_then(|w| w.read(cx).thread(thread)).map(|t| t.read(cx).meta.project_id.clone()), cx);
+        }
+        start_server(&engine, remote_actions.clone(), mac_id(&library), browser_hub.clone());
         // Phones on this network (Settings → Phone): the paired list saved as it changes.
         let (devices_changed, devices) = flume::unbounded::<Vec<yh_server::pairing::Device>>();
         // Its port: `YH_PHONES_PORT` (tests, not kept), the one it got last time, 7878 for a Mac
@@ -304,6 +321,7 @@ impl Workspace {
             pids: HashMap::new(),
             phones,
             remote_actions,
+            browser_hub,
             models,
             limits: None,
             limits_updated_at: None,
@@ -3398,7 +3416,7 @@ impl Workspace {
 /// `YH_SERVER=<port>` (`1`: 7878): the server for the app's clients (`yh_server`, the phone app),
 /// on loopback, its token `YH_SERVER_TOKEN` or made up. Prints `SERVER <url>` and writes it to
 /// `server.json` in the data folder (only you can read it). Its actions come back here.
-fn start_server(engine: &yh_engine::EngineHandle, actions: flume::Sender<yh_server::Asked>, mac_id: String) -> Option<()> {
+fn start_server(engine: &yh_engine::EngineHandle, actions: flume::Sender<yh_server::Asked>, mac_id: String, browser: Arc<yh_server::browser::Hub>) -> Option<()> {
     let asked = std::env::var("YH_SERVER").ok()?;
     let port: u16 = if asked == "1" { 7878 } else { asked.parse().ok()? };
     let token = std::env::var("YH_SERVER_TOKEN").ok().filter(|t| !t.is_empty()).unwrap_or_else(|| yh_core::library::new_uuid().replace('-', "").to_lowercase());
@@ -3417,7 +3435,7 @@ fn start_server(engine: &yh_engine::EngineHandle, actions: flume::Sender<yh_serv
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600));
     }
-    let links = yh_server::Links { engine: engine.clone(), actions };
+    let links = yh_server::Links { engine: engine.clone(), actions, browser: Some(browser) };
     let name = mac_name();
     std::thread::Builder::new()
         .name("server".into())
@@ -3527,7 +3545,7 @@ impl Workspace {
     }
 
     fn start_phones_now(&mut self) {
-        let links = yh_server::Links { engine: self.engine.clone(), actions: self.remote_actions.clone() };
+        let links = yh_server::Links { engine: self.engine.clone(), actions: self.remote_actions.clone(), browser: Some(self.browser_hub.clone()) };
         self.phones.start(self.data_dir.clone(), mac_name(), mac_id(&self.library), links);
         // The port it got is kept, so paired phones find it there next time.
         if self.phones.running() && std::env::var("YH_PHONES_PORT").is_err() {
@@ -3593,7 +3611,7 @@ impl Workspace {
             return Ok(Some(id));
         }
         let thread_id = match &action {
-            A::AskAside { thread, .. } | A::Send { thread, .. } | A::Stop { thread } | A::Respond { thread, .. } | A::Withdraw { thread, .. } | A::SendNow { thread, .. } | A::Answer { thread, .. } | A::SkipQuestion { thread, .. } | A::ApprovePlan { thread, .. } | A::KeepPlanning { thread, .. } | A::AnswerQuestion { thread, .. } | A::SetModel { thread, .. } | A::SetEffort { thread, .. } | A::SetMode { thread, .. } | A::Rename { thread, .. } | A::Pin { thread, .. } | A::Settle { thread, .. } | A::Delete { thread } => thread.clone(),
+            A::Browser { thread, .. } | A::AskAside { thread, .. } | A::Send { thread, .. } | A::Stop { thread } | A::Respond { thread, .. } | A::Withdraw { thread, .. } | A::SendNow { thread, .. } | A::Answer { thread, .. } | A::SkipQuestion { thread, .. } | A::ApprovePlan { thread, .. } | A::KeepPlanning { thread, .. } | A::AnswerQuestion { thread, .. } | A::SetModel { thread, .. } | A::SetEffort { thread, .. } | A::SetMode { thread, .. } | A::Rename { thread, .. } | A::Pin { thread, .. } | A::Settle { thread, .. } | A::Delete { thread } => thread.clone(),
             A::NewThread { .. } => unreachable!("taken above"),
         };
         let Some(thread) = self.thread(&thread_id) else { return Err("No such thread.".into()) };
@@ -3663,7 +3681,7 @@ impl Workspace {
             A::Pin { on, .. } => self.set_pinned(&thread_id, on, cx),
             A::Settle { on, .. } => self.set_settled(&thread_id, on, cx),
             A::Delete { .. } => self.delete(&thread_id, cx),
-            A::NewThread { .. } => unreachable!("taken above"),
+            A::NewThread { .. } | A::Browser { .. } => unreachable!("taken above"),
         }
         Ok(None)
     }

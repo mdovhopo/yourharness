@@ -299,6 +299,96 @@ struct PullComment: Decodable, Sendable, Hashable {
     let url: String?
 }
 
+/// A thread's browser around its pictures (protocol 7): its tabs, and the page's size in CSS
+/// pixels, which is where a tap on a picture lands.
+struct BrowserState: Decodable, Sendable, Equatable {
+    var tabs: [BrowserTab] = []
+    var selected: Int?
+    var canBack = false
+    var canForward = false
+    var width: Double = 0
+    var height: Double = 0
+    /// Taken over on the Mac: the agent's actions wait; yours still work.
+    var userControl = false
+    /// The focused element takes typing.
+    var editing = false
+    var dialog: BrowserDialog?
+
+    var shown: BrowserTab? { tabs.first { $0.id == selected } ?? tabs.last }
+
+    init() {}
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        tabs = try c.decodeIfPresent([BrowserTab].self, forKey: .tabs) ?? []
+        selected = try c.decodeIfPresent(Int.self, forKey: .selected)
+        canBack = try c.decodeIfPresent(Bool.self, forKey: .canBack) ?? false
+        canForward = try c.decodeIfPresent(Bool.self, forKey: .canForward) ?? false
+        width = try c.decodeIfPresent(Double.self, forKey: .width) ?? 0
+        height = try c.decodeIfPresent(Double.self, forKey: .height) ?? 0
+        userControl = try c.decodeIfPresent(Bool.self, forKey: .userControl) ?? false
+        editing = try c.decodeIfPresent(Bool.self, forKey: .editing) ?? false
+        dialog = try c.decodeIfPresent(BrowserDialog.self, forKey: .dialog)
+    }
+    private enum CodingKeys: String, CodingKey { case tabs, selected, canBack, canForward, width, height, userControl, editing, dialog }
+}
+
+struct BrowserTab: Decodable, Sendable, Equatable, Identifiable {
+    let id: Int
+    var title: String = ""
+    var url: String = ""
+    var loading = false
+
+    private enum CodingKeys: String, CodingKey { case id, title, url, loading }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(Int.self, forKey: .id)
+        title = try c.decodeIfPresent(String.self, forKey: .title) ?? ""
+        url = try c.decodeIfPresent(String.self, forKey: .url) ?? ""
+        loading = try c.decodeIfPresent(Bool.self, forKey: .loading) ?? false
+    }
+}
+
+struct BrowserDialog: Decodable, Sendable, Equatable {
+    /// `alert`, `confirm` or `prompt`.
+    let kind: String
+    let message: String
+    let defaultText: String?
+}
+
+/// What the phone does in a thread's browser (protocol 7); points in the page's CSS pixels.
+enum BrowserInput: Sendable, Equatable {
+    case tap(x: Double, y: Double)
+    case scroll(x: Double, y: Double, dx: Double, dy: Double)
+    case text(String)
+    case key(String)
+    case navigate(String)
+    case back, forward, reload
+    case open(String)
+    case selectTab(Int)
+    case closeTab(Int)
+    case size(String, width: Double? = nil, height: Double? = nil)
+    case dialog(accept: Bool, text: String?)
+
+    var object: [String: Any] {
+        switch self {
+        case .tap(let x, let y): ["kind": "tap", "x": x, "y": y]
+        case .scroll(let x, let y, let dx, let dy): ["kind": "scroll", "x": x, "y": y, "dx": dx, "dy": dy]
+        case .text(let text): ["kind": "text", "text": text]
+        case .key(let key): ["kind": "key", "key": key]
+        case .navigate(let url): ["kind": "navigate", "url": url]
+        case .back: ["kind": "back"]
+        case .forward: ["kind": "forward"]
+        case .reload: ["kind": "reload"]
+        case .open(let url): ["kind": "open", "url": url]
+        case .selectTab(let tab): ["kind": "select_tab", "tab": tab]
+        case .closeTab(let tab): ["kind": "close_tab", "tab": tab]
+        case .size(let preset, let width, let height):
+            if let width, let height { ["kind": "size", "preset": preset, "width": width, "height": height] } else { ["kind": "size", "preset": preset] }
+        case .dialog(let accept, let text): text.map { ["kind": "dialog", "accept": accept, "text": $0] } ?? ["kind": "dialog", "accept": accept]
+        }
+    }
+}
+
 /// A slash command the composer offers (protocol 5).
 struct SlashCommand: Codable, Sendable, Hashable, Identifiable {
     let name: String
@@ -429,6 +519,9 @@ enum ToApp: Sendable {
     case pullFiles(url: String, files: [PullFile], error: String?)
     /// A file's diff, already split into lines.
     case pullPatch(url: String, path: String, lines: [DiffLine]?, error: String?)
+    /// Protocol 7: the watched browser's tabs; a picture of its shown tab (decoded here).
+    case browser(thread: String, state: BrowserState)
+    case browserFrame(thread: String, tab: Int, seq: Int, image: UIImage?)
     case unknown
 
     /// Changes what the phone keeps of this Mac between launches (`Store`'s cache).
@@ -445,6 +538,8 @@ enum ToApp: Sendable {
     private struct Pull: Decodable { let url: String; let pull: PullDetail?; let error: String? }
     private struct PullFiles: Decodable { let url: String; let files: [PullFile]?; let error: String? }
     private struct PullPatch: Decodable { let url: String; let path: String; let patch: String?; let error: String? }
+    private struct Browser: Decodable { let thread: String; let state: BrowserState }
+    private struct Frame: Decodable { let thread: String; let tab: Int; let seq: Int; let data: String }
     private struct Hello: Decodable { let `protocol`: Int?; let server: String; let data: String; let mac: String?; let hosts: [String]? }
     private struct LiveMessage: Decodable { let thread: String; let live: Live }
     private struct Done: Decodable { let id: String; let error: String?; let thread: String? }
@@ -540,6 +635,14 @@ enum ToApp: Sendable {
             case "pull_patch":
                 let m = try d.decode(PullPatch.self, from: data)
                 return .pullPatch(url: m.url, path: m.path, lines: m.patch.map(DiffLine.parse), error: m.error)
+            case "browser":
+                let m = try d.decode(Browser.self, from: data)
+                return .browser(thread: m.thread, state: m.state)
+            case "browser_frame":
+                let m = try d.decode(Frame.self, from: data)
+                // Decoded here, off the main thread, ready to draw.
+                let image = Data(base64Encoded: m.data).flatMap(UIImage.init(data:)).map { $0.preparingForDisplay() ?? $0 }
+                return .browserFrame(thread: m.thread, tab: m.tab, seq: m.seq, image: image)
             case "paired":
                 let m = try d.decode(Paired.self, from: data)
                 return .paired(device: m.device, token: m.token)
@@ -558,6 +661,10 @@ struct OutgoingImage: Sendable, Hashable {
 }
 
 enum FromApp {
+    case watchBrowser(thread: String, width: Int)
+    case unwatchBrowser
+    case browserAck(seq: Int)
+    case browserInput(id: String, thread: String, input: BrowserInput)
     case subscribeApp
     case subscribeThread(String, limit: Int, known: Int? = nil)
     case unsubscribeThread
@@ -604,7 +711,7 @@ enum FromApp {
         case .send(let id, _, _, _, _), .stop(let id, _), .respond(let id, _, _, _), .withdraw(let id, _, _), .sendNow(let id, _, _),
              .answer(let id, _, _, _), .skipQuestion(let id, _, _), .approvePlan(let id, _, _, _, _), .keepPlanning(let id, _, _, _),
              .answerQuestion(let id, _, _, _), .newThread(let id, _, _, _, _, _), .setModel(let id, _, _), .setEffort(let id, _, _),
-             .setMode(let id, _, _), .rename(let id, _, _), .pin(let id, _, _), .settle(let id, _, _), .delete(let id, _), .askAside(let id, _, _), .mergePull(let id, _, _, _): id
+             .setMode(let id, _, _), .rename(let id, _, _), .pin(let id, _, _), .settle(let id, _, _), .delete(let id, _), .askAside(let id, _, _), .mergePull(let id, _, _, _), .browserInput(let id, _, _): id
         default: nil
         }
     }
@@ -632,6 +739,7 @@ enum FromApp {
         case .delete: "delete"
         case .askAside(_, _, let text): "ask aside \(text.prefix(40))"
         case .mergePull(_, let url, let method, let auto): "merge \(url) \(method)\(auto ? " auto" : "")"
+        case .browserInput(_, _, let input): "browser \(input)"
         default: "\(self)"
         }
     }
@@ -678,6 +786,10 @@ enum FromApp {
         case .pullFiles(let url): ["type": "pull_files", "url": url]
         case .pullPatch(let url, let path): ["type": "pull_patch", "url": url, "path": path]
         case .mergePull(let id, let url, let method, let auto): ["type": "merge_pull", "id": id, "url": url, "method": method, "auto": auto]
+        case .watchBrowser(let t, let width): ["type": "watch_browser", "thread": t, "width": width]
+        case .unwatchBrowser: ["type": "unwatch_browser"]
+        case .browserAck(let seq): ["type": "browser_ack", "seq": seq]
+        case .browserInput(let id, let t, let input): ["type": "browser_input", "id": id, "thread": t, "input": input.object]
         }
         let data = try! JSONSerialization.data(withJSONObject: object)
         return String(decoding: data, as: UTF8.self)

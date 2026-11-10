@@ -1222,6 +1222,44 @@ impl WebView {
         }
     }
 
+    /// The visible page as a JPEG at most `max_px` pixels across, for a phone watching it: taken
+    /// by WebKit, encoded off the main thread. Replies with the bytes and their size, or None.
+    pub fn capture_jpeg(&self, max_px: f64, quality: f64, reply: flume::Sender<Option<(Vec<u8>, u32, u32)>>) {
+        unsafe {
+            let (w, h) = self.size();
+            if w < 1. || h < 1. {
+                let _ = reply.send(None);
+                return;
+            }
+            let window: id = msg_send![self.view, window];
+            let scale: f64 = if window == nil { 2. } else { msg_send![window, backingScaleFactor] };
+            let config: id = msg_send![class!(WKSnapshotConfiguration), new];
+            // Points, drawn at the screen's scale: this many points makes `max_px` pixels.
+            let number: id = msg_send![class!(NSNumber), numberWithDouble: w.min(max_px / scale.max(1.))];
+            let _: () = msg_send![config, setSnapshotWidth: number];
+            let _: () = msg_send![config, setAfterScreenUpdates: NO];
+            let block = ConcreteBlock::new(move |image: id, error: id| {
+                if error != nil || image == nil {
+                    let _ = reply.send(None);
+                    return;
+                }
+                let cg: *const std::ffi::c_void = msg_send![image, CGImageForProposedRect: std::ptr::null_mut::<NSRect>() context: nil hints: nil];
+                if cg.is_null() {
+                    let _ = reply.send(None);
+                    return;
+                }
+                let cg = jpeg::retain(cg) as usize;
+                let reply = reply.clone();
+                std::thread::spawn(move || {
+                    let _ = reply.send(jpeg::encode(cg as *const std::ffi::c_void, quality));
+                });
+            });
+            let block = block.copy();
+            let _: () = msg_send![self.view, takeSnapshotWithConfiguration: config completionHandler: &*block];
+            let _: () = msg_send![config, release];
+        }
+    }
+
     pub fn go_back(&self) {
         unsafe {
             let _: id = msg_send![self.view, goBack];
@@ -1482,6 +1520,73 @@ impl Drop for WebView {
                 let _: () = msg_send![overlay, release];
             }
             let _: () = msg_send![self.page, release];
+        }
+    }
+}
+
+/// JPEGs from `CGImage`s with ImageIO, which is safe off the main thread.
+mod jpeg {
+    use core_foundation::base::{CFRelease, CFTypeRef, TCFType};
+    use core_foundation::dictionary::CFDictionary;
+    use core_foundation::number::CFNumber;
+    use core_foundation::string::{CFString, CFStringRef};
+    use std::ffi::c_void;
+
+    #[link(name = "ImageIO", kind = "framework")]
+    unsafe extern "C" {
+        static kCGImageDestinationLossyCompressionQuality: CFStringRef;
+        static kCGImageDestinationBackgroundColor: CFStringRef;
+        fn CGImageDestinationCreateWithData(data: *mut c_void, kind: CFStringRef, count: usize, options: *const c_void) -> *mut c_void;
+        fn CGImageDestinationAddImage(dest: *mut c_void, image: *const c_void, properties: *const c_void);
+        fn CGImageDestinationFinalize(dest: *mut c_void) -> bool;
+    }
+
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGImageRetain(image: *const c_void) -> *const c_void;
+        fn CGImageRelease(image: *mut c_void);
+        fn CGImageGetWidth(image: *const c_void) -> usize;
+        fn CGImageGetHeight(image: *const c_void) -> usize;
+        fn CGColorCreateSRGB(r: f64, g: f64, b: f64, a: f64) -> *const c_void;
+        fn CGColorRelease(color: *const c_void);
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFDataCreateMutable(allocator: *const c_void, capacity: isize) -> *mut c_void;
+        fn CFDataGetLength(data: *const c_void) -> isize;
+        fn CFDataGetBytePtr(data: *const c_void) -> *const u8;
+    }
+
+    pub fn retain(image: *const c_void) -> *const c_void {
+        unsafe { CGImageRetain(image) }
+    }
+
+    /// The image as a JPEG (transparency on white), and its size; the image is released.
+    pub fn encode(image: *const c_void, quality: f64) -> Option<(Vec<u8>, u32, u32)> {
+        unsafe {
+            let (w, h) = (CGImageGetWidth(image) as u32, CGImageGetHeight(image) as u32);
+            let data = CFDataCreateMutable(std::ptr::null(), 0);
+            let kind = CFString::from_static_string("public.jpeg");
+            let dest = CGImageDestinationCreateWithData(data, kind.as_concrete_TypeRef(), 1, std::ptr::null());
+            let mut out = None;
+            if !dest.is_null() {
+                let white = CGColorCreateSRGB(1., 1., 1., 1.);
+                let props = CFDictionary::from_CFType_pairs(&[
+                    (CFString::wrap_under_get_rule(kCGImageDestinationLossyCompressionQuality).as_CFType(), CFNumber::from(quality).as_CFType()),
+                    (CFString::wrap_under_get_rule(kCGImageDestinationBackgroundColor).as_CFType(), core_foundation::base::CFType::wrap_under_get_rule(white as CFTypeRef)),
+                ]);
+                CGImageDestinationAddImage(dest, image, props.as_concrete_TypeRef() as *const c_void);
+                if CGImageDestinationFinalize(dest) {
+                    let len = CFDataGetLength(data) as usize;
+                    out = Some((std::slice::from_raw_parts(CFDataGetBytePtr(data), len).to_vec(), w, h));
+                }
+                CGColorRelease(white);
+                CFRelease(dest as CFTypeRef);
+            }
+            CFRelease(data as CFTypeRef);
+            CGImageRelease(image as *mut c_void);
+            out
         }
     }
 }

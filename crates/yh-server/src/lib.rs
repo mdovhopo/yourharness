@@ -13,6 +13,7 @@
 //! database, and a bounded outbox: a client that falls behind is dropped, and reconnects for a
 //! fresh snapshot.
 
+pub mod browser;
 pub mod diagram;
 pub mod source;
 pub use yh_proto as wire;
@@ -99,6 +100,8 @@ pub enum Action {
     Pin { thread: String, on: bool },
     Settle { thread: String, on: bool },
     Delete { thread: String },
+    /// A tap, scroll, typing or going somewhere in the thread's browser (protocol 7).
+    Browser { thread: String, input: wire::BrowserInput },
 }
 
 /// An action and where the app says how it went: the thread it made, or why it couldn't.
@@ -126,6 +129,8 @@ pub const MODES: &[&str] = &["auto", "ask", "acceptEdits", "plan", "bypass"];
 pub struct Links {
     pub engine: yh_engine::EngineHandle,
     pub actions: flume::Sender<Asked>,
+    /// Where threads' browsers are streamed from (protocol 7); None: they aren't.
+    pub browser: Option<Arc<browser::Hub>>,
 }
 
 /// A row as the wire carries it, its text and tool output trimmed.
@@ -266,6 +271,8 @@ struct Client {
     /// The threads it watches: one, and a side chat beside it (`side:<thread>`); each with
     /// whether its snapshot was sent, so changes go to it from now on.
     watching: Vec<(String, bool)>,
+    /// The thread's browser it watches (protocol 7), and how far its pictures got.
+    browser: Option<browser::Watch>,
 }
 
 impl Client {
@@ -313,6 +320,10 @@ struct Shared {
     data_dir: PathBuf,
     /// The `rev` streamed rows take: above anything saved, so a client keeps the newest copy.
     rev: std::sync::atomic::AtomicI64,
+    /// Threads' browsers, streamed to clients that watch one; and where this server's client
+    /// keys start among the hub's.
+    hub: Option<Arc<browser::Hub>>,
+    hub_base: u64,
 }
 
 impl Shared {
@@ -346,13 +357,15 @@ impl Shared {
 
 /// Serves `directory` on `listener` until the process ends.
 pub fn serve(listener: TcpListener, directory: PathBuf, options: Options, links: Option<Links>) -> Result<(), String> {
-    let (engine, actions) = match links {
-        Some(l) => (Some(l.engine), Some(l.actions)),
-        None => (None, None),
+    let (engine, actions, hub) = match links {
+        Some(l) => (Some(l.engine), Some(l.actions), l.browser),
+        None => (None, None, None),
     };
     // Subscribed before anyone connects, so no change is missed.
     let told = engine.as_ref().map(|e| e.subscribe());
-    let shared = Arc::new(Shared { actions, engine, data_dir: directory.clone(), ..Default::default() });
+    let browsers = hub.as_ref().map(|h| h.subscribe());
+    let hub_base = hub.as_ref().map_or(0, |h| h.base());
+    let shared = Arc::new(Shared { actions, engine, data_dir: directory.clone(), hub, hub_base, ..Default::default() });
     let source = Source::open(&directory)?;
     shared.rev.store(source.max_rev().unwrap_or(0), std::sync::atomic::Ordering::SeqCst);
     // The list is read before anyone connects, so the first `threads` is never empty.
@@ -374,6 +387,16 @@ pub fn serve(listener: TcpListener, directory: PathBuf, options: Options, links:
                 let shared = shared.clone();
                 let options = options.clone();
                 move || follow(told, &shared, &source, &options)
+            })
+            .map_err(|e| e.to_string())?;
+    }
+    if let Some(changed) = browsers {
+        std::thread::Builder::new()
+            .name("browsers".into())
+            .spawn({
+                let shared = shared.clone();
+                let options = options.clone();
+                move || stream_browsers(changed, &shared, &options)
             })
             .map_err(|e| e.to_string())?;
     }
@@ -402,7 +425,51 @@ pub fn serve(listener: TcpListener, directory: PathBuf, options: Options, links:
                 eprintln!("client {id}: {e}");
             }
             shared.clients.lock().unwrap().remove(&id);
+            if let Some(hub) = &shared.hub {
+                hub.unwatch(shared.hub_base + id);
+            }
         });
+    }
+}
+
+/// Threads' browsers to the clients watching them, as the app hands in new pictures and tabs;
+/// once a second regardless, for a frame whose ack never came.
+fn stream_browsers(changed: flume::Receiver<String>, shared: &Shared, options: &Options) {
+    loop {
+        if options.stopped() {
+            return;
+        }
+        let threads: std::collections::HashSet<String> = match changed.recv_timeout(Duration::from_secs(1)) {
+            Ok(first) => std::iter::once(first).chain(changed.try_iter()).collect(),
+            Err(flume::RecvTimeoutError::Timeout) => Default::default(),
+            Err(flume::RecvTimeoutError::Disconnected) => return,
+        };
+        let ids: Vec<u64> = shared.clients.lock().unwrap().iter().filter(|(_, c)| c.browser.as_ref().is_some_and(|w| threads.is_empty() || threads.contains(&w.thread))).map(|(id, _)| *id).collect();
+        for id in ids {
+            push_browser(shared, id);
+        }
+    }
+}
+
+/// What a client watching a browser hasn't had yet: its tabs when they changed, and the newest
+/// picture once the last is drawn.
+fn push_browser(shared: &Shared, id: u64) {
+    let Some(hub) = &shared.hub else { return };
+    let mut clients = shared.clients.lock().unwrap();
+    let Some(c) = clients.get_mut(&id) else { return };
+    let Some(w) = c.browser.as_mut() else { return };
+    let mut out: Vec<String> = vec![];
+    if let Some(state) = hub.state(&w.thread).filter(|s| w.state.as_ref() != Some(s)) {
+        out.push(serde_json::to_string(&ToApp::Browser { thread: w.thread.clone(), state: state.clone() }).expect("messages serialize"));
+        w.state = Some(state);
+    }
+    if let Some(frame) = hub.frame(&w.thread).filter(|f| w.due(f)) {
+        out.push((*frame.text).clone());
+        (w.sent, w.sent_at) = (frame.seq, Some(Instant::now()));
+    }
+    if !out.into_iter().all(|text| c.outbox.try_send(text).is_ok()) {
+        eprintln!("client {id}: fell behind, dropped");
+        clients.remove(&id);
     }
 }
 
@@ -713,7 +780,7 @@ fn connection(id: u64, stream: TcpStream, shared: &Arc<Shared>, options: &Option
     eprintln!("client {id}: connected from {peer}");
     let source = Source::open(directory)?;
     let (outbox, inbox) = flume::bounded(OUTBOX);
-    shared.clients.lock().unwrap().insert(id, Client { outbox, app: false, watching: vec![] });
+    shared.clients.lock().unwrap().insert(id, Client { outbox, app: false, watching: vec![], browser: None });
     let hello = ToApp::Hello { protocol: wire::PROTOCOL, server: options.name.clone(), data: name_of(directory), mac: options.mac_id.clone(), hosts: options.hosts.as_ref().map(|h| h()).unwrap_or_default() };
     write(&mut ws, &hello)?;
     if let Some((device, token)) = paired {
@@ -959,6 +1026,32 @@ fn answer(id: u64, message: FromApp, shared: &Arc<Shared>, source: &Source) -> V
             set(&|c| c.watching.clear());
             vec![]
         }
+        FromApp::WatchBrowser { thread, width } => {
+            let Some(hub) = &shared.hub else { return vec![ToApp::Error { message: "This Mac doesn't show its browser to phones.".into() }] };
+            let key = shared.hub_base + id;
+            hub.unwatch(key);
+            hub.watch(key, &thread, width.unwrap_or(1200).clamp(320, 2400));
+            hub.poke(&thread);
+            set(&|c| c.browser = Some(browser::Watch { thread: thread.clone(), sent: 0, acked: 0, sent_at: None, state: None }));
+            push_browser(shared, id);
+            vec![]
+        }
+        FromApp::UnwatchBrowser => {
+            if let Some(hub) = &shared.hub {
+                hub.unwatch(shared.hub_base + id);
+            }
+            set(&|c| c.browser = None);
+            vec![]
+        }
+        FromApp::BrowserAck { seq } => {
+            set(&|c| {
+                if let Some(w) = c.browser.as_mut() {
+                    w.acked = w.acked.max(seq);
+                }
+            });
+            push_browser(shared, id);
+            vec![]
+        }
         FromApp::Page { thread, before_seq, limit } => {
             let limit = limit.unwrap_or(DEFAULT_ROWS).clamp(1, MAX_ROWS);
             match source.rows(&thread, (before_seq - limit).max(0), before_seq) {
@@ -967,6 +1060,9 @@ fn answer(id: u64, message: FromApp, shared: &Arc<Shared>, source: &Source) -> V
             }
         }
         action => {
+            if let (FromApp::BrowserInput { thread, .. }, Some(hub)) = (&action, &shared.hub) {
+                hub.poke(thread);
+            }
             let id = action.action_id().map(str::to_string);
             let (error, made) = match to_action(action) {
                 Err(e) => (Some(e), None),
@@ -1026,7 +1122,8 @@ fn to_action(m: FromApp) -> Result<Action, String> {
         F::Pin { thread, on, .. } => Action::Pin { thread, on },
         F::Settle { thread, on, .. } => Action::Settle { thread, on },
         F::Delete { thread, .. } => Action::Delete { thread },
-        F::SubscribeApp | F::SubscribeThread { .. } | F::UnsubscribeThread { .. } | F::Page { .. } | F::ToolResult { .. } | F::Subagent { .. } | F::Media { .. } | F::Diagram { .. } | F::Search { .. } | F::Files { .. } | F::Pulls { .. } | F::Pull { .. } | F::MergePull { .. } | F::PullFiles { .. } | F::PullPatch { .. } | F::Unknown => return Err("Not an action.".into()),
+        F::BrowserInput { thread, input, .. } => Action::Browser { thread, input },
+        F::WatchBrowser { .. } | F::UnwatchBrowser | F::BrowserAck { .. } | F::SubscribeApp | F::SubscribeThread { .. } | F::UnsubscribeThread { .. } | F::Page { .. } | F::ToolResult { .. } | F::Subagent { .. } | F::Media { .. } | F::Diagram { .. } | F::Search { .. } | F::Files { .. } | F::Pulls { .. } | F::Pull { .. } | F::MergePull { .. } | F::PullFiles { .. } | F::PullPatch { .. } | F::Unknown => return Err("Not an action.".into()),
     })
 }
 

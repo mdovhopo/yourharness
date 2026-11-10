@@ -8,6 +8,8 @@
 //! cargo run -p yh-server --example yh -- <url> withdraw|send-now <thread> <message id>
 //! cargo run -p yh-server --example yh -- <url> raw '<any message as JSON>'   (YH_WAIT=<s>: listens longer)
 //! cargo run -p yh-server --example yh -- <url> listen <seconds> [thread]   (what a client gets: counts and bytes by type)
+//! cargo run -p yh-server --example yh -- <url> browser <thread> <seconds> [out.jpg] ['<input as JSON>'…]
+//!     (watches its browser, drawing each frame at once; inputs sent a second apart; the last frame saved)
 //! ```
 //!
 //! Prints what it gets, one line a message: `THREAD`, `SNAPSHOT`, `ROWS`, `LIVE`, `DONE`. `watch`
@@ -94,6 +96,18 @@ fn print(m: &ToApp, began: &mut bool) -> bool {
         ToApp::Pull { url, pull: Some(p), .. } => println!("PULL {url} {} [{}] checks {} comments {} merge {:?} {}", p.title, p.state, p.checks.len(), p.comments.len(), p.merge_status, p.merge_methods.join("/")),
         ToApp::Pull { url, error, .. } => println!("PULL {url} ! {}", error.as_deref().unwrap_or("")),
         ToApp::PullFiles { url, files, error } => println!("FILES {url} {}{}", files.iter().map(|f| format!(" | {} {} +{} -{}{}", f.status, f.path, f.additions, f.deletions, if f.has_patch { "" } else { " (no diff)" })).collect::<String>(), error.as_ref().map(|e| format!(" ! {e}")).unwrap_or_default()),
+        ToApp::Browser { state, .. } => println!(
+            "BROWSER tabs=[{}] selected={:?} {}x{} back={} control={} editing={}{}",
+            state.tabs.iter().map(|t| format!("{} {:?} {}{}", t.id, t.title, t.url, if t.loading { " loading" } else { "" })).collect::<Vec<_>>().join(" | "),
+            state.selected,
+            state.width,
+            state.height,
+            state.can_back,
+            state.user_control,
+            state.editing,
+            state.dialog.as_ref().map(|d| format!(" dialog={} {:?}", d.kind, d.message)).unwrap_or_default()
+        ),
+        ToApp::BrowserFrame { tab, seq, width, height, data, .. } => println!("FRAME #{seq} tab {tab} {width}x{height} {} bytes", data.len() * 3 / 4),
         ToApp::PullPatch { path, patch, error, .. } => println!("PATCH {path} {} lines{}", patch.as_ref().map(|p| p.lines().count()).unwrap_or(0), error.as_ref().map(|e| format!(" ! {e}")).unwrap_or_default()),
     }
     false
@@ -227,8 +241,66 @@ fn main() {
                 println!("LISTEN {k}: {n} messages, {bytes} bytes");
             }
         }
+        // A thread's browser as the phone sees it: each frame acked as soon as it comes (the
+        // last saved to `out.jpg`), and inputs (`{"kind":"tap","x":10,"y":20}`) sent a second apart.
+        "browser" => {
+            let (Some(thread), Some(seconds)) = (rest.first().cloned(), rest.get(1).and_then(|s| s.parse::<u64>().ok())) else { usage() };
+            let out = rest.get(2).filter(|p| !p.starts_with('{')).cloned();
+            let mut inputs: std::collections::VecDeque<String> = rest.iter().skip(2).filter(|a| a.starts_with('{')).cloned().collect();
+            send(&mut ws, FromApp::WatchBrowser { thread: thread.clone(), width: Some(1200) });
+            let started = Instant::now();
+            let mut next_input = started + Duration::from_secs(2);
+            let mut frames = 0;
+            while started.elapsed() < Duration::from_secs(seconds) {
+                if Instant::now() >= next_input {
+                    if let Some(json) = inputs.pop_front() {
+                        let input: yh_server::wire::BrowserInput = serde_json::from_str(&json).unwrap_or_else(|e| {
+                            eprintln!("bad input {json}: {e}");
+                            std::process::exit(2)
+                        });
+                        println!("INPUT {json}");
+                        send(&mut ws, FromApp::BrowserInput { id: id(), thread: thread.clone(), input });
+                    }
+                    next_input = Instant::now() + Duration::from_secs(1);
+                }
+                let Some(m) = next(&mut ws) else { continue };
+                print(&m, &mut began);
+                if let ToApp::BrowserFrame { seq, data, .. } = &m {
+                    frames += 1;
+                    send(&mut ws, FromApp::BrowserAck { seq: *seq });
+                    if let Some(path) = &out {
+                        let bytes = base64_decode(data);
+                        std::fs::write(path, bytes).unwrap();
+                    }
+                }
+            }
+            println!("BROWSER {frames} frames in {seconds} s");
+        }
         _ => usage(),
     }
+}
+
+fn base64_decode(text: &str) -> Vec<u8> {
+    let value = |c: u8| -> u32 {
+        (match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            _ => 63,
+        }) as u32
+    };
+    let digits: Vec<u8> = text.bytes().filter(|b| *b != b'=').collect();
+    let mut out = vec![];
+    for chunk in digits.chunks(4) {
+        let mut n = 0u32;
+        for (i, c) in chunk.iter().enumerate() {
+            n |= value(*c) << (18 - 6 * i);
+        }
+        let b = [(n >> 16) as u8, (n >> 8) as u8, n as u8];
+        out.extend_from_slice(&b[..chunk.len().saturating_sub(1)]);
+    }
+    out
 }
 
 fn wait_done(ws: &mut Socket) {
