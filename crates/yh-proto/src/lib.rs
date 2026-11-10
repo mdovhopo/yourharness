@@ -444,8 +444,21 @@ pub enum FromApp {
     KeepPlanning { #[serde(default)] id: Option<String>, thread: String, request_id: String, #[serde(default)] feedback: Option<String> },
     /// An MCP server's question: accepted (a form with its defaults) or declined.
     AnswerQuestion { #[serde(default)] id: Option<String>, thread: String, request_id: String, accept: bool },
-    /// A new thread in a project (`text`: its first message); `done` names it.
-    NewThread { #[serde(default)] id: Option<String>, project: String, #[serde(default)] text: Option<String> },
+    /// A new thread in a project (`text`: its first message), with the model, effort and
+    /// permission mode (its project's) chosen for it; `done` names it.
+    NewThread {
+        #[serde(default)]
+        id: Option<String>,
+        project: String,
+        #[serde(default)]
+        text: Option<String>,
+        #[serde(default)]
+        model: Option<String>,
+        #[serde(default)]
+        effort: Option<String>,
+        #[serde(default)]
+        mode: Option<String>,
+    },
     SetModel { #[serde(default)] id: Option<String>, thread: String, #[serde(default)] model: Option<String> },
     SetEffort { #[serde(default)] id: Option<String>, thread: String, #[serde(default)] effort: Option<String> },
     /// The permission mode of the thread's project.
@@ -527,7 +540,9 @@ mod tests {
         let m: FromApp = serde_json::from_str(r#"{"type":"answer","id":"a2","thread":"t","request_id":"r","answers":{"Which?":"Rust"}}"#).unwrap();
         assert_eq!(m.action_id(), Some("a2"));
         let m: FromApp = serde_json::from_str(r#"{"type":"new_thread","project":"p","text":"hi"}"#).unwrap();
-        assert_eq!(m, FromApp::NewThread { id: None, project: "p".into(), text: Some("hi".into()) });
+        assert_eq!(m, FromApp::NewThread { id: None, project: "p".into(), text: Some("hi".into()), model: None, effort: None, mode: None });
+        let m: FromApp = serde_json::from_str(r#"{"type":"new_thread","project":"p","text":"hi","model":"haiku","effort":"low","mode":"plan"}"#).unwrap();
+        assert!(matches!(m, FromApp::NewThread { model: Some(ref m), effort: Some(ref e), mode: Some(ref p), .. } if m == "haiku" && e == "low" && p == "plan"));
     }
 
     /// A first-version client's thread (no `running`, `waiting`) still reads.

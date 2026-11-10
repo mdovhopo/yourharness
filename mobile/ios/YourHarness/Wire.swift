@@ -433,7 +433,7 @@ enum FromApp {
     case approvePlan(id: String, thread: String, requestID: String, mode: String, feedback: String?)
     case keepPlanning(id: String, thread: String, requestID: String, feedback: String?)
     case answerQuestion(id: String, thread: String, requestID: String, accept: Bool)
-    case newThread(id: String, project: String, text: String?)
+    case newThread(id: String, project: String, text: String?, model: String? = nil, effort: String? = nil, mode: String? = nil)
     case setModel(id: String, thread: String, model: String?)
     case setEffort(id: String, thread: String, effort: String?)
     case setMode(id: String, thread: String, mode: String)
@@ -456,7 +456,7 @@ enum FromApp {
         switch self {
         case .send(let id, _, _, _, _), .stop(let id, _), .respond(let id, _, _, _), .withdraw(let id, _, _), .sendNow(let id, _, _),
              .answer(let id, _, _, _), .skipQuestion(let id, _, _), .approvePlan(let id, _, _, _, _), .keepPlanning(let id, _, _, _),
-             .answerQuestion(let id, _, _, _), .newThread(let id, _, _), .setModel(let id, _, _), .setEffort(let id, _, _),
+             .answerQuestion(let id, _, _, _), .newThread(let id, _, _, _, _, _), .setModel(let id, _, _), .setEffort(let id, _, _),
              .setMode(let id, _, _), .rename(let id, _, _), .pin(let id, _, _), .settle(let id, _, _), .delete(let id, _), .askAside(let id, _, _): id
         default: nil
         }
@@ -508,7 +508,9 @@ enum FromApp {
             ["type": "approve_plan", "id": id, "thread": t, "request_id": request, "mode": mode, "feedback": feedback ?? ""]
         case .keepPlanning(let id, let t, let request, let feedback): ["type": "keep_planning", "id": id, "thread": t, "request_id": request, "feedback": feedback ?? ""]
         case .answerQuestion(let id, let t, let request, let accept): ["type": "answer_question", "id": id, "thread": t, "request_id": request, "accept": accept]
-        case .newThread(let id, let project, let text): ["type": "new_thread", "id": id, "project": project, "text": text ?? ""]
+        case .newThread(let id, let project, let text, let model, let effort, let mode):
+            ["type": "new_thread", "id": id, "project": project, "text": text ?? "", "model": model.map { $0 as Any } ?? NSNull(),
+             "effort": effort.map { $0 as Any } ?? NSNull(), "mode": mode.map { $0 as Any } ?? NSNull()]
         case .setModel(let id, let t, let model): ["type": "set_model", "id": id, "thread": t, "model": model.map { $0 as Any } ?? NSNull()]
         case .setEffort(let id, let t, let effort): ["type": "set_effort", "id": id, "thread": t, "effort": effort.map { $0 as Any } ?? NSNull()]
         case .setMode(let id, let t, let mode): ["type": "set_mode", "id": id, "thread": t, "mode": mode]

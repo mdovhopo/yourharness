@@ -3543,11 +3543,25 @@ impl Workspace {
 
     fn take_remote(&mut self, action: yh_server::Action, cx: &mut Context<Self>) -> Result<Option<String>, String> {
         use yh_server::Action as A;
-        if let A::NewThread { project, text } = &action {
+        if let A::NewThread { project, text, model, effort, mode } = &action {
             if self.project(project).is_none() {
                 return Err("No such project.".into());
             }
             let id = self.make_thread(project, cx);
+            // What the phone's New Thread chose, set before its first message starts `claude`.
+            let model = model.clone().filter(|m| !m.is_empty() && m != "default");
+            let effort = effort.clone().filter(|e| !e.is_empty());
+            if model.is_some() || effort.is_some() {
+                self.update_meta(&id, cx, |m, r| {
+                    m.model = model.clone();
+                    m.effort = effort.clone();
+                    r.insert("model".into(), model.map(Value::from).unwrap_or(Value::Null));
+                    r.insert("effort".into(), effort.map(Value::from).unwrap_or(Value::Null));
+                });
+            }
+            if let Some(mode) = mode.as_deref().filter(|m| crate::ui::composer::MODES.iter().any(|(v, _)| v == m) && self.project(project).is_some_and(|p| p.mode != *m)) {
+                self.set_mode(project, mode, cx);
+            }
             if let (Some(text), Some(thread)) = (text.as_deref().filter(|t| !t.trim().is_empty()), self.thread(&id)) {
                 self.send(&thread, text, false, cx);
             }

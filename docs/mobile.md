@@ -310,7 +310,7 @@ Recorded here so the MVP stays small. Roughly in order; Tailscale last.
    to it given); a 13,892-character result fetched whole; pin, rename, settle, bring back,
    delete; a new thread from a project's header; the Mac app restarted mid-session, the phone
    back on its own. Test hooks: `YH_PHONE_NEW_THREAD=<text>` (with `YH_PHONE_PROJECT=<name>`; `YH_PHONE_COMPOSE=<draft>` only
-   opens the sheet),
+   opens the sheet; `YH_PHONE_NEW_MODEL`, `YH_PHONE_NEW_EFFORT` are chosen in either),
    `YH_PHONE_CHOOSE=<label>[,<label>]` (answers Claude's question; `YH_PHONE_ANSWER=deny` skips
    it), `YH_PHONE_PLAN=approve:<mode>|keep:<feedback>`, `YH_PHONE_MCP=accept|decline`,
    `YH_PHONE_SET=model=…,effort=…,mode=…`, `YH_PHONE_QUEUE=<text>` with

@@ -345,13 +345,16 @@ final class Store: Identifiable {
 
     /// A new thread in `project` with its first message; opened once the Mac has made it. Until
     /// it's sent nothing exists on the Mac: what's typed waits here (`newThreadDrafts`).
-    func newThread(in project: String, text: String? = nil) {
+    /// `model`, `effort` and `mode` (the project's) as its sheet chose them; nil leaves the Mac's.
+    func newThread(in project: String, text: String? = nil, model: String? = nil, effort: String? = nil, mode: String? = nil) {
         newThreadDrafts[project] = nil
-        act(.newThread(id: Self.newID(), project: project, text: text))
+        act(.newThread(id: Self.newID(), project: project, text: text, model: model, effort: effort, mode: mode))
     }
 
     /// What's typed in each project's new thread, not sent yet: kept while the app runs.
     var newThreadDrafts: [String: String] = [:]
+    /// The model and effort last chosen in each project's New Thread ("" for Default).
+    var newThreadChoices: [String: (model: String, effort: String)] = [:]
 
     func setModel(_ model: String?, of thread: String) { act(.setModel(id: Self.newID(), thread: thread, model: model)) }
     func setEffort(_ effort: String?, of thread: String) { act(.setEffort(id: Self.newID(), thread: thread, effort: effort)) }

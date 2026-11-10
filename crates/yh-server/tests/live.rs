@@ -185,7 +185,7 @@ fn streams_what_claude_writes_and_takes_actions() {
     c.send(FromApp::Answer { id: Some("a4".into()), thread: t(), request_id: "r2".into(), answers: answers.clone() });
     c.expect("answered", |m| matches!(m, ToApp::Done { id, error: None, .. } if id == "a4"));
     assert_eq!(app.recv_timeout(Duration::from_secs(1)).unwrap(), yh_server::Action::Answer { thread: t(), request_id: "r2".into(), answers });
-    c.send(FromApp::NewThread { id: Some("a5".into()), project: "p1".into(), text: Some("hi".into()) });
+    c.send(FromApp::NewThread { id: Some("a5".into()), project: "p1".into(), text: Some("hi".into()), model: None, effort: None, mode: None });
     c.expect("made", |m| matches!(m, ToApp::Done { id, error: None, thread: Some(t) } if id == "a5" && t == "t2"));
     app.recv_timeout(Duration::from_secs(1)).unwrap();
     c.send(FromApp::Send { id: Some("a6".into()), thread: t(), text: "look".into(), now: false, images: vec![yh_server::wire::Image { media_type: "image/png".into(), data: "aGVsbG8=".into() }] });

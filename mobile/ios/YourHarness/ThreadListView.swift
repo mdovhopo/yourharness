@@ -148,8 +148,9 @@ struct ThreadListView: View {
             guard let project = store.projects.first(where: { wanted == nil || $0.name == wanted }) else { return }
             madeThread = true
             try? await Task.sleep(for: .seconds(1))
-            Perf.shared.log("PHONE new thread in \(project.name): \(text)")
-            store.newThread(in: project.id, text: text)
+            let (model, effort) = (Self.env["YH_PHONE_NEW_MODEL"], Self.env["YH_PHONE_NEW_EFFORT"])
+            Perf.shared.log("PHONE new thread in \(project.name): \(text) · \(model ?? "default") · \(effort ?? "default")")
+            store.newThread(in: project.id, text: text, model: model, effort: effort)
         }
     }
 
@@ -647,16 +648,24 @@ private struct ThreadActions: ViewModifier {
     }
 }
 
-/// A new thread's first message. Nothing is made on the Mac until it's sent; closed unsent, what's
-/// typed waits for the project's next New Thread.
+/// A new thread's first message, and the model, effort and permissions it starts with. Nothing is
+/// made on the Mac until it's sent; closed unsent, what's typed waits for the project's next New
+/// Thread.
 struct NewThreadSheet: View {
     let project: Project
     @Environment(Store.self) private var store
     @Environment(\.dismiss) private var dismiss
     @State private var text = ""
+    /// "" for the Mac's default.
+    @State private var model = ""
+    @State private var effort = ""
+    @State private var mode = "auto"
     @FocusState private var focused: Bool
 
     private var empty: Bool { text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    private var chosen: ModelOption? { store.models.first { $0.id == model } }
+    private var efforts: [String] { chosen?.efforts ?? ["low", "medium", "high", "xhigh", "max"] }
+    private var modes: [String] { store.modes.isEmpty ? ["auto", "ask", "acceptEdits", "plan", "bypass"] : store.modes }
 
     var body: some View {
         NavigationStack {
@@ -664,6 +673,33 @@ struct NewThreadSheet: View {
                 TextField("What are we working on?", text: $text, axis: .vertical)
                     .lineLimit(4...16)
                     .focused($focused)
+                Section {
+                    Picker(selection: $model) {
+                        Text("Default").tag("")
+                        ForEach(store.models.filter { !$0.id.hasPrefix("claude-") && $0.id != "default" }) { m in Text(m.name).tag(m.id) }
+                        if store.models.contains(where: { $0.id.hasPrefix("claude-") }) {
+                            Section("Versions") {
+                                ForEach(store.models.filter { $0.id.hasPrefix("claude-") }) { m in Text(m.name).tag(m.id) }
+                            }
+                        }
+                    } label: {
+                        Label("Model", systemImage: "sparkles")
+                    }
+                    Picker(selection: $effort) {
+                        Text("Default").tag("")
+                        ForEach(efforts, id: \.self) { e in Text(ThreadSettings.effortName(e)).tag(e) }
+                    } label: {
+                        Label("Effort", systemImage: "gauge.with.dots.needle.33percent")
+                    }
+                    Picker(selection: $mode) {
+                        ForEach(modes, id: \.self) { m in Text(ThreadSettings.modeName(m)).tag(m) }
+                    } label: {
+                        Label("Permissions", systemImage: "shield")
+                    }
+                } footer: {
+                    Text("Permissions apply to every thread in \(project.name).")
+                }
+                .pickerStyle(.menu)
             }
             .navigationTitle("New Thread")
             .navigationSubtitle(project.name)
@@ -674,7 +710,10 @@ struct NewThreadSheet: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Send", systemImage: "arrow.up") {
-                        store.newThread(in: project.id, text: text.trimmingCharacters(in: .whitespacesAndNewlines))
+                        store.newThread(
+                            in: project.id, text: text.trimmingCharacters(in: .whitespacesAndNewlines),
+                            model: model.isEmpty ? nil : model, effort: effort.isEmpty ? nil : effort,
+                            mode: mode == (project.mode ?? "auto") ? nil : mode)
                         text = ""
                         dismiss()
                     }
@@ -683,12 +722,21 @@ struct NewThreadSheet: View {
             }
         }
         .presentationDetents([.medium, .large])
+        // An effort the new model doesn't offer goes back to Default.
+        .onChange(of: model) { if !effort.isEmpty && !efforts.contains(effort) { effort = "" } }
         .onAppear {
             text = store.newThreadDrafts[project.id] ?? ""
+            if let c = store.newThreadChoices[project.id] { (model, effort) = c }
+            mode = store.projects.first { $0.id == project.id }?.mode ?? project.mode ?? "auto"
+            if let m = Self.env["YH_PHONE_NEW_MODEL"] { model = m }
+            if let e = Self.env["YH_PHONE_NEW_EFFORT"] { effort = e }
             focused = true
         }
         .onDisappear {
             store.newThreadDrafts[project.id] = empty ? nil : text
+            store.newThreadChoices[project.id] = (model, effort)
         }
     }
+
+    private static let env = ProcessInfo.processInfo.environment
 }
