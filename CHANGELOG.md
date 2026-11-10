@@ -6,6 +6,8 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+## [0.1.11] - 2026-11-10
+
 ### Added
 
 - Phone: Settings, from the gear at the top of Threads: Show All Macs Together, Wrap Lines in diffs and files, your Macs, and the app's version.
