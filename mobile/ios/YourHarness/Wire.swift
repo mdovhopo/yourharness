@@ -348,6 +348,15 @@ struct BrowserTab: Decodable, Sendable, Equatable, Identifiable {
     }
 }
 
+/// A thread's browser in a few words (protocol 7): pages open, the shown one, and when the agent
+/// last opened one (seconds since 1970).
+struct BrowserSummary: Decodable, Sendable, Equatable {
+    let tabs: Int
+    let url: String?
+    let title: String?
+    let openedAt: Double?
+}
+
 struct BrowserDialog: Decodable, Sendable, Equatable {
     /// `alert`, `confirm` or `prompt`.
     let kind: String
@@ -522,6 +531,7 @@ enum ToApp: Sendable {
     /// Protocol 7: the watched browser's tabs; a picture of its shown tab (decoded here).
     case browser(thread: String, state: BrowserState)
     case browserFrame(thread: String, tab: Int, seq: Int, image: UIImage?)
+    case browserSummary(thread: String, summary: BrowserSummary)
     case unknown
 
     /// Changes what the phone keeps of this Mac between launches (`Store`'s cache).
@@ -539,6 +549,7 @@ enum ToApp: Sendable {
     private struct PullFiles: Decodable { let url: String; let files: [PullFile]?; let error: String? }
     private struct PullPatch: Decodable { let url: String; let path: String; let patch: String?; let error: String? }
     private struct Browser: Decodable { let thread: String; let state: BrowserState }
+    private struct Summary: Decodable { let thread: String; let summary: BrowserSummary }
     private struct Frame: Decodable { let thread: String; let tab: Int; let seq: Int; let data: String }
     private struct Hello: Decodable { let `protocol`: Int?; let server: String; let data: String; let mac: String?; let hosts: [String]? }
     private struct LiveMessage: Decodable { let thread: String; let live: Live }
@@ -638,6 +649,9 @@ enum ToApp: Sendable {
             case "browser":
                 let m = try d.decode(Browser.self, from: data)
                 return .browser(thread: m.thread, state: m.state)
+            case "browser_summary":
+                let m = try d.decode(Summary.self, from: data)
+                return .browserSummary(thread: m.thread, summary: m.summary)
             case "browser_frame":
                 let m = try d.decode(Frame.self, from: data)
                 // Decoded here, off the main thread, ready to draw.

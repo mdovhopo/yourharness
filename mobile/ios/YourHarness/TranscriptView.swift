@@ -18,17 +18,54 @@ struct TranscriptScreen: View {
     @State private var queued = false
     @State private var askedAside = false
     @State private var showsAside = ProcessInfo.processInfo.environment["YH_PHONE_ASIDE"] != nil
+    @Environment(\.horizontalSizeClass) private var sizeClass
+    /// The browser beside the thread (iPad), live while it shows.
+    @State private var showsBrowserPane = false
+    /// A page Claude opened since the thread opened, offered above the composer (iPhone).
+    @State private var offeredPage: BrowserSummary?
+    /// When the thread opened (seconds since 1970): pages the agent opened before aren't news.
+    @State private var openedAt = Date().timeIntervalSince1970
     private static let env = ProcessInfo.processInfo.environment
     private static var openedPull = false
     private static var openedBrowser = false
+
+    /// The thread's browser: beside the thread on an iPad, pushed over it on a phone.
+    private func showBrowser() {
+        offeredPage = nil
+        if sizeClass == .regular { withAnimation { showsBrowserPane.toggle() } } else { store.openBrowser = threadID }
+    }
+
+    /// "Claude opened localhost:3000": Show opens the browser; nothing streams until then.
+    private func pageCard(_ page: BrowserSummary) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "globe").foregroundStyle(.tint)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Claude opened a page").font(.subheadline.weight(.semibold))
+                Text(page.title.flatMap { $0.isEmpty ? nil : $0 } ?? BrowserScreen.host(page.url ?? "")).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
+            Spacer(minLength: 4)
+            Button("Show") { showBrowser() }.buttonStyle(.glassProminent)
+            Button("Dismiss", systemImage: "xmark") { withAnimation { offeredPage = nil } }.labelStyle(.iconOnly).buttonStyle(.glass)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .glassEffect(in: .rect(cornerRadius: 22))
+        .padding(.horizontal, 12)
+        .transition(.move(edge: .bottom).combined(with: .opacity))
+        // Gone by itself after a while: the globe still has it.
+        .task(id: page.openedAt) {
+            try? await Task.sleep(for: .seconds(20))
+            if offeredPage?.openedAt == page.openedAt { withAnimation { offeredPage = nil } }
+        }
+    }
 
     /// A link to a page on the Mac itself (`localhost`): opened in the thread's browser there and
     /// shown here, when the Mac streams it; else nil, and it opens as any link.
     private var openLocal: ((URL) -> Void)? {
         guard store.offersBrowser else { return nil }
-        return { [store, threadID] url in
+        return { url in
             store.browserInput(.open(url.absoluteString), in: threadID)
-            store.openBrowser = threadID
+            showBrowser()
         }
     }
 
@@ -43,8 +80,25 @@ struct TranscriptScreen: View {
             }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            ComposerBar(threadID: threadID, draft: $draft, images: $images, showsAside: $showsAside)
-                .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { composerHeight = $0 }
+            VStack(spacing: 8) {
+                if let page = offeredPage { pageCard(page) }
+                ComposerBar(threadID: threadID, draft: $draft, images: $images, showsAside: $showsAside)
+            }
+            .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { composerHeight = $0 }
+        }
+        // Claude opened a page while you're here: beside the thread on an iPad, offered on a phone.
+        .onChange(of: store.browserSummaries[threadID]?.openedAt) { _, at in
+            guard let at, at > openedAt, let summary = store.browserSummaries[threadID] else { return }
+            openedAt = at
+            Perf.shared.log("BROWSER agent opened \(summary.url ?? "")")
+            if sizeClass == .regular { withAnimation { showsBrowserPane = true } } else { withAnimation { offeredPage = summary } }
+        }
+        .inspector(isPresented: $showsBrowserPane) {
+            // Made only while it shows: a hidden one would still watch, and stream.
+            if showsBrowserPane {
+                BrowserScreen(threadID: threadID, onClose: { showsBrowserPane = false })
+                    .inspectorColumnWidth(min: 340, ideal: 520, max: 900)
+            }
         }
         .overlay(alignment: .top) {
             if let error = store.actionError {
@@ -184,7 +238,16 @@ struct TranscriptScreen: View {
         .toolbar {
             if store.offersBrowser {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("Browser", systemImage: "globe") { store.openBrowser = threadID }
+                    // A dot when the thread's browser has pages open.
+                Button { showBrowser() } label: {
+                    Image(systemName: "globe")
+                        .overlay(alignment: .topTrailing) {
+                            if (store.browserSummaries[threadID]?.tabs ?? 0) > 0 {
+                                Circle().fill(.tint).frame(width: 8, height: 8).offset(x: 3, y: -2)
+                            }
+                        }
+                }
+                .accessibilityLabel((store.browserSummaries[threadID]?.tabs ?? 0) > 0 ? "Browser, pages open" : "Browser")
                 }
             }
             if store.serverProtocol >= 5 {

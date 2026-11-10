@@ -8,6 +8,9 @@ import UIKit
 
 struct BrowserScreen: View {
     let threadID: String
+    /// In a side panel beside the thread (iPad): a header of its own with a close button, in
+    /// place of the navigation bar's title and buttons.
+    var onClose: (() -> Void)? = nil
     @Environment(Store.self) private var store
     @State private var address = ""
     @FocusState private var addressFocused: Bool
@@ -25,6 +28,44 @@ struct BrowserScreen: View {
     private var shown: BrowserTab? { state?.shown }
 
     var body: some View {
+        if let onClose {
+            page.safeAreaInset(edge: .top, spacing: 0) { header(onClose) }
+        } else {
+            page
+                .navigationTitle(shown.map { $0.title.isEmpty ? Self.host($0.url) : $0.title } ?? "Browser")
+                .navigationSubtitle(shown.map { Self.host($0.url) } ?? "")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) { keyboardButton }
+                    ToolbarItem(placement: .topBarTrailing) { menu }
+                }
+        }
+    }
+
+    private var keyboardButton: some View {
+        Button(typing ? "Hide Keyboard" : "Type in the Page", systemImage: typing ? "keyboard.chevron.compact.down" : "keyboard") { typing.toggle() }
+            .disabled(shown == nil)
+    }
+
+    /// The side panel's top: the page's title and address, the keyboard, More, and Close.
+    private func header(_ close: @escaping () -> Void) -> some View {
+        HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(shown.map { $0.title.isEmpty ? Self.host($0.url) : $0.title } ?? "Browser").font(.headline).lineLimit(1)
+                if let shown { Text(Self.host(shown.url)).font(.caption).foregroundStyle(.secondary).lineLimit(1) }
+            }
+            Spacer(minLength: 4)
+            keyboardButton
+            menu
+            Button("Close", systemImage: "xmark", action: close)
+        }
+        .labelStyle(.iconOnly)
+        .buttonStyle(.glass)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+    }
+
+    private var page: some View {
         ZStack {
             Color(.secondarySystemBackground).ignoresSafeArea()
             if let state, state.tabs.isEmpty {
@@ -65,16 +106,6 @@ struct BrowserScreen: View {
                         if store.actionError == error { store.actionError = nil }
                     }
             }
-        }
-        .navigationTitle(shown.map { $0.title.isEmpty ? Self.host($0.url) : $0.title } ?? "Browser")
-        .navigationSubtitle(shown.map { Self.host($0.url) } ?? "")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button(typing ? "Hide Keyboard" : "Type in the Page", systemImage: typing ? "keyboard.chevron.compact.down" : "keyboard") { typing.toggle() }
-                    .disabled(shown == nil)
-            }
-            ToolbarItem(placement: .topBarTrailing) { menu }
         }
         .onAppear { store.watchBrowser(threadID) }
         .onDisappear { typing = false; store.unwatchBrowser() }

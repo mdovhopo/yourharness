@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use yh_server::browser::Hub;
-use yh_server::wire::{BrowserDialog, BrowserInput, BrowserState, BrowserTab};
+use yh_server::wire::{BrowserDialog, BrowserInput, BrowserState, BrowserSummary, BrowserTab};
 
 /// JPEG quality of a frame: text stays readable at a fraction of the bytes.
 const QUALITY: f64 = 0.6;
@@ -33,6 +33,7 @@ thread_local! {
 pub fn start(hub: Arc<Hub>, project_of: impl Fn(&str, &App) -> Option<String> + 'static, cx: &mut App) {
     let (done, results) = flume::unbounded::<(String, bool)>();
     let mut paces: HashMap<String, Pace> = HashMap::new();
+    let mut ticks = 0u64;
     #[allow(clippy::infinite_loop)]
     cx.spawn(async move |cx| loop {
         cx.background_executor().timer(Duration::from_millis(40)).await;
@@ -46,6 +47,36 @@ pub fn start(hub: Arc<Hub>, project_of: impl Fn(&str, &App) -> Option<String> + 
             }
         }
         paces.retain(|t, _| watched.iter().any(|(w, _)| w == t));
+        // Every browser in a few words, twice a second: a phone with its thread open learns
+        // when the agent opens a page there.
+        ticks += 1;
+        if ticks % 12 == 0 {
+            let summaries = Browsers::with(|b| {
+                let mut out: Vec<(String, BrowserSummary)> = b
+                    .sessions
+                    .iter()
+                    .map(|(thread, s)| {
+                        let shown = s.selected_tab();
+                        let summary = BrowserSummary {
+                            tabs: s.tabs.len() as u32,
+                            url: shown.and_then(|t| t.web.url()).unwrap_or_default(),
+                            title: shown.map(|t| t.title()).unwrap_or_default(),
+                            opened_at: b.agent_opened.get(thread).copied(),
+                        };
+                        (thread.clone(), summary)
+                    })
+                    .collect();
+                for gone in hub.summarized() {
+                    if !b.sessions.contains_key(&gone) {
+                        out.push((gone, BrowserSummary::default()));
+                    }
+                }
+                out
+            });
+            for (thread, summary) in summaries {
+                hub.publish_summary(&thread, summary);
+            }
+        }
         if watched.is_empty() {
             if Browsers::with(|b| !b.remote.is_empty()) {
                 Browsers::with(|b| b.remote.clear());

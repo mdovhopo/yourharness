@@ -107,6 +107,7 @@ fn print(m: &ToApp, began: &mut bool) -> bool {
             state.editing,
             state.dialog.as_ref().map(|d| format!(" dialog={} {:?}", d.kind, d.message)).unwrap_or_default()
         ),
+        ToApp::BrowserSummary { summary, .. } => println!("SUMMARY tabs={} {} {:?} opened_at={:?}", summary.tabs, summary.url, summary.title, summary.opened_at),
         ToApp::BrowserFrame { tab, seq, width, height, data, .. } => println!("FRAME #{seq} tab {tab} {width}x{height} {} bytes", data.len() * 3 / 4),
         ToApp::PullPatch { path, patch, error, .. } => println!("PATCH {path} {} lines{}", patch.as_ref().map(|p| p.lines().count()).unwrap_or(0), error.as_ref().map(|e| format!(" ! {e}")).unwrap_or_default()),
     }

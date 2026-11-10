@@ -321,6 +321,14 @@ pushed.
   page out at exactly the phone's page area, so it reads like a phone page; Tablet, Laptop, or
   fitting the Mac's panel). Alerts, confirms and prompts show as alerts. In the background the
   phone stops watching, and starts again when back.
+- **Shown when Claude opens a page:** a client with a thread open gets `browser_summary { thread,
+  summary }` (pages open, the shown one's address and title, and `opened_at`, when the agent's
+  `open` or `navigate` last went somewhere), at `subscribe_thread` and when it changes. The Mac
+  reads every browser twice a second for it; no pictures. A page opened after the thread did shows
+  the browser beside the conversation on an iPad (an inspector column, made only while it shows,
+  so it streams only then) and offers it on an iPhone, in a card above the composer ("Claude
+  opened a page", Show, gone after 20 s). The globe has a dot while pages are open, and toggles
+  the column on an iPad.
 - **Hooks:** `YH_PHONE_OPEN_BROWSER=1` (pushed over the selected thread), `YH_PHONE_BROWSER=tap:x,y;
   type:text;key:Enter;scroll:dy;size:phone;go:url;back;keyboard` (after the first picture, 1.5 s
   apart), and `YH_OPEN_LINK=1` on a `localhost` link; `BROWSER watch`, `BROWSER frame n WxH` lines.

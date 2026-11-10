@@ -243,6 +243,9 @@ pub struct Browsers {
     covered: bool,
     /// Threads whose browser a phone watches: looked at, so never closed for being idle.
     pub remote: std::collections::HashSet<String>,
+    /// When the agent last opened a page in each thread's browser (seconds since 1970): a
+    /// phone with the thread open offers to show it.
+    pub agent_opened: HashMap<String, f64>,
 }
 
 impl Browsers {
@@ -1979,7 +1982,15 @@ impl ToolServer for BrowserTools {
         if self.read_only && !READ_ONLY_TOOLS.contains(&name) {
             return ToolResult::error("The side chat can look at the browser, not use it.");
         }
-        self.perform(name, a, tool_use).unwrap_or_else(ToolResult::error)
+        let result = self.perform(name, a, tool_use).unwrap_or_else(ToolResult::error);
+        let went = name == "open" || (name == "navigate" && a["url"].as_str().is_some());
+        if went && !result.is_error {
+            let (thread, at) = (self.thread.clone(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0., |d| d.as_secs_f64()));
+            run_on_main(move |b, _| {
+                b.agent_opened.insert(thread, at);
+            });
+        }
+        result
     }
 }
 

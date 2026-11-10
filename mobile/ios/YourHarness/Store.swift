@@ -322,6 +322,8 @@ final class Store: Identifiable {
     private(set) var browserThread: String?
     private(set) var browserState: BrowserState?
     private(set) var browserFrame: UIImage?
+    /// Each open thread's browser in a few words: pages open, and when the agent last opened one.
+    var browserSummaries: [String: BrowserSummary] = [:]
     /// Pictures drawn since the browser opened, for logs and tests.
     @ObservationIgnored private(set) var browserFrames = 0
 
@@ -748,6 +750,11 @@ final class Store: Identifiable {
                 Perf.shared.log("PULL patch \(path) \(lines?.count ?? 0) lines\(error.map { " ! " + $0 } ?? "")")
             case .browser(let thread, let state):
                 if thread == browserThread, browserState != state { browserState = state }
+            case .browserSummary(let thread, let summary):
+                if browserSummaries[thread] != summary {
+                    browserSummaries[thread] = summary
+                    Perf.shared.log("BROWSER summary \(summary.tabs) tabs \(summary.url ?? "") opened \(summary.openedAt.map { "\(Int($0))" } ?? "-")")
+                }
             case .browserFrame(let thread, _, let seq, let image):
                 // Drawn, so the next may come; only the newest of a batch is shown.
                 connection.send(.browserAck(seq: seq))

@@ -273,6 +273,8 @@ struct Client {
     watching: Vec<(String, bool)>,
     /// The thread's browser it watches (protocol 7), and how far its pictures got.
     browser: Option<browser::Watch>,
+    /// The browser summaries sent for the threads it has open.
+    summaries: HashMap<String, wire::BrowserSummary>,
 }
 
 impl Client {
@@ -448,6 +450,31 @@ fn stream_browsers(changed: flume::Receiver<String>, shared: &Shared, options: &
         for id in ids {
             push_browser(shared, id);
         }
+        let ids: Vec<u64> = shared.clients.lock().unwrap().iter().filter(|(_, c)| c.watching.iter().any(|(t, _)| threads.contains(t))).map(|(id, _)| *id).collect();
+        for id in ids {
+            push_summaries(shared, id);
+        }
+    }
+}
+
+/// The browser summaries of the threads a client has open, where they changed since it was told.
+fn push_summaries(shared: &Shared, id: u64) {
+    let Some(hub) = &shared.hub else { return };
+    let mut clients = shared.clients.lock().unwrap();
+    let Some(c) = clients.get_mut(&id) else { return };
+    let open: Vec<String> = c.watching.iter().map(|(t, _)| t.clone()).filter(|t| !t.starts_with(yh_engine::ids::SIDE)).collect();
+    c.summaries.retain(|t, _| open.contains(t));
+    let mut out = vec![];
+    for thread in open {
+        let summary = hub.summary(&thread);
+        if c.summaries.get(&thread).cloned().unwrap_or_default() != summary {
+            out.push(serde_json::to_string(&ToApp::BrowserSummary { thread: thread.clone(), summary: summary.clone() }).expect("messages serialize"));
+            c.summaries.insert(thread, summary);
+        }
+    }
+    if !out.into_iter().all(|text| c.outbox.try_send(text).is_ok()) {
+        eprintln!("client {id}: fell behind, dropped");
+        clients.remove(&id);
     }
 }
 
@@ -780,7 +807,7 @@ fn connection(id: u64, stream: TcpStream, shared: &Arc<Shared>, options: &Option
     eprintln!("client {id}: connected from {peer}");
     let source = Source::open(directory)?;
     let (outbox, inbox) = flume::bounded(OUTBOX);
-    shared.clients.lock().unwrap().insert(id, Client { outbox, app: false, watching: vec![], browser: None });
+    shared.clients.lock().unwrap().insert(id, Client { outbox, app: false, watching: vec![], browser: None, summaries: HashMap::new() });
     let hello = ToApp::Hello { protocol: wire::PROTOCOL, server: options.name.clone(), data: name_of(directory), mac: options.mac_id.clone(), hosts: options.hosts.as_ref().map(|h| h()).unwrap_or_default() };
     write(&mut ws, &hello)?;
     if let Some((device, token)) = paired {
@@ -999,6 +1026,14 @@ fn answer(id: u64, message: FromApp, shared: &Arc<Shared>, source: &Source) -> V
         },
         FromApp::SubscribeThread { thread, limit, known } => {
             let limit = limit.unwrap_or(DEFAULT_ROWS).clamp(1, MAX_ROWS);
+            // Its browser in a few words, once it's watched.
+            if shared.hub.is_some() {
+                let shared = shared.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(50));
+                    push_summaries(&shared, id);
+                });
+            }
             // With the engine: its snapshot, in order with its changes, comes from `follow`.
             if let Some(engine) = &shared.engine {
                 set(&|c| c.watch(&thread, false));

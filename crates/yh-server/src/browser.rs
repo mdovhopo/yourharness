@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use yh_proto::{BrowserState, ToApp};
+use yh_proto::{BrowserState, BrowserSummary, ToApp};
 
 /// The newest picture of a thread's browser, as the message that carries it (made once, sent
 /// to every client watching).
@@ -25,6 +25,8 @@ pub struct Hub {
     watchers: Mutex<HashMap<u64, (String, u32)>>,
     frames: Mutex<HashMap<String, (u64, Arc<Frame>)>>,
     states: Mutex<HashMap<String, BrowserState>>,
+    /// Every thread's browser in a few words, for clients with the thread open.
+    summaries: Mutex<HashMap<String, BrowserSummary>>,
     /// When the phone last did something in a thread's browser: pictures come faster after.
     poked: Mutex<HashMap<String, Instant>>,
     /// Each server's listener: told the thread whose browser changed.
@@ -72,6 +74,31 @@ impl Hub {
         if changed {
             self.tell(thread);
         }
+    }
+
+    /// A thread's browser in a few words; told on only when it changed. No tabs: forgotten.
+    pub fn publish_summary(&self, thread: &str, summary: BrowserSummary) {
+        let mut held = self.summaries.lock().unwrap();
+        let was = held.get(thread).cloned().unwrap_or_default();
+        if was == summary {
+            return;
+        }
+        if summary == BrowserSummary::default() {
+            held.remove(thread);
+        } else {
+            held.insert(thread.to_string(), summary);
+        }
+        drop(held);
+        self.tell(thread);
+    }
+
+    /// The threads with a summary (their browser has pages, or had a page opened).
+    pub fn summarized(&self) -> Vec<String> {
+        self.summaries.lock().unwrap().keys().cloned().collect()
+    }
+
+    pub fn summary(&self, thread: &str) -> BrowserSummary {
+        self.summaries.lock().unwrap().get(thread).cloned().unwrap_or_default()
     }
 
     /// A browser nobody watches any more: what's held of it goes.

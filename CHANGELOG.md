@@ -8,7 +8,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ### Added
 
-- Phone: see and use the thread's browser from your Mac. The globe in a thread's toolbar shows the page Claude is testing as it changes, and you can use it too: tap to click, drag one finger to scroll, pinch with two to zoom, type into fields with the phone's keyboard, change the address, go back and forward, and switch tabs. Tapping a `localhost` link in a reply opens it in the Mac's browser and shows it on the phone, so the app Claude is building works from your phone or iPad, at home or over Tailscale. More → This Phone lays the page out at your phone's size. Pictures go out only when the page changes, and only as fast as your connection takes them. Needs the Mac on this version.
+- Phone: see and use the thread's browser from your Mac. The globe in a thread's toolbar shows the page Claude is testing as it changes, and you can use it too: tap to click, drag one finger to scroll, pinch with two to zoom, type into fields with the phone's keyboard, change the address, go back and forward, and switch tabs. Tapping a `localhost` link in a reply opens it in the Mac's browser and shows it on the phone, so the app Claude is building works from your phone or iPad, at home or over Tailscale. More → This Phone lays the page out at your phone's size. When Claude opens a page in the thread you're reading, an iPad shows the browser beside the conversation by itself, and an iPhone offers it in a card above the message field (nothing streams until you tap Show); the globe has a dot while pages are open. Pictures go out only when the page changes, and only as fast as your connection takes them. Needs the Mac on this version.
 
 ## [0.1.9] - 2026-11-10
 

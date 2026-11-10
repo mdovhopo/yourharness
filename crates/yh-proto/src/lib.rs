@@ -530,6 +530,20 @@ pub struct BrowserDialog {
     pub default_text: Option<String>,
 }
 
+/// A thread's browser in a few words (protocol 7), for a client with the thread open: whether
+/// pages are open, the shown one, and when the agent last opened one (seconds since 1970), so the
+/// phone can offer to show it. No pictures.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct BrowserSummary {
+    pub tabs: u32,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opened_at: Option<f64>,
+}
+
 /// What the phone does to a thread's browser (protocol 7), as you'd do it in the Mac's panel.
 /// Points are in the page's CSS pixels (`BrowserState`'s `width` × `height`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -625,6 +639,9 @@ pub enum ToApp {
     /// `width` × `height` pixels. The next comes once this one's `browser_ack` is in, and only
     /// when the page changed.
     BrowserFrame { thread: String, tab: u32, seq: u64, width: u32, height: u32, data: String },
+    /// Protocol 7: the open thread's browser in a few words: after `subscribe_thread`, and when
+    /// it changes (the agent opened a page, a tab closed).
+    BrowserSummary { thread: String, summary: BrowserSummary },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
