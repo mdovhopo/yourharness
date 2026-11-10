@@ -10,7 +10,7 @@ struct ThreadListView: View {
     @State private var deleting: ThreadInfo?
     /// The project whose PRs are open in a sheet.
     @State private var pullsFor: Project?
-    /// The project a new thread is being written in.
+    /// New Thread's sheet, open on this project.
     @State private var composingIn: Project?
     private static let env = ProcessInfo.processInfo.environment
 
@@ -34,6 +34,13 @@ struct ThreadListView: View {
             // Reconnecting with the list on screen: a spinner up here, nothing in the list moves.
             if store.state != .connected, !store.sections.isEmpty {
                 ToolbarItem(placement: .topBarTrailing) { ConnectionIndicator() }
+            }
+            // One New Thread for every project: its sheet picks the project, the last used first.
+            if store.offersControl {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("New Thread", systemImage: "square.and.pencil") { composingIn = store.newThreadProject }
+                        .disabled(store.projects.isEmpty)
+                }
             }
         }
     }
@@ -86,12 +93,6 @@ struct ThreadListView: View {
                                 .font(.body)
                                 .accessibilityLabel("Pull requests in \(section.project.name)")
                         }
-                        if store.offersControl {
-                            Button("New Thread", systemImage: "square.and.pencil") { composingIn = section.project }
-                                .labelStyle(.iconOnly)
-                                .font(.body)
-                                .accessibilityLabel("New thread in \(section.project.name)")
-                        }
                     }
                 }
             }
@@ -131,13 +132,13 @@ struct ThreadListView: View {
             Text("It goes from your Mac too. Until YourHarness quits, ⌘Z on the Mac brings it back.")
         }
         // `YH_PHONE_NEW_THREAD=<first message>`: a new thread in `YH_PHONE_PROJECT` (a project's
-        // name) or the first project, as its header's button does.
-        // `YH_PHONE_COMPOSE=<draft>`: New Thread pressed in `YH_PHONE_PROJECT` or the first
-        // project, the draft waiting in it (its sheet, for screenshots).
+        // name) or the first project, as New Thread's sheet sends it.
+        // `YH_PHONE_COMPOSE=<draft>`: New Thread pressed, its sheet on `YH_PHONE_PROJECT` or the
+        // last used project, the draft waiting in it (for screenshots).
         .task(id: store.canControl && !store.projects.isEmpty) {
             guard store.canControl, let draft = Self.env["YH_PHONE_COMPOSE"], composingIn == nil, !madeThread else { return }
             let wanted = Self.env["YH_PHONE_PROJECT"]
-            guard let project = store.projects.first(where: { wanted == nil || $0.name == wanted }) else { return }
+            guard let project = wanted.flatMap({ w in store.projects.first { $0.name == w } }) ?? store.newThreadProject else { return }
             madeThread = true
             if !draft.isEmpty { store.newThreadDrafts[project.id] = draft }
             composingIn = project
@@ -648,11 +649,13 @@ private struct ThreadActions: ViewModifier {
     }
 }
 
-/// A new thread's first message, and the model, effort and permissions it starts with. Nothing is
-/// made on the Mac until it's sent; closed unsent, what's typed waits for the project's next New
-/// Thread.
+/// A new thread's first message, and the project, model, effort and permissions it starts with.
+/// Nothing is made on the Mac until it's sent; closed unsent, what's typed waits for that
+/// project's next New Thread.
 struct NewThreadSheet: View {
-    let project: Project
+    /// The project it starts in; the sheet's picker can choose another.
+    @State private var projectID: String
+    init(project: Project) { _projectID = State(initialValue: project.id) }
     @Environment(Store.self) private var store
     @Environment(\.dismiss) private var dismiss
     @State private var text = ""
@@ -662,6 +665,7 @@ struct NewThreadSheet: View {
     @State private var mode = "auto"
     @FocusState private var focused: Bool
 
+    private var project: Project? { store.projects.first { $0.id == projectID } }
     private var empty: Bool { text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     private var chosen: ModelOption? { store.models.first { $0.id == model } }
     private var efforts: [String] { chosen?.efforts ?? ["low", "medium", "high", "xhigh", "max"] }
@@ -674,6 +678,11 @@ struct NewThreadSheet: View {
                     .lineLimit(4...16)
                     .focused($focused)
                 Section {
+                    Picker(selection: $projectID) {
+                        ForEach(store.projects) { p in Text(p.name).tag(p.id) }
+                    } label: {
+                        Label("Project", systemImage: "folder")
+                    }
                     Picker(selection: $model) {
                         Text("Default").tag("")
                         ForEach(store.models.filter { !$0.id.hasPrefix("claude-") && $0.id != "default" }) { m in Text(m.name).tag(m.id) }
@@ -697,12 +706,12 @@ struct NewThreadSheet: View {
                         Label("Permissions", systemImage: "shield")
                     }
                 } footer: {
-                    Text("Permissions apply to every thread in \(project.name).")
+                    Text("Permissions apply to every thread in \(project?.name ?? "the project").")
                 }
                 .pickerStyle(.menu)
             }
             .navigationTitle("New Thread")
-            .navigationSubtitle(project.name)
+            .navigationSubtitle(project?.name ?? "")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -711,30 +720,37 @@ struct NewThreadSheet: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Send", systemImage: "arrow.up") {
                         store.newThread(
-                            in: project.id, text: text.trimmingCharacters(in: .whitespacesAndNewlines),
+                            in: projectID, text: text.trimmingCharacters(in: .whitespacesAndNewlines),
                             model: model.isEmpty ? nil : model, effort: effort.isEmpty ? nil : effort,
-                            mode: mode == (project.mode ?? "auto") ? nil : mode)
+                            mode: mode == (project?.mode ?? "auto") ? nil : mode)
                         text = ""
                         dismiss()
                     }
-                    .disabled(empty || !store.canAct)
+                    .disabled(empty || !store.canAct || project == nil)
                 }
             }
         }
         .presentationDetents([.medium, .large])
         // An effort the new model doesn't offer goes back to Default.
         .onChange(of: model) { if !effort.isEmpty && !efforts.contains(effort) { effort = "" } }
+        // Another project: what's typed goes with it; its permissions, and its model and effort
+        // if New Thread chose them there before.
+        .onChange(of: projectID) { old, new in
+            store.newThreadDrafts[old] = nil
+            if let c = store.newThreadChoices[new] { (model, effort) = c }
+            mode = project?.mode ?? "auto"
+        }
         .onAppear {
-            text = store.newThreadDrafts[project.id] ?? ""
-            if let c = store.newThreadChoices[project.id] { (model, effort) = c }
-            mode = store.projects.first { $0.id == project.id }?.mode ?? project.mode ?? "auto"
+            text = store.newThreadDrafts[projectID] ?? ""
+            if let c = store.newThreadChoices[projectID] { (model, effort) = c }
+            mode = project?.mode ?? "auto"
             if let m = Self.env["YH_PHONE_NEW_MODEL"] { model = m }
             if let e = Self.env["YH_PHONE_NEW_EFFORT"] { effort = e }
             focused = true
         }
         .onDisappear {
-            store.newThreadDrafts[project.id] = empty ? nil : text
-            store.newThreadChoices[project.id] = (model, effort)
+            store.newThreadDrafts[projectID] = empty ? nil : text
+            store.newThreadChoices[projectID] = (model, effort)
         }
     }
 

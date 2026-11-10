@@ -6,6 +6,10 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+### Changed
+
+- Phone: one New Thread button at the top of the thread list instead of one per project; its sheet picks the project, starting on the last one you used.
+
 ## [0.1.7] - 2026-11-10
 
 ### Fixed

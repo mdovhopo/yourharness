@@ -16,7 +16,9 @@ final class Store: Identifiable {
     /// Thread IDs in the order the Mac lists them.
     private var order: [String] = []
     /// The navigation stack: thread IDs.
-    var path: [String] = []
+    var path: [String] = [] {
+        didSet { if let open = path.last, let project = threads[open]?.projectId { usedProject(project) } }
+    }
     /// A thread opened from anywhere: over the thread list (the fleet turns to Threads).
     func show(_ thread: String) {
         onShow?()
@@ -348,8 +350,20 @@ final class Store: Identifiable {
     /// `model`, `effort` and `mode` (the project's) as its sheet chose them; nil leaves the Mac's.
     func newThread(in project: String, text: String? = nil, model: String? = nil, effort: String? = nil, mode: String? = nil) {
         newThreadDrafts[project] = nil
+        usedProject(project)
         act(.newThread(id: Self.newID(), project: project, text: text, model: model, effort: effort, mode: mode))
     }
+
+    /// The project New Thread starts in: the last one used on this Mac from here (a thread opened
+    /// or started in it), else the one with the latest activity, else the first.
+    var newThreadProject: Project? {
+        let last = UserDefaults.standard.string(forKey: lastProjectKey)
+        return projects.first { $0.id == last }
+            ?? threads.values.max { $0.updatedAt < $1.updatedAt }.flatMap { t in projects.first { $0.id == t.projectId } }
+            ?? projects.first
+    }
+    private var lastProjectKey: String { "lastProject.\(macID ?? shownAddress)" }
+    private func usedProject(_ project: String) { UserDefaults.standard.set(project, forKey: lastProjectKey) }
 
     /// What's typed in each project's new thread, not sent yet: kept while the app runs.
     var newThreadDrafts: [String: String] = [:]
