@@ -47,6 +47,9 @@ struct PullScreen: View {
     @Environment(\.openURL) private var openURL
     @State private var confirming: (method: String, auto: Bool)?
     @State private var showsAllChecks = false
+    @State private var showsAllFiles = false
+    /// The file whose diff is open, pushed over the page.
+    @State private var openFile: PullFile?
     private static let env = ProcessInfo.processInfo.environment
 
     private var page: Store.PullPage? { store.pullPages[link.url] }
@@ -83,6 +86,7 @@ struct PullScreen: View {
             // Asked now, then again while checks run, so the page follows them.
             .task(id: link) {
                 store.askPull(link)
+                store.askPullFiles(link)
                 while !Task.isCancelled {
                     try? await Task.sleep(for: .seconds(20))
                     guard !Task.isCancelled, pull?.state == "open", (pull?.checks ?? []).contains(where: { $0.state == "pending" }) else { continue }
@@ -106,6 +110,7 @@ struct PullScreen: View {
 
     private func refresh() async {
         store.askPull(link)
+        store.askPullFiles(link)
         for _ in 0..<100 where store.pullPages[link.url]?.loading == true {
             try? await Task.sleep(for: .milliseconds(100))
         }
@@ -129,6 +134,7 @@ struct PullScreen: View {
                     .listRowInsets(EdgeInsets(top: 4, leading: 4, bottom: 8, trailing: 4))
                 Section { status(pull) }
                 checks(pull)
+                files(pull)
                 if let body = pull.body, !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     Section("Description") { PullMarkdown(source: body) }.id("description")
                 }
@@ -136,6 +142,9 @@ struct PullScreen: View {
             }
             .listStyle(.insetGrouped)
             .listSectionSpacing(.compact)
+            .navigationDestination(item: $openFile) { file in
+                PullDiffScreen(link: link, files: store.pullFiles[link.url]?.files ?? [file], start: file)
+            }
             // `YH_PHONE_PULL_SCROLL=description|conversation`: scrolled there once read, for screenshots.
             .task {
                 guard let to = Self.env["YH_PHONE_PULL_SCROLL"] else { return }
@@ -282,6 +291,45 @@ struct PullScreen: View {
         }
     }
 
+    // MARK: Files
+
+    @ViewBuilder private func files(_ p: PullDetail) -> some View {
+        let page = store.pullFiles[link.url]
+        let all = page?.files ?? []
+        let codeComments = Dictionary(grouping: (p.comments ?? []).filter { $0.kind == "code" && $0.path != nil }, by: { $0.path! }).mapValues(\.count)
+        let shown = showsAllFiles || all.count <= 8 ? all : Array(all.prefix(6))
+        Section {
+            if all.isEmpty {
+                if let error = page?.error {
+                    Label(error, systemImage: "exclamationmark.triangle").font(.footnote).foregroundStyle(.secondary)
+                } else if page?.files == nil {
+                    HStack { ProgressView(); Text("Reading the files…").foregroundStyle(.secondary) }.font(.subheadline)
+                } else {
+                    Text("No files changed.").font(.subheadline).foregroundStyle(.secondary)
+                }
+            }
+            ForEach(shown) { file in
+                Button { openFile = file } label: { FileRow(file: file, comments: codeComments[file.path] ?? 0) }
+                    .buttonStyle(.plain)
+            }
+            if shown.count < all.count {
+                Button("Show All \(all.count) Files") { withAnimation { showsAllFiles = true } }.font(.subheadline)
+            }
+        } header: {
+            Text(all.isEmpty ? "Files" : "Files · \(all.count)")
+        }
+        .id("files")
+        // `YH_PHONE_PULL_FILE=<path or index>`: that file's diff opened once the files are read.
+        .task(id: all.count) {
+            guard !all.isEmpty, let wanted = Self.env["YH_PHONE_PULL_FILE"], !Self.openedFile else { return }
+            Self.openedFile = true
+            try? await Task.sleep(for: .seconds(1))
+            openFile = all.first { $0.path == wanted } ?? Int(wanted).flatMap { all.indices.contains($0) ? all[$0] : nil }
+        }
+    }
+
+    private static var openedFile = false
+
     // MARK: Conversation
 
     @ViewBuilder private func conversation(_ p: PullDetail) -> some View {
@@ -372,6 +420,52 @@ struct PullScreen: View {
 }
 
 /// A line of the status section: an icon in its color, what it says, a detail under it.
+/// A file changed: what happened to it, its name and folder, lines added and removed, and how
+/// many comments are on its lines.
+struct FileRow: View {
+    let file: PullFile
+    var comments = 0
+
+    var body: some View {
+        HStack(spacing: 10) {
+            FileRow.icon(file.status).frame(width: 20)
+            VStack(alignment: .leading, spacing: 1) {
+                Text((file.path as NSString).lastPathComponent).font(.subheadline.weight(.medium)).lineLimit(1)
+                let folder = (file.path as NSString).deletingLastPathComponent
+                if let before = file.previousPath, before != file.path {
+                    Text("from \(before)").font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.head)
+                } else if !folder.isEmpty {
+                    Text(folder).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.head)
+                }
+            }
+            Spacer(minLength: 4)
+            if comments > 0 {
+                Label("\(comments)", systemImage: "bubble.left").font(.caption).foregroundStyle(.secondary).labelStyle(.titleAndIcon)
+            }
+            FileRow.counts(file).font(.caption.monospacedDigit())
+            Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
+        }
+        .contentShape(.rect)
+        .accessibilityElement(children: .combine)
+    }
+
+    @ViewBuilder static func icon(_ status: String) -> some View {
+        switch status {
+        case "added": Image(systemName: "plus.square.fill").foregroundStyle(.green)
+        case "removed": Image(systemName: "minus.square.fill").foregroundStyle(.red)
+        case "renamed", "copied": Image(systemName: "arrow.right.square.fill").foregroundStyle(.blue)
+        default: Image(systemName: "dot.square.fill").foregroundStyle(.orange)
+        }
+    }
+
+    static func counts(_ f: PullFile) -> some View {
+        HStack(spacing: 4) {
+            if let a = f.additions, a > 0 { Text("+\(a)").foregroundStyle(.green) }
+            if let d = f.deletions, d > 0 { Text("−\(d)").foregroundStyle(.red) }
+        }
+    }
+}
+
 private struct StatusRow: View {
     let icon: String
     let color: Color
@@ -418,7 +512,7 @@ private struct CheckRow: View {
     }
 }
 
-private struct CommentRow: View {
+struct CommentRow: View {
     let comment: PullComment
 
     var body: some View {

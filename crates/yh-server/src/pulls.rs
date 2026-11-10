@@ -50,7 +50,7 @@ pub fn read(project: &str, folder: &str) -> ToApp {
 
 use serde_json::Value;
 use yh_core::forge::Link;
-use yh_proto::{PullCheck, PullComment, PullDetail};
+use yh_proto::{PullCheck, PullComment, PullDetail, PullFile};
 
 const FIELDS: &str = "number,title,url,state,isDraft,author,body,headRefName,baseRefName,additions,deletions,changedFiles,commits,createdAt,updatedAt,mergedAt,labels,reviewDecision,mergeStateStatus,autoMergeRequest,statusCheckRollup,comments,reviews";
 const METHODS: &[&str] = &["squash", "merge", "rebase"];
@@ -320,6 +320,89 @@ pub fn from_gitlab(link: &Link, v: &Value, notes: Option<&Value>) -> PullDetail 
     }
 }
 
+/// A file a PR changes and its diff (None when the forge left it out: huge or binary).
+pub type FileDiff = (PullFile, Option<String>);
+
+/// The files a PR changes, with their diffs: `gh api …/pulls/<n>/files` a page of 100 at a
+/// time (GitHub stops at 3,000 files), or `glab api …/diffs`. Blocks while the forge answers.
+pub fn files(url: &str) -> Result<Vec<FileDiff>, String> {
+    let link = Link::parse(url).ok_or_else(|| "That isn't a pull request's address.".to_string())?;
+    if let Some(mock) = mock_entry(&link) {
+        let v = mock?;
+        return Ok(if link.gitlab { from_gitlab_diffs(&v["diffs"]) } else { from_github_files(&v["files"]) });
+    }
+    let mut all = vec![];
+    for page in 1..=30 {
+        let v = if link.gitlab {
+            run("glab", &["api".into(), format!("projects/{}/merge_requests/{}/diffs?per_page=100&page={page}", link.path.replace('/', "%2F"), link.number)]).and_then(json)?
+        } else {
+            let mut args = vec!["api".into(), format!("repos/{}/pulls/{}/files?per_page=100&page={page}", link.path, link.number)];
+            if link.host != "github.com" {
+                args.extend(["--hostname".into(), link.host.clone()]);
+            }
+            run("gh", &args).and_then(json)?
+        };
+        let got = v.as_array().map(Vec::len).unwrap_or(0);
+        all.extend(if link.gitlab { from_gitlab_diffs(&v) } else { from_github_files(&v) });
+        if got < 100 {
+            break;
+        }
+    }
+    Ok(all)
+}
+
+/// `gh api …/pulls/<n>/files`' answer.
+pub fn from_github_files(v: &Value) -> Vec<FileDiff> {
+    v.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|f| {
+            let patch = f["patch"].as_str().map(str::to_string);
+            Some((
+                PullFile {
+                    path: f["filename"].as_str()?.to_string(),
+                    previous_path: f["previous_filename"].as_str().map(str::to_string),
+                    status: f["status"].as_str().unwrap_or("modified").to_string(),
+                    additions: f["additions"].as_u64().unwrap_or(0),
+                    deletions: f["deletions"].as_u64().unwrap_or(0),
+                    has_patch: patch.as_deref().is_some_and(|p| !p.is_empty()),
+                },
+                patch,
+            ))
+        })
+        .collect()
+}
+
+/// `glab api …/merge_requests/<n>/diffs`' answer: no counts, so they're counted from the diff.
+pub fn from_gitlab_diffs(v: &Value) -> Vec<FileDiff> {
+    v.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|f| {
+            let path = f["new_path"].as_str()?.to_string();
+            let old = f["old_path"].as_str().unwrap_or(&path).to_string();
+            let patch = f["diff"].as_str().filter(|d| !d.is_empty()).map(str::to_string);
+            let count = |c: char| patch.as_deref().map(|p| p.lines().filter(|l| l.starts_with(c) && !l.starts_with("+++") && !l.starts_with("---")).count() as u64).unwrap_or(0);
+            let flag = |k: &str| f[k].as_bool().unwrap_or(false);
+            let status = if flag("new_file") { "added" } else if flag("deleted_file") { "removed" } else if flag("renamed_file") { "renamed" } else { "modified" };
+            Some((
+                PullFile { previous_path: (old != path).then_some(old), status: status.into(), additions: count('+'), deletions: count('-'), has_patch: patch.is_some(), path },
+                patch,
+            ))
+        })
+        .collect()
+}
+
+/// `YH_MOCK_PULLS`' object form: the entry for this PR, None when there's no mock file.
+fn mock_entry(link: &Link) -> Option<Result<Value, String>> {
+    let path = std::env::var("YH_MOCK_PULLS").ok().filter(|p| !p.is_empty())?;
+    let file: Value = match std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|t| serde_json::from_str(&t).map_err(|e| e.to_string())) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    Some(file.as_object().and_then(|m| m.iter().find(|(url, _)| Link::parse(url).is_some_and(|l| l.id() == link.id()))).map(|(_, v)| v.clone()).ok_or_else(|| "not in the mock file".to_string()))
+}
+
 /// `YH_MOCK_PULLS`: a URL's entry in the file's object form, read as `gh pr view` prints it
 /// (with `"mergeMethods"` and `"codeComments"`, as `gh repo view` and `gh api` would answer);
 /// in its list form, what the list says. None when there's no mock file.
@@ -421,6 +504,20 @@ mod tests {
         assert_eq!((p.state.as_str(), p.changed_files, p.merge_status.as_deref()), ("open", 5, Some("DIRTY")));
         assert_eq!(p.checks[0].state, "failing");
         assert_eq!(p.comments.len(), 1);
+    }
+
+    #[test]
+    fn reads_files_changed() {
+        let v = serde_json::json!([
+            {"filename": "src/a.rs", "status": "modified", "additions": 2, "deletions": 1, "patch": "@@ -1,2 +1,3 @@\n a\n-b\n+c\n+d"},
+            {"filename": "img.png", "status": "added", "additions": 0, "deletions": 0},
+            {"filename": "new.rs", "previous_filename": "old.rs", "status": "renamed", "additions": 0, "deletions": 0, "patch": ""}
+        ]);
+        let files = from_github_files(&v);
+        assert_eq!(files.iter().map(|(f, _)| (f.path.as_str(), f.has_patch)).collect::<Vec<_>>(), [("src/a.rs", true), ("img.png", false), ("new.rs", false)]);
+        assert_eq!(files[2].0.previous_path.as_deref(), Some("old.rs"));
+        let g = from_gitlab_diffs(&serde_json::json!([{"old_path": "a", "new_path": "a", "diff": "@@ -1 +1,2 @@\n-x\n+y\n+z\n"}]));
+        assert_eq!((g[0].0.additions, g[0].0.deletions, g[0].0.status.as_str()), (2, 1, "modified"));
     }
 
     #[test]

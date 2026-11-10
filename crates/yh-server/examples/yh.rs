@@ -93,6 +93,8 @@ fn print(m: &ToApp, began: &mut bool) -> bool {
         ToApp::Paired { device, token } => println!("PAIRED {device} token={token}"),
         ToApp::Pull { url, pull: Some(p), .. } => println!("PULL {url} {} [{}] checks {} comments {} merge {:?} {}", p.title, p.state, p.checks.len(), p.comments.len(), p.merge_status, p.merge_methods.join("/")),
         ToApp::Pull { url, error, .. } => println!("PULL {url} ! {}", error.as_deref().unwrap_or("")),
+        ToApp::PullFiles { url, files, error } => println!("FILES {url} {}{}", files.iter().map(|f| format!(" | {} {} +{} -{}{}", f.status, f.path, f.additions, f.deletions, if f.has_patch { "" } else { " (no diff)" })).collect::<String>(), error.as_ref().map(|e| format!(" ! {e}")).unwrap_or_default()),
+        ToApp::PullPatch { path, patch, error, .. } => println!("PATCH {path} {} lines{}", patch.as_ref().map(|p| p.lines().count()).unwrap_or(0), error.as_ref().map(|e| format!(" ! {e}")).unwrap_or_default()),
     }
     false
 }

@@ -15,7 +15,8 @@ use serde::{Deserialize, Serialize};
 /// 5: search across threads, files for `@`, slash commands in `options`, usage limits, asking on
 /// the side, and a snapshot from what the client already holds.
 /// 6: one PR in full (`pull`: its description, checks, comments and reviews) and merging it
-/// (`merge_pull`), for reviewing a PR on the phone.
+/// (`merge_pull`), for reviewing a PR on the phone; its files changed (`pull_files`) and each
+/// one's diff (`pull_patch`).
 pub const PROTOCOL: u32 = 6;
 
 /// A slash command the composer offers: `/name hint`, and what it does.
@@ -152,6 +153,24 @@ pub struct PullCheck {
     pub state: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+}
+
+/// A file a PR changes, as its Files tab lists it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PullFile {
+    pub path: String,
+    /// Where it was before, when it was renamed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_path: Option<String>,
+    /// `added`, `removed`, `modified`, `renamed`, `copied`, `changed`.
+    pub status: String,
+    #[serde(default)]
+    pub additions: u64,
+    #[serde(default)]
+    pub deletions: u64,
+    /// Whether its diff can be shown (the forge leaves out huge and binary ones).
+    #[serde(default)]
+    pub has_patch: bool,
 }
 
 /// Something said on a PR.
@@ -513,6 +532,11 @@ pub enum ToApp {
     Paired { device: String, token: String },
     /// Protocol 6: one PR in full, asked for with `pull` (`error`: why it couldn't be read).
     Pull { url: String, #[serde(default, skip_serializing_if = "Option::is_none")] pull: Option<PullDetail>, #[serde(default, skip_serializing_if = "Option::is_none")] error: Option<String> },
+    /// Protocol 6: the files a PR changes, asked for with `pull_files`.
+    PullFiles { url: String, #[serde(default)] files: Vec<PullFile>, #[serde(default, skip_serializing_if = "Option::is_none")] error: Option<String> },
+    /// Protocol 6: one file's unified diff (its hunks, as `git diff` prints them after the
+    /// header), asked for with `pull_patch`.
+    PullPatch { url: String, path: String, #[serde(default, skip_serializing_if = "Option::is_none")] patch: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] error: Option<String> },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -599,6 +623,10 @@ pub enum FromApp {
     /// Protocol 6: merges a PR (`method`: `squash`, `merge` or `rebase`; `auto`: once its checks
     /// and reviews allow), as `gh pr merge` does: answered with `done`, then a fresh `pull`.
     MergePull { #[serde(default)] id: Option<String>, url: String, method: String, #[serde(default)] auto: bool },
+    /// Protocol 6: the files a PR changes: answered with `pull_files`.
+    PullFiles { url: String },
+    /// Protocol 6: one of them's diff: answered with `pull_patch`.
+    PullPatch { url: String, path: String },
     #[serde(other)]
     Unknown,
 }

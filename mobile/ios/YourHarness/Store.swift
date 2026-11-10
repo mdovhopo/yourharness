@@ -467,6 +467,39 @@ final class Store: Identifiable {
         var mergeError: String?
     }
 
+    /// Each PR's files changed, by its URL, and each file's diff, by "url\npath".
+    var pullFiles: [String: PullFilesPage] = [:]
+    var patches: [String: PatchPage] = [:]
+
+    struct PullFilesPage: Equatable {
+        var files: [PullFile]?
+        var error: String?
+        var loading = false
+    }
+
+    struct PatchPage: Equatable {
+        var lines: [DiffLine]?
+        var error: String?
+    }
+
+    static func patchKey(_ url: String, _ path: String) -> String { url + "\n" + path }
+
+    /// A PR's files changed, read again (their diffs are kept on the Mac for `askPatch`).
+    func askPullFiles(_ link: PullLink) {
+        guard offersPullReview, state == .connected else { return }
+        pullFiles[link.url, default: PullFilesPage()].loading = true
+        connection.send(.pullFiles(url: link.url))
+    }
+
+    /// One file's diff.
+    func askPatch(_ link: PullLink, path: String) {
+        guard offersPullReview, state == .connected else {
+            patches[Self.patchKey(link.url, path)] = PatchPage(error: "Not connected to your Mac yet.")
+            return
+        }
+        connection.send(.pullPatch(url: link.url, path: path))
+    }
+
     /// A PR read again from its forge.
     func askPull(_ link: PullLink) {
         guard offersPullReview, state == .connected else {
@@ -655,6 +688,14 @@ final class Store: Identifiable {
                 if let detail { page.detail = detail; page.error = nil } else { page.error = error }
                 pullPages[url] = page
                 Perf.shared.log("PULL \(url) \(detail.map { "\($0.state) checks \($0.checks?.count ?? 0) comments \($0.comments?.count ?? 0) merge \($0.mergeStatus ?? "-") \(($0.mergeMethods ?? []).joined(separator: "/"))" } ?? "! \(error ?? "")")")
+            case .pullFiles(let url, let files, let error):
+                pullFiles[url] = PullFilesPage(files: error == nil ? files : pullFiles[url]?.files, error: error, loading: false)
+                // Diffs read before are stale now: asked again when opened.
+                for key in patches.keys where key.hasPrefix(url + "\n") { patches[key] = nil }
+                Perf.shared.log("PULL files \(url) \(files.count)\(error.map { " ! " + $0 } ?? "")")
+            case .pullPatch(let url, let path, let lines, let error):
+                patches[Self.patchKey(url, path)] = PatchPage(lines: lines, error: error)
+                Perf.shared.log("PULL patch \(path) \(lines?.count ?? 0) lines\(error.map { " ! " + $0 } ?? "")")
             case .paired(_, let token):
                 onPaired?(token)
                 Perf.shared.log("PAIRED \(displayName)")

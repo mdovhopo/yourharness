@@ -220,6 +220,64 @@ struct PullDetail: Decodable, Sendable, Hashable {
     let mergeMethods: [String]?
 }
 
+/// A file a PR changes (protocol 6).
+struct PullFile: Decodable, Sendable, Hashable, Identifiable {
+    let path: String
+    let previousPath: String?
+    /// `added`, `removed`, `modified`, `renamed`, `copied`, `changed`.
+    let status: String
+    let additions: Int?
+    let deletions: Int?
+    /// Whether the forge gives its diff (not for huge or binary files).
+    let hasPatch: Bool?
+    var id: String { path }
+}
+
+/// A line of a file's diff, numbered as in the file before (`old`) and after (`new`).
+struct DiffLine: Sendable, Hashable {
+    enum Kind: Sendable, Hashable { case hunk, context, added, removed, note }
+    let kind: Kind
+    let old: Int?
+    let new: Int?
+    let text: String
+
+    /// A unified diff's hunks (what GitHub's `patch` holds) as lines. Call it off the main thread.
+    static func parse(_ patch: String) -> [DiffLine] {
+        var lines: [DiffLine] = []
+        var old = 0, new = 0
+        for raw in patch.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = raw.hasSuffix("\r") ? raw.dropLast() : raw
+            guard let first = line.first else {
+                if !lines.isEmpty { lines.append(DiffLine(kind: .context, old: old, new: new, text: "")); old += 1; new += 1 }
+                continue
+            }
+            switch first {
+            case "@":
+                // `@@ -12,7 +12,8 @@ fn context()`
+                let parts = line.split(separator: " ")
+                if parts.count >= 3 {
+                    old = Int(parts[1].dropFirst().split(separator: ",").first ?? "") ?? old
+                    new = Int(parts[2].dropFirst().split(separator: ",").first ?? "") ?? new
+                }
+                lines.append(DiffLine(kind: .hunk, old: nil, new: nil, text: String(line)))
+            case "+":
+                if line.hasPrefix("+++ ") && lines.isEmpty { continue }
+                lines.append(DiffLine(kind: .added, old: nil, new: new, text: String(line.dropFirst()))); new += 1
+            case "-":
+                if line.hasPrefix("--- ") && lines.isEmpty { continue }
+                lines.append(DiffLine(kind: .removed, old: old, new: nil, text: String(line.dropFirst()))); old += 1
+            case "\\":
+                lines.append(DiffLine(kind: .note, old: nil, new: nil, text: String(line.dropFirst(2))))
+            default:
+                lines.append(DiffLine(kind: .context, old: old, new: new, text: String(line.dropFirst()))); old += 1; new += 1
+            }
+        }
+        // The empty line a patch ending in a newline leaves.
+        if let last = lines.last, last.kind == .context, last.text.isEmpty { lines.removeLast() }
+        return lines
+    }
+}
+
 struct PullCheck: Decodable, Sendable, Hashable {
     let name: String
     let workflow: String?
@@ -368,6 +426,9 @@ enum ToApp: Sendable {
     case paired(device: String, token: String)
     /// Protocol 6: a PR in full, or why it couldn't be read.
     case pull(url: String, detail: PullDetail?, error: String?)
+    case pullFiles(url: String, files: [PullFile], error: String?)
+    /// A file's diff, already split into lines.
+    case pullPatch(url: String, path: String, lines: [DiffLine]?, error: String?)
     case unknown
 
     /// Changes what the phone keeps of this Mac between launches (`Store`'s cache).
@@ -382,6 +443,8 @@ enum ToApp: Sendable {
     private struct Pulls: Decodable { let project: String; let pulls: [PullInfo]; let errors: [String]?; let accounts: [String]? }
     private struct Paired: Decodable { let device: String; let token: String }
     private struct Pull: Decodable { let url: String; let pull: PullDetail?; let error: String? }
+    private struct PullFiles: Decodable { let url: String; let files: [PullFile]?; let error: String? }
+    private struct PullPatch: Decodable { let url: String; let path: String; let patch: String?; let error: String? }
     private struct Hello: Decodable { let `protocol`: Int?; let server: String; let data: String; let mac: String?; let hosts: [String]? }
     private struct LiveMessage: Decodable { let thread: String; let live: Live }
     private struct Done: Decodable { let id: String; let error: String?; let thread: String? }
@@ -471,6 +534,12 @@ enum ToApp: Sendable {
             case "pull":
                 let m = try d.decode(Pull.self, from: data)
                 return .pull(url: m.url, detail: m.pull, error: m.error)
+            case "pull_files":
+                let m = try d.decode(PullFiles.self, from: data)
+                return .pullFiles(url: m.url, files: m.files ?? [], error: m.error)
+            case "pull_patch":
+                let m = try d.decode(PullPatch.self, from: data)
+                return .pullPatch(url: m.url, path: m.path, lines: m.patch.map(DiffLine.parse), error: m.error)
             case "paired":
                 let m = try d.decode(Paired.self, from: data)
                 return .paired(device: m.device, token: m.token)
@@ -526,6 +595,8 @@ enum FromApp {
     case askAside(id: String, thread: String, text: String)
     case pulls(project: String, fresh: Bool)
     case pull(url: String)
+    case pullFiles(url: String)
+    case pullPatch(url: String, path: String)
     case mergePull(id: String, url: String, method: String, auto: Bool)
 
     var actionID: String? {
@@ -604,6 +675,8 @@ enum FromApp {
         case .askAside(let id, let t, let text): ["type": "ask_aside", "id": id, "thread": t, "text": text]
         case .pulls(let project, let fresh): ["type": "pulls", "project": project, "fresh": fresh]
         case .pull(let url): ["type": "pull", "url": url]
+        case .pullFiles(let url): ["type": "pull_files", "url": url]
+        case .pullPatch(let url, let path): ["type": "pull_patch", "url": url, "path": path]
         case .mergePull(let id, let url, let method, let auto): ["type": "merge_pull", "id": id, "url": url, "method": method, "auto": auto]
         }
         let data = try! JSONSerialization.data(withJSONObject: object)

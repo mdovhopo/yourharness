@@ -186,6 +186,8 @@ fn subagent_run(sub: &yh_core::thread_run::Subagent, input: Option<&str>) -> wir
 const MEDIA_TOOL: &str = "mcp__harness__show_media";
 const PICTURE_TYPES: &[(&str, &str)] = &[("png", "image/png"), ("jpg", "image/jpeg"), ("jpeg", "image/jpeg"), ("gif", "image/gif"), ("webp", "image/webp"), ("heic", "image/heic")];
 const MAX_PICTURE: u64 = 20 * 1024 * 1024;
+/// The biggest diff sent to a client: a file's patch past this is "too big to show here".
+const MAX_PATCH: usize = 2 * 1024 * 1024;
 
 fn picture_type(name: &str) -> Option<&'static str> {
     let ext = name.rsplit('.').next()?.to_lowercase();
@@ -301,6 +303,8 @@ struct Shared {
     files: Mutex<HashMap<String, (Instant, Arc<Vec<String>>)>>,
     /// Each project's PRs as last read, for a minute.
     pulls: Mutex<HashMap<String, (Instant, ToApp)>>,
+    /// Each PR's files and diffs as last read (`pull_files`), for `pull_patch`: ten minutes.
+    pull_files: Mutex<HashMap<String, (Instant, Arc<Vec<pulls::FileDiff>>)>>,
     actions: Option<flume::Sender<Asked>>,
     engine: Option<yh_engine::EngineHandle>,
     /// Each watched thread's newest rows as the engine told them.
@@ -846,6 +850,45 @@ fn answer(id: u64, message: FromApp, shared: &Arc<Shared>, source: &Source) -> V
             std::thread::spawn(move || shared.send_to(id, &[pulls::detail(&url)], |_| {}));
             vec![]
         }
+        // Files read anew each time the page asks; a file's diff from what that read kept.
+        FromApp::PullFiles { url } => {
+            let shared = shared.clone();
+            std::thread::spawn(move || {
+                let reply = match pulls::files(&url) {
+                    Ok(files) => {
+                        let listed = files.iter().map(|(f, _)| f.clone()).collect();
+                        shared.pull_files.lock().unwrap().insert(url.clone(), (Instant::now(), Arc::new(files)));
+                        ToApp::PullFiles { url, files: listed, error: None }
+                    }
+                    Err(e) => ToApp::PullFiles { url, files: vec![], error: Some(e) },
+                };
+                shared.send_to(id, &[reply], |_| {});
+            });
+            vec![]
+        }
+        FromApp::PullPatch { url, path } => {
+            let shared = shared.clone();
+            std::thread::spawn(move || {
+                let kept = shared.pull_files.lock().unwrap().get(&url).filter(|(at, _)| at.elapsed() < Duration::from_secs(600)).map(|(_, f)| f.clone());
+                let files = match kept {
+                    Some(f) => Ok(f),
+                    None => pulls::files(&url).map(|f| {
+                        let f = Arc::new(f);
+                        shared.pull_files.lock().unwrap().insert(url.clone(), (Instant::now(), f.clone()));
+                        f
+                    }),
+                };
+                let found = files.and_then(|f| f.iter().find(|(file, _)| file.path == path).map(|(_, p)| p.clone()).ok_or_else(|| "That file isn't in this PR any more.".to_string()));
+                let reply = match found {
+                    Ok(Some(patch)) if patch.len() > MAX_PATCH => ToApp::PullPatch { url, path, patch: None, error: Some("This diff is too big to show here.".into()) },
+                    Ok(Some(patch)) => ToApp::PullPatch { url, path, patch: Some(patch), error: None },
+                    Ok(None) => ToApp::PullPatch { url, path, patch: None, error: Some("The forge doesn't show this file's diff: it's too big, or not text.".into()) },
+                    Err(e) => ToApp::PullPatch { url, path, patch: None, error: Some(e) },
+                };
+                shared.send_to(id, &[reply], |_| {});
+            });
+            vec![]
+        }
         FromApp::MergePull { id: action, url, method, auto } => {
             if shared.actions.is_none() {
                 return match action {
@@ -983,7 +1026,7 @@ fn to_action(m: FromApp) -> Result<Action, String> {
         F::Pin { thread, on, .. } => Action::Pin { thread, on },
         F::Settle { thread, on, .. } => Action::Settle { thread, on },
         F::Delete { thread, .. } => Action::Delete { thread },
-        F::SubscribeApp | F::SubscribeThread { .. } | F::UnsubscribeThread { .. } | F::Page { .. } | F::ToolResult { .. } | F::Subagent { .. } | F::Media { .. } | F::Diagram { .. } | F::Search { .. } | F::Files { .. } | F::Pulls { .. } | F::Pull { .. } | F::MergePull { .. } | F::Unknown => return Err("Not an action.".into()),
+        F::SubscribeApp | F::SubscribeThread { .. } | F::UnsubscribeThread { .. } | F::Page { .. } | F::ToolResult { .. } | F::Subagent { .. } | F::Media { .. } | F::Diagram { .. } | F::Search { .. } | F::Files { .. } | F::Pulls { .. } | F::Pull { .. } | F::MergePull { .. } | F::PullFiles { .. } | F::PullPatch { .. } | F::Unknown => return Err("Not an action.".into()),
     })
 }
 

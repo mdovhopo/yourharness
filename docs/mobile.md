@@ -270,8 +270,20 @@ offers the repo's methods (Squash and Merge, Rebase and Merge, Merge), or Merge 
 (an action: `done`, then the page read again). Safari and Copy Link in the toolbar. The thread
 stays watched under the page. Hooks: `YH_PHONE_OPEN_PULL=<url>` (pushed over the open thread),
 `YH_PHONE_MERGE=<method>[:auto]` (pressed and confirmed once the page is read); on the Mac,
-`YH_MOCK_PULLS`' object form serves the page (its `mergeMethods` and `codeComments` stand in for
-`gh repo view` and `gh api`) and merging only prints `PULL merge <url> <method>`.
+`YH_MOCK_PULLS`' object form serves the page (its `mergeMethods`, `codeComments` and `files` stand
+in for `gh repo view` and `gh api`) and merging only prints `PULL merge <url> <method>`.
+
+The page's Files section lists what the PR changes (added, removed, renamed, modified; lines added
+and removed; how many code comments each has), from `pull_files`: the Mac reads `gh api
+…/pulls/<n>/files` a page of 100 at a time (`glab api …/diffs` for GitLab, counted from the diff)
+and keeps the diffs ten minutes. A file opens its diff, pushed: `pull_patch { url, path }`, the
+file's hunks (2 MB at most), split into lines (`DiffLine.parse`) as the frame is decoded, off the
+main thread. Lines are numbered as in the file (removed ones as before), added green, removed red,
+each hunk headed by its line and the function it's in; code comments under the line they're on,
+those on lines outside the diff at the top. Lines wrap or scroll sideways (the toolbar's button, kept
+as `diff.wrap`); the bottom bar steps to the previous and next file. Huge and binary files (the forge
+gives no diff) say so, with the forge's Files page a tap away. Hooks: `YH_PHONE_PULL_FILE=<path or
+index>` (that diff opened), `YH_PHONE_DIFF_WRAP=0|1`, `YH_PHONE_PULL_SCROLL=files`.
 
 ### On your own iPhone or iPad
 
