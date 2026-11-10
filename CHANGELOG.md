@@ -6,6 +6,10 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+### Added
+
+- Phone: the Mac tab shows each Mac's battery level, and whether it's charging.
+
 ### Fixed
 
 - Phone: tapping the microphone no longer closes the app once you've allowed it to listen.

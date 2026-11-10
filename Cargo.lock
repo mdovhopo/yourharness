@@ -8667,6 +8667,7 @@ dependencies = [
 name = "yh-server"
 version = "0.0.1"
 dependencies = [
+ "core-foundation 0.10.1",
  "flume 0.11.1",
  "getrandom 0.2.17",
  "rusqlite",

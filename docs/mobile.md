@@ -430,6 +430,9 @@ Recorded here so the MVP stays small. Roughly in order; Tailscale last.
      one per Mac for now), and the tab has a section per subscription across every connected Mac,
      the shown one first: Macs signed in to the same account share a section, each window its
      freshest reading.
+   - **The Mac's battery** in its row on the Mac tab: `power` (`{percent, charging, plugged_in}`, read
+     from IOKit every 30 s by `yh-server`'s `power.rs`), after `limits` and when it changes; never sent
+     by a Mac without one. Additive since 0.1.11, so no protocol bump: older phones ignore it.
    - **Can't reach your Mac**: until the phone has connected once, an empty state with the
      address, Try Again and Server Settings in place of an empty list.
    - **Side chats** (`/btw`, or the toolbar's bubbles): a sheet with the side chat's rows drawn by

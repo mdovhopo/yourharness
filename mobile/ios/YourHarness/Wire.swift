@@ -425,6 +425,15 @@ struct LimitWindow: Decodable, Sendable, Hashable, Identifiable {
     var id: String { name }
 }
 
+/// The Mac's battery, as its menu bar shows it. Sent by Macs since 0.1.11 that have one.
+struct Power: Decodable, Sendable, Hashable {
+    /// 0 to 100.
+    let percent: Int
+    let charging: Bool
+    /// On a charger, charging or not.
+    let pluggedIn: Bool
+}
+
 /// Where a search found its words (protocol 5).
 struct SearchHit: Decodable, Sendable, Hashable, Identifiable {
     let thread: String
@@ -510,6 +519,8 @@ enum ToApp: Sendable {
     case options(models: [ModelOption], modes: [String], commands: [String: [SlashCommand]])
     /// Protocol 5: usage limits; what a search found; a thread's files for `@`.
     case limits([LimitWindow], Subscription?)
+    /// The Mac's battery (0.1.11; Macs with one).
+    case power(Power)
     case searchResults(query: String, hits: [SearchHit])
     case files(thread: String, query: String, files: [String])
     /// Protocol 3: a row's whole tool input and result.
@@ -556,6 +567,7 @@ enum ToApp: Sendable {
     private struct Done: Decodable { let id: String; let error: String?; let thread: String? }
     private struct Options: Decodable { let models: [ModelOption]; let modes: [String]; let commands: [String: [SlashCommand]]? }
     private struct Limits: Decodable { let windows: [LimitWindow]; let subscription: Subscription? }
+    private struct PowerMessage: Decodable { let power: Power }
     private struct Found: Decodable { let query: String; let hits: [SearchHit] }
     private struct Files: Decodable { let thread: String; let query: String; let files: [String] }
     private struct Whole: Decodable { let thread: String; let seq: Int; let input: String?; let result: String? }
@@ -613,6 +625,7 @@ enum ToApp: Sendable {
             case "limits":
                 let m = try d.decode(Limits.self, from: data)
                 return .limits(m.windows, m.subscription)
+            case "power": return .power(try d.decode(PowerMessage.self, from: data).power)
             case "search_results":
                 let m = try d.decode(Found.self, from: data)
                 return .searchResults(query: m.query, hits: m.hits)

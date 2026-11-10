@@ -541,7 +541,11 @@ private struct MacRow: View {
                 if let failed = mac.pairingFailed {
                     Text(failed).font(.subheadline).foregroundStyle(.orange).lineLimit(3)
                 } else {
-                    Text(mac.pairing ? "Pairing…" : MacMenu.status(of: mac, waiting: false)).font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
+                    HStack(spacing: 8) {
+                        Text(mac.pairing ? "Pairing…" : MacMenu.status(of: mac, waiting: false)).lineLimit(1)
+                        if mac.state == .connected, let power = mac.power { BatteryLabel(power: power) }
+                    }
+                    .font(.subheadline).foregroundStyle(.secondary)
                 }
                 Text(mac.viaTailscale ? "\(mac.shownAddress) · Tailscale" : mac.shownAddress)
                     .font(.caption.monospaced()).foregroundStyle(.tertiary).lineLimit(1)
@@ -558,6 +562,23 @@ private struct MacRow: View {
         }
         .contentShape(.rect)
         .padding(.vertical, 2)
+    }
+}
+
+/// The Mac's battery in a Mac's row: its level as iOS draws its own, red when low and not charging.
+private struct BatteryLabel: View {
+    let power: Power
+
+    var body: some View {
+        let level = [0, 25, 50, 75, 100].min { abs($0 - power.percent) < abs($1 - power.percent) } ?? 100
+        let low = power.percent <= 20 && !power.pluggedIn
+        HStack(spacing: 4) {
+            Image(systemName: power.charging ? "battery.100percent.bolt" : "battery.\(level)percent")
+                .foregroundStyle(low ? Color.red : power.pluggedIn ? Color.green : Color.secondary)
+            Text("\(power.percent)%").monospacedDigit()
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(power.charging ? "Battery \(power.percent)%, charging" : power.pluggedIn ? "Battery \(power.percent)%, on power" : "Battery \(power.percent)%")
     }
 }
 

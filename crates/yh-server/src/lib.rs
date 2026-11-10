@@ -15,6 +15,7 @@
 
 pub mod browser;
 pub mod diagram;
+mod power;
 pub mod source;
 pub use yh_proto as wire;
 
@@ -34,6 +35,8 @@ use wire::{FromApp, Live, Project, Thread, ToApp};
 /// How often the database is looked at for new rows; the thread list every `LIST_EVERY`th time.
 const POLL: Duration = Duration::from_millis(100);
 const LIST_EVERY: u32 = 5;
+/// The battery is read every `POWER_EVERY`th look: 30 seconds.
+const POWER_EVERY: u32 = 300;
 /// A thread whose rows changed this recently shows as active.
 const ACTIVE_FOR: Duration = Duration::from_secs(4);
 const OUTBOX: usize = 4096;
@@ -308,6 +311,8 @@ struct Shared {
     limits: Mutex<Vec<wire::LimitWindow>>,
     /// The subscription they belong to, as the Mac last checked.
     subscription: Mutex<Option<wire::Subscription>>,
+    /// The Mac's battery as last read (every 30 seconds); `None` without one.
+    power: Mutex<Option<wire::Power>>,
     /// Folders' files for `@`, kept 30 seconds.
     files: Mutex<HashMap<String, (Instant, Arc<Vec<String>>)>>,
     /// Each project's PRs as last read, for a minute.
@@ -372,6 +377,7 @@ pub fn serve(listener: TcpListener, directory: PathBuf, options: Options, links:
     shared.rev.store(source.max_rev().unwrap_or(0), std::sync::atomic::Ordering::SeqCst);
     // The list is read before anyone connects, so the first `threads` is never empty.
     refresh_listing(&source, &shared, &HashMap::new(), true);
+    *shared.power.lock().unwrap() = power::read();
     let options = Arc::new(options);
     std::thread::Builder::new()
         .name("poller".into())
@@ -678,6 +684,23 @@ fn poll(source: Source, shared: &Shared, options: &Options) {
             refresh_listing(&source, shared, &changed_at, false);
         }
         changed_at.retain(|_, t| now - *t < ACTIVE_FOR * 4);
+        if tick % POWER_EVERY == 0 {
+            check_power(shared);
+        }
+    }
+}
+
+/// Reads the battery again and tells app subscribers when it changed.
+fn check_power(shared: &Shared) {
+    let now = power::read();
+    let mut held = shared.power.lock().unwrap();
+    if *held == now {
+        return;
+    }
+    *held = now.clone();
+    drop(held);
+    if let Some(power) = now {
+        shared.send(&ToApp::Power { power }, |c| c.app);
     }
 }
 
@@ -869,7 +892,9 @@ fn answer(id: u64, message: FromApp, shared: &Arc<Shared>, source: &Source) -> V
         FromApp::SubscribeApp => {
             set(&|c| c.app = true);
             let (projects, threads) = shared.listing.lock().unwrap().clone();
-            vec![ToApp::Threads { projects, threads }, shared.options(), shared.limits()]
+            let mut first = vec![ToApp::Threads { projects, threads }, shared.options(), shared.limits()];
+            first.extend(shared.power.lock().unwrap().clone().map(|power| ToApp::Power { power }));
+            first
         }
         FromApp::ToolResult { thread, seq } => match source.whole(&thread, seq) {
             Ok((input, result)) => vec![ToApp::ToolResult { thread, seq, input, result }],

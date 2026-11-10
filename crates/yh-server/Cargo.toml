@@ -16,5 +16,7 @@ tungstenite = { version = "0.30", default-features = false, features = ["handsha
 # Paired phones' tokens are kept as hashes; codes and tokens from the system's randomness.
 sha2 = "0.10"
 getrandom = "0.2"
+# The Mac's battery, for the phone (`power.rs`).
+core-foundation = "0.10"
 
 [dev-dependencies]

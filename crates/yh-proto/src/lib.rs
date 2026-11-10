@@ -43,6 +43,16 @@ pub struct Subscription {
     pub org: Option<String>,
 }
 
+/// The Mac's battery, as its menu bar shows it (0.1.11 and later; a Mac without one never says).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Power {
+    /// 0 to 100.
+    pub percent: u8,
+    pub charging: bool,
+    /// On a charger, charging or not (full, or held back by Optimized Charging).
+    pub plugged_in: bool,
+}
+
 /// A usage window: how much of it is used (0 to 1) and when it starts over.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct LimitWindow {
@@ -607,6 +617,9 @@ pub enum ToApp {
     /// Usage limits as Claude last reported them: after `options`, and when they change. With
     /// the subscription they belong to (one per Mac for now), from Macs that know it.
     Limits { windows: Vec<LimitWindow>, #[serde(default, skip_serializing_if = "Option::is_none")] subscription: Option<Subscription> },
+    /// The Mac's battery: after `limits`, and when it changes (a point, charging or not). Never
+    /// sent by a Mac without one.
+    Power { power: Power },
     /// What `search` found, best first.
     SearchResults { query: String, hits: Vec<SearchHit> },
     /// A thread's files matching `query`, for `@`.

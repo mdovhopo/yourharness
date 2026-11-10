@@ -104,6 +104,8 @@ final class Store: Identifiable {
     var limits: [LimitWindow] = []
     /// The subscription they belong to, when the Mac says (0.1.8 and later).
     var subscription: Subscription?
+    /// The Mac's battery, when it has one (0.1.11 and later).
+    var power: Power?
     var searchQuery = ""
     var searchHits: [SearchHit] = []
     var fileMatches: (thread: String, query: String, files: [String])?
@@ -699,6 +701,8 @@ final class Store: Identifiable {
             case .limits(let windows, let subscription):
                 if limits != windows { limits = windows }
                 if self.subscription != subscription { self.subscription = subscription }
+            case .power(let power):
+                if self.power != power { self.power = power }
             case .searchResults(let query, let hits):
                 if query == searchQuery { searchHits = hits }
             case .files(let thread, let query, let files):
