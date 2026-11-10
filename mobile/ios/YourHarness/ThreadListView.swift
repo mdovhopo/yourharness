@@ -64,6 +64,9 @@ struct ThreadListView: View {
                 }
             }
         }
+        // Here, not on the list: a Mac never reached swaps the list for `Unreachable` at each try,
+        // which took the sheet down with it.
+        .sheet(isPresented: $settingsOpen) { SettingsSheet() }
     }
 
     /// The Mac whose spinner shows: not connected, its list on screen.
@@ -214,7 +217,6 @@ struct ThreadListView: View {
             }
         }
         .refreshable { if fleet.mixesMacs { fleet.stores.forEach { $0.reconnect() } } else { store.reconnect() } }
-        .sheet(isPresented: $settingsOpen) { SettingsSheet() }
         .sheet(item: $pullsFor) { PullsSheet(project: $0).environment(pullsOn ?? store) }
         .sheet(item: $composingIn) { project in
             let mac = composingOn ?? store

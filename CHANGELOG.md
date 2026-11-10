@@ -6,6 +6,10 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+### Fixed
+
+- Phone: Settings no longer closes by itself while the phone hasn't reached your Mac yet.
+
 ## [0.1.11] - 2026-11-10
 
 ### Added
