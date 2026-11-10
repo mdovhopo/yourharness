@@ -13,6 +13,93 @@ use gpui_kit::component::{Icon, IconName, Sizable, WindowExt};
 use gpui_kit::{div, prelude::*, px, AnyElement, App, Context, Entity, FontWeight, IntoElement, SharedString, Window};
 use yh_core::updates::{Notes, Version, RELEASES_PAGE};
 
+/// "Restarting in 1:47 to update to 0.1.9" with Later and Restart Now, over the top right of
+/// the thread while the automatic update counts down. A view of its own: its tick once a second
+/// redraws it and the window's root, never the transcript (a cached sibling).
+pub struct RestartCountdown {
+    updater: Entity<Updater>,
+    workspace: Entity<Workspace>,
+    _tick: Option<gpui_kit::Task<()>>,
+    _watch: gpui_kit::Subscription,
+}
+
+impl RestartCountdown {
+    pub fn new(updater: Entity<Updater>, workspace: Entity<Workspace>, cx: &mut Context<Self>) -> Self {
+        let watch = cx.observe(&updater, |this, u, cx| {
+            let counting = u.read(cx).countdown.is_some();
+            if counting && this._tick.is_none() {
+                this._tick = Some(cx.spawn(async move |this, cx| loop {
+                    cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
+                    if this.update(cx, |_, cx| cx.notify()).is_err() {
+                        break;
+                    }
+                }));
+            } else if !counting {
+                this._tick = None;
+            }
+            cx.notify();
+        });
+        RestartCountdown { updater, workspace, _tick: None, _watch: watch }
+    }
+}
+
+impl gpui_kit::Render for RestartCountdown {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let u = self.updater.read(cx);
+        let (Some(ends), Phase::Ready(v)) = (u.countdown, &u.phase) else { return div().into_any_element() };
+        let theme = Theme::get(cx);
+        let left = ends.saturating_duration_since(std::time::Instant::now()).as_secs();
+        let (u1, u2, ws) = (self.updater.clone(), self.updater.clone(), self.workspace.clone());
+        div()
+            .id("update-countdown")
+            .w(px(300.))
+            .flex()
+            .flex_col()
+            .gap(px(space::S))
+            .p(px(space::M))
+            .rounded(px(radius::LARGE))
+            .bg(theme.card)
+            .border_1()
+            .border_color(theme.separator)
+            .shadow_md()
+            .child(
+                div()
+                    .flex()
+                    .items_start()
+                    .gap(px(space::S))
+                    .child(crate::ui::icons::download().size(px(16.)).text_color(theme.accent).mt(px(1.)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(div().font_weight(FontWeight::SEMIBOLD).child(format!("Restarting in {}:{:02}", left / 60, left % 60)))
+                            .child(div().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child(format!("To update to {v}. Your threads open again where they were."))),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S))
+                    .child(
+                        div()
+                            .id("update-countdown-off")
+                            .flex_1()
+                            .text_size(px(text::FOOTNOTE))
+                            .text_color(theme.accent)
+                            .cursor_pointer()
+                            .child("Turn Off")
+                            .on_click(move |_, _, cx| crate::ui::settings::open_window(ws.clone(), Some(crate::ui::settings::Tab::Releases), cx)),
+                    )
+                    .child(Button::new("update-countdown-later").small().outline().label("Later").tooltip("Wait 15 minutes").on_click(move |_, _, cx| u1.update(cx, |u, cx| u.later(cx))))
+                    .child(Button::new("update-countdown-now").small().primary().label("Restart Now").on_click(move |_, _, cx| u2.update(cx, |u, cx| u.restart_from_countdown(cx)))),
+            )
+            .into_any_element()
+    }
+}
+
 /// How many threads are working now, for Restart's question.
 pub fn working(ws: &Entity<Workspace>, cx: &App) -> usize {
     ws.read(cx).threads.iter().filter(|t| t.read(cx).run.running).count()
@@ -238,7 +325,15 @@ pub fn banner(updater: &Entity<Updater>, workspace: &Entity<Workspace>, notes: &
         Phase::Ready(v) => {
             let ws = workspace.clone();
             row.child(icon(Icon::new(IconName::CircleCheck), theme.success))
-                .child(div().flex_1().min_w_0().flex().flex_col().items_start().child(strong(format!("{v} is ready"))).child(small("Restart to use it".into())))
+                .child(div().flex_1().min_w_0().flex().flex_col().items_start().child(strong(format!("{v} is ready"))).child(small(match u.restart_at() {
+                    Some(at) => format!("Restarts at {at}"),
+                    None if u.auto => "Installs when nothing's running".into(),
+                    None => "Restart to use it".into(),
+                })))
+                .when(u.countdown.is_some(), |d| {
+                    let u3 = updater.clone();
+                    d.child(Button::new("update-later").xsmall().outline().label("Later").tooltip("Wait 15 minutes").on_click(move |_, _, cx| u3.update(cx, |u, cx| u.later(cx))))
+                })
                 .child(Button::new("update-action").xsmall().primary().label("Restart").tooltip(format!("Quit and open {v}")).on_click(move |_, window, cx| {
                     let n = working(&ws, cx);
                     u1.update(cx, |u, cx| u.confirm_restart(n, window, cx))
@@ -308,7 +403,11 @@ pub fn status(updater: &Entity<Updater>, workspace: &Entity<Workspace>, notes: &
         Phase::Preparing(r) => row.child(Icon::new(IconName::LoaderCircle).size(px(14.)).text_color(theme.secondary)).child(format!("Preparing {}…", r.version)).into_any_element(),
         Phase::Ready(v) => {
             let ws = workspace.clone();
-            row.child(div().flex_1().child(format!("{v} is ready")))
+            row.child(div().flex_1().child(match u.restart_at() {
+                Some(at) => format!("{v} is ready, restarting by itself at {at}"),
+                None if u.auto => format!("{v} is ready, installs when nothing's running"),
+                None => format!("{v} is ready"),
+            }))
                 .child(Button::new("status-restart").small().primary().label("Restart").on_click(move |_, window, cx| {
                     let n = working(&ws, cx);
                     u2.update(cx, |u, cx| u.confirm_restart(n, window, cx))

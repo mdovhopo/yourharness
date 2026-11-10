@@ -6,9 +6,18 @@
 //! release there would replace them with the main app. `YH_UPDATE_FEED` makes them look at a
 //! file instead, for testing the whole flow; `YH_UPDATE_DOWNLOAD=1` then downloads what it
 //! finds and `YH_UPDATE_RESTART=1` restarts into it, printing each step.
+//!
+//! Install Automatically (Settings → Updates, off unless you turn it on, `YH_AUTO_UPDATE=1`
+//! for a run) downloads what it finds and restarts into it once nothing has run for two
+//! minutes (`YH_UPDATE_IDLE` seconds): no thread working, waiting for you or with messages
+//! queued, no background jobs. First a countdown shows for two minutes (`YH_UPDATE_COUNTDOWN`)
+//! with Later (fifteen minutes, `YH_UPDATE_SNOOZE`) and Restart Now, and a notification when the
+//! window is out of sight; anything starting, or a key typed, calls it off. A locked screen
+//! restarts at once: nobody would see it.
 
-use gpui_kit::{Context, Task};
+use gpui_kit::{App, Context, Task};
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -48,6 +57,23 @@ pub struct Updater {
     pub notes_error: Option<String>,
     cancel: Option<Arc<AtomicBool>>,
     _timer: Option<Task<()>>,
+    /// Install Automatically is on.
+    pub auto: bool,
+    /// When the automatic restart happens, while its countdown shows.
+    pub countdown: Option<Instant>,
+    /// Later was pressed: no countdown before this.
+    snoozed_until: Option<Instant>,
+    /// Nothing has run since then.
+    idle_since: Option<Instant>,
+    /// The countdown ran out: a last look for a newer release, then the restart.
+    applying: bool,
+    /// Why the app can't restart now (set by the window: threads, jobs).
+    busy: Option<Rc<dyn Fn(&App) -> Option<String>>>,
+    _watch: Option<Task<()>>,
+}
+
+fn seconds(var: &str, default: u64) -> Duration {
+    Duration::from_secs(std::env::var(var).ok().and_then(|v| v.parse().ok()).unwrap_or(default))
 }
 
 fn log(text: String) {
@@ -82,6 +108,7 @@ impl Updater {
             log(format!("updated from {from}"));
         }
         let feed = std::env::var("YH_UPDATE_FEED").ok().filter(|f| !f.is_empty());
+        let auto = std::env::var("YH_AUTO_UPDATE").as_deref() == Ok("1") || library.setting("autoUpdate").and_then(|v| v.as_bool()).unwrap_or(false);
         let mut updater = Updater {
             phase: Phase::Idle,
             bundle,
@@ -97,8 +124,33 @@ impl Updater {
             notes_error: None,
             cancel: None,
             _timer: None,
+            auto,
+            countdown: None,
+            snoozed_until: None,
+            idle_since: None,
+            applying: false,
+            busy: None,
+            _watch: None,
         };
         updater.restore_staged();
+        updater.watch(cx);
+        // The countdown's notification: Later puts it off, a click shows the window.
+        let answers = crate::platform::update_notification_answers();
+        cx.spawn(async move |this, cx| {
+            while let Ok(answer) = answers.recv_async().await {
+                let done = this.update(cx, |u, cx| {
+                    if answer == "later" {
+                        u.later(cx);
+                    } else {
+                        crate::platform::bring_to_front();
+                    }
+                });
+                if done.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
         if updater.looks() {
             updater._timer = Some(cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(Duration::from_secs(if std::env::var("YH_UPDATE_FEED").is_ok() { 1 } else { 10 })).await;
@@ -215,6 +267,152 @@ impl Updater {
         self.current.is_some() && (self.feed.is_some() || !(self.bundle_id.ends_with(".next") || self.bundle_id.ends_with(".dev")))
     }
 
+    /// Install Automatically turned on or off (Settings saves it).
+    pub fn set_auto(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.auto = on;
+        if !on {
+            self.stop_countdown(None, cx);
+        } else if matches!(self.phase, Phase::Available(_)) {
+            self.download(cx);
+        }
+        self.watch(cx);
+        cx.notify();
+    }
+
+    /// What says the app is busy: asked once a second while an update waits.
+    pub fn set_busy_check(&mut self, check: Rc<dyn Fn(&App) -> Option<String>>) {
+        self.busy = Some(check);
+    }
+
+    /// Once a second while an update is ready and installs by itself: is it time?
+    fn watch(&mut self, cx: &mut Context<Self>) {
+        if !self.auto || !matches!(self.phase, Phase::Ready(_)) || self._watch.is_some() {
+            return;
+        }
+        log("waiting for the app to be idle".into());
+        self._watch = Some(cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(Duration::from_secs(1)).await;
+            match this.update(cx, |u, cx| u.tick(cx)) {
+                Ok(true) => {}
+                _ => break,
+            }
+        }));
+    }
+
+    /// One look: false once there's nothing more to wait for.
+    fn tick(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.auto || !matches!(self.phase, Phase::Ready(_)) {
+            self.stop_countdown(None, cx);
+            self._watch = None;
+            return false;
+        }
+        if self.applying {
+            return true;
+        }
+        let now = Instant::now();
+        if let Some(why) = self.busy.as_ref().and_then(|b| b(cx)) {
+            self.idle_since = None;
+            if self.countdown.is_some() {
+                self.stop_countdown(Some(&why), cx);
+            }
+            return true;
+        }
+        let since = *self.idle_since.get_or_insert(now);
+        if let Some(ends) = self.countdown {
+            if now >= ends {
+                self.apply(cx);
+            }
+            return true;
+        }
+        if self.snoozed_until.is_some_and(|t| now < t) || now.duration_since(since) < seconds("YH_UPDATE_IDLE", 120) {
+            return true;
+        }
+        if crate::platform::screen_off() {
+            log("idle, screen off: restarting".into());
+            self.apply(cx);
+            return true;
+        }
+        let wait = seconds("YH_UPDATE_COUNTDOWN", 120);
+        self.countdown = Some(now + wait);
+        log(format!("idle: restarting in {}s", wait.as_secs()));
+        if !crate::platform::app_is_active() {
+            if let Phase::Ready(v) = &self.phase {
+                crate::platform::notify_update(&format!("Restarting to update to {v}"), &format!("YourHarness restarts in {} once nothing's running. Choose Later to wait 15 minutes.", countdown_words(wait)));
+            }
+        }
+        // The first countdown only, so a test sees the next one run out.
+        static ANSWERED: AtomicBool = AtomicBool::new(false);
+        if let Ok(answer) = std::env::var("YH_UPDATE_TOAST_ANSWER").map_err(|_| ()).and_then(|a| if ANSWERED.swap(true, Ordering::SeqCst) { Err(()) } else { Ok(a) }) {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                let _ = this.update(cx, |u, cx| {
+                    eprintln!("UPDATE toast {answer}");
+                    if answer == "now" { u.restart_from_countdown(cx) } else { u.later(cx) }
+                });
+            })
+            .detach();
+        }
+        cx.notify();
+        true
+    }
+
+    /// The countdown goes (`why`: something started), back to waiting for two quiet minutes.
+    fn stop_countdown(&mut self, why: Option<&str>, cx: &mut Context<Self>) {
+        if self.countdown.take().is_some() {
+            log(format!("countdown called off{}", why.map(|w| format!(": {w}")).unwrap_or_default()));
+            crate::platform::clear_update_notification();
+            cx.notify();
+        }
+    }
+
+    /// A key typed: you're here, so not now.
+    pub fn typed(&mut self, cx: &mut Context<Self>) {
+        if self.countdown.is_some() {
+            self.idle_since = None;
+            self.stop_countdown(Some("a key typed"), cx);
+        }
+    }
+
+    /// Later: the countdown goes, and none comes for fifteen minutes.
+    pub fn later(&mut self, cx: &mut Context<Self>) {
+        let wait = seconds("YH_UPDATE_SNOOZE", 15 * 60);
+        self.snoozed_until = Some(Instant::now() + wait);
+        self.stop_countdown(Some(&format!("later, for {}s", wait.as_secs())), cx);
+    }
+
+    /// "15:42": when the countdown ends, as the clock says it.
+    pub fn restart_at(&self) -> Option<String> {
+        let left = self.countdown?.saturating_duration_since(Instant::now()).as_secs_f64();
+        let now = yh_core::library::now_ms() / 1000.;
+        Some(yh_core::clock::message_time(now + left, now))
+    }
+
+    /// Restart Now, on the countdown.
+    pub fn restart_from_countdown(&mut self, cx: &mut Context<Self>) {
+        if self.countdown.is_some() {
+            self.apply(cx);
+        }
+    }
+
+    /// The automatic restart: a last look for a newer release first (which replaces this one
+    /// and starts over), then, if still nothing runs, the restart.
+    fn apply(&mut self, cx: &mut Context<Self>) {
+        self.applying = true;
+        self.check(cx);
+    }
+
+    /// The last look found nothing newer.
+    fn finish_apply(&mut self, cx: &mut Context<Self>) {
+        self.applying = false;
+        if let Some(why) = self.busy.as_ref().and_then(|b| b(cx)) {
+            self.idle_since = None;
+            return self.stop_countdown(Some(&why), cx);
+        }
+        crate::platform::clear_update_notification();
+        log("restarting by itself".into());
+        self.restart_now(!crate::platform::app_is_active(), cx);
+    }
+
     fn set(&mut self, phase: Phase, cx: &mut Context<Self>) {
         log(match &phase {
             Phase::Available(r) => format!("available {}", r.version),
@@ -225,6 +423,12 @@ impl Updater {
             other => format!("{other:?}"),
         });
         self.phase = phase;
+        if matches!(self.phase, Phase::Ready(_)) {
+            self.watch(cx);
+        } else {
+            self.applying = false;
+            self.stop_countdown(None, cx);
+        }
         cx.notify();
     }
 
@@ -258,10 +462,14 @@ impl Updater {
                     u.set(Phase::Available(r), cx);
                     u.download(cx);
                 }
-                Ok(_) | Err(_) if staged.is_some() => {}
+                Ok(_) | Err(_) if staged.is_some() => {
+                    if u.applying {
+                        u.finish_apply(cx);
+                    }
+                }
                 Ok(r) if r.version > current => {
                     u.set(Phase::Available(r), cx);
-                    if std::env::var("YH_UPDATE_DOWNLOAD").as_deref() == Ok("1") {
+                    if u.auto || std::env::var("YH_UPDATE_DOWNLOAD").as_deref() == Ok("1") {
                         u.download(cx);
                     }
                 }
@@ -356,7 +564,7 @@ impl Updater {
                     u.cancel = None;
                     u.set(Phase::Ready(release.version.clone()), cx);
                     if std::env::var("YH_UPDATE_RESTART").as_deref() == Ok("1") {
-                        u.restart_now(cx);
+                        u.restart_now(false, cx);
                     } else {
                         // One may have come out while this one downloaded.
                         u.check(cx);
@@ -383,12 +591,13 @@ impl Updater {
         }
     }
 
-    /// Quits; once this process is gone, a small script swaps in the new app and opens it.
-    fn restart_now(&mut self, cx: &mut Context<Self>) {
+    /// Quits; once this process is gone, a small script swaps in the new app and opens it
+    /// (`quiet`: behind the app you're using, as it was).
+    fn restart_now(&mut self, quiet: bool, cx: &mut Context<Self>) {
         let Some(app) = self.bundle.clone() else { return };
         // A development run comes back the way it was started: same scratch state, in the background.
         let mut open: Vec<String> = vec![];
-        if std::env::var("YH_DATA_DIR").is_ok() {
+        if quiet || std::env::var("YH_DATA_DIR").is_ok() {
             open.push("-g".into());
         }
         let mut vars: Vec<(String, String)> = std::env::vars().filter(|(k, _)| k.starts_with("YH_") && k != "YH_UPDATE_RESTART" && k != "YH_UPDATE_DOWNLOAD").collect();
@@ -418,7 +627,7 @@ impl Updater {
     /// Restart now, as Restart's question answered yes does.
     pub fn restart(&mut self, cx: &mut Context<Self>) {
         if matches!(self.phase, Phase::Ready(_)) {
-            self.restart_now(cx);
+            self.restart_now(false, cx);
         }
     }
 
@@ -442,5 +651,17 @@ impl Updater {
             }
         })
         .detach();
+    }
+}
+
+/// "2 minutes", "1 minute", "45 seconds".
+pub fn countdown_words(d: Duration) -> String {
+    let s = d.as_secs();
+    match s {
+        0..=59 => format!("{s} second{}", if s == 1 { "" } else { "s" }),
+        _ => {
+            let m = (s + 30) / 60;
+            format!("{m} minute{}", if m == 1 { "" } else { "s" })
+        }
     }
 }

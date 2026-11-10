@@ -10,6 +10,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 - Phone: tapping a pull request's link in a thread opens a review page right in the app instead of the browser: its status (reviews, checks, conflicts), checks, description and conversation, with Squash and Merge (or Merge When Ready) and a button to open it on GitHub. PRs in a project's PR list open it too. Needs the Mac on this version.
 - Phone: a PR's review page lists the files it changes; tap one for its diff, with comments shown under the lines they're on, lines wrapped or scrolling sideways, and arrows to step through the files.
+- Updates can install by themselves: turn on "Install updates automatically" in Settings → Releases (off by default). New releases then download on their own, and once nothing has run for two minutes (no thread working or waiting for you, no background jobs, no files waiting to be sent) a card in the window's top right counts down two minutes to the restart, with Later (15 minutes) and Restart Now. Typing or anything starting calls it off. When the window is out of sight a notification warns you, with its own Later button; with the screen locked it restarts straight away. Your threads and drafts open again where they were.
 
 ### Fixed
 

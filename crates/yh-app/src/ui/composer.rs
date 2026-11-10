@@ -451,6 +451,11 @@ impl Composer {
         self.sync_card(window, cx);
     }
 
+    /// Files attached and not sent yet, in any thread (held only while the app runs).
+    pub fn has_attachments(&self) -> bool {
+        self.attached.values().any(|a| !a.is_empty())
+    }
+
     /// Kept with the thread: on leaving the field, switching threads and quitting.
     pub fn save_draft(&mut self, cx: &mut Context<Self>) {
         let Some(id) = self.current.clone() else { return };

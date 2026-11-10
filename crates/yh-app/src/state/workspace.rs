@@ -2743,6 +2743,27 @@ impl Workspace {
 
     /// Background jobs and sub-agents running in every thread, for asking before quitting:
     /// (title, detail).
+    /// Why an automatic update can't restart the app now, if anything: a thread working (side
+    /// chats count), one waiting for you, messages queued, or what the quit question would ask
+    /// about (background commands, sub-agents).
+    pub fn busy_for_update(&self, cx: &App) -> Option<String> {
+        for t in self.threads.iter().chain(self.side_chats.values()) {
+            let t = t.read(cx);
+            let r = &t.run;
+            let why = if r.running {
+                "is working"
+            } else if !r.permissions.is_empty() || !r.elicitations.is_empty() || t.sign_in.is_some() {
+                "waits for you"
+            } else if !r.queue.is_empty() {
+                "has messages queued"
+            } else {
+                continue;
+            };
+            return Some(format!("“{}” {why}", t.title));
+        }
+        self.quit_question(cx).map(|(title, _)| title)
+    }
+
     pub fn quit_question(&self, cx: &App) -> Option<(String, String)> {
         // Worded by who started what: a running sub-agent's commands count with it.
         let commands: Vec<String> =

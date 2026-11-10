@@ -875,8 +875,20 @@ impl SettingsView {
                             ),
                     )
                     .child(div().px(px(space::M)).py(px(space::S)).child(crate::ui::updates::status(&updater, &self.workspace, &notes, None, theme, cx)))
-                    .footer("Looks for a new release on GitHub at launch and every few hours. Updates download only when you ask, and apply when you restart."),
+                    .footer("Looks for a new release on GitHub at launch and every few hours."),
             )
+            .child({
+                let (ws, u) = (self.workspace.clone(), updater.clone());
+                Group::untitled()
+                    .child(row(
+                        "Install updates automatically",
+                        Switch::new("auto-update").checked(u.read(cx).auto).on_change(move |on, _, cx| {
+                            ws.read(cx).library.set_setting("autoUpdate", &Value::Bool(*on));
+                            u.update(cx, |u, cx| u.set_auto(*on, cx));
+                        }),
+                    ))
+                    .footer("Downloads new releases by itself and restarts into them once nothing has run for two minutes: no thread working or waiting for you, no background jobs. A countdown shows first, with Later. Off: updates download when you ask and apply when you restart.")
+            })
             .child(
                 div()
                     .flex()

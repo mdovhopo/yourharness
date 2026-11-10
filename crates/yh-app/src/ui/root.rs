@@ -102,6 +102,8 @@ pub struct RootView {
     focus: FocusHandle,
     /// "Working 0:12" over the transcript's bottom: outside it, so its tick doesn't redraw it.
     working: Entity<crate::ui::working::WorkingTimer>,
+    /// The automatic update's countdown, over the thread's top right while it runs.
+    countdown: Entity<crate::ui::updates::RestartCountdown>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -188,18 +190,36 @@ impl RootView {
         let last_typed: std::rc::Rc<std::cell::Cell<Option<std::time::Instant>>> = Default::default();
         {
             // Keys typed (not shortcuts): what ⌘Z in the composer weighs a thread action against.
+            // Any key also calls off an automatic update's countdown: you're here.
             let last_typed = last_typed.clone();
-            cx.observe_keystrokes(move |_, e, _, _| {
+            let updater = updater.clone();
+            cx.observe_keystrokes(move |_, e, _, cx| {
                 let m = &e.keystroke.modifiers;
                 if !m.platform && !m.control {
                     last_typed.set(Some(std::time::Instant::now()));
                 }
+                if updater.read(cx).countdown.is_some() {
+                    updater.update(cx, |u, cx| u.typed(cx));
+                }
             })
             .detach();
         }
+        {
+            // An automatic update restarts only when nothing runs and nothing would be lost.
+            let (ws, composer) = (workspace.downgrade(), composer.downgrade());
+            updater.update(cx, |u, _| {
+                u.set_busy_check(std::rc::Rc::new(move |cx| {
+                    if let Some(why) = ws.upgrade().and_then(|ws| ws.read(cx).busy_for_update(cx)) {
+                        return Some(why);
+                    }
+                    composer.upgrade().filter(|c| c.read(cx).has_attachments()).map(|_| "files attached and not sent".to_string())
+                }))
+            });
+        }
+        let countdown = { let (u, ws) = (updater.clone(), workspace.clone()); cx.new(|cx| crate::ui::updates::RestartCountdown::new(u, ws, cx)) };
         let working = cx.new(|cx| crate::ui::working::WorkingTimer::new(workspace.clone(), cx));
         let inspector_was_open = workspace.read(cx).shows_inspector;
-        RootView { sidebar_hidden, sidebar_width, sidebar_folded: false, resizing_sidebar: false, inspector_width, resizing_inspector: false, widened: None, inspector_was_open, last_typed, save_frame: None, workspace, sidebar, composer, find, spotlight, resume, inspector, mcp, jobs, deck: vec![], memory: None, project: None, usage: None, tasks: vec![], tasks_for: None, focus: cx.focus_handle(), working, _subscriptions: subscriptions }
+        RootView { sidebar_hidden, sidebar_width, sidebar_folded: false, resizing_sidebar: false, inspector_width, resizing_inspector: false, widened: None, inspector_was_open, last_typed, save_frame: None, workspace, sidebar, composer, find, spotlight, resume, inspector, mcp, jobs, deck: vec![], memory: None, project: None, usage: None, tasks: vec![], tasks_for: None, focus: cx.focus_handle(), working, countdown, _subscriptions: subscriptions }
     }
 
     fn show(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -1082,6 +1102,9 @@ impl Render for RootView {
                     ),
                 )
             })
+            // Top right of the content, under its header: clear of the composer, and of the
+            // right sidebar, where the browser's page would cover it.
+            .child(div().absolute().top(px(44. + space::M)).right(px(right_w + space::M)).child(self.countdown.clone()))
             .child(self.spotlight.clone())
             .child(self.resume.clone())
             .child(self.mcp.clone())

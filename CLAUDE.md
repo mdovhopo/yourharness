@@ -266,5 +266,5 @@ own (`scripts/signing-keychain.sh`), never the login keychain, so signing never 
 
 Never run a `RELEASE=1` build for testing: it shares your app's permissions and data. Test the
 updater with `.next` copies and `YH_UPDATE_FEED=<release.json>` (`YH_UPDATE_DOWNLOAD=1`,
-`YH_UPDATE_RESTART=1` run the whole flow; `VERSION_OVERRIDE=9.9.9 scripts/bundle.sh` makes the
+`YH_UPDATE_RESTART=1` run the whole flow; `YH_AUTO_UPDATE=1` turns on Install Automatically for the run, with `YH_UPDATE_IDLE` / `YH_UPDATE_COUNTDOWN` / `YH_UPDATE_SNOOZE` seconds, `YH_UPDATE_TOAST_ANSWER=later|now` pressing the first countdown's button and `YH_UPDATE_SCREEN_OFF=1` pretending the screen is locked; `VERSION_OVERRIDE=9.9.9 scripts/bundle.sh` makes the
 newer copy).

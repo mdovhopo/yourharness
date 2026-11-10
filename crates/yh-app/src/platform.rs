@@ -355,6 +355,25 @@ impl Sampler {
 
 /// A locked screen or a sleeping display stops frames with nothing wrong in the app.
 pub fn run_is_valid() -> bool {
+    let (locked, asleep) = screen_state();
+    if locked || asleep {
+        eprintln!("PERF INVALID locked={locked} displayAsleep={asleep}");
+    }
+    !locked && !asleep
+}
+
+/// Nobody can see the screen: it's locked or the display sleeps (`YH_UPDATE_SCREEN_OFF=1`
+/// pretends so).
+pub fn screen_off() -> bool {
+    if std::env::var("YH_UPDATE_SCREEN_OFF").as_deref() == Ok("1") {
+        return true;
+    }
+    let (locked, asleep) = screen_state();
+    locked || asleep
+}
+
+/// (locked, display asleep).
+fn screen_state() -> (bool, bool) {
     unsafe {
         let asleep = CGDisplayIsAsleep(CGMainDisplayID()) != 0;
         let mut locked = false;
@@ -369,10 +388,7 @@ pub fn run_is_valid() -> bool {
                 locked = value.downcast::<core_foundation::boolean::CFBoolean>().map(bool::from).unwrap_or(false);
             }
         }
-        if locked || asleep {
-            eprintln!("PERF INVALID locked={locked} displayAsleep={asleep}");
-        }
-        !locked && !asleep
+        (locked, asleep)
     }
 }
 
@@ -532,6 +548,59 @@ fn post(title: &str, subtitle: &str, body: &str, thread: Option<(&str, &str)>) {
     }
 }
 
+/// What was done with the update notification: `later` (its Later button) or `open` (clicked).
+fn update_answers() -> &'static (flume::Sender<String>, flume::Receiver<String>) {
+    static ANSWERS: std::sync::OnceLock<(flume::Sender<String>, flume::Receiver<String>)> = std::sync::OnceLock::new();
+    ANSWERS.get_or_init(flume::unbounded)
+}
+
+const UPDATE_NOTIFICATION: &str = "update.restart";
+
+/// "Restarting in 2 minutes", with a Later button: the automatic update's warning while the
+/// window is out of sight. What you do with it arrives on `update_notification_answers`.
+pub fn notify_update(title: &str, body: &str) {
+    if logs_notifications() {
+        eprintln!("NOTIFY update: {title} · {body}");
+        return;
+    }
+    let Some(center) = notification_center() else { return };
+    install_notification_delegate();
+    unsafe {
+        static CATEGORY: std::sync::Once = std::sync::Once::new();
+        CATEGORY.call_once(|| {
+            let later: id = msg_send![class!(UNNotificationAction), actionWithIdentifier: ns_string("later") title: ns_string("Later") options: 0u64];
+            let actions: id = msg_send![class!(NSArray), arrayWithObject: later];
+            let empty: id = msg_send![class!(NSArray), array];
+            let category: id = msg_send![class!(UNNotificationCategory), categoryWithIdentifier: ns_string("update") actions: actions intentIdentifiers: empty options: 0u64];
+            let set: id = msg_send![class!(NSSet), setWithObject: category];
+            let _: () = msg_send![center, setNotificationCategories: set];
+        });
+        let content: id = msg_send![class!(UNMutableNotificationContent), new];
+        let _: () = msg_send![content, setTitle: ns_string(title)];
+        let _: () = msg_send![content, setBody: ns_string(body)];
+        let _: () = msg_send![content, setCategoryIdentifier: ns_string("update")];
+        let info: id = msg_send![class!(NSDictionary), dictionaryWithObject: ns_string("1") forKey: ns_string("update")];
+        let _: () = msg_send![content, setUserInfo: info];
+        let request: id = msg_send![class!(UNNotificationRequest), requestWithIdentifier: ns_string(UPDATE_NOTIFICATION) content: content trigger: nil];
+        let _: () = msg_send![center, addNotificationRequest: request withCompletionHandler: nil];
+        let _: () = msg_send![content, release];
+    }
+}
+
+/// The countdown is over (cancelled, put off or done): its notification goes.
+pub fn clear_update_notification() {
+    let Some(center) = notification_center() else { return };
+    unsafe {
+        let list: id = msg_send![class!(NSArray), arrayWithObject: ns_string(UPDATE_NOTIFICATION)];
+        let _: () = msg_send![center, removeDeliveredNotificationsWithIdentifiers: list];
+    }
+}
+
+pub fn update_notification_answers() -> flume::Receiver<String> {
+    install_notification_delegate();
+    update_answers().1.clone()
+}
+
 /// You're looking at the thread now: its notifications have done their job.
 pub fn clear_notifications(thread: &str) {
     {
@@ -579,7 +648,12 @@ fn install_notification_delegate() {
             let content: id = msg_send![request, content];
             let info: id = msg_send![content, userInfo];
             let value: id = msg_send![info, objectForKey: ns_string("thread")];
-            if value != nil {
+            let update: id = msg_send![info, objectForKey: ns_string("update")];
+            if update != nil {
+                let action: id = msg_send![response, actionIdentifier];
+                let later: bool = msg_send![action, isEqualToString: ns_string("later")];
+                let _ = update_answers().0.send(if later { "later" } else { "open" }.to_string());
+            } else if value != nil {
                 let utf8: *const std::ffi::c_char = msg_send![value, UTF8String];
                 if !utf8.is_null() {
                     let thread = std::ffi::CStr::from_ptr(utf8).to_string_lossy().into_owned();
