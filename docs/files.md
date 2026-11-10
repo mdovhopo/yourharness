@@ -57,3 +57,9 @@ lines (`open_link`); a web address opens in your browser.
   open and the longest step's lines took to make (PASS under 50 ms). `YH_FILES_LOG=1` prints
   each folder read again and each file reloaded; `YH_FILES_FIND=<words>` types in Find;
   `YH_FILES_WRAP=1` turns Wrap Lines on; `YH_SNAPSHOT` draws it.
+
+## On the phone
+
+The phone reads the same folder over protocol 8 (`crates/yh-server/src/files.rs`): its tree, a
+file's lines coloured by `highlight_line`, what changed since the last commit, and replies' paths
+as links found by the same `Linker`. docs/mobile.md, "The thread's files".

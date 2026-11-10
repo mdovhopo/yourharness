@@ -16,6 +16,7 @@
 pub mod browser;
 pub mod diagram;
 mod power;
+mod files;
 pub mod source;
 pub use yh_proto as wire;
 
@@ -114,6 +115,13 @@ pub struct Asked {
 }
 
 impl Shared {
+    /// The files each reply in `rows` names in `thread`'s folder (protocol 8's links).
+    fn link(&self, source: &Source, thread: &str, rows: &mut [wire::Row]) {
+        if let Ok(Some(folder)) = source.folder_of(thread) {
+            self.folders.link_rows(&folder, rows);
+        }
+    }
+
     fn limits(&self) -> ToApp {
         ToApp::Limits { windows: self.limits.lock().unwrap().clone(), subscription: self.subscription.lock().unwrap().clone() }
     }
@@ -157,6 +165,7 @@ pub fn wire_row(r: &yh_core::thread_run::TranscriptRow, rev: i64) -> wire::Row {
         attachments: d.attachments.clone(),
         changed_files: d.changed_files.clone().unwrap_or_default(),
         subagent: r.sub.as_ref().map(|sub| subagent_info(sub, d.tool_input.as_deref())),
+        files: vec![],
     }
 }
 
@@ -313,8 +322,10 @@ struct Shared {
     subscription: Mutex<Option<wire::Subscription>>,
     /// The Mac's battery as last read (every 30 seconds); `None` without one.
     power: Mutex<Option<wire::Power>>,
-    /// Folders' files for `@`, kept 30 seconds.
-    files: Mutex<HashMap<String, (Instant, Arc<Vec<String>>)>>,
+    /// Thread folders' files (for `@`, Go to File and links in replies), kept 30 seconds.
+    folders: Arc<files::Folders>,
+    /// The last files the phone read, for paging through them.
+    reads: files::Reads,
     /// Each project's PRs as last read, for a minute.
     pulls: Mutex<HashMap<String, (Instant, ToApp)>>,
     /// Each PR's files and diffs as last read (`pull_files`), for `pull_patch`: ten minutes.
@@ -550,7 +561,8 @@ fn follow(told: flume::Receiver<yh_engine::Output>, shared: &Shared, source: &So
                 yh_engine::Output::Snapshot { thread, tag, first_seq, count, rows, live } => {
                     // Above anything saved by now, so what streams after it wins.
                     let rev = shared.rev.fetch_max(source.max_rev().unwrap_or(0), std::sync::atomic::Ordering::SeqCst).max(source.max_rev().unwrap_or(0));
-                    let wire_rows: Vec<wire::Row> = rows.iter().map(|r| wire_row(r, rev)).collect();
+                    let mut wire_rows: Vec<wire::Row> = rows.iter().map(|r| wire_row(r, rev)).collect();
+                    shared.link(source, &thread, &mut wire_rows);
                     shared.mirrors.lock().unwrap().insert(thread.clone(), Mirror { rows: rows.into_iter().map(|r| (r.seq, r)).collect(), count });
                     let snapshot = ToApp::Snapshot { thread: thread.clone(), first_seq: first_seq as i64, count: count as i64, rows: wire_rows };
                     let live = live_of(&live);
@@ -570,7 +582,7 @@ fn follow(told: flume::Receiver<yh_engine::Output>, shared: &Shared, source: &So
         sent_at = Instant::now();
         for (thread, seqs) in changed.drain() {
             let Some(m) = shared.mirrors.lock().unwrap().get(&thread).cloned() else { continue };
-            let rows: Vec<wire::Row> = seqs
+            let mut rows: Vec<wire::Row> = seqs
                 .iter()
                 .filter_map(|seq| m.rows.get(seq))
                 .map(|r| wire_row(r, shared.rev.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1))
@@ -578,6 +590,7 @@ fn follow(told: flume::Receiver<yh_engine::Output>, shared: &Shared, source: &So
             if rows.is_empty() {
                 continue;
             }
+            shared.link(source, &thread, &mut rows);
             let message = ToApp::RowsChanged { thread: thread.clone(), count: m.count as i64, rows };
             shared.send(&message, |c| c.ready_for(&thread));
         }
@@ -676,6 +689,7 @@ fn poll(source: Source, shared: &Shared, options: &Options) {
             rows.sort_by_key(|r| (r.seq, std::cmp::Reverse(r.rev)));
             rows.dedup_by_key(|r| r.seq);
             let count = source.count(&thread).unwrap_or(0);
+            shared.link(&source, &thread, &mut rows);
             let message = ToApp::RowsChanged { thread: thread.clone(), count, rows };
             shared.send(&message, |c| c.watches(&thread));
         }
@@ -1037,13 +1051,65 @@ fn answer(id: u64, message: FromApp, shared: &Arc<Shared>, source: &Source) -> V
                 Ok(None) => return vec![ToApp::Files { thread, query, files: vec![] }],
                 Err(e) => return failed(e),
             };
-            let cached = shared.files.lock().unwrap().get(&folder).filter(|(at, _)| at.elapsed() < Duration::from_secs(30)).map(|(_, f)| f.clone());
-            let all = cached.unwrap_or_else(|| {
-                let listed = Arc::new(yh_core::files::list(std::path::Path::new(&folder)));
-                shared.files.lock().unwrap().insert(folder.clone(), (Instant::now(), listed.clone()));
-                listed
-            });
+            let all = shared.folders.files(&folder);
             vec![ToApp::Files { thread, query: query.clone(), files: yh_core::files::matches(&all, &query, 20) }]
+        }
+        // The thread's folder, read only: nothing outside it (`files::resolve`).
+        FromApp::ListDir { thread, path } => {
+            let entries = match source.folder_of(&thread) {
+                Ok(Some(folder)) => files::list_dir(&folder, &path, shared.folders.listed(&folder).as_deref()),
+                Ok(None) => Err("This thread has no folder on the Mac.".into()),
+                Err(e) => return failed(e),
+            };
+            match entries {
+                Ok(entries) => vec![ToApp::Dir { thread, path, entries, error: None }],
+                Err(error) => vec![ToApp::Dir { thread, path, entries: vec![], error: Some(error) }],
+            }
+        }
+        FromApp::ReadFile { thread, path, from, count, known } => {
+            let page = match source.folder_of(&thread) {
+                Ok(Some(folder)) => shared.reads.page(&folder, &path, from, count, known),
+                Ok(None) => Err("This thread has no folder on the Mac.".into()),
+                Err(e) => return failed(e),
+            };
+            match page {
+                Ok(page) => vec![ToApp::File { thread, path, page: Some(page), error: None }],
+                Err(error) => vec![ToApp::File { thread, path, page: None, error: Some(error) }],
+            }
+        }
+        // `git` takes a moment in a big repo: aside, then to this client.
+        FromApp::Changes { thread } => {
+            let folder = match source.folder_of(&thread) {
+                Ok(Some(f)) => f,
+                Ok(None) => return vec![ToApp::Changes { thread, files: vec![], branch: None, error: Some("This thread has no folder on the Mac.".into()) }],
+                Err(e) => return failed(e),
+            };
+            let shared = shared.clone();
+            std::thread::spawn(move || {
+                let reply = match files::changes(&folder) {
+                    Ok((files, branch)) => ToApp::Changes { thread, files, branch, error: None },
+                    Err(error) => ToApp::Changes { thread, files: vec![], branch: None, error: Some(error) },
+                };
+                shared.send_to(id, &[reply], |_| {});
+            });
+            vec![]
+        }
+        FromApp::ChangePatch { thread, path } => {
+            let folder = match source.folder_of(&thread) {
+                Ok(Some(f)) => f,
+                Ok(None) => return vec![ToApp::ChangePatch { thread, path, patch: None, error: Some("This thread has no folder on the Mac.".into()) }],
+                Err(e) => return failed(e),
+            };
+            let shared = shared.clone();
+            std::thread::spawn(move || {
+                let reply = match files::change_patch(&folder, &path) {
+                    Ok(patch) if patch.len() > MAX_PATCH => ToApp::ChangePatch { thread, path, patch: None, error: Some("This diff is too big to show here.".into()) },
+                    Ok(patch) => ToApp::ChangePatch { thread, path, patch: Some(patch), error: None },
+                    Err(error) => ToApp::ChangePatch { thread, path, patch: None, error: Some(error) },
+                };
+                shared.send_to(id, &[reply], |_| {});
+            });
+            vec![]
         }
         FromApp::Diagram { key, source } => match diagram::draw(&source) {
             Ok(drawing) => vec![ToApp::Diagram { key, drawing: Some(drawing), error: None }],
@@ -1074,7 +1140,10 @@ fn answer(id: u64, message: FromApp, shared: &Arc<Shared>, source: &Source) -> V
             let first_seq = (count - limit).max(0);
             let live = shared.live.lock().unwrap().get(&thread).cloned().unwrap_or_default();
             match source.rows(&thread, first_seq, count) {
-                Ok(rows) => vec![ToApp::Snapshot { thread: thread.clone(), first_seq, count, rows }, ToApp::Live { thread, live }],
+                Ok(mut rows) => {
+                    shared.link(source, &thread, &mut rows);
+                    vec![ToApp::Snapshot { thread: thread.clone(), first_seq, count, rows }, ToApp::Live { thread, live }]
+                }
                 Err(e) => failed(e),
             }
         }
@@ -1115,7 +1184,10 @@ fn answer(id: u64, message: FromApp, shared: &Arc<Shared>, source: &Source) -> V
         FromApp::Page { thread, before_seq, limit } => {
             let limit = limit.unwrap_or(DEFAULT_ROWS).clamp(1, MAX_ROWS);
             match source.rows(&thread, (before_seq - limit).max(0), before_seq) {
-                Ok(rows) => vec![ToApp::PageRows { thread, rows }],
+                Ok(mut rows) => {
+                    shared.link(source, &thread, &mut rows);
+                    vec![ToApp::PageRows { thread, rows }]
+                }
                 Err(e) => failed(e),
             }
         }
@@ -1183,7 +1255,7 @@ fn to_action(m: FromApp) -> Result<Action, String> {
         F::Settle { thread, on, .. } => Action::Settle { thread, on },
         F::Delete { thread, .. } => Action::Delete { thread },
         F::BrowserInput { thread, input, .. } => Action::Browser { thread, input },
-        F::WatchBrowser { .. } | F::UnwatchBrowser | F::BrowserAck { .. } | F::SubscribeApp | F::SubscribeThread { .. } | F::UnsubscribeThread { .. } | F::Page { .. } | F::ToolResult { .. } | F::Subagent { .. } | F::Media { .. } | F::Diagram { .. } | F::Search { .. } | F::Files { .. } | F::Pulls { .. } | F::Pull { .. } | F::MergePull { .. } | F::PullFiles { .. } | F::PullPatch { .. } | F::Unknown => return Err("Not an action.".into()),
+        F::WatchBrowser { .. } | F::UnwatchBrowser | F::BrowserAck { .. } | F::SubscribeApp | F::SubscribeThread { .. } | F::UnsubscribeThread { .. } | F::Page { .. } | F::ToolResult { .. } | F::Subagent { .. } | F::Media { .. } | F::Diagram { .. } | F::Search { .. } | F::Files { .. } | F::Pulls { .. } | F::Pull { .. } | F::MergePull { .. } | F::PullFiles { .. } | F::PullPatch { .. } | F::ListDir { .. } | F::ReadFile { .. } | F::Changes { .. } | F::ChangePatch { .. } | F::Unknown => return Err("Not an action.".into()),
     })
 }
 

@@ -109,9 +109,9 @@ struct PullDiffScreen: View {
 
 /// The lines, drawn lazily: a gutter with the line's number and its + or −, then the code.
 /// Unwrapped, every line is as wide as the longest, so the colors run edge to edge as it scrolls.
-private struct PullDiffLines: View {
+struct PullDiffLines: View {
     let lines: [DiffLine]
-    let comments: (byLine: [Int: [PullComment]], elsewhere: [PullComment])
+    var comments: (byLine: [Int: [PullComment]], elsewhere: [PullComment]) = ([:], [])
     let wrap: Bool
 
     private static let size: CGFloat = 12

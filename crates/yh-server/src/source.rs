@@ -285,6 +285,7 @@ fn row(r: &rusqlite::Row, at: usize) -> rusqlite::Result<(Row, RawRun)> {
         turn_ended_at: r.get(at + 13)?,
         changed_files: list(r.get(at + 14)?),
         subagent: None,
+        files: vec![],
     };
     Ok((row, run))
 }

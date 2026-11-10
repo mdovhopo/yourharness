@@ -10,6 +10,12 @@ struct RowDetail: View {
     let store: Store?
     @Environment(\.dismiss) private var dismiss
 
+    /// The file a Read, Edit or Write was about, as its input names it.
+    private var filePath: String? {
+        guard ["Read", "Edit", "MultiEdit", "Write", "NotebookEdit"].contains(row.toolName ?? "") else { return nil }
+        return ToolSummary.field("file_path", in: row.toolInput ?? "") ?? ToolSummary.field("notebook_path", in: row.toolInput ?? "")
+    }
+
     var body: some View {
         NavigationStack {
             ScrollView {
@@ -27,6 +33,15 @@ struct RowDetail: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
+                // A file it read or wrote: opened over the thread (protocol 8).
+                if let store, store.offersFiles, let path = filePath {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button("Open File", systemImage: "doc.text") {
+                            dismiss()
+                            store.openFile = FileTarget(thread: threadID, path: path, line: nil, end: nil)
+                        }
+                    }
+                }
             }
         }
         .presentationDetents([.medium, .large])

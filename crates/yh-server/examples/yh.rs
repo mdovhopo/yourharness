@@ -48,7 +48,8 @@ fn next(ws: &mut Socket) -> Option<ToApp> {
 
 fn line(r: &Row) -> String {
     let text: String = r.text.chars().take(70).collect();
-    format!("#{} {} {}{:?}", r.seq, r.kind, r.tool_name.as_deref().map(|t| format!("{t} ")).unwrap_or_default(), text)
+    let files: Vec<String> = r.files.iter().map(|f| format!("{}→{}", f.text, f.path)).collect();
+    format!("#{} {} {}{:?}{}", r.seq, r.kind, r.tool_name.as_deref().map(|t| format!("{t} ")).unwrap_or_default(), text, if files.is_empty() { String::new() } else { format!(" files [{}]", files.join(", ")) })
 }
 
 fn live_line(l: &Live) -> String {
@@ -111,6 +112,19 @@ fn print(m: &ToApp, began: &mut bool) -> bool {
         ToApp::BrowserSummary { summary, .. } => println!("SUMMARY tabs={} {} {:?} opened_at={:?}", summary.tabs, summary.url, summary.title, summary.opened_at),
         ToApp::BrowserFrame { tab, seq, width, height, data, .. } => println!("FRAME #{seq} tab {tab} {width}x{height} {} bytes", data.len() * 3 / 4),
         ToApp::PullPatch { path, patch, error, .. } => println!("PATCH {path} {} lines{}", patch.as_ref().map(|p| p.lines().count()).unwrap_or(0), error.as_ref().map(|e| format!(" ! {e}")).unwrap_or_default()),
+        ToApp::Dir { path, entries, error, .. } => {
+            let names: Vec<String> = entries.iter().map(|e| format!("{}{}{}", e.name, if e.folder { "/" } else { "" }, if e.ignored { " (ignored)" } else { "" })).collect();
+            println!("DIR {path:?} {}{}", names.join(", "), error.as_ref().map(|e| format!(" ! {e}")).unwrap_or_default())
+        }
+        ToApp::File { path, page, error, .. } => match page {
+            Some(p) => println!("FILE {path} {} {} bytes, lines {}..{} of {}, {} coloured{}{}", p.kind, p.size, p.from, p.from + p.lines.len() as u64, p.total, p.spans.iter().filter(|s| !s.is_empty()).count(), if p.unchanged { " unchanged" } else { "" }, p.note.as_ref().map(|n| format!(" ({n})")).unwrap_or_default()),
+            None => println!("FILE {path} ! {}", error.as_deref().unwrap_or("")),
+        },
+        ToApp::Changes { files, branch, error, .. } => {
+            let list: Vec<String> = files.iter().map(|f| format!("{} {} +{} -{}", f.status, f.path, f.additions, f.deletions)).collect();
+            println!("CHANGES on {} {}{}", branch.as_deref().unwrap_or("-"), list.join(", "), error.as_ref().map(|e| format!(" ! {e}")).unwrap_or_default())
+        }
+        ToApp::ChangePatch { path, patch, error, .. } => println!("CHANGE PATCH {path} {} lines{}", patch.as_ref().map(|p| p.lines().count()).unwrap_or(0), error.as_ref().map(|e| format!(" ! {e}")).unwrap_or_default()),
     }
     false
 }

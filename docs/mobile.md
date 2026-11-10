@@ -341,6 +341,53 @@ pushed.
   video codec while things move, the phone's own WKWebView through the Mac as a proxy (native
   scrolling, but a second browser, not the agent's), and the element picker.
 
+### The thread's files
+
+A thread's folder on the Mac (its worktree, or its project's folder) is readable from the phone, never
+written (protocol 8; `yh_server::files`, `Files.swift`). The folder button in the thread's toolbar
+pushes **Files**:
+
+- **Changed**: `changes { thread }` → `changes { files, branch }`, from `git status --porcelain -z
+  --untracked-files=all --no-renames` and `git diff HEAD --numstat` (new files counted by their lines;
+  before the first commit, against the empty tree). Read when shown and again when a turn ends. A
+  file opens its diff, `change_patch { thread, path }` (`git diff HEAD -- path`, or `--no-index
+  /dev/null path` for a new one, the header cut off), drawn by the PR review's diff view
+  (`PullDiffLines`), stepping to the previous and next change.
+- **All Files**: `list_dir { thread, path }` → `dir { entries }`, a folder at a time as on disk
+  (`yh_core::files::list_dir`, as the Mac's tree), folders pushed; what git ignores is dimmed
+  (`ignored`, from `files::list` kept 30 s, `Folders`).
+- **Go to File**: the `files` query `@` uses (20 best matches).
+- **A file**: `read_file { thread, path, from, count, known }` → `file { page }`: `count` lines from
+  `from` (1000 by default, 5000 at most) of `total`, each with its colours from `highlight_line`
+  (`spans`, `[start, end, kind]` in UTF-16 units, made into an `AttributedString` as the frame is
+  decoded). The first 8 MB of a file is read, lines over 2000 characters cut (with a `note`); the
+  last six files read are kept while unchanged, so paging reads a file once. Pictures come whole
+  (base64, up to 6 MB), binary files as their size. The viewer is a `LazyVStack` of every line;
+  a line not read yet asks for its page as it shows. Find in File reads the whole file first (up to
+  100,000 lines), then steps through the lines that match. Every 3 s while it shows, the phone
+  sends `known: <modified>`: an unchanged file answers `unchanged` and nothing else, a changed one
+  its first page, and the phone drops what it held and reads the pages in view again.
+- **Links**: the server adds `files` to each reply row it sends (snapshots, pages, streamed
+  changes): the thread's files the reply names, found by the Mac's `Linker` (`file_references`,
+  the same rules as the Mac's links: an exact path, an absolute one inside the folder, or a name
+  only one file has, with `:12`, `:12-20`, `#L12`). The phone links each where it's written as a
+  whole word (`yh-file://open?path=…&line=…`) and pushes the viewer at those lines. A Read, Edit or
+  Write row's sheet has Open File.
+- **Nothing outside the folder**: every path is joined to the folder, resolved (`..` and links
+  followed) and must still be inside it, or the answer is "That's outside the thread's folder."
+  (tested with `/etc/hosts`, `../../etc/hosts` and a link to `/etc`).
+
+Hooks: `YH_PHONE_OPEN_FILES=changed|all|<folder>` (Files pushed over the selected thread),
+`YH_PHONE_CHANGE=<path or index>` (that change's diff), `YH_PHONE_FILES_QUERY=<words>` (typed in Go to
+File, `GOTO` line), `YH_PHONE_OPEN_FILE=<path[:line]>` (as a link does), `YH_PHONE_FILE_FIND=<words>`
+(`FIND` line), `YH_PHONE_FILE_WRAP=0|1`; `DIR`, `FILE`, `FILE changed`, `CHANGES` lines. `yh <url> raw
+'{"type":"read_file",…}'` prints `DIR`, `FILE`, `CHANGES` and `CHANGE PATCH` lines, and a row's
+`files`. Checked 2026-11-10 in the Simulator against a test copy: a Haiku turn started from the phone
+edited `src/main.rs` and made `notes.txt`; its reply's `src/main.rs:6` and `notes.txt` were links,
+Changed listed both (+1 −1, +2) with the edit's diff, All Files dimmed `target/`, `main.rs` opened at
+line 6 coloured, a 2,600-line file paged in and found `line 2500:`, and `notes.txt` edited on the
+Mac while open showed its new line on the phone.
+
 ### On your own iPhone or iPad
 
 `scripts/mobile-device.sh [device]` builds the app signed with your Apple team, installs it on a

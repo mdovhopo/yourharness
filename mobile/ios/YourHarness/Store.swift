@@ -578,6 +578,130 @@ final class Store: Identifiable {
         connection.send(action)
     }
 
+    // MARK: Protocol 8: the thread's folder, read only
+
+    /// The Mac shows the thread's folder: its tree, files, what changed.
+    var offersFiles: Bool { serverProtocol >= 8 }
+    /// A file a link tapped opened: pushed over the thread.
+    var openFile: FileTarget?
+    /// The thread whose folder is open (the Files button): pushed over it.
+    var openFiles: String?
+
+    struct DirPage: Equatable {
+        var entries: [DirEntry]?
+        var error: String?
+    }
+
+    /// A file as read so far: its lines by number, a page at a time.
+    struct FileDoc {
+        var kind: String?
+        var size = 0
+        var modified: Double?
+        var total = 0
+        var lines: [Int: FileLine] = [:]
+        /// The pages asked for (by first line), so each is asked once.
+        var asked: Set<Int> = []
+        var note: String?
+        var image: UIImage?
+        var error: String?
+        /// Bumped when the file changed on the Mac and was read again.
+        var revision = 0
+    }
+
+    struct ChangesPage: Equatable {
+        var files: [PullFile]?
+        var branch: String?
+        var error: String?
+        var loading = false
+    }
+
+    var dirs: [String: DirPage] = [:]
+    var fileDocs: [String: FileDoc] = [:]
+    var changes: [String: ChangesPage] = [:]
+    var changePatches: [String: PatchPage] = [:]
+    static let filePage = 1000
+
+    static func fileKey(_ thread: String, _ path: String) -> String { thread + "\n" + path }
+
+    func askDir(_ path: String, in thread: String) {
+        guard offersFiles, state == .connected else {
+            dirs[Self.fileKey(thread, path)] = DirPage(entries: dirs[Self.fileKey(thread, path)]?.entries, error: "Not connected to your Mac yet.")
+            return
+        }
+        connection.send(.listDir(thread: thread, path: path))
+    }
+
+    /// The page holding `line` of a file, unless it's held or asked for already.
+    func askFileLines(_ path: String, around line: Int, in thread: String) {
+        let key = Self.fileKey(thread, path)
+        let first = max(0, line / Self.filePage * Self.filePage)
+        guard offersFiles, state == .connected else {
+            if fileDocs[key]?.kind == nil { fileDocs[key, default: FileDoc()].error = "Not connected to your Mac yet." }
+            return
+        }
+        guard fileDocs[key]?.asked.contains(first) != true else { return }
+        fileDocs[key, default: FileDoc()].asked.insert(first)
+        connection.send(.readFile(thread: thread, path: path, from: first, count: Self.filePage, known: nil))
+    }
+
+    /// Whether the file changed on the Mac: its first page comes again if it did.
+    func checkFile(_ path: String, in thread: String) {
+        let key = Self.fileKey(thread, path)
+        guard offersFiles, state == .connected, let modified = fileDocs[key]?.modified else { return }
+        connection.send(.readFile(thread: thread, path: path, from: 0, count: Self.filePage, known: modified))
+    }
+
+    /// Forgets a file closed, so opening it again reads it anew.
+    func dropFile(_ path: String, in thread: String) {
+        fileDocs[Self.fileKey(thread, path)] = nil
+    }
+
+    func askChanges(in thread: String) {
+        guard offersFiles, state == .connected else {
+            changes[thread, default: ChangesPage()].error = "Not connected to your Mac yet."
+            return
+        }
+        changes[thread, default: ChangesPage()].loading = true
+        connection.send(.changes(thread: thread))
+    }
+
+    func askChangePatch(_ path: String, in thread: String) {
+        guard offersFiles, state == .connected else {
+            changePatches[Self.fileKey(thread, path)] = PatchPage(error: "Not connected to your Mac yet.")
+            return
+        }
+        connection.send(.changePatch(thread: thread, path: path))
+    }
+
+    private func receive(file page: FilePage?, error: String?, path: String, thread: String) {
+        let key = Self.fileKey(thread, path)
+        var doc = fileDocs[key] ?? FileDoc()
+        guard let page else {
+            doc.error = error
+            fileDocs[key] = doc
+            Perf.shared.log("FILE \(path) ! \(error ?? "")")
+            return
+        }
+        if page.unchanged { return }
+        // Changed since it was read: what's held goes, the rest is asked again as it shows.
+        if let held = doc.modified, held != page.modified {
+            doc.lines = [:]
+            doc.asked = [page.from]
+            doc.revision += 1
+            Perf.shared.log("FILE changed \(path)")
+        }
+        doc.kind = page.kind
+        doc.size = page.size
+        doc.modified = page.modified
+        doc.total = page.total
+        doc.note = page.note
+        doc.image = page.image
+        doc.error = nil
+        for (i, line) in page.lines.enumerated() { doc.lines[page.from + i] = line }
+        fileDocs[key] = doc
+        Perf.shared.log("FILE \(path) \(page.kind) lines \(page.from)..\(page.from + page.lines.count) of \(page.total)")
+    }
+
     /// Searches every thread's words; hits arrive in `searchHits`. Titles are matched here.
     func search(_ query: String) {
         let query = query.trimmingCharacters(in: .whitespaces)
@@ -656,6 +780,8 @@ final class Store: Identifiable {
                 if let mac { macID = mac }
                 if !hosts.isEmpty, hosts != self.hosts { self.hosts = hosts }
                 serverProtocol = version
+                // Pages asked of the last connection may never have come: asked again as they show.
+                for (key, doc) in fileDocs { fileDocs[key]?.asked = Set(doc.lines.keys.map { $0 / Self.filePage * Self.filePage }) }
                 onHello?()
                 connection.send(.subscribeApp)
                 if !away { resubscribe() }
@@ -772,6 +898,18 @@ final class Store: Identifiable {
                 Perf.shared.log("PAIRED \(displayName)")
             case .error(let message):
                 print("server: \(message)")
+            case .dir(let thread, let path, let entries, let error):
+                dirs[Self.fileKey(thread, path)] = DirPage(entries: error == nil ? entries : dirs[Self.fileKey(thread, path)]?.entries, error: error)
+                Perf.shared.log("DIR \(path.isEmpty ? "/" : path) \(entries.count)\(error.map { " ! " + $0 } ?? "")")
+            case .file(let thread, let path, let page, let error):
+                receive(file: page, error: error, path: path, thread: thread)
+            case .changes(let thread, let files, let branch, let error):
+                changes[thread] = ChangesPage(files: error == nil ? files : changes[thread]?.files, branch: branch, error: error, loading: false)
+                for key in changePatches.keys where key.hasPrefix(thread + "\n") { changePatches[key] = nil }
+                Perf.shared.log("CHANGES \(files.count) on \(branch ?? "-")\(error.map { " ! " + $0 } ?? "")")
+            case .changePatch(let thread, let path, let lines, let error):
+                changePatches[Self.fileKey(thread, path)] = PatchPage(lines: lines, error: error)
+                Perf.shared.log("CHANGE patch \(path) \(lines?.count ?? 0) lines\(error.map { " ! " + $0 } ?? "")")
             case .unknown:
                 break
             }

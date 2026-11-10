@@ -28,6 +28,7 @@ struct TranscriptScreen: View {
     private static let env = ProcessInfo.processInfo.environment
     private static var openedPull = false
     private static var openedBrowser = false
+    private static var openedFiles = false
 
     /// The thread's browser: beside the thread on an iPad, pushed over it on a phone.
     private func showBrowser() {
@@ -76,7 +77,8 @@ struct TranscriptScreen: View {
             Color.clear
             if let model {
                 // Under the composer, so rows scroll beneath its glass; its height is the list's inset.
-                TranscriptRepresentable(model: model, store: store, bottomInset: composerHeight, onPull: { store.openPull = $0 }, onLocal: openLocal).ignoresSafeArea(.container, edges: .bottom)
+                TranscriptRepresentable(model: model, store: store, bottomInset: composerHeight, onPull: { store.openPull = $0 }, onLocal: openLocal,
+                                        onFile: store.offersFiles ? { store.openFile = FileTarget(thread: threadID, path: $0.path, line: $0.line, end: $0.end) } : nil).ignoresSafeArea(.container, edges: .bottom)
             }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
@@ -250,6 +252,11 @@ struct TranscriptScreen: View {
                 .accessibilityLabel((store.browserSummaries[threadID]?.tabs ?? 0) > 0 ? "Browser, pages open" : "Browser")
                 }
             }
+            if store.offersFiles {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Files", systemImage: "folder") { store.openFiles = threadID }
+                }
+            }
             if store.serverProtocol >= 5 {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Side Chat", systemImage: "bubble.left.and.text.bubble.right") { showsAside = true }
@@ -269,6 +276,27 @@ struct TranscriptScreen: View {
         .sheet(isPresented: $showsAside) { AsideSheet(threadID: threadID) }
         // A PR's link: its review page, pushed over the thread (which stays watched beneath).
         .navigationDestination(item: Bindable(store).openPull) { PullScreen(link: $0) }
+        // A file a link names, and the thread's folder: pushed over the thread (watched beneath).
+        .navigationDestination(item: Bindable(store).openFile) { FileScreen(target: $0) }
+        .navigationDestination(isPresented: Binding(get: { store.openFiles == threadID }, set: { if !$0, store.openFiles == threadID { store.openFiles = nil } })) {
+            FilesScreen(threadID: threadID)
+        }
+        // `YH_PHONE_OPEN_FILES=changed|all`, `YH_PHONE_OPEN_FILE=<path[:line]>`: as the Files button and a link do.
+        .task(id: store.offersFiles) {
+            guard store.offersFiles, !Self.openedFiles else { return }
+            if let tab = Self.env["YH_PHONE_OPEN_FILES"] {
+                Self.openedFiles = true
+                try? await Task.sleep(for: .seconds(1))
+                Perf.shared.log("OPEN files \(tab)")
+                store.openFiles = threadID
+            } else if let spec = Self.env["YH_PHONE_OPEN_FILE"] {
+                Self.openedFiles = true
+                try? await Task.sleep(for: .seconds(1))
+                let parts = spec.split(separator: ":", maxSplits: 1).map(String.init)
+                Perf.shared.log("OPEN file \(spec)")
+                store.openFile = FileTarget(thread: threadID, path: parts[0], line: parts.count > 1 ? Int(parts[1]) : nil, end: nil)
+            }
+        }
         // The thread's browser on the Mac, streamed: pushed over the thread (watched beneath).
         .navigationDestination(isPresented: Binding(get: { store.openBrowser == threadID }, set: { if !$0, store.openBrowser == threadID { store.openBrowser = nil } })) {
             BrowserScreen(threadID: threadID)
@@ -299,7 +327,7 @@ struct TranscriptScreen: View {
         }
         .onAppear { model = store.open(threadID) }
         // A PR's page pushed over it keeps the thread open; leaving the thread closes it (`path`).
-        .onDisappear { if let model, store.openPull == nil, store.openBrowser == nil { store.close(model) } }
+        .onDisappear { if let model, store.openPull == nil, store.openBrowser == nil, store.openFile == nil, store.openFiles == nil { store.close(model) } }
     }
 }
 
@@ -312,12 +340,15 @@ struct TranscriptRepresentable: UIViewControllerRepresentable {
     var onPull: ((PullLink) -> Void)?
     /// A `localhost` link tapped: the Mac's browser (protocol 7), instead of the phone's.
     var onLocal: ((URL) -> Void)?
+    /// A file the reply names tapped: opened (protocol 8).
+    var onFile: ((FileLink.Target) -> Void)?
 
     func makeUIViewController(context: Context) -> TranscriptViewController {
         let controller = TranscriptViewController(model: model)
         controller.store = store
         controller.onPull = onPull
         controller.onLocal = onLocal
+        controller.onFile = onFile
         return controller
     }
 
@@ -325,6 +356,7 @@ struct TranscriptRepresentable: UIViewControllerRepresentable {
         controller.setBottomInset(bottomInset)
         controller.onPull = onPull
         controller.onLocal = onLocal
+        controller.onFile = onFile
     }
 }
 
@@ -343,12 +375,15 @@ final class TranscriptViewController: UIViewController, UICollectionViewDataSour
     private var openedRow = false
     var onPull: ((PullLink) -> Void)?
     var onLocal: ((URL) -> Void)?
+    var onFile: ((FileLink.Target) -> Void)?
 
     /// A link tapped: a PR's opens its review page when the Mac can read it, a page on the Mac
     /// (`localhost`) its browser, the rest the phone's browser.
     func openLink(_ url: URL) {
         Perf.shared.log("OPEN link \(url.absoluteString)")
-        if let onLocal, LocalLink.isLocal(url) {
+        if let file = FileLink.parse(url) {
+            onFile?(file)
+        } else if let onLocal, LocalLink.isLocal(url) {
             onLocal(url)
         } else if let onPull, store?.offersPullReview == true, let pull = PullLink(url) {
             onPull(pull)

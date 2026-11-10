@@ -4,6 +4,7 @@
 // Unknown messages and fields are ignored.
 
 import Foundation
+import SwiftUI
 import UIKit
 
 struct Project: Codable, Sendable, Hashable, Identifiable {
@@ -143,6 +144,83 @@ struct Row: Codable, Sendable {
     let changedFiles: [String]?
     /// Protocol 4: a sub-agent's call, its run summarized.
     let subagent: SubagentInfo?
+    /// Protocol 8: the thread's files a reply names, for links.
+    let files: [FileRef]?
+}
+
+/// A file of the thread's folder a reply names (protocol 8): as written there, the path it is
+/// (relative to the folder), the lines it points at.
+struct FileRef: Codable, Sendable, Hashable {
+    let text: String
+    let path: String
+    let line: Int?
+    let end: Int?
+}
+
+/// One entry of a folder in the thread's folder (protocol 8).
+struct DirEntry: Decodable, Sendable, Hashable, Identifiable {
+    let name: String
+    let folder: Bool
+    /// Git ignores it: dimmed.
+    let ignored: Bool?
+    let size: Int?
+    var id: String { name }
+}
+
+/// A line of a file, coloured as the Mac colours it (made as the frame is decoded).
+struct FileLine: Sendable, Hashable {
+    let text: String
+    let styled: AttributedString
+}
+
+/// A page of a file (protocol 8): `lines` start at `from`, of `total`.
+struct FilePage: Sendable {
+    /// `text`, `binary` or `image`.
+    let kind: String
+    let size: Int
+    let modified: Double
+    let total: Int
+    let from: Int
+    let lines: [FileLine]
+    let note: String?
+    let image: UIImage?
+    let unchanged: Bool
+
+    fileprivate struct Raw: Decodable {
+        let kind: String
+        let size: Int
+        let modified: Double
+        let total: Int?
+        let from: Int?
+        let lines: [String]?
+        let spans: [[[Int]]]?
+        let note: String?
+        let data: String?
+        let unchanged: Bool?
+    }
+
+    /// Kind 0 keyword, 1 string, 2 comment, 3 number: the colours Xcode uses for them.
+    static let colours: [Color] = [Color(uiColor: .systemPink), Color(uiColor: .systemRed), .secondary, Color(uiColor: .systemBlue)]
+
+    fileprivate init(_ raw: Raw) {
+        kind = raw.kind
+        size = raw.size
+        modified = raw.modified
+        total = raw.total ?? 0
+        from = raw.from ?? 0
+        note = raw.note
+        unchanged = raw.unchanged ?? false
+        image = raw.data.flatMap { Data(base64Encoded: $0) }.flatMap(UIImage.init(data:)).map(ToApp.fitted)
+        let spans = raw.spans ?? []
+        lines = (raw.lines ?? []).enumerated().map { i, text in
+            var styled = AttributedString(text)
+            for span in i < spans.count ? spans[i] : [] where span.count == 3 && span[1] > span[0] {
+                guard let range = Range<AttributedString.Index>(NSRange(location: span[0], length: span[1] - span[0]), in: styled) else { continue }
+                styled[range].foregroundColor = FilePage.colours[min(max(span[2], 0), 3)]
+            }
+            return FileLine(text: text, styled: styled)
+        }
+    }
 }
 
 extension Row {
@@ -151,7 +229,7 @@ extension Row {
         seq == o.seq && id == o.id && kind == o.kind && text == o.text && toolName == o.toolName && toolInput == o.toolInput
             && toolResult == o.toolResult && toolResultLength == o.toolResultLength && toolIsError == o.toolIsError
             && noticeStyle == o.noticeStyle && date == o.date && turnEndedAt == o.turnEndedAt && attachments == o.attachments
-            && changedFiles == o.changedFiles && subagent == o.subagent
+            && changedFiles == o.changedFiles && subagent == o.subagent && files == o.files
     }
 }
 
@@ -543,6 +621,12 @@ enum ToApp: Sendable {
     case browser(thread: String, state: BrowserState)
     case browserFrame(thread: String, tab: Int, seq: Int, image: UIImage?)
     case browserSummary(thread: String, summary: BrowserSummary)
+    /// Protocol 8: a folder of the thread's folder; a page of a file; what changed since the
+    /// last commit; one change's diff, split into lines.
+    case dir(thread: String, path: String, entries: [DirEntry], error: String?)
+    case file(thread: String, path: String, page: FilePage?, error: String?)
+    case changes(thread: String, files: [PullFile], branch: String?, error: String?)
+    case changePatch(thread: String, path: String, lines: [DiffLine]?, error: String?)
     case unknown
 
     /// Changes what the phone keeps of this Mac between launches (`Store`'s cache).
@@ -554,6 +638,10 @@ enum ToApp: Sendable {
     }
 
     private struct Tag: Decodable { let type: String }
+    private struct Dir: Decodable { let thread: String; let path: String; let entries: [DirEntry]?; let error: String? }
+    private struct File: Decodable { let thread: String; let path: String; let page: FilePage.Raw?; let error: String? }
+    private struct Changes: Decodable { let thread: String; let files: [PullFile]?; let branch: String?; let error: String? }
+    private struct ChangePatch: Decodable { let thread: String; let path: String; let patch: String?; let error: String? }
     private struct Pulls: Decodable { let project: String; let pulls: [PullInfo]; let errors: [String]?; let accounts: [String]? }
     private struct Paired: Decodable { let device: String; let token: String }
     private struct Pull: Decodable { let url: String; let pull: PullDetail?; let error: String? }
@@ -670,6 +758,18 @@ enum ToApp: Sendable {
                 // Decoded here, off the main thread, ready to draw.
                 let image = Data(base64Encoded: m.data).flatMap(UIImage.init(data:)).map { $0.preparingForDisplay() ?? $0 }
                 return .browserFrame(thread: m.thread, tab: m.tab, seq: m.seq, image: image)
+            case "dir":
+                let m = try d.decode(Dir.self, from: data)
+                return .dir(thread: m.thread, path: m.path, entries: m.entries ?? [], error: m.error)
+            case "file":
+                let m = try d.decode(File.self, from: data)
+                return .file(thread: m.thread, path: m.path, page: m.page.map(FilePage.init), error: m.error)
+            case "changes":
+                let m = try d.decode(Changes.self, from: data)
+                return .changes(thread: m.thread, files: m.files ?? [], branch: m.branch, error: m.error)
+            case "change_patch":
+                let m = try d.decode(ChangePatch.self, from: data)
+                return .changePatch(thread: m.thread, path: m.path, lines: m.patch.map(DiffLine.parse), error: m.error)
             case "paired":
                 let m = try d.decode(Paired.self, from: data)
                 return .paired(device: m.device, token: m.token)
@@ -732,6 +832,11 @@ enum FromApp {
     case pullFiles(url: String)
     case pullPatch(url: String, path: String)
     case mergePull(id: String, url: String, method: String, auto: Bool)
+    // Protocol 8.
+    case listDir(thread: String, path: String)
+    case readFile(thread: String, path: String, from: Int, count: Int, known: Double?)
+    case changes(thread: String)
+    case changePatch(thread: String, path: String)
 
     var actionID: String? {
         switch self {
@@ -813,6 +918,11 @@ enum FromApp {
         case .pullFiles(let url): ["type": "pull_files", "url": url]
         case .pullPatch(let url, let path): ["type": "pull_patch", "url": url, "path": path]
         case .mergePull(let id, let url, let method, let auto): ["type": "merge_pull", "id": id, "url": url, "method": method, "auto": auto]
+        case .listDir(let t, let path): ["type": "list_dir", "thread": t, "path": path]
+        case .readFile(let t, let path, let from, let count, let known):
+            ["type": "read_file", "thread": t, "path": path, "from": from, "count": count, "known": known.map { $0 as Any } ?? NSNull()]
+        case .changes(let t): ["type": "changes", "thread": t]
+        case .changePatch(let t, let path): ["type": "change_patch", "thread": t, "path": path]
         case .watchBrowser(let t, let width): ["type": "watch_browser", "thread": t, "width": width]
         case .unwatchBrowser: ["type": "unwatch_browser"]
         case .browserAck(let seq): ["type": "browser_ack", "seq": seq]

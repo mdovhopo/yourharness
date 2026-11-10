@@ -30,7 +30,7 @@ enum RowContent: Sendable {
     init(_ row: Row) {
         switch row.kind {
         case "user": self = .user(row.text, attachments: row.attachments ?? [])
-        case "assistant": self = .reply(Markdown.blocks(row.text))
+        case "assistant": self = .reply(Markdown.blocks(row.text, files: row.files ?? []))
         case "thinking": self = .thinking(row.text)
         case "tool" where row.subagent != nil || ["Agent", "Task"].contains(row.toolName ?? ""):
             self = .agent(ToolSummary(row), row.subagent)
@@ -144,7 +144,7 @@ struct MDParagraph: Sendable {
 }
 
 enum Markdown {
-    static func blocks(_ source: String) -> [MDBlock] {
+    static func blocks(_ source: String, files: [FileRef] = []) -> [MDBlock] {
         let options = AttributedString.MarkdownParsingOptions(
             allowsExtendedAttributes: false, interpretedSyntax: .full, failurePolicy: .returnPartiallyParsedIfPossible)
         guard let parsed = try? AttributedString(markdown: source, options: options) else {
@@ -203,8 +203,36 @@ enum Markdown {
         flush()
         return blocks.map { block in
             guard case .text(let paragraphs) = block else { return block }
-            return .text(paragraphs.map { MDParagraph(kind: $0.kind, text: linkingBareURLs($0.text)) })
+            return .text(paragraphs.map { MDParagraph(kind: $0.kind, text: linkingFiles(linkingBareURLs($0.text), files)) })
         }
+    }
+
+    /// The thread's files the Mac found named in the reply (protocol 8), made links that open
+    /// them: each where it's written as a whole word, in code too, never inside another link.
+    static func linkingFiles(_ text: AttributedString, _ files: [FileRef]) -> AttributedString {
+        guard !files.isEmpty else { return text }
+        let plain = String(text.characters)
+        let token = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_~@+-./"))
+        func isToken(_ c: Character?) -> Bool { c.map { $0.unicodeScalars.allSatisfy(token.contains) } ?? false }
+        var out = text
+        for ref in files.sorted(by: { $0.text.count > $1.text.count }) {
+            guard let url = FileLink.url(ref) else { continue }
+            var from = plain.startIndex
+            while let found = plain.range(of: ref.text, range: from..<plain.endIndex) {
+                from = found.upperBound
+                let before = found.lowerBound > plain.startIndex ? plain[plain.index(before: found.lowerBound)] : nil
+                let after = found.upperBound < plain.endIndex ? plain[found.upperBound] : nil
+                let next = found.upperBound < plain.endIndex ? plain.index(after: found.upperBound) : plain.endIndex
+                let afterThat = next < plain.endIndex ? plain[next] : nil
+                // "app.rs" isn't linked inside "src/app.rs"; a sentence's last dot may follow.
+                guard !isToken(before), !isToken(after) || after == "." && !isToken(afterThat),
+                      let range = Range<AttributedString.Index>(NSRange(found, in: plain), in: out),
+                      !out[range].runs.contains(where: { $0.link != nil })
+                else { continue }
+                out[range].link = url
+            }
+        }
+        return out
     }
 
     private static let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)

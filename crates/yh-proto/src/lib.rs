@@ -20,7 +20,10 @@ use serde::{Deserialize, Serialize};
 /// 7: a thread's browser on the phone: what it shows streamed as pictures (`watch_browser`,
 /// `browser`, `browser_frame`, `browser_ack`), and taps, scrolls, typing and going places sent
 /// back (`browser_input`).
-pub const PROTOCOL: u32 = 7;
+/// 8: a thread's folder, read only: its tree (`list_dir`), a file a page of lines at a time,
+/// coloured (`read_file`), what's changed in it since the last commit (`changes`) and each one's
+/// diff (`change_patch`); the files a reply names, on its row (`files`), for links.
+pub const PROTOCOL: u32 = 8;
 
 /// A slash command the composer offers: `/name hint`, and what it does.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -296,6 +299,63 @@ pub struct Row {
     /// A sub-agent's call (`Agent`, `Task`): its run summarized.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent: Option<SubagentInfo>,
+    /// Protocol 8: the thread's files a reply names, for links.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<FileRef>,
+}
+
+/// A file of the thread's folder named in a reply: `text` as it's written there (`app.rs:12`),
+/// the path it is (relative to the folder) and the lines it points at.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct FileRef {
+    pub text: String,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<u32>,
+}
+
+/// One entry of a folder in the thread's folder: folders first, then as Finder sorts.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct DirEntry {
+    pub name: String,
+    #[serde(default)]
+    pub folder: bool,
+    /// Git ignores it (shown dimmed).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ignored: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+}
+
+/// A page of a file: `lines` are its lines `from..from + lines.len()` of `total`, each with its
+/// colours (`spans`: `[start, end, kind]` in UTF-16 units; kind 0 keyword, 1 string, 2 comment,
+/// 3 number).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct FilePage {
+    /// `text`, `binary` or `image`.
+    pub kind: String,
+    pub size: u64,
+    /// When it last changed, milliseconds since 1970: asked with `known`, an unchanged file
+    /// comes back `unchanged` and empty.
+    pub modified: f64,
+    #[serde(default)]
+    pub total: u64,
+    #[serde(default)]
+    pub from: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lines: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spans: Vec<Vec<[u32; 3]>>,
+    /// Why not all of it shows (only its first 8 MB, long lines cut).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// A picture, base64, when it's small enough to send.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unchanged: bool,
 }
 
 /// A sub-agent's run as its card shows it.
@@ -655,6 +715,16 @@ pub enum ToApp {
     /// Protocol 7: the open thread's browser in a few words: after `subscribe_thread`, and when
     /// it changes (the agent opened a page, a tab closed).
     BrowserSummary { thread: String, summary: BrowserSummary },
+    /// Protocol 8: a folder of the thread's folder (`path` relative to it, `""` the folder
+    /// itself), asked for with `list_dir`.
+    Dir { thread: String, path: String, #[serde(default)] entries: Vec<DirEntry>, #[serde(default, skip_serializing_if = "Option::is_none")] error: Option<String> },
+    /// Protocol 8: a page of a file, asked for with `read_file` (`path` as asked).
+    File { thread: String, path: String, #[serde(default, skip_serializing_if = "Option::is_none")] page: Option<FilePage>, #[serde(default, skip_serializing_if = "Option::is_none")] error: Option<String> },
+    /// Protocol 8: what changed in the thread's folder since its last commit, as `git status`
+    /// says (`status` as a PR's files have it), on `branch`.
+    Changes { thread: String, #[serde(default)] files: Vec<PullFile>, #[serde(default, skip_serializing_if = "Option::is_none")] branch: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] error: Option<String> },
+    /// Protocol 8: one changed file's diff (its hunks), asked for with `change_patch`.
+    ChangePatch { thread: String, path: String, #[serde(default, skip_serializing_if = "Option::is_none")] patch: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] error: Option<String> },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -754,6 +824,16 @@ pub enum FromApp {
     /// Protocol 7: a tap, scroll, typing or going somewhere in a thread's browser; `done` when
     /// it carries an `id`.
     BrowserInput { #[serde(default)] id: Option<String>, thread: String, input: BrowserInput },
+    /// Protocol 8: a folder of the thread's folder: answered with `dir`.
+    ListDir { thread: String, #[serde(default)] path: String },
+    /// Protocol 8: a file of the thread's folder (relative, or absolute inside it), `count`
+    /// lines from `from` (1000 by default); `known`: the `modified` held, for `unchanged`.
+    /// Answered with `file`.
+    ReadFile { thread: String, path: String, #[serde(default)] from: Option<u64>, #[serde(default)] count: Option<u64>, #[serde(default)] known: Option<f64> },
+    /// Protocol 8: what changed in the thread's folder: answered with `changes`.
+    Changes { thread: String },
+    /// Protocol 8: one changed file's diff: answered with `change_patch`.
+    ChangePatch { thread: String, path: String },
     #[serde(other)]
     Unknown,
 }
