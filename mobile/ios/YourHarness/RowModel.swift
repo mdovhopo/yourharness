@@ -201,7 +201,29 @@ enum Markdown {
             paragraphs.append(MDParagraph(kind: kind, text: text))
         }
         flush()
-        return blocks
+        return blocks.map { block in
+            guard case .text(let paragraphs) = block else { return block }
+            return .text(paragraphs.map { MDParagraph(kind: $0.kind, text: linkingBareURLs($0.text)) })
+        }
+    }
+
+    private static let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
+
+    /// Web addresses written out without markdown's brackets made links too, as the Mac shows
+    /// them; never inside inline code.
+    static func linkingBareURLs(_ text: AttributedString) -> AttributedString {
+        guard let detector else { return text }
+        let plain = String(text.characters)
+        guard plain.contains("://") || plain.contains("www.") else { return text }
+        var out = text
+        for match in detector.matches(in: plain, range: NSRange(plain.startIndex..., in: plain)) {
+            guard let url = match.url, ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+                  let range = Range<AttributedString.Index>(match.range, in: out),
+                  !out[range].runs.contains(where: { $0.link != nil || $0.inlinePresentationIntent?.contains(.code) == true })
+            else { continue }
+            out[range].link = url
+        }
+        return out
     }
 }
 

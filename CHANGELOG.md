@@ -7,6 +7,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 ## [Unreleased]
 
 ### Fixed
+- Links in Claude's replies on the phone open in Safari when you tap them, web addresses written out without a link too.
 - The phone opens on the thread list it last had, even before it reaches the Mac, and a reconnect no longer moves anything: a spinner shows in the corner, and in a thread the send button spins until it's back.
 - The phone keeps the last messages of each thread you opened, so a thread shows them at once, even before the phone reaches the Mac; then only what's new arrives.
 

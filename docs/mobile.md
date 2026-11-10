@@ -363,7 +363,9 @@ Recorded here so the MVP stays small. Roughly in order; Tailscale last.
    `yh_core::diagrams::paint`, recorded by the server as paths and labels in colour roles) and
    opened at its own size to scroll and zoom. Wide ones too small to read say "Tap to zoom". A kind
    the Mac doesn't draw stays code. Test hooks: `YH_OPEN_ROW=Agent` (the newest sub-agent's sheet),
-   `YH_OPEN_PICTURE=1`, `YH_OPEN_DIAGRAM=1`.
+   `YH_OPEN_PICTURE=1`, `YH_OPEN_DIAGRAM=1`. Links in replies open in Safari on a tap, written
+   out web addresses too (the labels don't follow links themselves: `RowCell` finds the one under
+   the tap); `YH_OPEN_LINK=1` opens the last one on screen, printing `OPEN link <url>`.
 5c. **Voice input** (built 2026-11-09, not yet heard): a mic in the message field, always there;
    tap to dictate (Apple's speech recognition, on the device where it can be), the words written
    into the field after what's there as you speak, tap again (or Send) to stop. Asks for the

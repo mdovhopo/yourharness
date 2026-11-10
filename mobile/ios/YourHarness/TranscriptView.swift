@@ -328,6 +328,18 @@ final class TranscriptViewController: UIViewController, UICollectionViewDataSour
                     Perf.shared.log("OPEN pictures \(row.seq)")
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.openPictures(seq: row.seq, index: 0) }
                 }
+                // `YH_OPEN_LINK=1`: the last link on screen found where it's drawn and opened, as a tap there does.
+                if ProcessInfo.processInfo.environment["YH_OPEN_LINK"] == "1", !openedRow {
+                    openedRow = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+                        guard let self else { return }
+                        let cells = collectionView.indexPathsForVisibleItems.sorted().reversed().compactMap { self.collectionView.cellForItem(at: $0) as? RowCell }
+                        guard let cell = cells.first(where: { $0.lastLinkPoint() != nil }), let point = cell.lastLinkPoint(),
+                              let url = cell.link(at: point) else { return Perf.shared.log("OPEN link none") }
+                        Perf.shared.log("OPEN link \(url.absoluteString)")
+                        UIApplication.shared.open(url)
+                    }
+                }
             }
         case .prepended:
             guard let first = layouts.first?.seq else { return process() }
@@ -599,7 +611,7 @@ private final class ScrollProbe {
 
 /// Any row: its pieces placed at the frames its layout measured. Views are kept and reused
 /// by kind, so a row streaming in only changes text and frames.
-final class RowCell: UICollectionViewCell {
+final class RowCell: UICollectionViewCell, UIGestureRecognizerDelegate {
     private var labels: [UILabel] = []
     private var bubbles: [UIView] = []
     private var codes: [CodeBlockView] = []
@@ -617,9 +629,72 @@ final class RowCell: UICollectionViewCell {
     override init(frame: CGRect) {
         super.init(frame: frame)
         isAccessibilityElement = true
+        // Labels don't follow their links: a tap on one opens it (only there, so a tap elsewhere
+        // still opens the row).
+        let tap = UITapGestureRecognizer(target: self, action: #selector(tapped(_:)))
+        tap.delegate = self
+        contentView.addGestureRecognizer(tap)
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    override func gestureRecognizerShouldBegin(_ recognizer: UIGestureRecognizer) -> Bool {
+        guard recognizer.view === contentView else { return super.gestureRecognizerShouldBegin(recognizer) }
+        return link(at: recognizer.location(in: contentView)) != nil
+    }
+
+    @objc private func tapped(_ recognizer: UITapGestureRecognizer) {
+        guard let url = link(at: recognizer.location(in: contentView)) else { return }
+        Perf.shared.log("OPEN link \(url.absoluteString)")
+        UIApplication.shared.open(url)
+    }
+
+    /// The web address under a point in the cell, if a link's words are there.
+    func link(at point: CGPoint) -> URL? {
+        for l in labels where !l.isHidden && l.frame.insetBy(dx: -4, dy: -4).contains(point) {
+            guard let text = l.attributedText, let (storage, manager, container) = Self.textLayout(l) else { continue }
+            defer { withExtendedLifetime(storage) {} }
+            let p = CGPoint(x: point.x - l.frame.minX, y: point.y - l.frame.minY)
+            let glyph = manager.glyphIndex(for: p, in: container)
+            guard manager.boundingRect(forGlyphRange: NSRange(location: glyph, length: 1), in: container).insetBy(dx: -4, dy: -4).contains(p) else { continue }
+            let value = text.attribute(.link, at: manager.characterIndexForGlyph(at: glyph), effectiveRange: nil)
+            let url = (value as? URL) ?? (value as? String).flatMap(URL.init(string:))
+            if let url, ["http", "https", "mailto"].contains(url.scheme?.lowercased() ?? "") { return url }
+        }
+        return nil
+    }
+
+    /// Where the cell's last link is drawn (`YH_OPEN_LINK`), in the cell.
+    func lastLinkPoint() -> CGPoint? {
+        for l in labels.reversed() where !l.isHidden {
+            guard let text = l.attributedText, let (storage, manager, container) = Self.textLayout(l) else { continue }
+            defer { withExtendedLifetime(storage) {} }
+            var found: NSRange?
+            text.enumerateAttribute(.link, in: NSRange(location: 0, length: text.length)) { value, range, _ in
+                if value != nil { found = range }
+            }
+            guard let found else { continue }
+            let glyphs = manager.glyphRange(forCharacterRange: NSRange(location: found.location, length: 1), actualCharacterRange: nil)
+            let r = manager.boundingRect(forGlyphRange: glyphs, in: container)
+            return CGPoint(x: l.frame.minX + r.midX, y: l.frame.minY + r.midY)
+        }
+        return nil
+    }
+
+    /// A label's text laid out as it draws it, to find what's under a point. The storage comes
+    /// along: the layout manager doesn't keep it.
+    private static func textLayout(_ l: UILabel) -> (NSTextStorage, NSLayoutManager, NSTextContainer)? {
+        guard let text = l.attributedText, text.length > 0 else { return nil }
+        let storage = NSTextStorage(attributedString: text)
+        let manager = NSLayoutManager()
+        let container = NSTextContainer(size: l.bounds.size)
+        container.lineFragmentPadding = 0
+        container.maximumNumberOfLines = l.numberOfLines
+        container.lineBreakMode = l.lineBreakMode
+        manager.addTextContainer(container)
+        storage.addLayoutManager(manager)
+        return (storage, manager, container)
+    }
 
     func configure(_ layout: RowLayout) {
         var used = (labels: 0, bubbles: 0, codes: 0, rules: 0, icons: 0, cards: 0, pictures: 0, diagrams: 0)
