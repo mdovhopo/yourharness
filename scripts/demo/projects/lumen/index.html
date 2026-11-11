@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lumen · daily habits</title>
+  <link rel="stylesheet" href="src/styles.css">
+</head>
+<body>
+  <header class="top">
+    <h1>Lumen</h1>
+    <p class="tagline">Small habits, every day.</p>
+  </header>
+
+  <main>
+    <form id="new-habit" class="new-habit">
+      <input id="habit-name" name="name" placeholder="New habit, e.g. Read 20 pages" autocomplete="off" required>
+      <button type="submit">Add</button>
+    </form>
+
+    <section id="today" aria-label="Today">
+      <h2>Today</h2>
+      <ul id="habits" class="habits"></ul>
+      <p id="empty" class="empty" hidden>No habits yet. Add your first one above.</p>
+    </section>
+
+    <section id="week" aria-label="This week">
+      <h2>This week</h2>
+      <div id="grid" class="grid"></div>
+    </section>
+  </main>
+
+  <script type="module" src="src/app.js"></script>
+</body>
+</html>

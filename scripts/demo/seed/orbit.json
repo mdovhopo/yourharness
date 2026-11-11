@@ -1,0 +1,7 @@
+{"record": false, "lead": 3, "tail": 2, "steps": [
+ {"send": "Review src/ for bugs. Use two sub-agents in parallel: one on parser.rs, one on render.rs. Don't change any code; give me the findings as one table by severity."},
+ {"wait_for": "turn", "max": 900, "after": 3},
+ {"key": "cmd-n", "after": 1.5},
+ {"send": "Add an RSS feed (public/feed.xml) listing the posts newest first, and link it from the index page."},
+ {"wait_for": "turn", "max": 600, "after": 3}
+]}

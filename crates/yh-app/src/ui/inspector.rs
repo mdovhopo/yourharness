@@ -536,6 +536,15 @@ impl Inspector {
 
     /// The PRs tab looks its thread's PRs up when it shows, then every 15 seconds while it
     /// shows (and its project's repos again, every 30 s at most, for the PRs of its branches).
+    /// A tab chosen: its panel shown, with what it needs read.
+    pub fn choose_panel(&mut self, panel: Panel, cx: &mut Context<Self>) {
+        self.workspace.update(cx, |ws, cx| ws.show_panel(panel, cx));
+        self.ensure_tree(cx);
+        self.ensure_side(cx);
+        self.ensure_pulls(cx);
+        cx.notify();
+    }
+
     fn ensure_pulls(&mut self, cx: &mut Context<Self>) {
         if self.workspace.read(cx).panel != Panel::PullRequests {
             self._pulls_timer = None;
@@ -1290,7 +1299,6 @@ impl Inspector {
         // Sub-agents still working in the background: a count on their tab.
         let agents = self.thread.as_ref().map_or(0, |t| t.read(cx).run.jobs.agents_running());
         for p in Panel::ALL {
-            let ws = self.workspace.clone();
             let on = p == panel;
             let (icon, tip): (Icon, SharedString) = match p {
                 Panel::PullRequests => (crate::ui::icons::pull_request(), "Pull Requests".into()),
@@ -1337,13 +1345,7 @@ impl Inspector {
                     .child(icon.size(px(15.)).text_color(if on { theme.accent } else { theme.secondary }))
                     .children(badge)
                     .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        ws.update(cx, |ws, cx| ws.show_panel(p, cx));
-                        this.ensure_tree(cx);
-                        this.ensure_side(cx);
-                        this.ensure_pulls(cx);
-                        cx.notify();
-                    })),
+                    .on_click(cx.listener(move |this, _, _, cx| this.choose_panel(p, cx))),
             );
         }
         div().flex().items_center().px(px(space::M)).h(px(44.)).flex_none().border_b_1().border_color(theme.separator).child(track)

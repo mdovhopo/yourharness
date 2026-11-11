@@ -540,6 +540,22 @@ impl Browsers {
         });
     }
 
+    /// Every page shown over `window` right now, with where (demo recordings).
+    pub fn shown_pages(window: cocoa::base::id) -> Vec<(usize, (f64, f64, f64, f64))> {
+        Browsers::with(|b| {
+            b.sessions.values().flat_map(|s| s.tabs.iter()).filter_map(|t| t.web.shown_in(window).map(|r| (t.web.key(), r))).collect()
+        })
+    }
+
+    /// A picture of the page whose `key` is given, as JPEG (demo recordings).
+    pub fn capture_page(key: usize, max_px: f64, reply: flume::Sender<Option<(Vec<u8>, u32, u32)>>) {
+        Browsers::with(|b| {
+            if let Some(t) = b.sessions.values().flat_map(|s| s.tabs.iter()).find(|t| t.web.key() == key) {
+                t.web.capture_jpeg(max_px, 0.92, reply);
+            }
+        })
+    }
+
     /// Does something with a thread's current tab, from the panel's buttons.
     pub fn with_tab<T>(thread: &str, f: impl FnOnce(&mut Tab) -> T) -> Option<T> {
         Browsers::with(|b| {

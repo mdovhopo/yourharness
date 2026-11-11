@@ -1,0 +1,55 @@
+{
+ "out": "../../../test-harness-root/demo/out/overview-light.mp4",
+ "theme": "light",
+ "poster": 6.0,
+ "clips": [
+  {
+   "card": {
+    "title": "YourHarness",
+    "subtitle": "A fast, native macOS home for AI coding agents"
+   },
+   "dur": 3.2
+  },
+  {
+   "video": "../../../test-harness-root/demo/takes/overview-light.mp4",
+   "from": 0.0,
+   "to": 38.5,
+   "fade_out": false
+  },
+  {
+   "video": "../../../test-harness-root/demo/takes/overview-light.mp4",
+   "from": 38.5,
+   "to": 50.5,
+   "speed": 3,
+   "fade_in": false,
+   "fade_out": false
+  },
+  {
+   "video": "../../../test-harness-root/demo/takes/overview-light.mp4",
+   "from": 50.5,
+   "to": 58.6,
+   "fade_in": false,
+   "fade_out": false
+  },
+  {
+   "video": "../../../test-harness-root/demo/takes/overview-light.mp4",
+   "from": 58.6,
+   "to": 69.0,
+   "speed": 3,
+   "fade_in": false,
+   "fade_out": false
+  },
+  {
+   "video": "../../../test-harness-root/demo/takes/overview-light.mp4",
+   "from": 69.0,
+   "fade_in": false
+  },
+  {
+   "card": {
+    "title": "YourHarness",
+    "subtitle": "github.com/mdovhopo/yourharness\nmacOS 26 \u00b7 Apple Silicon \u00b7 Claude Code"
+   },
+   "dur": 3.5
+  }
+ ]
+}

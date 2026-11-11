@@ -1,0 +1,7 @@
+{"record": false, "lead": 3, "tail": 2, "steps": [
+ {"send": "Add a GET /places/{id} endpoint that returns 404 for unknown ids, with tests, then run the test suite."},
+ {"wait_for": "turn", "max": 600, "after": 3},
+ {"key": "cmd-n", "after": 1.5},
+ {"send": "Compare three ways to add rate limiting to this API in a table (how it works, pros, cons, effort), then recommend one in two sentences. No code changes."},
+ {"wait_for": "turn", "max": 600, "after": 3}
+]}

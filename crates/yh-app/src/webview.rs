@@ -828,6 +828,24 @@ impl WebView {
         }
     }
 
+    /// Where the page shows over `window`, in its top-left points, when it's shown there (not
+    /// parked, not hidden, not in a window of its own): for demo recordings to draw it in.
+    pub fn shown_in(&self, window: id) -> Option<(f64, f64, f64, f64)> {
+        unsafe {
+            let hidden: bool = msg_send![self.page, isHidden];
+            let in_window: id = msg_send![self.page, window];
+            if self.parked.get() || hidden || in_window != window {
+                return None;
+            }
+            let host: id = msg_send![self.page, superview];
+            let flipped: bool = msg_send![host, isFlipped];
+            let host_frame: NSRect = msg_send![host, bounds];
+            let f: NSRect = msg_send![self.page, frame];
+            let top = if flipped { f.origin.y } else { host_frame.size.height - f.origin.y - f.size.height };
+            Some((f.origin.x, top, f.size.width, f.size.height))
+        }
+    }
+
     /// Moves it over another GPUI view (the browser's own window, or back), keeping the page.
     pub fn move_to(&self, host: id) {
         unsafe {

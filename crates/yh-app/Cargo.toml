@@ -32,7 +32,9 @@ qrcode = { version = "0.14", default-features = false }
 # Only for the snapshots feature: the same GPUI gpui-kit pins, with its test support turned on.
 gpui = { package = "gpui-pre", version = "=0.3.11", optional = true }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.11", optional = true }
+# Demo recordings (demo.rs): the browser's page, captured as JPEG, decoded into the frame.
+image = { version = "0.25", optional = true, default-features = false, features = ["jpeg"] }
 
 [features]
 # Test builds: `Window::render_to_image` for YH_SNAPSHOT (screencapture would prompt the user).
-snapshots = ["dep:gpui", "dep:gpui_platform", "gpui/test-support", "gpui_platform/test-support"]
+snapshots = ["dep:gpui", "dep:gpui_platform", "dep:image", "gpui/test-support", "gpui_platform/test-support"]

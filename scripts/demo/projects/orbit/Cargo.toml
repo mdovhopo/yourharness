@@ -1,0 +1,7 @@
+[package]
+name = "orbit"
+version = "0.2.0"
+edition = "2021"
+description = "A tiny static site generator: Markdown in, HTML out."
+
+[dependencies]

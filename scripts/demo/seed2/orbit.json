@@ -1,0 +1,7 @@
+{"record": false, "lead": 3, "tail": 2, "steps": [
+ {"send": "What would it take to add syntax highlighting to code blocks without any dependencies? Short answer with a sketch of the approach."},
+ {"wait_for": "turn", "max": 300, "after": 2},
+ {"key": "cmd-n", "after": 1.5},
+ {"send": "Explain how the front matter parser works in three bullets."},
+ {"wait_for": "turn", "max": 300, "after": 2}
+]}

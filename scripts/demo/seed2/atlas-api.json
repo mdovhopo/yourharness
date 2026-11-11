@@ -1,0 +1,7 @@
+{"record": false, "lead": 3, "tail": 2, "steps": [
+ {"send": "Write OpenAPI 3.1 docs for the existing endpoints as openapi.yaml at the repo root."},
+ {"wait_for": "turn", "max": 300, "after": 2},
+ {"key": "cmd-n", "after": 1.5},
+ {"send": "Could test_nearest_first ever be flaky? Two sentences."},
+ {"wait_for": "turn", "max": 300, "after": 2}
+]}

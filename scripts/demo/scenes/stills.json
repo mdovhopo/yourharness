@@ -1,0 +1,30 @@
+{"out": "{{OUT}}/{{NAME}}.mp4", "fps": 10, "lead": 3, "tail": 0.5, "steps": [
+  {"cursor": false},
+  {"inspector": false},
+
+  {"select": "App State Flow", "after": 0.8},
+  {"key": "shift-cmd-[", "after": 1.2},
+  {"caption": "diagram", "hold": 1.5, "for": 1.4},
+
+  {"select": "Bug Review", "after": 0.8},
+  {"wheel": "transcript", "by": 40, "count": 30, "gap": 0.01, "glide": false},
+  {"wait": 1.2},
+  {"caption": "markdown", "hold": 1.5, "for": 1.4},
+
+  {"select": "Lumen dark mode", "after": 1.2},
+  {"caption": "thread", "hold": 1.5, "for": 1.4},
+  {"click": [703, 699], "dur": 0.1, "after": 2.0},
+  {"caption": "files", "hold": 1.5, "for": 1.4},
+  {"inspector": false, "after": 0.8},
+
+  {"key": "cmd-k", "after": 0.8},
+  {"type": "rate", "cps": 30},
+  {"wait": 1.2},
+  {"caption": "spotlight", "hold": 1.5, "for": 1.4},
+  {"key": "escape", "after": 0.6},
+
+  {"key": "shift-cmd-m", "after": 1.5},
+  {"caption": "memory", "hold": 1.5, "for": 1.4},
+  {"click": [436, 95], "dur": 0.1, "after": 1.5},
+  {"caption": "tasks", "hold": 1.5, "for": 1.4}
+]}

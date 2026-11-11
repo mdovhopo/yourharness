@@ -1,0 +1,76 @@
+:root {
+  --bg: #fbfaf7;
+  --fg: #1d1d1f;
+  --muted: #6e6e73;
+  --card: #ffffff;
+  --line: #e7e5e0;
+  --accent: #f5a524;
+  font-family: -apple-system, BlinkMacSystemFont, "Inter", system-ui, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.top {
+  padding: 48px 24px 8px;
+  max-width: 640px;
+  margin: 0 auto;
+}
+
+h1 { margin: 0; font-size: 40px; letter-spacing: -0.02em; }
+.tagline { margin: 4px 0 0; color: var(--muted); }
+
+main { max-width: 640px; margin: 0 auto; padding: 16px 24px 64px; }
+h2 { font-size: 15px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 32px 0 12px; }
+
+.new-habit { display: flex; gap: 8px; }
+.new-habit input {
+  flex: 1;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  font: inherit;
+  background: var(--card);
+}
+.new-habit button, .check, .remove { font: inherit; cursor: pointer; }
+.new-habit button {
+  padding: 0 18px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--fg);
+  color: var(--bg);
+}
+
+.habits { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.habit {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+.habit.done .name { color: var(--muted); text-decoration: line-through; }
+.check {
+  width: 26px; height: 26px;
+  border-radius: 50%;
+  border: 2px solid var(--line);
+  background: transparent;
+}
+.habit.done .check { background: var(--accent); border-color: var(--accent); color: white; }
+.name { flex: 1; }
+.streak { color: var(--muted); font-size: 14px; }
+.remove { border: 0; background: none; color: var(--muted); font-size: 20px; }
+
+.grid { display: grid; grid-template-columns: 1fr repeat(7, 22px); gap: 6px; align-items: center; }
+.label { font-size: 14px; }
+.cell { width: 22px; height: 22px; border-radius: 6px; background: var(--line); }
+.cell.on { background: var(--accent); }
+
+.empty { color: var(--muted); }

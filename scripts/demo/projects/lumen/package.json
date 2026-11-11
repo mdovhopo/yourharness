@@ -1,0 +1,11 @@
+{
+  "name": "lumen",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "description": "A tiny habit tracker: no build step, no dependencies.",
+  "scripts": {
+    "dev": "python3 -m http.server 5173",
+    "test": "node --test test/*.test.js"
+  }
+}

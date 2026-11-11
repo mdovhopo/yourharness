@@ -1,0 +1,7 @@
+{"record": false, "lead": 3, "tail": 2, "steps": [
+ {"send": "Remember for this project, as memories: Lumen stays dependency-free with no build step, and the amber accent (#f5a524) is part of the brand. Then track a task \"Monthly heatmap\" with four short steps for adding a month view below the week grid. Don't change code."},
+ {"wait_for": "turn", "max": 300, "after": 2},
+ {"key": "cmd-n", "after": 1.5},
+ {"send": "Suggest five small UX improvements for the habit list. Numbered list, one line each, no code."},
+ {"wait_for": "turn", "max": 300, "after": 2}
+]}

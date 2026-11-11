@@ -49,6 +49,15 @@ fn bounds(key: &str) -> Option<Bounds<Pixels>> {
     BOUNDS.with(|b| b.borrow().get(key).copied())
 }
 
+/// Elements tracked without a perf run: for demo recordings (`demo.rs`).
+pub fn enable_tracking() {
+    ENABLED.with(|e| e.set(true));
+}
+
+pub fn tracked(key: &str) -> Option<Bounds<Pixels>> {
+    bounds(key)
+}
+
 /// How long applying a batch of Claude's events took on the main thread.
 pub fn note_batch(ms: f64, _count: usize) {
     if enabled() {

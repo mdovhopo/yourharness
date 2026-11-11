@@ -8619,6 +8619,7 @@ dependencies = [
  "gpui-kit",
  "gpui-pre",
  "gpui-pre-platform",
+ "image",
  "imagesize 0.14.0",
  "libc",
  "notify",

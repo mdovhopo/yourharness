@@ -1,0 +1,10 @@
+{"record": false, "lead": 3, "tail": 2, "steps": [
+ {"send": "Add a dark mode toggle to Lumen: follow the system setting by default, remember the user's choice, and keep the amber accent. Keep it small."},
+ {"wait_for": "turn", "max": 600, "after": 3},
+ {"key": "cmd-n", "after": 1.5},
+ {"send": "How does state flow through this app, from a click to localStorage and back to the screen? Explain it with a mermaid flowchart and a short table of the modules."},
+ {"wait_for": "turn", "max": 600, "after": 3},
+ {"key": "cmd-n", "after": 1.5},
+ {"send": "Bug: a habit done yesterday but not yet today shows a streak of 0, which feels punishing. Keep yesterday's streak alive until the day is over, add tests for it, and run them."},
+ {"wait_for": "turn", "max": 600, "after": 3}
+]}

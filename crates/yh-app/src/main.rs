@@ -4,6 +4,7 @@
 
 mod platform;
 mod probe;
+mod demo;
 mod state;
 mod theme;
 mod ui;
@@ -156,6 +157,11 @@ fn main() {
         let bounds = saved
             .filter(|b| env("YH_PERF").is_none() && on_screen(b))
             .unwrap_or_else(|| Bounds::centered(None, size(px(1280.), px(820.)), cx));
+        // `YH_WINDOW_SIZE=<w>x<h>`: the window at that size in points (demo recordings).
+        let bounds = env("YH_WINDOW_SIZE")
+            .and_then(|v| v.split_once('x').and_then(|(w, h)| Some((w.trim().parse::<f32>().ok()?, h.trim().parse::<f32>().ok()?))))
+            .map(|(w, h)| Bounds::centered(None, size(px(w), px(h)), cx))
+            .unwrap_or(bounds);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(TitlebarOptions {
@@ -1265,6 +1271,10 @@ fn main() {
                 }
             })
             .detach();
+        }
+        // `YH_DEMO=<script.json>`: a scripted demo recorded to video (demo.rs).
+        if let Some(script) = env("YH_DEMO") {
+            demo::start(window, root.clone(), script, cx);
         }
         if let Some(folder) = env("YH_PERF") {
             probe::start(window, root, folder, cx);

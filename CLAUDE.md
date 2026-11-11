@@ -108,7 +108,7 @@ its empty state), `YH_QUEUE=<text>` (sent `YH_QUEUE_DELAY` s after launch, 3, so
 `YH_SCROLL_BARS=always` shows the transcript's and sub-agent detail's scroll bars all the time, for snapshots (they follow the Mac's Show scroll bars setting otherwise). `YH_TYPE_KEYS=h,i,shift-space,x,space,y` types into the composer as real key events sent through the application (key equivalents first, as a key press goes; `shift-<key>`, `space`, `return`, letters and digits), `YH_TYPE_KEYS_DELAY` seconds after launch (3), then prints `TYPE composer holds "…"`; `YH_TYPE_KEYS_CLICKS=0.88,0.4;0.4,0.93` clicks those fractions of the window first (the browser's page, then the composer, as a person would) instead of focusing the composer. `YH_DRAFT=<text>` (typed in the composer:
 `/co` opens the command menu, `@no` the file menu; `YH_DRAFT_DELAY`), `YH_FIND=<words>` (Find
 opened), `YH_EXPAND_WORK=1` (folded work drawn open), `YH_ACTIONS_PROBE=1` (pin, rename, settle,
-delete on the first threads). Also `YH_SNAPSHOT=<png>` (`_DELAY`, `_QUIT`), `YH_BACKGROUND=1`,
+delete on the first threads). Also `YH_SNAPSHOT=<png>` (`_DELAY`, `_QUIT`), `YH_DEMO=<script.json>` (a scripted demo recorded to video with a drawn pointer, captions and zooms for the edit; `crates/yh-app/src/demo.rs`, scripts/demo/README.md), `YH_WINDOW_SIZE=<w>x<h>`, `YH_BACKGROUND=1`,
 `YH_TIMING=1` and `YH_EVENT_LOG=1` (every event, and each plan rebuild). `YH_NOTIFICATIONS=log`
 prints notifications and the Dock badge instead (always in tests: a real one asks for permission),
 `YH_APPEARANCE=light|dark`, `YH_OPEN_SETTINGS=1`, `YH_INSPECTOR_PANEL=prs|sideChat|subagents|files|browser`, `YH_MOCK_PULLS=<file.json>` (PRs read from
