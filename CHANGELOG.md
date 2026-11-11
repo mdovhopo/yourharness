@@ -6,6 +6,10 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+### Added
+
+- Signing in another Claude account shows its sign-in link with Copy Link, for opening it in the browser that's signed in to that subscription.
+
 ## [0.1.13] - 2026-11-11
 
 ### Added

@@ -639,6 +639,7 @@ fn main() {
                             "on" => ws.set_account_enabled(&id, true, cx),
                             "signin" => Ok(ws.sign_in(&id, cx)),
                             "cancel" => Ok(ws.cancel_sign_in(&id, cx)),
+                            "link" => Ok(eprintln!("ACCOUNT sign-in link: {}", ws.account(&id).and_then(|a| a.login.as_ref()).and_then(|l| l.url.lock().unwrap().clone()).unwrap_or_else(|| "none".into()))),
                             "signout" => Ok(ws.sign_out(&id, cx)),
                             "remove" => ws.remove_account(&id, cx),
                             "refresh" => Ok(ws.refresh_account(&id, cx)),

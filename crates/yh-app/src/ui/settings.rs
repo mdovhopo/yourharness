@@ -80,6 +80,8 @@ pub struct SettingsView {
     mcp: Option<Entity<crate::ui::mcp::McpSheet>>,
     /// "Copied" for a moment after Copy in the sign-in hint.
     copied: bool,
+    /// "Copied" after an account's sign-in link is copied.
+    link_copied: bool,
     _watch: Vec<gpui_kit::Subscription>,
 }
 
@@ -93,7 +95,7 @@ impl SettingsView {
         if let Some(u) = cx.try_global::<SettingsLinks>().map(|l| l.updater.clone()) {
             watch.push(cx.observe(&u, |_, _, cx| cx.notify()));
         }
-        let mut view = SettingsView { workspace, tab, found: Found::default(), title_prompt, body_scroll: gpui_kit::ScrollHandle::new(), mcp: None, copied: false, _watch: watch };
+        let mut view = SettingsView { workspace, tab, found: Found::default(), title_prompt, body_scroll: gpui_kit::ScrollHandle::new(), mcp: None, copied: false, link_copied: false, _watch: watch };
         view.detect(cx);
         view.tab_shown(window, cx);
         view
@@ -365,6 +367,7 @@ impl SettingsView {
             ws.accounts.len() == 1 && ws.accounts[0].signed_out()
         };
         let hint = only_main_signed_out.then(|| self.sign_in_hint(theme, cx));
+        let mut signing_in = self.sign_in_panel(theme, cx);
         let ws = self.workspace.read(cx);
         let several = ws.accounts.len() > 1;
         let enabled = ws.accounts.iter().filter(|a| a.account.enabled).count();
@@ -481,6 +484,11 @@ impl SettingsView {
                     )
                     .child(controls.flex_none()),
             );
+            if signing_in.as_ref().is_some_and(|(signing, _)| *signing == id) {
+                if let Some((_, panel)) = signing_in.take() {
+                    group = group.inline(panel);
+                }
+            }
         }
         let w = self.workspace.clone();
         group = group
@@ -493,6 +501,41 @@ impl SettingsView {
         } else {
             "Have another Claude subscription? Add it, and switch between them here or in the sidebar. It signs in through Claude Code itself, in your browser: YourHarness never sees credentials."
         })
+    }
+
+    /// Under an account signing in: Claude Code's sign-in link, to copy into another browser
+    /// (the one signed in to that subscription).
+    fn sign_in_panel(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<(String, AnyElement)> {
+        let (id, url) = {
+            let ws = self.workspace.read(cx);
+            let a = ws.accounts.iter().find(|a| a.login.is_some())?;
+            (a.id().to_string(), a.login.as_ref().and_then(|l| l.url.lock().unwrap().clone()))
+        };
+        let Some(url) = url else {
+            return Some((id, div().px(px(space::M)).pb(px(space::S)).text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child("Opening the sign-in page…").into_any_element()));
+        };
+        let (copy_url, tip) = (url.clone(), url.clone());
+        let panel = div()
+            .flex()
+            .flex_col()
+            .gap(px(space::S))
+            .px(px(space::M))
+            .pb(px(space::M))
+            .child(div().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child("Your browser opened Claude's sign-in page. Signed in to this subscription in another browser? Copy the link there."))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S))
+                    .child(div().id("sign-in-link").flex_1().min_w_0().px(px(8.)).py(px(3.)).rounded(px(radius::SMALL + 1.)).bg(theme.selected).font_family(MONO).text_size(px(text::CAPTION)).text_color(theme.secondary).truncate().child(url).tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)))
+                    .child(Button::new("sign-in-copy").small().outline().icon(Icon::new(IconName::Copy)).label(if self.link_copied { "Copied" } else { "Copy Link" }).on_click(cx.listener(move |this, _, _, cx| {
+                        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(copy_url.clone()));
+                        this.link_copied = true;
+                        cx.notify();
+                    }))),
+            )
+            .into_any_element();
+        Some((id, panel))
     }
 
     /// The account in use's usage limits, as the sidebar's meters read them.
