@@ -6,6 +6,8 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+## [0.1.13] - 2026-11-11
+
 ### Added
 
 - Claude can hand work to other threads in the same project: start a thread with a task, send it follow-ups, stop it, wait for it to finish and read its reply, and answer its permission requests, questions and plans. Ask a thread to delegate and follow the work from there. On by default; Settings → General → Delegation turns it off.
