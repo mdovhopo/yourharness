@@ -42,7 +42,7 @@ YourHarness drives the official agent CLIs you're already signed in to, and buil
 </p>
 
 <p align="center">
-  <a href="https://github.com/mdovhopo/yourharness/blob/main/docs/media/overview.mp4">
+  <a href="https://github.com/mdovhopo/yourharness/raw/main/docs/media/overview.mp4">
     <img src="docs/media/tour-poster.png" alt="Watch the 2-minute tour" width="70%">
   </a>
   <br>
