@@ -120,6 +120,107 @@ class Stage:
         return canvas
 
 
+class PairStage:
+    """The Mac window (smaller) and an iPhone beside it, on the same backdrop."""
+
+    PHONE_H = 1720  # the phone's screen height on the canvas
+    BEZEL = 26
+
+    def __init__(self, theme, win_w, win_h, phone_w, phone_h):
+        self.t = THEMES[theme]
+        self.backdrop = Stage(theme, 2880, 1800).backdrop
+        self.ph = self.PHONE_H
+        self.pw = round(phone_w * self.ph / phone_h)
+        gap = 150
+        self.mw = CW - 2 * 170 - gap - self.pw - 2 * self.BEZEL
+        self.mh = round(win_h * self.mw / win_w)
+        self.mx, self.my = 170, max(60, (CH - self.mh) // 2 - 70)
+        self.px = self.mx + self.mw + gap + self.BEZEL
+        self.py = max(60, (CH - self.ph) // 2 - 70)
+        img = Image.fromarray(self.backdrop)
+        shadow = Image.new("L", (CW, CH), 0)
+        d = ImageDraw.Draw(shadow)
+        d.rounded_rectangle([self.mx, self.my + 26, self.mx + self.mw, self.my + self.mh + 26], 36, fill=150)
+        b = self.BEZEL
+        d.rounded_rectangle([self.px - b, self.py - b + 26, self.px + self.pw + b, self.py + self.ph + b + 26], 150, fill=150)
+        shadow = shadow.filter(ImageFilter.GaussianBlur(60))
+        a = np.array(shadow, float)[:, :, None] / 255 * (0.85 if self.t is THEMES["dark"] else 0.45)
+        base = (self.backdrop * (1 - a)).astype(np.uint8)
+        # The phone's body: a dark titanium edge around the screen.
+        body = Image.fromarray(base)
+        bd = ImageDraw.Draw(body)
+        bd.rounded_rectangle([self.px - b, self.py - b, self.px + self.pw + b, self.py + self.ph + b], 150, fill=(38, 38, 42))
+        bd.rounded_rectangle([self.px - b + 4, self.py - b + 4, self.px + self.pw + b - 4, self.py + self.ph + b - 4], 146, outline=(90, 90, 96), width=2)
+        self.base = np.array(body)
+        self.win_mask = Stage._corner_mask(self, 24)
+        m = Image.new("L", (self.pw * 2, self.ph * 2), 0)
+        ImageDraw.Draw(m).rounded_rectangle([0, 0, self.pw * 2 - 1, self.ph * 2 - 1], 124 * 2, fill=255)
+        self.phone_mask = np.array(m.resize((self.pw, self.ph), Image.LANCZOS), float)[:, :, None] / 255
+
+    def place(self, window, phone):
+        canvas = self.base.copy()
+        win = np.array(Image.fromarray(window).resize((self.mw, self.mh), Image.BICUBIC))
+        x, y, w, h = self.mx, self.my, self.mw, self.mh
+        canvas[y : y + h, x : x + w] = win
+        r = self.win_mask.shape[0]
+        for fy in (False, True):
+            for fx in (False, True):
+                m = self.win_mask[::-1] if fy else self.win_mask
+                m = m[:, ::-1] if fx else m
+                ys = slice(y + h - r, y + h) if fy else slice(y, y + r)
+                xs = slice(x + w - r, x + w) if fx else slice(x, x + r)
+                canvas[ys, xs] = (canvas[ys, xs] * m + self.base[ys, xs] * (1 - m)).astype(np.uint8)
+        ph = np.array(Image.fromarray(phone).resize((self.pw, self.ph), Image.BICUBIC), float)
+        ys, xs = slice(self.py, self.py + self.ph), slice(self.px, self.px + self.pw)
+        canvas[ys, xs] = (ph * self.phone_mask + canvas[ys, xs] * (1 - self.phone_mask)).astype(np.uint8)
+        return canvas
+
+
+def phone_frames(video, start, w, h):
+    """The Simulator's film from `start` seconds (before its first frame: the first frame), at
+    the edit's rate: it only writes a frame when the screen changes."""
+    first = None
+    lead = int(max(0.0, -start) * FPS)
+    for frame in frames_of_vfr(video, max(0.0, start), w, h):
+        if first is None:
+            first = frame
+            for _ in range(lead):
+                yield first
+        yield frame
+    while True:
+        yield first if first is not None else np.zeros((h, w, 3), np.uint8)
+
+
+def frames_of_vfr(video, start, w, h):
+    args = [FFMPEG, "-v", "error", "-ss", str(start), "-i", video, "-vf", f"fps={FPS}", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
+    p = subprocess.Popen(args, stdout=subprocess.PIPE, bufsize=w * h * 3 * 2)
+    size = w * h * 3
+    last = None
+    while True:
+        buf = p.stdout.read(size)
+        if len(buf) < size:
+            break
+        last = np.frombuffer(buf, np.uint8).reshape(h, w, 3)
+        yield last
+    p.wait()
+    # The last frame held: the film ends at its last change.
+    while last is not None:
+        yield last
+
+
+def blur_regions(frame, regions, t):
+    """Rects (in the frame's pixels) blurred while `from` <= t < `to`: addresses kept private."""
+    img = None
+    for r in regions:
+        if r.get("from", -1e9) <= t < r.get("to", 1e9):
+            if img is None:
+                img = Image.fromarray(frame)
+            x, y, w, h = r["rect"]
+            box = (int(x), int(y), int(x + w), int(y + h))
+            img.paste(img.crop(box).filter(ImageFilter.GaussianBlur(r.get("radius", 28))), box)
+    return frame if img is None else np.array(img)
+
+
 def traffic_lights(frame):
     """The window's close, minimise and zoom buttons, which AppKit draws (not in the frame)."""
     img = Image.fromarray(frame)
@@ -328,9 +429,10 @@ def main():
 
     for clip in cut["clips"]:
         if "card" in clip:
-            if stage is None:
-                stage = Stage(theme, 2880, 1800)
-            frame = card_frame(stage, clip["card"], theme, icon)
+            card_theme = clip.get("theme", theme)
+            if stage is None or stage.t is not THEMES[card_theme]:
+                stage = Stage(card_theme, 2880, 1800)
+            frame = card_frame(stage, clip["card"], card_theme, icon)
             back = np.array(Image.fromarray(stage.backdrop).reduce(SS))
             count = int(clip.get("dur", 3) * FPS)
             for i in range(count):
@@ -340,14 +442,28 @@ def main():
             clock += count / FPS
             continue
 
+        clip_theme = clip.get("theme", theme)
+        if caps.t is not THEMES[clip_theme]:
+            caps = Captions(clip_theme)
         video = path(clip["video"])
         meta = json.load(open(video + ".captions.json"))
         start = clip.get("from", 0.0)
         end = clip.get("to")
         length = (end if end is not None else meta["duration"]) - start
         w, h = probe_size(video)
-        if stage is None or (stage.win_w, stage.win_h) != (w, h):
-            stage = Stage(theme, w, h)
+        if stage is None or (stage.win_w, stage.win_h) != (w, h) or stage.t is not THEMES[clip_theme]:
+            stage = Stage(clip_theme, w, h)
+        # `phone`: the Simulator's film beside the Mac, lined up by `sync` (record-phone.sh).
+        pair = phones = None
+        if "phone" in clip:
+            phone = path(clip["phone"])
+            sync = json.load(open(path(clip["sync"])))
+            pw, ph = probe_size(phone)
+            pair = PairStage(clip_theme, w, h, pw, ph)
+            offset = sync["phone_start"] - sync["mac_start"]
+            phone_t0 = clip.get("from", 0.0) - offset + clip.get("phone_shift", 0.0)
+            phones = phone_frames(phone, phone_t0, pw, ph)
+            phone_blur = clip.get("phone_blur", [])
         speed = max(1, int(clip.get("speed", 1)))
         cam = Camera(stage, meta.get("zooms", []), start)
         cues = [c for c in meta.get("captions", []) if c["end"] > start and (end is None or c["start"] < end)]
@@ -360,8 +476,15 @@ def main():
             if i % speed:
                 continue
             t = i / FPS
-            canvas = stage.place(traffic_lights(win))
-            frame = shoot(canvas, cam.at(t))
+            if pair is not None:
+                ph_frame = next(phones)
+                for _ in range(speed - 1):
+                    next(phones)
+                ph_frame = blur_regions(ph_frame, phone_blur, phone_t0 + t)
+                frame = np.array(Image.fromarray(pair.place(traffic_lights(win), ph_frame)).reduce(SS))
+            else:
+                canvas = stage.place(traffic_lights(win))
+                frame = shoot(canvas, cam.at(t))
             text, alpha = None, 0.0
             for c in cues:
                 s, e = c["start"] - start, c["end"] - start

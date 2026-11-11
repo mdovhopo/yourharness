@@ -1,0 +1,131 @@
+{
+ "out": "../../../test-harness-root/demo/out/overview.mp4",
+ "theme": "light",
+ "poster": 6.0,
+ "clips": [
+  {
+   "card": {
+    "title": "YourHarness",
+    "subtitle": "A fast, native macOS home for AI coding agents"
+   },
+   "dur": 3.2
+  },
+  {
+   "video": "../../../test-harness-root/demo/takes/overview-system.mp4",
+   "from": 0.0,
+   "to": 37.3,
+   "fade_out": false
+  },
+  {
+   "video": "../../../test-harness-root/demo/takes/overview-system.mp4",
+   "from": 37.3,
+   "to": 44.0,
+   "speed": 2,
+   "fade_in": false,
+   "fade_out": false
+  },
+  {
+   "video": "../../../test-harness-root/demo/takes/overview-system.mp4",
+   "from": 44.0,
+   "to": 51.4,
+   "fade_in": false,
+   "fade_out": false
+  },
+  {
+   "video": "../../../test-harness-root/demo/takes/overview-system.mp4",
+   "from": 51.4,
+   "to": 66.8,
+   "speed": 3,
+   "fade_in": false,
+   "fade_out": false
+  },
+  {
+   "video": "../../../test-harness-root/demo/takes/overview-system.mp4",
+   "from": 66.8,
+   "to": 84.75,
+   "fade_in": false,
+   "fade_out": false
+  },
+  {
+   "video": "../../../test-harness-root/demo/takes/overview-system.mp4",
+   "from": 84.75,
+   "theme": "dark",
+   "fade_in": false
+  },
+  {
+   "video": "../../../test-harness-root/demo/takes/phone-dark.mp4",
+   "phone": "../../../test-harness-root/demo/takes/phone-dark-phone.mp4",
+   "sync": "../../../test-harness-root/demo/takes/phone-dark-sync.json",
+   "phone_blur": [
+    {
+     "rect": [
+      180,
+      1150,
+      880,
+      80
+     ],
+     "from": 30.14,
+     "to": 36.24
+    }
+   ],
+   "from": 0.5,
+   "to": 14.0,
+   "theme": "dark",
+   "fade_in": true,
+   "fade_out": false
+  },
+  {
+   "video": "../../../test-harness-root/demo/takes/phone-dark.mp4",
+   "phone": "../../../test-harness-root/demo/takes/phone-dark-phone.mp4",
+   "sync": "../../../test-harness-root/demo/takes/phone-dark-sync.json",
+   "phone_blur": [
+    {
+     "rect": [
+      180,
+      1150,
+      880,
+      80
+     ],
+     "from": 30.14,
+     "to": 36.24
+    }
+   ],
+   "from": 14.0,
+   "to": 30.0,
+   "theme": "dark",
+   "fade_in": false,
+   "fade_out": false,
+   "speed": 2
+  },
+  {
+   "video": "../../../test-harness-root/demo/takes/phone-dark.mp4",
+   "phone": "../../../test-harness-root/demo/takes/phone-dark-phone.mp4",
+   "sync": "../../../test-harness-root/demo/takes/phone-dark-sync.json",
+   "phone_blur": [
+    {
+     "rect": [
+      180,
+      1150,
+      880,
+      80
+     ],
+     "from": 30.14,
+     "to": 36.24
+    }
+   ],
+   "from": 30.0,
+   "to": 48.0,
+   "theme": "dark",
+   "fade_in": false,
+   "fade_out": true
+  },
+  {
+   "card": {
+    "title": "YourHarness",
+    "subtitle": "github.com/mdovhopo/yourharness\nmacOS 26 \u00b7 Apple Silicon \u00b7 Claude Code \u00b7 iPhone over Tailscale"
+   },
+   "dur": 3.8,
+   "theme": "dark"
+  }
+ ]
+}

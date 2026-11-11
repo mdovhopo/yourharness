@@ -90,11 +90,16 @@ pub fn start(handle: AnyWindowHandle, root: Entity<RootView>, script: String, cx
             cx.background_executor().timer(Duration::from_secs_f64(lead)).await;
             let t0 = Instant::now();
             *started.borrow_mut() = Some(t0);
-            eprintln!("DEMO {}", if record { "recording" } else { "running" });
+            // When it began, in seconds since 1970: lines a phone's film up with this one.
+            let epoch = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
+            eprintln!("DEMO {} at {epoch:.3}", if record { "recording" } else { "running" });
             *stop.borrow_mut() |= !record;
             let interval = Duration::from_secs_f64(1.0 / fps);
             let mut next = t0;
             let mut last_page = Instant::now() - Duration::from_secs(1);
+            // `YH_DEMO_PAGES=0`: the page left out; `YH_DEMO_PAGE_MS`: how often it's taken (120).
+            let capture_pages = std::env::var("YH_DEMO_PAGES").as_deref() != Ok("0");
+            let page_every: u64 = std::env::var("YH_DEMO_PAGE_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(120);
             let (mut grabs, mut grab_ms) = (0u32, 0f64);
             while !*stop.borrow() {
                 let p = *pointer.borrow();
@@ -112,8 +117,8 @@ pub fn start(handle: AnyWindowHandle, root: Entity<RootView>, script: String, cx
                 }
                 if let Ok(Some((width, height, scale, pixels, page))) = grabbed {
                     // The page, a few times a second (WebKit takes its picture asynchronously).
-                    if let Some((key, rect)) = page {
-                        if last_page.elapsed() > Duration::from_millis(120) {
+                    if let Some((key, rect)) = page.filter(|_| capture_pages) {
+                        if last_page.elapsed() > Duration::from_millis(page_every) {
                             last_page = Instant::now();
                             let tx = page_tx.clone();
                             let _ = cx.update(|_| crate::browser::Browsers::capture_page(key, rect.2 * scale as f64, tx));
@@ -132,7 +137,10 @@ pub fn start(handle: AnyWindowHandle, root: Entity<RootView>, script: String, cx
                     };
                     let _ = tx.try_send(frame);
                 }
-                next += interval;
+                // Never more than half the main thread: a slow grab (a busy GPU) waits as long
+                // again, so the app keeps its pace and the film drops frames instead.
+                let cost = began.elapsed();
+                next = (next + interval).max(Instant::now() + cost);
                 let now = Instant::now();
                 if next > now {
                     cx.background_executor().timer(next - now).await;
@@ -245,14 +253,18 @@ impl Director {
     /// The pointer glides there (eased), sending real moves on the way, for hover states.
     async fn glide(&mut self, to: (f32, f32), dur: f64) {
         let from = { let p = self.pointer.borrow(); (p.x, p.y) };
-        let frames = ((dur * 60.0) as usize).max(1);
-        for i in 1..=frames {
-            let t = i as f32 / frames as f32;
+        // By the clock, not by steps: a slow patch skips positions instead of slowing down.
+        let began = Instant::now();
+        loop {
+            let t = (began.elapsed().as_secs_f64() / dur.max(0.001)).min(1.0) as f32;
             let e = if t < 0.5 { 4.0 * t * t * t } else { 1.0 - (-2.0 * t + 2.0).powi(3) / 2.0 };
             let (x, y) = (from.0 + (to.0 - from.0) * e, from.1 + (to.1 - from.1) * e);
             { let mut p = self.pointer.borrow_mut(); p.x = x; p.y = y; }
             if let Some(ns) = self.ns() {
                 platform::mouse_move(ns, x, y);
+            }
+            if t >= 1.0 {
+                break;
             }
             self.sleep(1.0 / 60.0).await;
         }
@@ -445,6 +457,15 @@ impl Director {
                 inspector.update(cx, |i, cx| i.choose_panel(panel, cx));
             });
             self.sleep(step["after"].as_f64().unwrap_or(0.4)).await;
+        } else if let Some(choice) = step["appearance"].as_str() {
+            // Settings → Appearance, as its control sets it (`light`, `dark`, `system`).
+            let choice = choice.to_string();
+            let _ = self.handle.update(&mut self.cx, |_, window, cx| {
+                crate::theme::set_chosen_appearance(Some(choice));
+                crate::theme::apply_appearance(window.appearance(), window, cx);
+                cx.refresh_windows();
+            });
+            self.sleep(step["after"].as_f64().unwrap_or(0.3)).await;
         } else if let Some(open) = step["inspector"].as_bool() {
             // The right sidebar open or closed, whichever it is now.
             let root = self.root.clone();
@@ -463,7 +484,9 @@ impl Director {
             let root = self.root.clone();
             // `turn`: a turn that may not have started yet, waited for to start, then to end.
             if what == "turn" {
-                while start.elapsed().as_secs_f64() < 10.0 {
+                // `start_max`: how long the turn may take to begin (a phone sending it).
+                let start_max = step["start_max"].as_f64().unwrap_or(10.0);
+                while start.elapsed().as_secs_f64() < start_max {
                     let running = self.cx.update(|cx| root.read(cx).workspace.read(cx).selected_thread().is_some_and(|t| t.read(cx).run.running));
                     if running {
                         break;

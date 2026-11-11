@@ -11,17 +11,26 @@ times; `compose.py` cuts takes into the finished video.
 brew install ffmpeg; python3 -m venv /tmp/yh-media-venv && /tmp/yh-media-venv/bin/pip install numpy pillow
 APP=test-harness-root/demo/app/"YourHarness Next.app" FEATURES=snapshots scripts/bundle.sh
 
-scripts/demo/make-workspace.sh             # projects/ → test-harness-root/demo/work, as git repos
-scripts/demo/seed.sh                       # real Sonnet turns on them → test-harness-root/demo/data
-SEED=seed2 scripts/demo/seed.sh "" haiku   # a few more threads, memories and a task
-# then keep the seeded state: cp -cR …/demo/work …/demo/work-seed; cp -cR …/demo/data …/demo/data-seed
+scripts/demo/build-data.sh                 # projects in /Users/Shared/Projects + real turns → data-seed, work-seed
+scripts/demo/pair-phone.sh                 # the demo Simulator paired over Tailscale (phone app built into
+                                           # test-harness-root/demo/phone-dd, Simulator ID in demo/phone-udid)
 
-EXTRA_ENV="--env YH_MODEL=sonnet" scripts/demo/record.sh scripts/demo/scenes/overview.json light
-/tmp/yh-media-venv/bin/python -I scripts/demo/compose.py scripts/demo/cuts/overview-light.json
+EXTRA_ENV="--env YH_MODEL=sonnet" scripts/demo/record.sh scripts/demo/scenes/overview.json system
+scripts/demo/record-phone.sh scripts/demo/scenes/phone.json scripts/demo/phone/steps.json dark
+/tmp/yh-media-venv/bin/python -I scripts/demo/compose.py scripts/demo/cuts/overview.json
 scripts/demo/record.sh scripts/demo/scenes/stills.json dark
 scripts/demo/stills.sh test-harness-root/demo/takes/stills-dark.mp4 test-harness-root/demo/out/stills dark
 ```
 
+- The projects live in `/Users/Shared/Projects`, not in this repo: commands Claude runs show their
+  paths (no home folder in them), and inside the repo its CLAUDE.md reached the demo turns.
+- The phone: `YH_PHONE_DEMO` (`mobile/ios/YourHarness/Demo.swift`) acts out `phone/*.json` while
+  `simctl io recordVideo` films the Simulator; the Mac serves phones over Tailscale only, so the
+  connection shown is the real one. A cut's `phone` clip puts both side by side, lined up by the
+  take's `-sync.json`; `phone_blur` hides the tailnet address. Shut the demo Simulator down for
+  Mac-only takes: it slows the Mac's frame grabs.
+- `appearance` steps switch light and dark mid-take (record with `system`); a cut's clips take a
+  `theme` for the backdrop.
 - `scenes/*.json`: what happens, step by step (see the top of `demo.rs` for the steps). Live
   turns differ every take: check the take before cutting.
 - `cuts/*.json`: clips of takes (`from`, `to`, `speed` for time-lapses), title cards; makes the

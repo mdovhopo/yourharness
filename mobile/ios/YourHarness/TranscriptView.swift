@@ -88,6 +88,8 @@ struct TranscriptScreen: View {
             }
             .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { composerHeight = $0 }
         }
+        // A demo recording typing (Demo.swift).
+        .onChange(of: Demo.shared.draft) { _, typed in if let typed { draft = typed } }
         // Claude opened a page while you're here: beside the thread on an iPad, offered on a phone.
         .onChange(of: store.browserSummaries[threadID]?.openedAt) { _, at in
             guard let at, at > openedAt, let summary = store.browserSummaries[threadID] else { return }

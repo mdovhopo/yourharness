@@ -180,6 +180,8 @@ struct ComposerBar: View {
         .onChange(of: dictation.state) { _, state in
             if case .unavailable(let why) = state { store.actionError = why }
         }
+        // A demo recording pressing Send (Demo.swift).
+        .onChange(of: Demo.shared.sendTick) { if !empty { send() } }
         // `YH_PHONE_DICTATE_FILE=<audio>`: a recording's words written into the field, as dictating them would.
         .task {
             guard let path = ProcessInfo.processInfo.environment["YH_PHONE_DICTATE_FILE"] else { return }

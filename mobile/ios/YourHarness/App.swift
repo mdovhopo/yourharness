@@ -58,6 +58,8 @@ struct RootView: View {
                 NavigationStack { SearchView() }.environment(store).id(store.id)
             }
         }
+        // `YH_PHONE_DEMO=<steps>`: a scripted demo (Demo.swift).
+        .task { Demo.shared.start(fleet: fleet) }
         // `YH_PHONE_PAIR=<yourharness://pair… link>`: paired with, as opening the link does.
         .task {
             guard let link = ProcessInfo.processInfo.environment["YH_PHONE_PAIR"].flatMap(URL.init(string:)) else { return }

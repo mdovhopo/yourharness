@@ -2,7 +2,7 @@
   {"cursor": false},
   {"inspector": false},
 
-  {"select": "App State Flow", "after": 0.8},
+  {"select": "State Flow", "after": 0.8},
   {"key": "shift-cmd-[", "after": 1.2},
   {"caption": "diagram", "hold": 1.5, "for": 1.4},
 
@@ -13,7 +13,7 @@
 
   {"select": "Lumen dark mode", "after": 1.2},
   {"caption": "thread", "hold": 1.5, "for": 1.4},
-  {"click": [703, 699], "dur": 0.1, "after": 2.0},
+  {"inspector": true, "after": 0.6}, {"panel": "files", "dur": 0.1, "after": 1.2}, {"click": [1135, 200], "dur": 0.1, "after": 1.5},
   {"caption": "files", "hold": 1.5, "for": 1.4},
   {"inspector": false, "after": 0.8},
 

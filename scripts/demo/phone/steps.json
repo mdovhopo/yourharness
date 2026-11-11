@@ -1,0 +1,8 @@
+[{"wait_connected": 30}, {"wait": 2.5},
+ {"open": "lumen dark mode", "after": 2.0},
+ {"type": "Add a D keyboard shortcut for the theme toggle", "cps": 15},
+ {"wait": 0.8}, {"send": true},
+ {"wait": 18},
+ {"back": true, "after": 1.5},
+ {"tab": "mac", "after": 5},
+ {"tab": "threads", "after": 3}]

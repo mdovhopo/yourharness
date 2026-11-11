@@ -1,4 +1,5 @@
 {"out": "{{OUT}}/{{NAME}}.mp4", "fps": 30, "lead": 2.5, "tail": 1.5, "steps": [
+  {"appearance": "light"},
   {"select": "Lumen dark mode", "after": 0.2},
   {"inspector": false, "after": 0.1},
   {"move": [760, 520], "dur": 0.1},
@@ -28,7 +29,7 @@
   {"wait": 1.0},
 
   {"caption": "Mermaid diagrams, drawn right in the conversation"},
-  {"click": "title:App State Flow", "dur": 1.0, "after": 0.6},
+  {"click": "title:State Flow", "dur": 1.0, "after": 0.6},
   {"key": "shift-cmd-[", "after": 0.8},
   {"zoom": [468, 230, 764, 560], "dur": 1.2, "pad": 10},
   {"move": [880, 600], "dur": 1.5},
@@ -63,12 +64,14 @@
   {"click": [410, 440], "dur": 0.8, "after": 2.5},
   {"click": [410, 580], "dur": 0.8, "after": 2.0},
 
+  {"click": "@live", "dur": 1.0, "after": 0.6},
+  {"caption": "Light or dark, as you like"},
+  {"wait": 0.8},
+  {"appearance": "dark", "after": 1.8},
   {"caption": "Pull requests, side chat, sub-agents, files and the browser, one click away"},
-  {"click": "@live", "dur": 1.0, "after": 0.5},
   {"inspector": true, "after": 0.8},
   {"panel": "files", "dur": 1.0, "after": 2.2},
   {"panel": "subagents", "dur": 0.8, "after": 1.6},
   {"panel": "prs", "dur": 0.8, "after": 1.6},
-  {"inspector": false, "after": 0.6},
-  {"caption": "github.com/mdovhopo/yourharness", "for": 3}
+  {"inspector": false, "after": 1.0}
 ]}

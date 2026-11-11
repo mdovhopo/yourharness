@@ -67,6 +67,8 @@ struct ThreadListView: View {
         // Here, not on the list: a Mac never reached swaps the list for `Unreachable` at each try,
         // which took the sheet down with it.
         .sheet(isPresented: $settingsOpen) { SettingsSheet() }
+        // A demo recording opening or closing Settings (Demo.swift).
+        .onChange(of: Demo.shared.settingsOpen) { _, open in if let open { settingsOpen = open } }
     }
 
     /// The Mac whose spinner shows: not connected, its list on screen.

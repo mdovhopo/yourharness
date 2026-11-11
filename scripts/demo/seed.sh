@@ -8,7 +8,7 @@ root=${here:h:h}
 data=${1:-$root/test-harness-root/demo/data}
 model=${2:-sonnet}
 app="$root/test-harness-root/demo/app/YourHarness Next.app"
-work=$root/test-harness-root/demo/work
+work=${DEMO_WORK:-/Users/Shared/Projects}
 mkdir -p "$data/home"
 for p in ${=PROJECTS:-atlas-api orbit lumen}; do
   log=$data/seed-$p.log

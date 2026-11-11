@@ -1,0 +1,13 @@
+{"out": "{{OUT}}/{{NAME}}.mp4", "fps": 30, "lead": 2.0, "tail": 1.0, "steps": [
+  {"inspector": false},
+  {"cursor": false},
+  {"select": "Lumen dark mode", "after": 0.5},
+  {"caption": "Your threads on your iPhone, from anywhere, over Tailscale"},
+  {"wait": 9.0},
+  {"caption": "Send from the phone: it runs on your Mac"},
+  {"wait_for": "turn", "start_max": 40, "max": 180, "after": 0.5},
+  {"caption": "Both stay in sync, live"},
+  {"wait": 8.0},
+  {"caption": "Only your own devices on your tailnet can connect, end to end encrypted"},
+  {"wait": 14.0}
+]}
