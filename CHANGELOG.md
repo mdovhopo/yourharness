@@ -6,6 +6,8 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+## [0.1.12] - 2026-11-11
+
 ### Added
 
 - Phone: **Select Text** in a message's long-press menu opens it in a sheet where you can select any part of it, not only copy the whole; a tool's details and thinking select the same way.
