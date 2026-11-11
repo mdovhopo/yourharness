@@ -12,6 +12,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ### Fixed
 
+- Mac: the browser no longer keeps your keyboard. Typing into a page is now a keyboard toggle in the browser's toolbar, off by default: once it's on, clicking the page lets you type into it, and clicking the composer or anywhere else in the app gives the keyboard back, as focus works on a web page. Before, after Take Control and a click in the page you couldn't type in the thread anymore.
 - Phone: Settings no longer closes by itself while the phone hasn't reached your Mac yet.
 - Selecting text in a thread shows the selection as you drag, not only once you let go.
 

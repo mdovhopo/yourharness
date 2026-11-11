@@ -65,6 +65,7 @@ The right sidebar has a **Browser** tab, beside Side Chat, Sub-agents, Files and
   - the URL field;
   - device size;
   - the element picker (Pick);
+  - Typing in Page (the keyboard toggle, off by default);
   - Take Control / Give Back;
   - a More menu: the window, the tab, page size and appearance, the Web Inspector, Clear Browsing Data, Import Sign-ins.
 - **Tabs:** a thin tab strip appears only when the thread has more than one tab.
@@ -76,7 +77,7 @@ The right sidebar has a **Browser** tab, beside Side Chat, Sub-agents, Files and
   - Both lists are capped, the same buffers the agent reads.
 - **Empty state:** "Claude opens pages here when it tests your app." It lists recent URLs and the local servers this thread started (see Local servers below).
 - **Opening:** when the agent opens a page in the thread you're looking at, the sidebar opens on Browser. A setting covers this, "Show the browser when Claude opens a page" (on).
-- **Taking over:** you can click and type in the page at any time. Take Control makes it explicit: the agent's actions fail with "The user has taken control of the browser", while its reads still work.
+- **Taking over:** you can click in the page at any time. Typing into it is a toggle in the toolbar (the keyboard button), off by default and at each launch: off, what you type always goes to the app, even after a click in the page; on, a click in the page gives it the keyboard, as a field on a web page takes focus, and a click anywhere else (the composer, the transcript, the panel's toolbar) takes it back. Take Control turns typing on and Give Back turns it off; Take Control also makes taking over explicit: the agent's actions fail with "The user has taken control of the browser", while its reads still work.
 - **Element picker:** pick an element to put it in the composer as a chip with:
   - its role, name and a CSS selector;
   - a short HTML excerpt;
@@ -170,7 +171,7 @@ What it gives you:
 1. In-process MCP over the control channel works with the installed CLI, with no wait between `initialize` and the first message, and `--allowedTools mcp__browser` keeps the tools from asking.
 2. Image results reach the model.
 3. **Input.** `NSEvent`s sent straight to the web view arrive as trusted events, in a key window or not, on screen or off. Two catches, both handled:
-   - WebKit makes the web view the window's first responder when it's clicked, which would pull the keyboard out of your composer. `_setShouldSuppressFirstResponderChanges:` stops that for the agent's own events (turned off again after a round trip, so your clicks focus the page as usual).
+   - WebKit makes the web view the window's first responder when it's clicked or a page focuses a field, which would pull the keyboard out of your composer. `_setShouldSuppressFirstResponderChanges:` is on for every page, always, so neither the agent's events nor a page's own focus take it. Your clicks go through a local event monitor (`webview::watch_focus`), seen before the window handles them: a press in a page with typing on makes it first responder (suppression lifted for that one call), and a press anywhere else while a page has the keyboard gives it back to the GPUI view, which never asks for it itself (it doesn't accept first responder on a click).
    - Without the keyboard focus, key presses still fire `keydown` and their default actions (Backspace, Tab, Enter submitting a form), but typed characters don't insert. `type` inserts text with `insertText:` instead (real `beforeinput`/`input` events). ⌘A/⌘C/⌘X/⌘V are menu commands WebKit runs only for the focused view, so they're done in the page, with a clipboard of the browser's own.
 4. **Hidden rendering.** WebKit treats a page in an occluded or off-screen window as hidden: timers drop to 1 Hz, `requestAnimationFrame` stops, `visibilityState` is `hidden`. With `_setWindowOcclusionDetectionEnabled:` off, a page in any window that's ordered in runs at full speed and screenshots fine; out of a window it's suspended either way. So pages not on screen wait in an off-screen, never-key panel (it doesn't keep the app open), and moving a web view between windows keeps its state. Occlusion detection is off for every page, from the moment its web view is made (`WebView::new` in `webview.rs`), so a page parked off screen, or one a phone is watching, keeps running and drawing. Both switches are private WebKit API, looked up first: without them, pages are throttled and the agent's clicks take focus, but nothing breaks.
 5. **Snapshots.** Measured on real pages: a login form 1 KB, TodoMVC 1 KB, Hacker News' front page 17.5 KB with all 30 stories, a long Wikipedia article and apple.com capped at 18 KB with text and off-screen parts dropped first. Layout tables are flattened, boxes around a single link collapse into it, and punctuation between links is dropped.

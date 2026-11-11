@@ -937,6 +937,7 @@ impl Render for BrowserPanel {
         };
         self._rescan = None;
         let control = Browsers::has_control(&thread);
+        let typing = Browsers::keyboard_on(&thread);
         // The field shows the page's address, except while you're typing in it.
         if !gpui_kit::Focusable::focus_handle(self.address.read(cx), cx).is_focused(window) && self.address.read(cx).value() != shown.url.as_str() {
             let url = shown.url.clone();
@@ -996,6 +997,21 @@ impl Render for BrowserPanel {
                 .tooltip(if control { "Give Back Control: let Claude act in the browser again" } else { "Take Control: stop Claude from acting in the browser while you use it. It can still look." })
                 .on_click(cx.listener(move |_, _, _, cx| {
                     Browsers::set_control(&thread, !control);
+                    cx.notify();
+                }))
+        };
+        // Off, what you type always goes to the app, even after a click in the page; on, a
+        // click in the page gives it the keyboard and a click anywhere else takes it back.
+        let keyboard = {
+            let thread = thread.clone();
+            Button::new("browser-keyboard")
+                .small()
+                .ghost()
+                .icon(icons::keyboard().size(px(14.)).text_color(if typing { theme.accent } else { theme.secondary }))
+                .selected(typing)
+                .tooltip(if typing { "Typing in Page: on. Click the page to type into it, anywhere else to type in the app" } else { "Typing in Page: off. Turn on to type into the page after clicking it" })
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    Browsers::set_keyboard(&thread, !typing);
                     cx.notify();
                 }))
         };
@@ -1084,6 +1100,7 @@ impl Render for BrowserPanel {
                     .child(reload)
                     .child(div().flex_1().min_w_0().px(px(2.)).child(Input::new(&self.address).small().text_size(px(text::FOOTNOTE))))
                     .child(pick)
+                    .child(keyboard)
                     .child(take)
                     .child(menu)
                     .children(last),

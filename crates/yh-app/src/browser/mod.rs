@@ -202,6 +202,9 @@ pub struct Session {
     pub restorable: Vec<String>,
     /// You took over: the agent's actions fail until you give it back; it can still look.
     pub user_has_control: bool,
+    /// You may type into its pages: a click in one gives it the keyboard (off by default, and
+    /// at each launch).
+    pub keyboard: bool,
 }
 
 impl Session {
@@ -317,28 +320,46 @@ impl Browsers {
 
     /// Take Control, or Give Back: refs the agent had are stale either way.
     pub fn set_control(thread: &str, on: bool) {
-        Browsers::with(|b| {
-            let s = b.session(thread);
-            if s.user_has_control == on {
-                return;
-            }
-            s.user_has_control = on;
-            for t in &s.tabs {
-                t.reset_refs();
-            }
-            // The keyboard goes with control: to the shown tab when you take it, back to the
-            // app when you give it back.
-            let shown = s.selected_tab().map(|t| t.id);
-            for t in s.tabs.iter().filter(|t| Some(t.id) != shown) {
-                t.web.set_keyboard(false);
-            }
-            if let Some(t) = s.selected_tab() {
-                t.web.set_keyboard(on);
-            }
-            if std::env::var("YH_DATA_DIR").is_ok() {
-                eprintln!("BROWSER control {}", if on { "taken" } else { "given back" });
-            }
-        });
+        Browsers::with(|b| b.set_control_now(thread, on));
+    }
+
+    fn set_control_now(&mut self, thread: &str, on: bool) {
+        let s = self.session(thread);
+        if s.user_has_control == on {
+            return;
+        }
+        s.user_has_control = on;
+        for t in &s.tabs {
+            t.reset_refs();
+        }
+        if std::env::var("YH_DATA_DIR").is_ok() {
+            eprintln!("BROWSER control {}", if on { "taken" } else { "given back" });
+        }
+        // Typing goes with control: on when you take it, off when you give it back.
+        self.set_keyboard_now(thread, on);
+    }
+
+    /// Typing into the pages on or off (the panel's keyboard toggle).
+    pub fn set_keyboard(thread: &str, on: bool) {
+        Browsers::with(|b| b.set_keyboard_now(thread, on));
+    }
+
+    fn set_keyboard_now(&mut self, thread: &str, on: bool) {
+        let s = self.session(thread);
+        if s.keyboard == on {
+            return;
+        }
+        s.keyboard = on;
+        for t in &s.tabs {
+            t.web.set_keyboard(on);
+        }
+        if std::env::var("YH_DATA_DIR").is_ok() {
+            eprintln!("BROWSER typing {}", if on { "on" } else { "off" });
+        }
+    }
+
+    pub fn keyboard_on(thread: &str) -> bool {
+        Browsers::with(|b| b.sessions.get(thread).is_some_and(|s| s.keyboard))
     }
 
     pub fn has_control(thread: &str) -> bool {
@@ -361,7 +382,7 @@ impl Browsers {
             s.next_id += 1;
             let id = s.next_id;
             let mut tab = Tab::new(id, web);
-            if s.user_has_control {
+            if s.keyboard {
                 tab.web.set_keyboard(true);
             }
             tab.log(&json!({"kind": "console", "level": "info", "text": format!("Opened by tab {from} ({})", url.as_deref().unwrap_or("a new window"))}));
@@ -500,7 +521,7 @@ impl Browsers {
         if let Some(u) = url_from(url) {
             web.load(&u);
         }
-        if session.user_has_control {
+        if session.keyboard {
             web.set_keyboard(true);
         }
         session.tabs.push(Tab::new(id, web));
@@ -2014,14 +2035,18 @@ pub fn run_probe(path: String, thread: String, project: Option<String>) {
                 std::thread::sleep(Duration::from_secs_f64(seconds));
                 continue;
             }
-            // `{"control": true}`: you take control (false gives it back), as the panel's button does.
-            if let Some(on) = step["control"].as_bool() {
+            // `{"control": true}`: you take control (false gives it back), as the panel's button
+            // does; `{"keyboard": true}`: its keyboard toggle.
+            let control = step["control"].as_bool().map(|on| ("control", on)).or(step["keyboard"].as_bool().map(|on| ("keyboard", on)));
+            if let Some((what, on)) = control {
                 let t = thread.clone();
                 if let Some(jobs) = JOBS.get() {
                     let _ = jobs.send(Box::new(move |b, cx| {
-                        let s = b.session(&t);
-                        s.user_has_control = on;
-                        s.tabs.iter().for_each(Tab::reset_refs);
+                        if what == "control" {
+                            b.set_control_now(&t, on);
+                        } else {
+                            b.set_keyboard_now(&t, on);
+                        }
                         // The panel shows the banner, as after its button.
                         if let Some(f) = b.changed.take() {
                             f(cx);
@@ -2029,7 +2054,7 @@ pub fn run_probe(path: String, thread: String, project: Option<String>) {
                         }
                     }));
                 }
-                eprintln!("== {index} control {on}");
+                eprintln!("== {index} {what} {on}");
                 std::thread::sleep(Duration::from_millis(200));
                 continue;
             }

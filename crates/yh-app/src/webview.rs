@@ -524,8 +524,100 @@ pub struct WebView {
     activity: std::cell::Cell<u64>,
     /// In the parking window (`parking_view`), off screen, rather than over a panel.
     parked: std::cell::Cell<bool>,
-    /// The page may have the keyboard: only after Take Control (`set_keyboard`).
-    keyboard: std::cell::Cell<bool>,
+}
+
+thread_local! {
+    /// The web views you may type into (`set_keyboard`): a click of yours in one gives it the
+    /// keyboard, as a field on a web page takes focus.
+    static TYPING: std::cell::RefCell<std::collections::HashSet<usize>> = Default::default();
+}
+
+/// The GPUI view of `window`, which takes the app's keys; its content view when there's none.
+fn app_view(window: id) -> id {
+    unsafe {
+        let content: id = msg_send![window, contentView];
+        if content == nil {
+            return nil;
+        }
+        let subviews: id = msg_send![content, subviews];
+        let count: usize = msg_send![subviews, count];
+        for i in 0..count {
+            let view: id = msg_send![subviews, objectAtIndex: i];
+            let class: id = msg_send![view, className];
+            let utf8: *const std::ffi::c_char = msg_send![class, UTF8String];
+            if !utf8.is_null() && CStr::from_ptr(utf8).to_bytes() == b"GPUIView" {
+                return view;
+            }
+        }
+        content
+    }
+}
+
+/// The web view `view` is in (itself, or one of WebKit's views inside it), or nil.
+fn web_view_of(mut view: id) -> id {
+    unsafe {
+        while view != nil {
+            let web: bool = msg_send![view, isKindOfClass: class!(WKWebView)];
+            if web {
+                return view;
+            }
+            view = msg_send![view, superview];
+        }
+        nil
+    }
+}
+
+/// Keyboard focus as on a web page, watched in every mouse press the app gets before its window
+/// handles it: a press in a page you may type into gives it the keyboard, and a press anywhere
+/// else (the composer, the transcript, the page's own toolbar) takes it back for the app. Pages
+/// never take it by themselves: WebKit's first-responder changes stay suppressed for good.
+fn watch_focus() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| unsafe {
+        let handler = ConcreteBlock::new(|event: id| -> id {
+            focus_for_press(event);
+            event
+        })
+        .copy();
+        // Left, right and other mouse down.
+        let mask: u64 = (1 << 1) | (1 << 3) | (1 << 25);
+        let monitor: id = msg_send![class!(NSEvent), addLocalMonitorForEventsMatchingMask: mask handler: &*handler];
+        let _: id = msg_send![monitor, retain];
+    });
+}
+
+/// Where a mouse press moves the keyboard (`watch_focus`).
+pub fn focus_for_press(event: id) {
+    unsafe {
+        let window: id = msg_send![event, window];
+        if window == nil {
+            return;
+        }
+        let content: id = msg_send![window, contentView];
+        let frame: id = if content == nil { nil } else { msg_send![content, superview] };
+        let at: NSPoint = msg_send![event, locationInWindow];
+        let hit: id = if content == nil {
+            nil
+        } else if frame == nil {
+            msg_send![content, hitTest: at]
+        } else {
+            let local: NSPoint = msg_send![frame, convertPoint: at fromView: nil];
+            msg_send![content, hitTest: local]
+        };
+        let pressed = web_view_of(hit);
+        let first: id = msg_send![window, firstResponder];
+        let is_view: bool = first != nil && msg_send![first, isKindOfClass: class!(NSView)];
+        let focused = if is_view { web_view_of(first) } else { nil };
+        if pressed != nil && TYPING.with(|t| t.borrow().contains(&(pressed as usize))) {
+            if focused != pressed {
+                spi_bool(pressed, "_setShouldSuppressFirstResponderChanges:", false);
+                let _: bool = msg_send![window, makeFirstResponder: pressed];
+                spi_bool(pressed, "_setShouldSuppressFirstResponderChanges:", true);
+            }
+        } else if focused != nil && focused != pressed {
+            let _: bool = msg_send![window, makeFirstResponder: app_view(window)];
+        }
+    }
 }
 
 /// A parked page is drawn at half its CSS size.
@@ -707,11 +799,12 @@ impl WebView {
                 overlay: std::cell::Cell::new(nil),
                 activity: Default::default(),
                 parked: Default::default(),
-                keyboard: Default::default(),
             };
-            // The page never takes the keyboard by itself (a page focusing a field, your click
-            // in it): what you type goes to the composer until you take control.
-            web.set_keyboard(false);
+            // The page never takes the keyboard by itself (a page focusing a field, the agent's
+            // clicks): what you type goes to the composer unless you click into a page you
+            // may type into (`watch_focus`).
+            spi_bool(view, "_setShouldSuppressFirstResponderChanges:", true);
+            watch_focus();
             web.lay_out(LAPTOP.0, LAPTOP.1, LAPTOP.0, LAPTOP.1);
             web
         }
@@ -1004,75 +1097,34 @@ impl WebView {
         }
     }
 
-    /// A click at a point in CSS pixels, as real mouse events: `left` or `right`, `count` times.
-    /// WebKit makes the page the window's first responder when it's clicked, which would pull
-    /// the keyboard out of the composer you're typing in: the agent's input mustn't. Off again
-    /// once the page has handled the events, so your own clicks focus it as usual.
-    fn without_taking_focus(&self, body: impl FnOnce()) {
-        // Without control the page can't take the keyboard at all: nothing to guard.
-        if !self.keyboard.get() {
-            body();
+    /// Whether you may type into the page. Off (the default), keys always go to the app; on,
+    /// a click of yours in the page gives it the keyboard (`watch_focus`). Turned off while it
+    /// has the keyboard, the keyboard goes back to the app.
+    pub fn set_keyboard(&self, allowed: bool) {
+        TYPING.with(|t| {
+            let mut t = t.borrow_mut();
+            if allowed { t.insert(self.view as usize) } else { t.remove(&(self.view as usize)) }
+        });
+        if allowed {
             return;
         }
         unsafe {
             let window: id = msg_send![self.view, window];
-            let first: id = if window == nil { nil } else { msg_send![window, firstResponder] };
-            let selector = sel!(_setShouldSuppressFirstResponderChanges:);
-            let can: bool = msg_send![self.view, respondsToSelector: selector];
-            if first == self.view || !can {
-                body();
-                return;
-            }
-            let _: () = msg_send![self.view, _setShouldSuppressFirstResponderChanges: YES];
-            body();
-            let view = self.view as usize;
-            let done = ConcreteBlock::new(move |_result: id, _error: id| {
-                let view = view as id;
-                let _: () = msg_send![view, _setShouldSuppressFirstResponderChanges: NO];
-            })
-            .copy();
-            let _: () = msg_send![self.view, evaluateJavaScript: ns_string("0") completionHandler: &*done];
-        }
-    }
-
-    /// Whether the page may have the keyboard. Off (the default), WebKit never makes it the
-    /// window's first responder, so keys go to the app, and if it had the keyboard it goes
-    /// back to the app's own view. On (Take Control), it gets the keyboard now.
-    pub fn set_keyboard(&self, allowed: bool) {
-        self.keyboard.set(allowed);
-        unsafe {
-            let selector = sel!(_setShouldSuppressFirstResponderChanges:);
-            let can: bool = msg_send![self.view, respondsToSelector: selector];
-            if can {
-                let suppress = if allowed { NO } else { YES };
-                let _: () = msg_send![self.view, _setShouldSuppressFirstResponderChanges: suppress];
-            }
-            let window: id = msg_send![self.view, window];
             if window == nil {
                 return;
             }
-            if allowed {
-                let _: () = msg_send![window, makeFirstResponder: self.view];
-                return;
-            }
             let first: id = msg_send![window, firstResponder];
-            if first == nil {
-                return;
-            }
-            let is_view: bool = msg_send![first, isKindOfClass: class!(NSView)];
-            let inside: bool = is_view && msg_send![first, isDescendantOf: self.view];
-            if inside {
-                let content: id = msg_send![window, contentView];
-                let _: () = msg_send![window, makeFirstResponder: content];
+            let is_view: bool = first != nil && msg_send![first, isKindOfClass: class!(NSView)];
+            if is_view && web_view_of(first) == self.view {
+                let _: bool = msg_send![window, makeFirstResponder: app_view(window)];
             }
         }
     }
 
+    /// A click at a point in CSS pixels, as real mouse events: `left` or `right`, `count` times.
+    /// It never takes the keyboard from the composer: WebKit's first-responder changes are
+    /// suppressed.
     pub fn click(&self, x: f64, y: f64, right: bool, count: isize, modifiers: usize) {
-        self.without_taking_focus(|| self.click_now(x, y, right, count, modifiers));
-    }
-
-    fn click_now(&self, x: f64, y: f64, right: bool, count: isize, modifiers: usize) {
         let at = self.window_point(x, y);
         self.hover_at(at, modifiers);
         unsafe {
@@ -1115,10 +1167,8 @@ impl WebView {
     pub fn mouse_down(&self, x: f64, y: f64) {
         let at = self.window_point(x, y);
         self.hover_at(at, 0);
-        self.without_taking_focus(|| {
-            synthetic_mouse::holding(1, || unsafe {
-                let _: () = msg_send![self.view, mouseDown: self.mouse_event(1, at, 1, 0)];
-            })
+        synthetic_mouse::holding(1, || unsafe {
+            let _: () = msg_send![self.view, mouseDown: self.mouse_event(1, at, 1, 0)];
         });
     }
 
@@ -1511,6 +1561,7 @@ impl Drop for WebView {
     fn drop(&mut self) {
         // A dialog left waiting is cancelled, so WebKit isn't left holding its handler.
         self.answer_dialog(false, None);
+        self.set_keyboard(false);
         unsafe {
             let _: () = msg_send![self.view, stopLoading];
             let _: () = msg_send![self.page, removeFromSuperview];

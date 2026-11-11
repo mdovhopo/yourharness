@@ -133,6 +133,11 @@ pub fn click(w: id, x: f32, y: f32) {
         for kind in [NSLeftMouseDown, NSLeftMouseUp] {
             let event = mouse_event(w, kind, point, 1);
             if event != nil {
+                // Sent to the window, it skips the app's event monitors: the browser's keyboard
+                // focus is moved as a real press would.
+                if kind == NSLeftMouseDown {
+                    crate::webview::focus_for_press(event);
+                }
                 let _: () = msg_send![w, sendEvent: event];
             }
         }
