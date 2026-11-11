@@ -1,0 +1,96 @@
+1
+00:00:03,944 --> 00:00:07,783
+Claude Code, in a fast native Mac app
+
+2
+00:00:07,783 --> 00:00:16,427
+Start a thread in any project
+
+3
+00:00:16,427 --> 00:00:23,150
+Every step and every edit, as it happens
+
+4
+00:00:23,150 --> 00:00:26,832
+Each thread runs its own claude: switch freely while it works
+
+5
+00:00:26,832 --> 00:00:28,549
+Tables, code and file links, rendered natively
+
+6
+00:00:28,549 --> 00:00:34,499
+Mermaid diagrams, drawn right in the conversation
+
+7
+00:00:34,499 --> 00:00:38,798
+⌘K finds any thread, in any project
+
+8
+00:00:38,798 --> 00:00:40,500
+Back to the new thread
+
+9
+00:00:40,500 --> 00:00:43,850
+Back to the new thread
+
+10
+00:00:43,850 --> 00:00:43,922
+Back to the new thread
+
+11
+00:00:43,922 --> 00:00:51,250
+Claude checks its work in a browser built into the app
+
+12
+00:00:51,250 --> 00:00:56,383
+Claude checks its work in a browser built into the app
+
+13
+00:00:56,383 --> 00:00:56,433
+Claude checks its work in a browser built into the app
+
+14
+00:00:56,433 --> 00:01:02,311
+Done: a summary of what changed, and how it was checked
+
+15
+00:01:02,311 --> 00:01:13,438
+Memory and tasks your agents keep across sessions
+
+16
+00:01:13,438 --> 00:01:14,333
+Light or dark, as you like
+
+17
+00:01:14,333 --> 00:01:16,090
+Light or dark, as you like
+
+18
+00:01:16,090 --> 00:01:29,310
+Pull requests, side chat, sub-agents, files and the browser, one click away
+
+19
+00:01:29,944 --> 00:01:38,953
+Your threads on your iPhone, from anywhere, over Tailscale
+
+20
+00:01:38,953 --> 00:01:42,810
+Send from the phone: it runs on your Mac
+
+21
+00:01:42,810 --> 00:01:50,810
+Send from the phone: it runs on your Mac
+
+22
+00:01:50,810 --> 00:01:54,176
+Send from the phone: it runs on your Mac
+
+23
+00:01:54,176 --> 00:02:02,177
+Both stay in sync, live
+
+24
+00:02:02,177 --> 00:02:08,810
+Only your own devices on your tailnet can connect, end to end encrypted
+
