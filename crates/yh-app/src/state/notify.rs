@@ -63,6 +63,10 @@ impl Workspace {
             return;
         }
         let id = t.id().strip_prefix(SIDE).unwrap_or(t.id()).to_string();
+        // Started by another thread whose turn runs: its agent follows this one and answers.
+        if self.watched_by(&id, cx).is_some() {
+            return;
+        }
         let active = crate::platform::app_is_active();
         let looking = active && self.selected.as_deref() == Some(id.as_str());
         if looking || (kind == Kind::Finished && active) {

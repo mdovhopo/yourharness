@@ -72,7 +72,7 @@ fn now() -> f64 {
     yh_core::library::now_ms() / 1000.0
 }
 
-fn tooltip(text: impl Into<SharedString>) -> impl Fn(&mut Window, &mut App) -> gpui_kit::AnyView + 'static {
+pub(crate) fn tooltip(text: impl Into<SharedString>) -> impl Fn(&mut Window, &mut App) -> gpui_kit::AnyView + 'static {
     let text: SharedString = text.into();
     move |window, cx| gpui_kit::component::tooltip::Tooltip::new(text.clone()).build(window, cx)
 }
@@ -97,6 +97,8 @@ pub struct Sidebar {
     expanded: HashSet<String>,
     shelves: HashSet<String>,
     collapsed: HashSet<String>,
+    /// Threads whose agent-started threads are folded away under them.
+    folded_workers: HashSet<String>,
     pub scroll: ScrollHandle,
     renaming: Option<(String, Entity<InputState>, Subscription)>,
     pub focus: FocusHandle,
@@ -107,11 +109,25 @@ pub struct Sidebar {
 
 enum SidebarRow {
     Project(ProjectMeta, bool),
-    Thread(Entity<ThreadState>),
+    Thread(Entity<ThreadState>, Nest),
     More(String, usize, bool),
     Shelf(String, usize, bool),
     AddProject,
 }
+
+/// Where a thread sits among the threads agents started (`start_thread`): how deep, and for
+/// one that started others, how many sit under it and what they're doing.
+#[derive(Clone, Copy, Default)]
+struct Nest {
+    depth: usize,
+    workers: usize,
+    working: usize,
+    waiting: usize,
+    folded: bool,
+}
+
+/// How far a thread an agent started sits in from the one that started it: one status column.
+const INDENT: f32 = ICON + GAP;
 
 /// What a thread's menu needs, for its context menu and its "…" button alike.
 #[derive(Clone)]
@@ -214,6 +230,7 @@ impl Sidebar {
             expanded,
             shelves,
             collapsed,
+            folded_workers: HashSet::new(),
             scroll: ScrollHandle::new(),
             renaming: None,
             focus: cx.focus_handle(),
@@ -262,16 +279,28 @@ impl Sidebar {
             live.sort_by(|a, b| crate::state::workspace::sidebar_order(&a.read(cx).meta, &b.read(cx).meta));
             settled.sort_by(|a, b| b.read(cx).meta.settled_at.unwrap_or(0.).total_cmp(&a.read(cx).meta.settled_at.unwrap_or(0.)));
             let all = self.expanded.contains(&project.id);
-            let shown = if all { live.len() } else { live.len().min(SHOWN_PER_PROJECT) };
-            rows.extend(live[..shown].iter().map(|t| SidebarRow::Thread((*t).clone())));
-            if live.len() > SHOWN_PER_PROJECT {
-                rows.push(SidebarRow::More(project.id.clone(), live.len() - SHOWN_PER_PROJECT, all));
+            // Threads an agent started sit under the one that started it; the limit counts
+            // only the threads at the top.
+            let nested = self.nested(live, cx);
+            let tops = nested.iter().filter(|(_, n)| n.depth == 0).count();
+            let mut seen = 0;
+            for (t, n) in nested {
+                if n.depth == 0 {
+                    seen += 1;
+                }
+                if !all && seen > SHOWN_PER_PROJECT {
+                    break;
+                }
+                rows.push(SidebarRow::Thread(t.clone(), n));
+            }
+            if tops > SHOWN_PER_PROJECT {
+                rows.push(SidebarRow::More(project.id.clone(), tops - SHOWN_PER_PROJECT, all));
             }
             if !settled.is_empty() {
                 let open = self.shelves.contains(&project.id);
                 rows.push(SidebarRow::Shelf(project.id.clone(), settled.len(), open));
                 if open {
-                    rows.extend(settled.iter().map(|t| SidebarRow::Thread((*t).clone())));
+                    rows.extend(self.nested(settled, cx).into_iter().map(|(t, n)| SidebarRow::Thread(t.clone(), n)));
                 }
             }
         }
@@ -279,15 +308,54 @@ impl Sidebar {
         rows
     }
 
+    /// The threads in their order with the ones agents started under theirs, those under a
+    /// folded one left out, and what each started thread's parent shows of them.
+    fn nested<'a>(&self, threads: Vec<&'a Entity<ThreadState>>, cx: &App) -> Vec<(&'a Entity<ThreadState>, Nest)> {
+        let order = crate::state::workspace::nest(threads, |t| {
+            let m = &t.read(cx).meta;
+            (m.id.clone(), m.parent_id.clone(), m.created_at)
+        });
+        let mut out: Vec<(&Entity<ThreadState>, Nest)> = vec![];
+        // The open threads above the current one, by depth, to count each one's workers.
+        let mut chain: Vec<usize> = vec![];
+        let mut hidden_below: Option<usize> = None;
+        for (t, depth) in order {
+            chain.truncate(depth);
+            let (working, waiting) = {
+                let t = t.read(cx);
+                let waiting = t.waiting_for_you();
+                (t.run.running && !waiting, waiting)
+            };
+            for &i in &chain {
+                let n = &mut out[i].1;
+                n.workers += 1;
+                n.working += working as usize;
+                n.waiting += waiting as usize;
+            }
+            if hidden_below.is_some_and(|d| depth > d) {
+                // Under a folded thread: counted, not listed.
+                continue;
+            }
+            hidden_below = None;
+            let folded = self.folded_workers.contains(t.read(cx).id());
+            if folded {
+                hidden_below = Some(depth);
+            }
+            chain.push(out.len());
+            out.push((t, Nest { depth, folded, ..Default::default() }));
+        }
+        out
+    }
+
     /// The threads as the sidebar lists them, top to bottom, folded projects skipped: for
     /// Previous and Next Thread, and ↑/↓.
     pub fn thread_order(&self, cx: &App) -> Vec<String> {
-        self.rows(cx).iter().filter_map(|r| if let SidebarRow::Thread(t) = r { Some(t.read(cx).id().to_string()) } else { None }).collect()
+        self.rows(cx).iter().filter_map(|r| if let SidebarRow::Thread(t, _) = r { Some(t.read(cx).id().to_string()) } else { None }).collect()
     }
 
     /// The thread's row, for scrolling it into view as a person would before clicking.
     pub fn row_index(&self, id: &str, cx: &App) -> Option<usize> {
-        self.rows(cx).iter().position(|r| matches!(r, SidebarRow::Thread(t) if t.read(cx).id() == id))
+        self.rows(cx).iter().position(|r| matches!(r, SidebarRow::Thread(t, _) if t.read(cx).id() == id))
     }
 
     pub fn more_index(&self, project_id: &str, cx: &App) -> Option<usize> {
@@ -629,7 +697,7 @@ impl Sidebar {
             .into_any_element()
     }
 
-    fn thread_row(&self, thread: &Entity<ThreadState>, selected: Option<&str>, theme: &Theme, now: f64, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+    fn thread_row(&self, thread: &Entity<ThreadState>, nest: Nest, selected: Option<&str>, theme: &Theme, now: f64, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let t = thread.read(cx);
         let id = t.id().to_string();
         let is_selected = selected == Some(id.as_str());
@@ -675,7 +743,12 @@ impl Sidebar {
         };
         // Working, waiting on you, waiting on a job, unread, or nothing when idle: under the
         // project's icon. Still icons: the sidebar is cached, nothing in it spins.
-        let (status, status_tip): (gpui_kit::AnyElement, &str) = if waiting {
+        // Folded away, the threads it started still show: one waiting on you while this one
+        // isn't following them (its turn over).
+        let workers_need_you = nest.folded && nest.waiting > 0 && !t.run.running;
+        let (status, status_tip): (gpui_kit::AnyElement, &str) = if workers_need_you && !waiting {
+            (icons::hand().size(px(13.)).text_color(theme.warning).into_any_element(), "A thread it started is waiting for you")
+        } else if waiting {
             (icons::hand().size(px(13.)).text_color(theme.warning).into_any_element(), "Waiting for your approval")
         } else if running {
             (Icon::new(IconName::LoaderCircle).size(px(13.)).text_color(theme.accent).into_any_element(), "Working…")
@@ -797,12 +870,37 @@ impl Sidebar {
             .gap(px(GAP))
             .w_full()
             .h(px(ROW_HEIGHT))
-            .px(px(ROW_INSET))
+            .pl(px(ROW_INSET + nest.depth as f32 * INDENT))
+            .pr(px(ROW_INSET))
             .rounded(px(radius::MEDIUM))
             .overflow_hidden()
             .when(is_selected, |d| d.bg(theme.selected))
             .when(!is_selected, |d| d.hover(|s| s.bg(theme.hover)))
-            .child(div().flex_none().w(px(CHEVRON)))
+            .child(if nest.workers > 0 {
+                let (this, key) = (cx.entity().downgrade(), id.clone());
+                let tip = workers_summary(&nest);
+                div()
+                    .id(SharedString::from(format!("fold-{id}")))
+                    .flex_none()
+                    .w(px(CHEVRON))
+                    .h(px(ROW_HEIGHT))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(Icon::new(if nest.folded { IconName::ChevronRight } else { IconName::ChevronDown }).size(px(10.)).text_color(theme.tertiary))
+                    .tooltip(tooltip(tip))
+                    .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(move |_, _, cx| {
+                        cx.stop_propagation();
+                        let _ = this.update(cx, |s, cx| {
+                            Self::toggle(&mut s.folded_workers, &key);
+                            cx.notify();
+                        });
+                    })
+                    .into_any_element()
+            } else {
+                div().flex_none().w(px(CHEVRON)).into_any_element()
+            })
             .child(
                 div()
                     .id(SharedString::from(format!("status-{id}")))
@@ -829,6 +927,8 @@ impl Sidebar {
                     .child(t.title.clone()),
             )
             .when(pinned, |d| d.child(icons::pin().size(px(11.)).text_color(theme.tertiary).rotate(gpui_kit::radians(0.7))))
+            // Folded: how many it started, where they'd be.
+            .when(nest.folded, |d| d.child(div().flex_none().text_size(px(text::CAPTION)).text_color(theme.tertiary).child(format!("+{}", nest.workers))))
             .child(div().flex_none().text_size(px(text::CAPTION)).text_color(if is_selected { theme.secondary } else { theme.tertiary }).child(age))
             .child(actions)
             .when(tracking, |d| d.child(probe::tracker(format!("thread:{id}"))))
@@ -847,6 +947,20 @@ impl Sidebar {
             .context_menu(move |m, _, cx| menu.build(m, cx))
             .into_any_element()
     }
+}
+
+/// "3 threads it started: 1 working, 1 waiting for you".
+fn workers_summary(n: &Nest) -> String {
+    let mut parts = vec![];
+    if n.working > 0 {
+        parts.push(format!("{} working", n.working));
+    }
+    if n.waiting > 0 {
+        parts.push(format!("{} waiting for you", n.waiting));
+    }
+    let head = format!("{} thread{} it started", n.workers, if n.workers == 1 { "" } else { "s" });
+    let head = if parts.is_empty() { head } else { format!("{head}: {}", parts.join(", ")) };
+    format!("{head} · click to {}", if n.folded { "show them" } else { "fold them away" })
 }
 
 fn visible(mut s: gpui_kit::StyleRefinement) -> gpui_kit::StyleRefinement {
@@ -1226,7 +1340,7 @@ impl Render for Sidebar {
                     let first = std::mem::replace(&mut first_project, false);
                     self.project_row(&project, home, first, &theme, cx)
                 }
-                SidebarRow::Thread(thread) => self.thread_row(&thread, selected.as_deref(), &theme, now, cx),
+                SidebarRow::Thread(thread, nest) => self.thread_row(&thread, nest, selected.as_deref(), &theme, now, cx),
                 SidebarRow::More(project, count, all) => {
                     let key = project.clone();
                     small_row(SharedString::from(format!("more-{project}")), if all { "Show less".into() } else { format!("Show {count} more") }, &theme)

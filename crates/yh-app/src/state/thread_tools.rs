@@ -33,6 +33,8 @@ pub struct ThreadInfo {
     pub queued: usize,
     /// What it waits for the user on, oldest first.
     pub requests: Vec<Ask>,
+    /// The thread whose agent started it.
+    pub parent_id: Option<String>,
 }
 
 /// A request waiting in a thread's composer.
@@ -73,9 +75,9 @@ pub enum ToolRequest {
     /// A page for you, in your default browser (`YH_MCP_BROWSER=log` prints it instead).
     OpenUrl(String),
     /// Start, send or stop, taken as the phone's are. Reply: a new thread's id, or why not.
-    Control { action: yh_server::Action, reply: flume::Sender<Result<Option<String>, String>> },
+    Control { caller: String, action: yh_server::Action, reply: flume::Sender<Result<Option<String>, String>> },
     /// A permission denied with a reason the thread's Claude reads.
-    Deny { thread: String, request_id: String, message: String, reply: flume::Sender<()> },
+    Deny { caller: String, thread: String, request_id: String, message: String, reply: flume::Sender<()> },
     UpdateTitle { caller: String, messages: Vec<(bool, String)>, sent: usize, hint: Option<String>, reply: flume::Sender<String> },
 }
 
@@ -109,6 +111,11 @@ pub fn instructions(project: Option<&str>, updates_title: bool, controls: bool) 
 /// At most this many threads working at once in a project, counting those the user started:
 /// a delegating agent can't run away.
 const MAX_RUNNING: usize = 8;
+/// How deep threads may start threads: the user's thread starts workers, they may start their
+/// own, and those can't. With commands going only down the tree (`other`), nothing loops.
+const MAX_DEPTH: usize = 2;
+/// Threads one thread may start in all (settled ones too): a start-settle-start loop ends.
+const MAX_STARTED: usize = 20;
 const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 /// The modes an agent may approve a plan into (it becomes the project's mode, as the card's
 /// does). Not Bypass: that one is the user's to choose.
@@ -193,6 +200,12 @@ impl ThreadTools {
         }
         if t.settled {
             states.push("settled");
+        }
+        let started_by = t.parent_id.as_ref().and_then(|p| s.threads.iter().find(|o| &o.id == p)).map(|p| {
+            if p.id == self.caller { "started by this thread".to_string() } else { format!("started by {}", Self::short_id(s, p)) }
+        });
+        if let Some(by) = &started_by {
+            states.push(by);
         }
         let mut line = format!("{}{} · “{}” · {}", if listed { "- " } else { "" }, Self::short_id(s, t), one_line(&t.title, 100), Self::project_name(s, t));
         if !states.is_empty() {
@@ -384,14 +397,36 @@ impl ThreadTools {
     }
 
     fn control(&self, action: yh_server::Action) -> Result<Option<String>, ToolResult> {
-        self.ask(|reply| ToolRequest::Control { action, reply }).ok_or_else(|| ToolResult::error("The app didn't answer."))?.map_err(ToolResult::error)
+        self.ask(|reply| ToolRequest::Control { caller: self.caller.clone(), action, reply }).ok_or_else(|| ToolResult::error("The app didn't answer."))?.map_err(ToolResult::error)
     }
 
-    /// A thread other than this one, for send and stop.
+    /// The threads above this one: the one that started it, the one that started that…
+    fn ancestors(s: &Snapshot, id: &str) -> Vec<String> {
+        let mut out: Vec<String> = vec![];
+        let mut at = id.to_string();
+        while let Some(parent) = s.threads.iter().find(|t| t.id == at).and_then(|t| t.parent_id.clone()) {
+            if out.contains(&parent) || parent == id {
+                break;
+            }
+            out.push(parent.clone());
+            at = parent;
+        }
+        out
+    }
+
+    /// A thread this one may send to, stop, answer or wait on: not itself, nor any thread above
+    /// it (the one that started it, and so on), and of another thread's workers only its own.
+    /// Commands go only down, so no two threads drive each other in a loop.
     fn other<'a>(&self, s: &'a Snapshot, a: &Value) -> Result<&'a ThreadInfo, ToolResult> {
         let t = self.thread(s, a)?;
         if t.id == self.caller {
             return Err(ToolResult::error("That's this thread. Give another thread's id."));
+        }
+        if Self::ancestors(s, &self.caller).contains(&t.id) {
+            return Err(ToolResult::error(format!("“{}” started this thread (or one above it): a thread can't drive the threads above it. Reply in your own conversation; it reads that.", t.title)));
+        }
+        if t.parent_id.is_some() && !Self::ancestors(s, &t.id).contains(&self.caller) {
+            return Err(ToolResult::error(format!("“{}” was started by another thread, which drives it. Leave it to that one.", t.title)));
         }
         Ok(t)
     }
@@ -426,6 +461,14 @@ impl ThreadTools {
                 }
             }
         };
+        let depth = Self::ancestors(&s, &self.caller).len();
+        if depth >= MAX_DEPTH {
+            return Err(ToolResult::error("This thread was started by a thread that was itself started by one: threads this deep can't start more. Do the work here, or say in your reply what should be handed off."));
+        }
+        let started = s.threads.iter().filter(|t| t.parent_id.as_deref() == Some(self.caller.as_str())).count();
+        if started >= MAX_STARTED {
+            return Err(ToolResult::error(format!("This thread has started {started} threads already, the most one may. Reuse one with send_to_thread.")));
+        }
         let running = self.reachable(&s).into_iter().filter(|t| t.running && t.project_id == project.id).count();
         if running >= MAX_RUNNING {
             return Err(ToolResult::error(format!("{running} threads are already working in {}; wait for some to finish first.", project.name)));
@@ -536,7 +579,7 @@ impl ThreadTools {
             (_, "deny") => {
                 match message {
                     Some(message) => {
-                        self.ask(|reply| ToolRequest::Deny { thread, request_id, message, reply }).ok_or_else(|| ToolResult::error("The app didn't answer."))?;
+                        self.ask(|reply| ToolRequest::Deny { caller: self.caller.clone(), thread, request_id, message, reply }).ok_or_else(|| ToolResult::error("The app didn't answer."))?;
                     }
                     None => {
                         self.control(yh_server::Action::Respond { thread, request_id, allow: false })?;

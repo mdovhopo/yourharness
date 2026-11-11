@@ -148,6 +148,11 @@ pub struct ThreadMeta {
     /// How full its context was when last heard from (tokens), and its model's window.
     pub context_tokens: Option<u64>,
     pub context_window: Option<u64>,
+    /// The thread whose agent started this one (`start_thread`): the sidebar nests it there.
+    /// 0.0.x doesn't know the key and drops it on a save.
+    pub parent_id: Option<String>,
+    /// Its messages that thread's agent sent (`send_to_thread`), by message id: marked as such.
+    pub agent_messages: Vec<String>,
 }
 
 impl ThreadMeta {
@@ -171,6 +176,8 @@ impl ThreadMeta {
             written_footprint: vec![],
             context_tokens: None,
             context_window: None,
+            parent_id: None,
+            agent_messages: vec![],
         }
     }
 
@@ -198,6 +205,8 @@ impl ThreadMeta {
             written_footprint: list(o, "writtenFootprint"),
             context_tokens: o.get("contextTokens").and_then(Value::as_u64),
             context_window: o.get("contextWindow").and_then(Value::as_u64),
+            parent_id: s("parentThreadID"),
+            agent_messages: list(o, "agentMessageIDs"),
         }
     }
 }
@@ -448,6 +457,9 @@ impl Library {
         }
         if let Some(folder) = &meta.working_directory {
             object.insert("workingDirectory".into(), folder.clone().into());
+        }
+        if let Some(parent) = &meta.parent_id {
+            object.insert("parentThreadID".into(), parent.clone().into());
         }
         self.records.lock().unwrap().threads.insert(0, object);
         self.save();

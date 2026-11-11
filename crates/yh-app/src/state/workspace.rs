@@ -39,6 +39,43 @@ pub fn sidebar_order(a: &ThreadMeta, b: &ThreadMeta) -> std::cmp::Ordering {
     b.pinned.cmp(&a.pinned).then(b.created_at.total_cmp(&a.created_at))
 }
 
+/// Threads in the sidebar's order with the ones an agent started (`parent_id`) right under
+/// theirs, in the order they were started, and how deep each sits. One whose parent isn't
+/// among them stands on its own.
+/// `meta` gives each one's id, parent and when it was made.
+pub fn nest<T: Clone>(items: Vec<T>, meta: impl Fn(&T) -> (String, Option<String>, f64)) -> Vec<(T, usize)> {
+    let ids: std::collections::HashSet<String> = items.iter().map(|t| meta(t).0).collect();
+    let mut children: HashMap<String, Vec<T>> = HashMap::new();
+    let mut roots = vec![];
+    for t in items {
+        let (id, parent, _) = meta(&t);
+        match parent.filter(|p| ids.contains(p) && *p != id) {
+            Some(parent) => children.entry(parent).or_default().push(t),
+            None => roots.push(t),
+        }
+    }
+    for kids in children.values_mut() {
+        kids.sort_by(|a, b| meta(a).2.total_cmp(&meta(b).2));
+    }
+    let mut out = vec![];
+    for root in roots {
+        let mut stack = vec![(root, 0usize)];
+        while let Some((t, depth)) = stack.pop() {
+            let kids = children.remove(&meta(&t).0).unwrap_or_default();
+            out.push((t, depth));
+            stack.extend(kids.into_iter().rev().map(|k| (k, depth + 1)));
+        }
+    }
+    // A loop of parents (never made, but the records are data): still listed.
+    out.extend(children.into_values().flatten().map(|t| (t, 0)));
+    out
+}
+
+/// The one workspace, for drawing that has only a thread at hand (a message's "From …").
+pub struct GlobalWorkspace(pub WeakEntity<Workspace>);
+
+impl gpui_kit::Global for GlobalWorkspace {}
+
 /// What can stand in place of the open thread.
 #[derive(Clone, PartialEq, Debug)]
 pub enum Page {
@@ -104,8 +141,9 @@ pub enum Undo {
     Unpin(String),
     /// Pinning: ⌘Z unpins (no notice).
     Pin(String),
-    /// Settling: back as it was, its pin and the selection too.
-    Settle { id: String, pinned: bool, was_selected: bool },
+    /// Settling: back as it was, its pin and the selection too, and the threads it started
+    /// that went with it.
+    Settle { id: String, pinned: bool, was_selected: bool, workers: Vec<String> },
     /// Bringing back from the shelf: ⌘Z settles it again (no notice).
     Unsettle(String),
 }
@@ -143,6 +181,8 @@ pub struct Workspace {
     /// A folder's files for `@` mentions, kept 30 seconds.
     files: HashMap<String, (Instant, Arc<Vec<String>>)>,
     new_count: usize,
+    /// The thread whose agent sends the next message (`send_to_thread`), so it's marked.
+    agent_sender: Option<String>,
     /// Each project's new thread, made in memory only (no record, not in the sidebar) until its
     /// first message goes; let go of when you leave it with nothing typed.
     pending: HashMap<String, Entity<ThreadState>>,
@@ -227,6 +267,7 @@ impl EventEmitter<WorkspaceEvent> for Workspace {}
 impl Workspace {
     pub fn new(library: Arc<Library>, cx: &mut Context<Self>) -> Self {
         let weak = cx.entity().downgrade();
+        cx.set_global(GlobalWorkspace(weak.clone()));
         let threads: Vec<Entity<ThreadState>> =
             library.threads.iter().map(|meta| make_thread(meta.clone(), weak.clone(), cx)).collect();
         let by_id = threads.iter().map(|t| (t.read(cx).id().to_string(), t.clone())).collect();
@@ -327,6 +368,7 @@ impl Workspace {
             commands: HashMap::new(),
             files: HashMap::new(),
             new_count: 0,
+            agent_sender: None,
             pending: HashMap::new(),
             tool_requests,
             titles_rewriting: Default::default(),
@@ -854,7 +896,7 @@ impl Workspace {
         for p in projects {
             let mut live: Vec<&ThreadMeta> = self.threads.iter().map(|t| &t.read(cx).meta).filter(|m| m.project_id == p.id && m.settled_at.is_none()).collect();
             live.sort_by(|a, b| sidebar_order(a, b));
-            out.extend(live.into_iter().map(|m| m.id.clone()));
+            out.extend(nest(live, |m| (m.id.clone(), m.parent_id.clone(), m.created_at)).into_iter().map(|(m, _)| m.id.clone()));
         }
         out
     }
@@ -1071,7 +1113,13 @@ impl Workspace {
             }
             Undo::Unpin(id) => self.set_pinned(&id, true, cx),
             Undo::Pin(id) => self.set_pinned(&id, false, cx),
-            Undo::Settle { id, pinned, was_selected } => {
+            Undo::Settle { id, pinned, was_selected, workers } => {
+                for w in workers {
+                    self.update_meta(&w, cx, |m, r| {
+                        m.settled_at = None;
+                        r.insert("settledAt".into(), Value::Null);
+                    });
+                }
                 // Back as it was: not "brought back" (that holds off settling on its own).
                 self.update_meta(&id, cx, |m, r| {
                     m.settled_at = None;
@@ -1510,10 +1558,40 @@ impl Workspace {
         let was_selected = self.selected.as_deref() == Some(id);
         self.set_settled(id, !settled, cx);
         if !settled {
-            self.offer_undo(format!("Settled “{title}”"), Undo::Settle { id: id.to_string(), pinned, was_selected }, cx);
+            // The threads its agent started go with it, unless they're working or waiting on you.
+            let workers = self.workers_of(id, cx);
+            let idle: Vec<String> = workers.into_iter().filter(|w| self.thread(w).is_some_and(|t| { let t = t.read(cx); t.meta.settled_at.is_none() && !t.run.running && !t.waiting_for_you() })).collect();
+            for w in &idle {
+                self.set_settled(w, true, cx);
+            }
+            let what = if idle.is_empty() { format!("Settled “{title}”") } else { format!("Settled “{title}” and {} thread{} it started", idle.len(), if idle.len() == 1 { "" } else { "s" }) };
+            self.offer_undo(what, Undo::Settle { id: id.to_string(), pinned, was_selected, workers: idle }, cx);
         } else {
             self.register_undo(Undo::Unsettle(id.to_string()), cx);
         }
+    }
+
+    /// The threads its agent started, and theirs, by id.
+    pub fn workers_of(&self, id: &str, cx: &App) -> Vec<String> {
+        let mut out: Vec<String> = vec![];
+        let mut look = vec![id.to_string()];
+        while let Some(parent) = look.pop() {
+            for t in &self.threads {
+                let m = &t.read(cx).meta;
+                if m.parent_id.as_deref() == Some(parent.as_str()) && m.id != id && !out.contains(&m.id) {
+                    out.push(m.id.clone());
+                    look.push(m.id.clone());
+                }
+            }
+        }
+        out
+    }
+
+    /// The thread that started this one, while its turn runs: its agent is following this one
+    /// and answers for it, so you aren't told.
+    pub fn watched_by(&self, id: &str, cx: &App) -> Option<String> {
+        let parent = self.thread(id)?.read(cx).meta.parent_id.clone()?;
+        self.thread(&parent).filter(|p| p.read(cx).run.running).map(|_| parent)
     }
 
     /// Whether idle settling may move the thread to the shelf (`autoSettle`, on unless off).
@@ -1623,6 +1701,7 @@ impl Workspace {
         now: bool,
         cx: &mut Context<Self>,
     ) {
+        let from_agent = self.agent_sender.take();
         let mut text = text.trim().to_string();
         if text.is_empty() && images.is_empty() && files.is_empty() {
             return;
@@ -1647,6 +1726,13 @@ impl Workspace {
             None => self.library.db.as_ref().map_or(0, |db| db.transcript_count(&id)) == 0,
         };
         let message_id = yh_core::library::new_uuid();
+        if from_agent.is_some() {
+            let mid = message_id.clone();
+            self.update_meta(&id, cx, |m, r| {
+                m.agent_messages.push(mid);
+                r.insert("agentMessageIDs".into(), Value::from(m.agent_messages.clone()));
+            });
+        }
         // Kept with the message as 0.0.x kept them: images by name, then files.
         let file_names: Vec<String> = files.iter().map(|f| f.stored_name(&id)).collect();
         let attachments: Vec<String> = images.iter().chain(&file_names).cloned().collect();
@@ -1931,6 +2017,12 @@ impl Workspace {
         // Waiting on jobs it started, Claude isn't done: it's back when they report. Stopped by
         // you: you're there, nothing to tell. A side chat never notifies.
         let stopped = end.stopped_by_you;
+        // Its agent no longer follows the threads it started: one still waiting is yours now.
+        for worker in self.workers_of(&id, cx) {
+            if let Some(w) = self.thread(&worker).filter(|w| w.read(cx).waiting_for_you() && w.read(cx).meta.parent_id.as_deref() == Some(id.as_str())) {
+                self.note_attention(&w, cx);
+            }
+        }
         if !end.waiting_on_jobs && !stopped && !id.starts_with(SIDE) {
             let body = Self::last_reply(thread.read(cx));
             self.notify_about(crate::state::notify::Kind::Finished, thread, body, cx);
@@ -2538,6 +2630,7 @@ impl Workspace {
                                 session_id: t.run.session_id.clone(),
                                 queued: t.queued_messages().len(),
                                 requests: tool_asks(t),
+                                parent_id: t.meta.parent_id.clone(),
                             }
                         })
                         .collect(),
@@ -2592,12 +2685,16 @@ impl Workspace {
             ToolRequest::Import { caller, session, project, reply } => {
                 let _ = reply.send(self.import_for_agent(&caller, &session, project.as_deref(), cx));
             }
-            ToolRequest::Control { action, reply } => {
-                let _ = reply.send(self.take_remote(action, cx));
+            ToolRequest::Control { caller, action, reply } => {
+                let _ = reply.send(self.control_for_agent(&caller, action, cx));
             }
-            ToolRequest::Deny { thread, request_id, message, reply } => {
+            ToolRequest::Deny { caller, thread, request_id, message, reply } => {
                 if let Some(t) = self.thread(&thread) {
-                    self.respond_to(&t, &request_id, Decision::Deny { message }, cx);
+                    let what = t.read(cx).run.permissions.iter().find(|p| p.id == request_id).map(|p| p.tool.clone());
+                    self.respond_to(&t, &request_id, Decision::Deny { message: message.clone() }, cx);
+                    if let Some(tool) = what {
+                        self.note_from_agent(&caller, &thread, &format!("denied {tool}: {message}"), cx);
+                    }
                 }
                 let _ = reply.send(());
             }
@@ -2605,6 +2702,64 @@ impl Workspace {
                 let _ = reply.send(self.update_title_for_agent(&caller, messages, sent, hint, cx));
             }
         }
+    }
+
+    /// What an agent does to another thread (`start_thread`, `send_to_thread`, `answer_thread`…),
+    /// taken as the phone's actions are; a thread it starts is nested under it, and what it
+    /// sends or answers says it came from there.
+    fn control_for_agent(&mut self, caller: &str, action: yh_server::Action, cx: &mut Context<Self>) -> Result<Option<String>, String> {
+        use yh_server::Action as A;
+        let note = |ws: &Self, thread: &str, request_id: &str, cx: &App| -> Option<String> {
+            let t = ws.thread(thread)?;
+            let t = t.read(cx);
+            if let Some(p) = t.run.permissions.iter().find(|p| p.id == request_id) {
+                return Some(p.tool.clone());
+            }
+            t.run.elicitations.iter().find(|e| e.id == request_id).map(|e| format!("{}'s question", e.server))
+        };
+        match action {
+            A::NewThread { project, text, model, effort, mode } => self.start_thread(&project, text.as_deref(), model, effort, mode.as_deref(), Some(caller), cx).map(Some),
+            A::Send { .. } => {
+                self.agent_sender = Some(caller.to_string());
+                let result = self.take_remote_on(action, cx);
+                self.agent_sender = None;
+                result
+            }
+            A::Respond { ref thread, ref request_id, allow } => {
+                let (thread, what) = (thread.clone(), note(self, thread, request_id, cx));
+                self.take_remote_on(action, cx)?;
+                if let Some(what) = what {
+                    self.note_from_agent(caller, &thread, &format!("{} {what}", if allow { "allowed" } else { "denied" }), cx);
+                }
+                Ok(None)
+            }
+            A::Answer { ref thread, .. } | A::SkipQuestion { ref thread, .. } | A::ApprovePlan { ref thread, .. } | A::KeepPlanning { ref thread, .. } | A::AnswerQuestion { ref thread, .. } => {
+                let thread = thread.clone();
+                let what = match &action {
+                    A::Answer { answers, .. } => format!("answered: {}", answers.values().cloned().collect::<Vec<_>>().join("; ")),
+                    A::SkipQuestion { .. } => "skipped the question".into(),
+                    A::ApprovePlan { mode, .. } => format!("approved the plan ({mode})"),
+                    A::KeepPlanning { .. } => "sent the plan back".into(),
+                    A::AnswerQuestion { accept, .. } => if *accept { "accepted the MCP question".into() } else { "declined the MCP question".into() },
+                    _ => unreachable!(),
+                };
+                self.take_remote_on(action, cx)?;
+                self.note_from_agent(caller, &thread, &what, cx);
+                Ok(None)
+            }
+            other => self.take_remote_on(other, cx),
+        }
+    }
+
+    /// A line in the thread saying what another thread's agent did there: "“Refactor auth”
+    /// allowed Write".
+    fn note_from_agent(&mut self, caller: &str, thread: &str, what: &str, cx: &mut Context<Self>) {
+        let name = self.thread(caller).map(|t| t.read(cx).title.clone()).unwrap_or_else(|| "Another thread".into());
+        let mut line = format!("“{name}” {what}");
+        if line.chars().count() > 300 {
+            line = format!("{}…", line.chars().take(300).collect::<String>());
+        }
+        self.command(thread, Command::Notice { thread: thread.to_string(), text: line, error: false }, cx);
     }
 
     /// `import_claude_code_session`: never a new project. From a project's thread, into that
@@ -3357,6 +3512,18 @@ mod tests {
     use super::quit_words;
 
     #[test]
+    fn threads_agents_started_sit_under_theirs() {
+        // (id, parent, made): in the sidebar's order, newest first.
+        let t = |id: &str, parent: Option<&str>, made: f64| (id.to_string(), parent.map(str::to_string), made);
+        let items = vec![t("c", None, 9.), t("w2", Some("a"), 8.), t("x", Some("gone"), 7.), t("w1", Some("a"), 6.), t("s1", Some("w1"), 5.), t("a", None, 1.), t("l1", Some("l2"), 0.), t("l2", Some("l1"), 0.)];
+        let order: Vec<(String, usize)> = super::nest(items, |x| x.clone()).into_iter().map(|(x, d)| (x.0, d)).collect();
+        let want = [("c", 0), ("x", 0), ("a", 0), ("w1", 1), ("s1", 2), ("w2", 1)];
+        assert_eq!(order[..6].iter().map(|(i, d)| (i.as_str(), *d)).collect::<Vec<_>>(), want);
+        // A loop of parents in the records: still listed, once each.
+        assert_eq!(order.len(), 8);
+    }
+
+    #[test]
     fn the_quit_question_counts_sub_agents_with_commands() {
         let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
         assert_eq!(quit_words(&[], &[], 0), None);
@@ -3687,13 +3854,29 @@ impl Workspace {
     fn take_remote(&mut self, action: yh_server::Action, cx: &mut Context<Self>) -> Result<Option<String>, String> {
         use yh_server::Action as A;
         if let A::NewThread { project, text, model, effort, mode } = &action {
+            return self.start_thread(project, text.as_deref(), model.clone(), effort.clone(), mode.as_deref(), None, cx).map(Some);
+        }
+        self.take_remote_on(action, cx)
+    }
+
+    /// A new thread saved at once, its first message sent, the Mac staying on what you have
+    /// open: the phone's New Thread, and an agent's `start_thread` (`parent`: its thread).
+    pub fn start_thread(&mut self, project: &str, text: Option<&str>, model: Option<String>, effort: Option<String>, mode: Option<&str>, parent: Option<&str>, cx: &mut Context<Self>) -> Result<String, String> {
+        {
             if self.project(project).is_none() {
                 return Err("No such project.".into());
             }
             let id = self.make_thread(project, cx);
+            if let Some(parent) = parent {
+                let parent = parent.to_string();
+                self.update_meta(&id, cx, |m, r| {
+                    m.parent_id = Some(parent.clone());
+                    r.insert("parentThreadID".into(), parent.into());
+                });
+            }
             // What the phone's New Thread chose, set before its first message starts `claude`.
-            let model = model.clone().filter(|m| !m.is_empty() && m != "default");
-            let effort = effort.clone().filter(|e| !e.is_empty());
+            let model = model.filter(|m| !m.is_empty() && m != "default");
+            let effort = effort.filter(|e| !e.is_empty());
             if model.is_some() || effort.is_some() {
                 self.update_meta(&id, cx, |m, r| {
                     m.model = model.clone();
@@ -3702,14 +3885,18 @@ impl Workspace {
                     r.insert("effort".into(), effort.map(Value::from).unwrap_or(Value::Null));
                 });
             }
-            if let Some(mode) = mode.as_deref().filter(|m| crate::ui::composer::MODES.iter().any(|(v, _)| v == m) && self.project(project).is_some_and(|p| p.mode != *m)) {
+            if let Some(mode) = mode.filter(|m| crate::ui::composer::MODES.iter().any(|(v, _)| v == m) && self.project(project).is_some_and(|p| p.mode != *m)) {
                 self.set_mode(project, mode, cx);
             }
-            if let (Some(text), Some(thread)) = (text.as_deref().filter(|t| !t.trim().is_empty()), self.thread(&id)) {
+            if let (Some(text), Some(thread)) = (text.filter(|t| !t.trim().is_empty()), self.thread(&id)) {
                 self.send(&thread, text, false, cx);
             }
-            return Ok(Some(id));
+            Ok(id)
         }
+    }
+
+    fn take_remote_on(&mut self, action: yh_server::Action, cx: &mut Context<Self>) -> Result<Option<String>, String> {
+        use yh_server::Action as A;
         let thread_id = match &action {
             A::Browser { thread, .. } | A::AskAside { thread, .. } | A::Send { thread, .. } | A::Stop { thread } | A::Respond { thread, .. } | A::Withdraw { thread, .. } | A::SendNow { thread, .. } | A::Answer { thread, .. } | A::SkipQuestion { thread, .. } | A::ApprovePlan { thread, .. } | A::KeepPlanning { thread, .. } | A::AnswerQuestion { thread, .. } | A::SetModel { thread, .. } | A::SetEffort { thread, .. } | A::SetMode { thread, .. } | A::Rename { thread, .. } | A::Pin { thread, .. } | A::Settle { thread, .. } | A::Delete { thread } => thread.clone(),
             A::NewThread { .. } => unreachable!("taken above"),

@@ -789,6 +789,12 @@ impl Render for RootView {
         let selected = if page.is_some() { None } else { self.workspace.read(cx).selected_thread() };
         let title = selected.as_ref().map(|t| t.read(cx).title.clone()).unwrap_or_else(|| "YourHarness".into());
         let subtitle = selected.as_ref().map(|t| self.subtitle(t, cx)).unwrap_or_default();
+        // Started by another thread's agent: which, a click away.
+        let started_by: Option<(String, String)> = selected.as_ref().and_then(|t| {
+            let parent = t.read(cx).meta.parent_id.clone()?;
+            let title = self.workspace.read(cx).thread(&parent)?.read(cx).title.clone();
+            Some((parent, title))
+        });
         let transcript = self.transcript_view(cx);
         // The browser's page shows only over its panel; anything else hides it.
         let ws = self.workspace.read(cx);
@@ -967,7 +973,26 @@ impl Render for RootView {
                                         .items_baseline()
                                         .gap(px(space::S))
                                         .child(div().id("thread-title").role(gpui_kit::Role::Heading).aria_label(title.clone()).flex_none().max_w(gpui_kit::relative(0.7)).text_size(px(text::HEADLINE)).font_weight(FontWeight::SEMIBOLD).overflow_hidden().whitespace_nowrap().text_ellipsis().child(title))
-                                        .child(div().min_w_0().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).overflow_hidden().whitespace_nowrap().text_ellipsis().child(subtitle)),
+                                        .child(div().min_w_0().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).overflow_hidden().whitespace_nowrap().text_ellipsis().child(subtitle))
+                                        .when_some(started_by, |d, (parent, name)| {
+                                            let ws = self.workspace.clone();
+                                            d.child(
+                                                div()
+                                                    .id("started-by")
+                                                    .flex_none()
+                                                    .max_w(px(260.))
+                                                    .overflow_hidden()
+                                                    .whitespace_nowrap()
+                                                    .text_ellipsis()
+                                                    .text_size(px(text::FOOTNOTE))
+                                                    .text_color(theme.secondary)
+                                                    .cursor_pointer()
+                                                    .hover(|s| s.text_color(theme.accent))
+                                                    .child(format!("· Started by {name}"))
+                                                    .tooltip(crate::ui::sidebar::tooltip(format!("Open “{name}”, whose agent started this thread")))
+                                                    .on_click(move |_, _, cx| ws.update(cx, |ws, cx| ws.select(&parent, cx))),
+                                            )
+                                        }),
                                 )
                                 .child(
                                     // The toolbar: icons right-aligned, close together.

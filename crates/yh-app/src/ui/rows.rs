@@ -121,7 +121,12 @@ pub fn render_item(thread: &Entity<ThreadState>, ix: usize, window: &mut Window,
         root: state.linker.as_ref().map(|l| l.root.clone()),
     };
     let content = match item.ty {
-        ItemType::User => user_row(item, &ctx, &theme, window),
+        ItemType::User => {
+            // Sent by the agent of the thread that started this one (`send_to_thread`).
+            let id = item.entries[0].borrow().data.id.clone();
+            let from = state.meta.agent_messages.contains(&id).then(|| state.meta.parent_id.as_ref().and_then(|p| ctx_parent_title(p, cx)).unwrap_or_else(|| "another thread".into()));
+            user_row(item, &ctx, from, &theme, window)
+        }
         ItemType::Text => text_row(&item.entries[0], &ctx, &theme, window),
         ItemType::Notice => notice_row(&item.entries[0], &theme),
         ItemType::Work => work_row(state, &ctx, item, &theme),
@@ -644,7 +649,14 @@ fn user_text(text: &str, ctx: &RowContext, theme: &Theme, window: &Window) -> An
         .into_any_element()
 }
 
-fn user_row(item: &Item, ctx: &RowContext, theme: &Theme, window: &Window) -> AnyElement {
+/// The title of the thread that started this one, for "From …".
+fn ctx_parent_title(parent: &str, cx: &App) -> Option<String> {
+    let ws = cx.try_global::<crate::state::workspace::GlobalWorkspace>()?.0.upgrade()?;
+    let t = ws.read(cx).thread(parent)?;
+    Some(t.read(cx).title.clone())
+}
+
+fn user_row(item: &Item, ctx: &RowContext, from: Option<String>, theme: &Theme, window: &Window) -> AnyElement {
     let e = item.entries[0].borrow();
     let text = e.data.text.clone();
     let images = e.data.attachments.clone();
@@ -672,6 +684,18 @@ fn user_row(item: &Item, ctx: &RowContext, theme: &Theme, window: &Window) -> An
         .pt(px(space::S))
         .pb(px(space::XS))
         .group("user-message")
+        .when_some(from, |d, from| {
+            d.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(space::XS))
+                    .text_size(px(ts::CAPTION))
+                    .text_color(theme.secondary)
+                    .child(crate::ui::icons::corner_down_right().size(px(11.)).text_color(theme.secondary))
+                    .child(format!("From “{from}”")),
+            )
+        })
         .when(!images.is_empty(), |d| {
             d.child(div().flex().flex_wrap().justify_end().gap(px(6.)).mb(px(2.)).children(images.iter().enumerate().map(|(n, name)| {
                 let path = attachments_dir().join(name).to_string_lossy().into_owned();
