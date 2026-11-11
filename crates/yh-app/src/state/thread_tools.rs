@@ -1,6 +1,8 @@
 //! `mcp__threads__…`: an agent looks through the app's threads (list, read, search), tidies them
-//! (rename, settle, pin) and brings in Claude Code sessions, the way you would from the sidebar
-//! and ⌘K. It can't delete anything. A thread in Home reaches every project; a thread anywhere
+//! (rename, settle, pin), brings in Claude Code sessions, the way you would from the sidebar
+//! and ⌘K, and hands work to other threads: starts them, sends them messages, stops them and
+//! waits for them, as the phone does (`Workspace::take_remote`). It can't delete anything, nor
+//! answer another thread's permission requests: those stay the user's. A thread in Home reaches every project; a thread anywhere
 //! else only its own project's threads, and only sessions that ran in its folder. With title
 //! updates on, it can have its own thread's title rewritten when the subject changes.
 //! Names, schemas and replies are as 0.0.x had them: agents already use them.
@@ -26,6 +28,10 @@ pub struct ThreadInfo {
     pub settled: bool,
     pub updated_at: f64,
     pub session_id: Option<String>,
+    /// Messages queued behind its turn.
+    pub queued: usize,
+    /// What it waits for the user on: the oldest request, in a line.
+    pub asks: Option<String>,
 }
 
 /// What the calling thread reaches, as the main thread sees it right now.
@@ -53,6 +59,8 @@ pub enum ToolRequest {
     SignInCard { caller: String, ask: Option<crate::state::thread::SignInAsk> },
     /// A page for you, in your default browser (`YH_MCP_BROWSER=log` prints it instead).
     OpenUrl(String),
+    /// Start, send or stop, taken as the phone's are. Reply: a new thread's id, or why not.
+    Control { action: yh_server::Action, reply: flume::Sender<Result<Option<String>, String>> },
     UpdateTitle { caller: String, messages: Vec<(bool, String)>, sent: usize, hint: Option<String>, reply: flume::Sender<String> },
 }
 
@@ -69,12 +77,17 @@ pub fn instructions(project: Option<&str>, updates_title: bool) -> String {
         Some(p) => format!("From this thread you reach only the threads of the project {p}, and only Claude Code sessions that ran in its folder; for anything wider, the user can ask from a thread in Home."),
         None => "This thread is in Home, so you reach every project's threads and every Claude Code session.".into(),
     };
-    let mut text = format!("The user's conversations in YourHarness are threads, grouped by project in the sidebar. The mcp__threads__ tools work with them: list_threads, read_thread and search_threads find and read them; rename_thread, settle_thread and pin_thread tidy them; list_claude_code_sessions and import_claude_code_session bring in sessions from Claude Code run in a terminal or an editor. {reach}\nReading and searching are fine whenever they help, like picking up what an earlier thread worked out. Changing threads is the user's call: rename, settle, pin or import only what the user asked for, or a list they agreed to. Before changing more than two threads, list exactly what you'll change and wait for a yes. Leave threads that are working or waiting for the user alone unless the user named them. You can't delete threads; if asked, tell the user to do it from the sidebar. Other threads can hold private details or secrets: bring into this conversation only what the task needs. When you're done, say what you changed.");
+    let mut text = format!("The user's conversations in YourHarness are threads, grouped by project in the sidebar. The mcp__threads__ tools work with them: list_threads, read_thread and search_threads find and read them; rename_thread, settle_thread and pin_thread tidy them; list_claude_code_sessions and import_claude_code_session bring in sessions from Claude Code run in a terminal or an editor; start_thread, send_to_thread, stop_thread and wait_for_threads hand work to other threads and follow it. {reach}\nReading and searching are fine whenever they help, like picking up what an earlier thread worked out. Changing threads is the user's call: rename, settle, pin or import only what the user asked for, or a list they agreed to. Before changing more than two threads, list exactly what you'll change and wait for a yes. Leave threads that are working or waiting for the user alone unless the user named them. You can't delete threads; if asked, tell the user to do it from the sidebar. Other threads can hold private details or secrets: bring into this conversation only what the task needs. When you're done, say what you changed.\nDelegating: when the user asks you to hand work off, start_thread gives each piece a thread of its own, with a message that stands alone (the new thread knows nothing of this conversation: give it the goal, the files, what done means and what to leave alone). Then wait_for_threads and read its reply, or read_thread for more; send_to_thread follows up. A thread waiting for the user (a permission, a question, a plan) needs the user: tell them which and what it asks; you can't answer for them. Send to or stop only threads you started or the user named, never one the user is working in. Settle the threads you started once their work is done and the user has what they need.");
     if updates_title {
         text += "\n\nKeeping this thread's title right is part of your job; a separate title model writes it, you tell it when to look again. When the user's latest message turns the thread to a different subject than it has been about (a new, unrelated task or question), or a vague start (\"fix this\", a bare link) has turned out to be about something specific, call mcp__threads__update_title before you answer, with a few words on the new subject as the hint. Not for progress on the same subject (exploring, planning, implementing, reviewing, fixing CI, merging), and once per change at most. Don't use rename_thread on this thread unless the user asks for a particular name, and don't mention the title to the user.";
     }
     text
 }
+
+/// At most this many threads working at once in a project, counting those the user started:
+/// a delegating agent can't run away.
+const MAX_RUNNING: usize = 8;
+const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
 fn one_line(text: &str, max: usize) -> String {
     let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -142,6 +155,10 @@ impl ThreadTools {
         }
         if t.waiting {
             states.push("waiting for the user");
+        }
+        let queued = format!("{} queued", t.queued);
+        if t.queued > 0 {
+            states.push(&queued);
         }
         if t.unread {
             states.push("unread");
@@ -341,6 +358,166 @@ impl ThreadTools {
         Ok(ToolResult::text(format!("{} “{}”.", if on { "Pinned" } else { "Unpinned" }, t.title)))
     }
 
+    fn control(&self, action: yh_server::Action) -> Result<Option<String>, ToolResult> {
+        self.ask(|reply| ToolRequest::Control { action, reply }).ok_or_else(|| ToolResult::error("The app didn't answer."))?.map_err(ToolResult::error)
+    }
+
+    /// A thread other than this one, for send and stop.
+    fn other<'a>(&self, s: &'a Snapshot, a: &Value) -> Result<&'a ThreadInfo, ToolResult> {
+        let t = self.thread(s, a)?;
+        if t.id == self.caller {
+            return Err(ToolResult::error("That's this thread. Give another thread's id."));
+        }
+        Ok(t)
+    }
+
+    fn start(&self, a: &Value) -> Result<ToolResult, ToolResult> {
+        let message = a["message"].as_str().unwrap_or("").trim().to_string();
+        if message.is_empty() {
+            return Err(ToolResult::error("Give message: what the new thread should do, written so it stands alone."));
+        }
+        let s = self.snapshot()?;
+        let project = match (&s.scope, a["project"].as_str().map(str::trim).filter(|p| !p.is_empty())) {
+            (Some(own), None) => own.clone(),
+            (Some(own), Some(given)) => {
+                if !(own.name.eq_ignore_ascii_case(given) || (given.len() >= 6 && own.id.to_lowercase().starts_with(&given.to_lowercase()))) {
+                    return Err(ToolResult::error(format!("From a thread in {} you can only start threads in {}.", own.name, own.name)));
+                }
+                own.clone()
+            }
+            (None, given) => {
+                let caller_project = s.threads.iter().find(|t| t.id == self.caller).map(|t| t.project_id.clone());
+                let found = match given {
+                    Some(given) => s
+                        .projects
+                        .iter()
+                        .find(|p| given.len() >= 6 && p.id.to_lowercase().starts_with(&given.to_lowercase()))
+                        .or_else(|| s.projects.iter().find(|p| p.name.eq_ignore_ascii_case(given))),
+                    None => s.projects.iter().find(|p| Some(&p.id) == caller_project.as_ref()),
+                };
+                match found {
+                    Some(p) => p.clone(),
+                    None => return Err(ToolResult::error(format!("No project {}. Projects: {}.", given.unwrap_or(""), s.projects.iter().map(|p| p.name.clone()).collect::<Vec<_>>().join(", ")))),
+                }
+            }
+        };
+        let running = self.reachable(&s).into_iter().filter(|t| t.running && t.project_id == project.id).count();
+        if running >= MAX_RUNNING {
+            return Err(ToolResult::error(format!("{running} threads are already working in {}; wait for some to finish first.", project.name)));
+        }
+        let title = a["title"].as_str().map(str::trim).filter(|t| !t.is_empty()).map(str::to_string);
+        if title.as_ref().is_some_and(|t| t.chars().count() > 120) {
+            return Err(ToolResult::error("Keep title under 120 characters."));
+        }
+        let model = a["model"].as_str().map(str::trim).filter(|m| !m.is_empty()).map(str::to_string);
+        let effort = a["effort"].as_str().map(str::trim).filter(|e| !e.is_empty()).map(str::to_string);
+        if let Some(e) = &effort {
+            if !EFFORTS.contains(&e.as_str()) {
+                return Err(ToolResult::error(format!("effort is one of {}.", EFFORTS.join(", "))));
+            }
+        }
+        let id = self
+            .control(yh_server::Action::NewThread { project: project.id.clone(), text: Some(message), model, effort, mode: None })?
+            .ok_or_else(|| ToolResult::error("Couldn't start a thread."))?;
+        if let Some(title) = &title {
+            self.ask(|reply| ToolRequest::Rename { id: id.clone(), title: title.clone(), reply });
+        }
+        let s = self.snapshot()?;
+        let Some(t) = s.threads.iter().find(|t| t.id == id) else { return Err(ToolResult::error("Couldn't start a thread.")) };
+        Ok(ToolResult::text(format!(
+            "Started {}\nIt's working on your message; the user isn't taken to it. wait_for_threads with thread_ids [\"{}\"] tells you when it's done.",
+            self.describe(&s, t, false),
+            Self::short_id(&s, t)
+        )))
+    }
+
+    fn send_to(&self, a: &Value) -> Result<ToolResult, ToolResult> {
+        let message = a["message"].as_str().unwrap_or("").trim().to_string();
+        if message.is_empty() {
+            return Err(ToolResult::error("Give message: what to send."));
+        }
+        let s = self.snapshot()?;
+        let t = self.other(&s, a)?;
+        let now = a["now"].as_bool().unwrap_or(false);
+        self.control(yh_server::Action::Send { thread: t.id.clone(), text: message, now, images: vec![] })?;
+        Ok(ToolResult::text(if !t.running {
+            format!("Sent to “{}”; it's working on it.", t.title)
+        } else if now {
+            format!("Sent to “{}”, which was working: it reads it at its next step.", t.title)
+        } else {
+            format!("Queued in “{}”, which is working: it goes when the turn ends.", t.title)
+        }))
+    }
+
+    fn stop_other(&self, a: &Value) -> Result<ToolResult, ToolResult> {
+        let s = self.snapshot()?;
+        let t = self.other(&s, a)?;
+        if !t.running {
+            return Ok(ToolResult::text(format!("“{}” isn't working.", t.title)));
+        }
+        self.control(yh_server::Action::Stop { thread: t.id.clone() })?;
+        Ok(ToolResult::text(format!("Stopped “{}”{}.", t.title, if t.queued > 0 { "; its queued messages went back to its composer" } else { "" })))
+    }
+
+    /// Its last turn's last reply, as saved (a turn's rows are saved before it shows as over).
+    fn last_reply(&self, id: &str) -> Option<String> {
+        let db = self.db.as_ref()?;
+        let total = db.transcript_count(id);
+        let start = total.saturating_sub(80);
+        let rows: Vec<_> = db.read_rows(id, start, total - start).into_iter().filter_map(yh_core::library::EntryData::from_row).collect();
+        rows.iter().rev().take_while(|e| e.kind != Kind::User).find(|e| e.kind == Kind::Assistant && !e.text.trim().is_empty()).map(|e| clip(e.text.trim(), 3000))
+    }
+
+    fn wait(&self, a: &Value) -> Result<ToolResult, ToolResult> {
+        let given: Vec<String> = match &a["thread_ids"] {
+            Value::Array(ids) => ids.iter().filter_map(|v| v.as_str().map(str::to_string)).collect(),
+            Value::String(one) => vec![one.clone()],
+            _ => vec![],
+        };
+        if given.is_empty() {
+            return Err(ToolResult::error("Give thread_ids: the threads to wait for."));
+        }
+        let any = a["any"].as_bool().unwrap_or(false);
+        let timeout = a["timeout_seconds"].as_u64().unwrap_or(300).clamp(1, 600);
+        let s = self.snapshot()?;
+        let mut ids = vec![];
+        for g in &given {
+            let t = self.other(&s, &json!({ "thread_id": g }))?;
+            ids.push(t.id.clone());
+        }
+        let busy = |t: &ThreadInfo| t.running && !t.waiting;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout);
+        let s = loop {
+            let s = self.snapshot()?;
+            let states: Vec<bool> = ids.iter().map(|id| s.threads.iter().find(|t| &t.id == id).is_none_or(|t| !busy(t))).collect();
+            let done = if any { states.iter().any(|d| *d) } else { states.iter().all(|d| *d) };
+            // Stopped meanwhile: nobody waits for the answer any more.
+            let caller_gone = !s.threads.iter().any(|t| t.id == self.caller && t.running);
+            if done || caller_gone || std::time::Instant::now() >= deadline {
+                break s;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1000));
+        };
+        let mut lines = vec![];
+        let mut still = 0;
+        for id in &ids {
+            let Some(t) = s.threads.iter().find(|t| &t.id == id) else {
+                lines.push(format!("- {id}: gone (deleted)"));
+                continue;
+            };
+            lines.push(self.describe(&s, t, true));
+            if t.waiting {
+                lines.push(format!("    waits for the user: {}", t.asks.as_deref().unwrap_or("an MCP question or sign-in")));
+            } else if busy(t) {
+                still += 1;
+            } else if let Some(reply) = self.last_reply(&t.id) {
+                lines.push(format!("    last reply:\n{}", reply.lines().map(|l| format!("    {l}")).collect::<Vec<_>>().join("\n")));
+            }
+        }
+        let head = if still > 0 { format!("After {timeout} s, {still} still working (call again to keep waiting):") } else { "Done waiting:".to_string() };
+        Ok(ToolResult::text(format!("{head}\n{}", lines.join("\n"))))
+    }
+
     fn sessions(&self, a: &Value) -> Result<ToolResult, ToolResult> {
         let s = self.snapshot()?;
         let w = words(a["query"].as_str());
@@ -463,6 +640,28 @@ impl ToolServer for ThreadTools {
                     "session_id": { "type": "string", "description": "From list_claude_code_sessions." },
                     "project": { "type": "string", "description": "From Home only: the project to put it in (name or id). Default: the project for the folder it ran in, else Home." },
                 }), &["session_id"]), false, false),
+            tool("start_thread", "Start a new thread in this project and send it a first message, to hand it a piece of work. It runs on its own, in the project's permission mode; the user isn't taken to it. Returns its id for wait_for_threads, read_thread and send_to_thread.",
+                schema(json!({
+                    "message": { "type": "string", "description": "Its first message. It knows nothing of this conversation: say the goal, where to look, what done means and what to leave alone." },
+                    "title": { "type": "string", "description": "Its sidebar title. Default: written from the message, as for any thread." },
+                    "model": { "type": "string", "description": "haiku, sonnet, opus or a full model id. Default: the user's default." },
+                    "effort": { "type": "string", "enum": EFFORTS, "description": "Default: the user's default." },
+                    "project": { "type": "string", "description": "From Home only: the project to start it in (name or id). Default: Home." },
+                }), &["message"]), false, false),
+            tool("send_to_thread", "Send a message to another thread, as if the user typed it in its composer: it starts a turn, or queues behind the one running.",
+                schema(json!({
+                    "thread_id": thread_id,
+                    "message": { "type": "string" },
+                    "now": { "type": "boolean", "description": "If it's working, have it read this at its next step instead of after the turn. Default false." },
+                }), &["thread_id", "message"]), false, false),
+            tool("stop_thread", "Stop another thread's turn, as its Stop button does.",
+                schema(json!({ "thread_id": thread_id }), &["thread_id"]), false, false),
+            tool("wait_for_threads", "Wait until threads finish their turns or need the user, then get each one's state and last reply (or what it waits for). Returns after timeout_seconds with the ones still working; call again to keep waiting.",
+                schema(json!({
+                    "thread_ids": { "type": "array", "items": { "type": "string" }, "description": "The threads' ids." },
+                    "any": { "type": "boolean", "description": "Return as soon as one of them is done. Default false: when all are." },
+                    "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 600, "description": "Default 300." },
+                }), &["thread_ids"]), true, false),
         ];
         if self.updates_title {
             tools.push(tool("update_title", "Have this thread's title rewritten because what the thread is about has changed: the user turned to a different task, or a vague start turned out to be about something specific. YourHarness's title model writes it from the conversation, in the background, and keeps the current title if it's still accurate. Not for progress on the same subject, and not for other threads.",
@@ -481,6 +680,10 @@ impl ToolServer for ThreadTools {
             "pin_thread" => self.pin(a),
             "list_claude_code_sessions" => self.sessions(a),
             "import_claude_code_session" => self.import(a),
+            "start_thread" => self.start(a),
+            "send_to_thread" => self.send_to(a),
+            "stop_thread" => self.stop_other(a),
+            "wait_for_threads" => self.wait(a),
             "update_title" => {
                 let hint = a["hint"].as_str().map(|h| one_line(h, 300));
                 let messages = self.title_messages();

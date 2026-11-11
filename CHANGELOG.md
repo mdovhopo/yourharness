@@ -6,6 +6,10 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+### Added
+
+- Claude can hand work to other threads in the same project: start a thread with a task, send it follow-ups, stop it, and wait for it to finish and read its reply. Ask a thread to delegate and follow the work from there. Threads it starts need you for their permission requests, as any thread does.
+
 ## [0.1.12] - 2026-11-11
 
 ### Added

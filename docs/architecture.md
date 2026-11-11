@@ -102,7 +102,7 @@ requests (`yh_core::mcp`), so there's no port, no token, and nothing else can ca
 | Server | What it does |
 |---|---|
 | `memory` | The workspace's memory: search, read, save, update, link, forget, track tasks. Every call is recorded for the Memory page's activity (docs/memory.md). |
-| `threads` | Look through the app's threads (list, read, search), tidy them (rename, settle, pin), bring in Claude Code sessions. Nothing can be deleted. |
+| `threads` | Look through the app's threads (list, read, search), tidy them (rename, settle, pin), bring in Claude Code sessions, and hand work to other threads: `start_thread`, `send_to_thread`, `stop_thread`, `wait_for_threads` (until they finish or need you, then their last reply), taken as the phone's actions are (`take_remote`). Only within the caller's project (Home reaches all); at most 8 threads working per project; another thread's permission requests stay yours. Nothing can be deleted. |
 | `browser` | Drive the thread's browser: open, navigate, snapshot, screenshot, click, type, and the rest (docs/browser.md). |
 | `harness` | `sign_in_to_mcp_server`: a card in the thread asks you to sign in to an MCP server Claude needs. |
 

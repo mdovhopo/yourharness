@@ -2532,6 +2532,11 @@ impl Workspace {
                                 settled: t.meta.settled_at.is_some(),
                                 updated_at: t.meta.updated_at,
                                 session_id: t.run.session_id.clone(),
+                                queued: t.queued_messages().len(),
+                                asks: t.permission().map(|p| {
+                                    let input: String = p.input.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(200).collect();
+                                    format!("{} {}", p.tool, if p.description.trim().is_empty() { input } else { p.description.trim().to_string() })
+                                }),
                             }
                         })
                         .collect(),
@@ -2584,6 +2589,9 @@ impl Workspace {
             }
             ToolRequest::Import { caller, session, project, reply } => {
                 let _ = reply.send(self.import_for_agent(&caller, &session, project.as_deref(), cx));
+            }
+            ToolRequest::Control { action, reply } => {
+                let _ = reply.send(self.take_remote(action, cx));
             }
             ToolRequest::UpdateTitle { caller, messages, sent, hint, reply } => {
                 let _ = reply.send(self.update_title_for_agent(&caller, messages, sent, hint, cx));
