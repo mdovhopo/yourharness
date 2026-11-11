@@ -36,9 +36,8 @@ impl Workspace {
             return;
         }
         self.active_account = id.to_string();
-        let active = self.active();
-        log(format!("active: {id} ({})", active.label()));
-        yh_core::shell_env::set_claude_config(active.account.dir.as_ref().map(|d| d.to_string_lossy().into_owned()));
+        log(format!("active: {id} ({})", self.account_label(id)));
+        yh_core::shell_env::set_claude_config(self.active().account.dir.as_ref().map(|d| d.to_string_lossy().into_owned()));
         self.save_accounts();
         self.save_readings();
         // Not a side chat or a memory specialist: nothing of theirs is saved to resume, so they
@@ -56,7 +55,7 @@ impl Workspace {
         let id = self.active_account.clone();
         let before = self.runtime_accounts.insert(thread.to_string(), id.clone());
         if before.is_some_and(|b| b != id) && yh_engine::ids::saved(thread) {
-            let text = format!("Continues on {}. Claude reads the conversation again on this account, so the first turn uses more of its limits.", self.active().label());
+            let text = format!("Continues on {}. Claude reads the conversation again on this account, so the first turn uses more of its limits.", self.account_label(&id));
             self.engine_send(Command::Notice { thread: thread.to_string(), text, error: false });
         }
     }

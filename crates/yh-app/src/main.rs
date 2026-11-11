@@ -644,7 +644,7 @@ fn main() {
                         let list: Vec<String> = ws
                             .accounts
                             .iter()
-                            .map(|a| format!("{}{}{} {}{}", if a.id() == ws.active_account { "*" } else { "" }, a.id(), if a.account.enabled { "" } else { " (off)" }, a.label(), if a.login.is_some() { " [signing in]" } else if a.signed_out() { " [signed out]" } else { "" }))
+                            .map(|a| format!("{}{}{} {}{}", if a.id() == ws.active_account { "*" } else { "" }, a.id(), if a.account.enabled { "" } else { " (off)" }, ws.account_label(a.id()), if a.login.is_some() { " [signing in]" } else if a.signed_out() { " [signed out]" } else { "" }))
                             .collect();
                         eprintln!("ACCOUNTS {step}: {} · {}", outcome.err().unwrap_or_else(|| "ok".into()), list.join(" | "));
                     });

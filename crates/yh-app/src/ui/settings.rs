@@ -375,16 +375,11 @@ impl SettingsView {
         for a in &ws.accounts {
             let id = a.id().to_string();
             let active = id == ws.active_account;
-            let label = a.label();
+            let label = ws.account_label(&id);
+            // Settings is where you look: who it is, under the plan.
             let detail = match (&a.subscription, &a.login) {
                 (_, Some(_)) => "Signing in: finish in your browser".to_string(),
-                (Some(s), _) => {
-                    let mut d = s.plan_name();
-                    if let Some(org) = s.org.as_ref().filter(|_| s.email.is_some()) {
-                        d.push_str(&format!(" · {org}"));
-                    }
-                    d
-                }
+                (Some(s), _) => s.who().map(str::to_string).unwrap_or_else(|| "Signed in".into()),
                 (None, _) if a.signed_out() => "Signed out".into(),
                 (None, _) => "Checking…".into(),
             };

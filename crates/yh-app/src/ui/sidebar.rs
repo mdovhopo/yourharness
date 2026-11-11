@@ -1079,7 +1079,7 @@ impl Sidebar {
 
     /// One account in a row: a dot on the active one, who it is, its 5-hour and weekly limits.
     /// A click switches to it; on the active one, it opens Usage.
-    fn account_row(a: &crate::state::limits::AccountState, active: bool, now: f64, theme: &Theme, ws: &gpui_kit::Entity<Workspace>) -> gpui_kit::AnyElement {
+    fn account_row(a: &crate::state::limits::AccountState, label: String, active: bool, now: f64, theme: &Theme, ws: &gpui_kit::Entity<Workspace>) -> gpui_kit::AnyElement {
         let windows = a.limits.as_ref().map(yh_core::limits::windows).unwrap_or_default();
         let window = |name: &str| windows.iter().find(|w| w.name == name).cloned();
         let mini = |w: Option<yh_core::limits::Window>| {
@@ -1098,7 +1098,6 @@ impl Sidebar {
                 .child(div().flex_1().h(px(BAR)).rounded_full().bg(theme.selected).overflow_hidden().when_some(used, |d, u| d.child(div().h_full().rounded_full().min_w(px(BAR)).w(gpui_kit::relative(u as f32)).bg(tint))))
                 .child(div().w(px(28.)).flex_none().flex().justify_end().child(used.map(|u| format!("{}%", (u * 100.).round() as i64)).unwrap_or_else(|| "–".into())))
         };
-        let label = a.label();
         let mut tip = match &a.subscription {
             Some(s) => format!("{} · {}", s.plan_name(), s.who().unwrap_or("signed in")),
             None if a.login.is_some() => format!("{label}: signing in, in your browser"),
@@ -1169,7 +1168,7 @@ impl Sidebar {
         let meters = yh_core::limits::meters(active.limits.as_ref());
         let updated = active.limits_updated_at;
         let refreshing = ws.limits_refreshing();
-        let errors: Vec<String> = enabled.iter().filter_map(|a| a.error.as_ref().map(|e| if enabled.len() > 1 { format!("{}: {e}", a.label()) } else { e.clone() })).collect();
+        let errors: Vec<String> = enabled.iter().filter_map(|a| a.error.as_ref().map(|e| if enabled.len() > 1 { format!("{}: {e}", ws.account_label(a.id())) } else { e.clone() })).collect();
         let error = (!errors.is_empty()).then(|| errors.join("\n"));
         let refresh_tip = match &error {
             Some(e) => format!("Couldn't refresh: {e}"),
@@ -1194,7 +1193,7 @@ impl Sidebar {
             // Several accounts: a row each, the one in use marked.
             bars = bars.child(Self::accounts_header(theme));
             for a in &enabled {
-                bars = bars.child(Self::account_row(a, a.id() == active.id(), now, theme, &self.workspace));
+                bars = bars.child(Self::account_row(a, ws.account_label(a.id()), a.id() == active.id(), now, theme, &self.workspace));
             }
         } else {
             bars = bars.child(Self::subscription_row(active.subscription.as_ref(), theme));

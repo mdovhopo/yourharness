@@ -40,10 +40,11 @@ impl AccountState {
         &self.account.id
     }
 
-    /// Its email, else what it is: "Main account", "New account".
+    /// What it is, never who: its plan ("Claude Max"), else "Main account", "New account". The
+    /// email stays in tooltips and Settings (`Workspace::account_label` tells same plans apart).
     pub fn label(&self) -> String {
-        match self.subscription.as_ref().and_then(|s| s.who()) {
-            Some(who) => who.to_string(),
+        match &self.subscription {
+            Some(s) => s.plan_name(),
             None if self.account.is_main() => "Main account".into(),
             None => "New account".into(),
         }
@@ -93,6 +94,15 @@ impl Workspace {
     /// The account new turns use.
     pub fn active(&self) -> &AccountState {
         self.accounts.iter().find(|a| a.id() == self.active_account).unwrap_or(&self.accounts[0])
+    }
+
+    /// An account's name on screen: its plan, numbered when another has the same ("Claude Max 2").
+    pub fn account_label(&self, id: &str) -> String {
+        let Some(i) = self.accounts.iter().position(|a| a.id() == id) else { return String::new() };
+        let label = self.accounts[i].label();
+        let same = self.accounts.iter().filter(|a| a.label() == label).count();
+        let nth = self.accounts[..i].iter().filter(|a| a.label() == label).count();
+        if same > 1 && nth > 0 { format!("{label} {}", nth + 1) } else { label }
     }
 
     pub fn account(&self, id: &str) -> Option<&AccountState> {

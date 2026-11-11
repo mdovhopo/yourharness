@@ -583,7 +583,7 @@ impl Render for UsagePage {
         // Every account that's on, each named when there's more than one.
         let accounts: Vec<(String, Option<serde_json::Value>)> = {
             let ws = self.workspace.read(cx);
-            ws.accounts.iter().filter(|a| a.account.enabled).map(|a| (a.label(), a.limits.clone())).collect()
+            ws.accounts.iter().filter(|a| a.account.enabled).map(|a| (ws.account_label(a.id()), a.limits.clone())).collect()
         };
         let several = accounts.len() > 1;
         let mut limit_row = div().flex().flex_wrap().gap(px(space::M));
