@@ -568,6 +568,11 @@ impl SettingsView {
                     .footer("New threads that aren't in a project run here."),
             )
             .child(
+                section("Delegation")
+                    .child(self.toggle("agentControlsThreads", "Let Claude control other threads", cx))
+                    .footer("Claude can start threads in the same project, send them messages, stop them, and answer their permission requests, questions and plans, so one thread can hand work to others. Home threads reach every project."),
+            )
+            .child(
                 section("Thread Titles")
                     .child(row(
                         "Generate with",

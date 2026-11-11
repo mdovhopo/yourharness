@@ -1829,13 +1829,15 @@ impl Workspace {
             let updates_title = self.library.setting("agentUpdatesTitles").and_then(|v| v.as_bool()).unwrap_or(true)
                 && titles.as_ref().is_none_or(|t| t.get("provider").is_some_and(|p| !p.is_null()));
             let home = self.home_project().as_deref() == Some(project.id.as_str());
-            prompt.push(thread_tools::instructions((!home).then_some(project.name.as_str()), updates_title));
+            let controls = self.library.setting("agentControlsThreads").and_then(|v| v.as_bool()).unwrap_or(true);
+            prompt.push(thread_tools::instructions((!home).then_some(project.name.as_str()), updates_title, controls));
             allowed.push("mcp__threads".to_string());
             servers.push(std::sync::Arc::new(thread_tools::ThreadTools {
                 caller: t.id().to_string(),
                 requests: self.tool_requests.clone(),
                 db: self.library.db.clone(),
                 updates_title,
+                controls,
             }));
         }
         // A memory specialist: its own prompt, read-only file tools, the specialist memory tools,
@@ -2533,13 +2535,11 @@ impl Workspace {
                                 updated_at: t.meta.updated_at,
                                 session_id: t.run.session_id.clone(),
                                 queued: t.queued_messages().len(),
-                                asks: t.permission().map(|p| {
-                                    let input: String = p.input.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(200).collect();
-                                    format!("{} {}", p.tool, if p.description.trim().is_empty() { input } else { p.description.trim().to_string() })
-                                }),
+                                requests: tool_asks(t),
                             }
                         })
                         .collect(),
+                    controls: self.library.setting("agentControlsThreads").and_then(|v| v.as_bool()).unwrap_or(true),
                 });
                 let _ = reply.send(snapshot);
             }
@@ -2592,6 +2592,12 @@ impl Workspace {
             }
             ToolRequest::Control { action, reply } => {
                 let _ = reply.send(self.take_remote(action, cx));
+            }
+            ToolRequest::Deny { thread, request_id, message, reply } => {
+                if let Some(t) = self.thread(&thread) {
+                    self.respond_to(&t, &request_id, Decision::Deny { message }, cx);
+                }
+                let _ = reply.send(());
             }
             ToolRequest::UpdateTitle { caller, messages, sent, hint, reply } => {
                 let _ = reply.send(self.update_title_for_agent(&caller, messages, sent, hint, cx));
@@ -2838,6 +2844,44 @@ fn quit_words(commands: &[String], agents: &[String], theirs: usize) -> Option<(
         detail += &format!(", with {} {whose} started", if theirs == 1 { "the command".to_string() } else { format!("the {theirs} commands") });
     }
     Some((title, detail + "."))
+}
+
+/// What a thread waits on, for another thread's agent to answer (`answer_thread`): each
+/// request with what it needs to decide.
+fn tool_asks(t: &ThreadState) -> Vec<thread_tools::Ask> {
+    let flat = |s: &str, n: usize| -> String {
+        let one = s.split_whitespace().collect::<Vec<_>>().join(" ");
+        if one.chars().count() > n { format!("{}…", one.chars().take(n).collect::<String>()) } else { one }
+    };
+    let mut asks: Vec<thread_tools::Ask> = t
+        .run
+        .permissions
+        .iter()
+        .map(|p| {
+            let input: Value = serde_json::from_str(&p.input).unwrap_or(Value::Null);
+            let (kind, detail) = match p.tool.as_str() {
+                "AskUserQuestion" => {
+                    let questions = input["questions"].as_array().cloned().unwrap_or_default();
+                    let lines: Vec<String> = questions
+                        .iter()
+                        .map(|q| {
+                            let options: Vec<String> = q["options"].as_array().into_iter().flatten().map(|o| format!("“{}”{}", o["label"].as_str().unwrap_or(""), o["description"].as_str().map(|d| format!(" ({})", flat(d, 120))).unwrap_or_default())).collect();
+                            format!("“{}”{} options: {}", q["question"].as_str().unwrap_or(""), if q["multiSelect"].as_bool() == Some(true) { " (several allowed, comma-separated)" } else { "" }, options.join(", "))
+                        })
+                        .collect();
+                    ("question", lines.join("\n"))
+                }
+                "ExitPlanMode" => {
+                    let plan = input["plan"].as_str().unwrap_or("");
+                    ("plan", if plan.chars().count() > 6000 { format!("{}… (read_thread for the rest)", plan.chars().take(6000).collect::<String>()) } else { plan.to_string() })
+                }
+                tool => ("permission", format!("{tool}{}: {}", if p.description.trim().is_empty() { String::new() } else { format!(" ({})", flat(&p.description, 200)) }, flat(&p.input, 800))),
+            };
+            thread_tools::Ask { id: p.id.clone(), kind, detail }
+        })
+        .collect();
+    asks.extend(t.run.elicitations.iter().map(|e| thread_tools::Ask { id: e.id.clone(), kind: "mcp", detail: format!("{} asks: {}", e.server, flat(&e.message, 400)) }));
+    asks
 }
 
 fn make_thread(meta: ThreadMeta, workspace: WeakEntity<Workspace>, cx: &mut Context<Workspace>) -> Entity<ThreadState> {
