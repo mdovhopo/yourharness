@@ -866,6 +866,9 @@ fn memory_label() -> String {
     if bytes >= 1e9 { format!("{:.1} GB", bytes / 1e9) } else { format!("{:.0} MB", bytes / 1e6) }
 }
 
+/// An account's 5-hour or weekly limit in the footer's compact rows: the bar and its percent.
+const ACCOUNT_METER: f32 = 62.;
+
 impl Sidebar {
     /// What there is to do about an update, above the limits (`ui::updates::banner`).
     fn update_row(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
@@ -919,7 +922,6 @@ impl Sidebar {
     }
 
     /// A subscription's name over its meters: `Claude Max`, the account only in its tooltip.
-    /// One per Mac for now, so the footer shows one; more would stack.
     fn subscription_row(sub: Option<&yh_core::limits::Subscription>, theme: &Theme) -> gpui_kit::AnyElement {
         let plan = sub.map(|s| s.plan_name()).unwrap_or_else(|| "Claude".into());
         let tip = match sub {
@@ -945,18 +947,121 @@ impl Sidebar {
             .into_any_element()
     }
 
+    /// `5h  7d` over the accounts' columns.
+    fn accounts_header(theme: &Theme) -> gpui_kit::AnyElement {
+        let column = |label: &'static str| div().w(px(ACCOUNT_METER)).flex_none().flex().justify_end().child(label);
+        div()
+            .flex()
+            .items_center()
+            .gap(px(space::S))
+            .h(px(14.))
+            .text_size(px(text::CAPTION))
+            .text_color(theme.tertiary)
+            .child(div().flex_1())
+            .child(column("5h"))
+            .child(column("7d"))
+            .into_any_element()
+    }
+
+    /// One account in a row: a dot on the active one, who it is, its 5-hour and weekly limits.
+    /// A click switches to it; on the active one, it opens Usage.
+    fn account_row(a: &crate::state::limits::AccountState, active: bool, now: f64, theme: &Theme, ws: &gpui_kit::Entity<Workspace>) -> gpui_kit::AnyElement {
+        let windows = a.limits.as_ref().map(yh_core::limits::windows).unwrap_or_default();
+        let window = |name: &str| windows.iter().find(|w| w.name == name).cloned();
+        let mini = |w: Option<yh_core::limits::Window>| {
+            let used = w.as_ref().map(|w| yh_core::limits::utilization(w, now));
+            let tint = match used.unwrap_or(0.) {
+                u if u < 0.7 => theme.accent,
+                u if u < 0.9 => theme.warning,
+                _ => theme.error,
+            };
+            div()
+                .w(px(ACCOUNT_METER))
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(4.))
+                .child(div().flex_1().h(px(BAR)).rounded_full().bg(theme.selected).overflow_hidden().when_some(used, |d, u| d.child(div().h_full().rounded_full().min_w(px(BAR)).w(gpui_kit::relative(u as f32)).bg(tint))))
+                .child(div().w(px(28.)).flex_none().flex().justify_end().child(used.map(|u| format!("{}%", (u * 100.).round() as i64)).unwrap_or_else(|| "–".into())))
+        };
+        let label = a.label();
+        let mut tip = match &a.subscription {
+            Some(s) => format!("{} · {}", s.plan_name(), s.who().unwrap_or("signed in")),
+            None if a.login.is_some() => format!("{label}: signing in, in your browser"),
+            None if a.signed_out() => format!("{label}: signed out. Sign in from Settings → Agents"),
+            None => label.clone(),
+        };
+        for w in &windows {
+            if let Some(at) = w.resets_at.filter(|at| *at > now) {
+                tip.push_str(&format!("\n{}: {}% · resets {}", yh_core::limits::title(&w.name), (yh_core::limits::utilization(w, now) * 100.).round() as i64, yh_core::clock::relative(at, now)));
+            }
+        }
+        if let Some(e) = &a.error {
+            tip.push_str(&format!("\nLast refresh: {e}"));
+        }
+        let signed_out = a.signed_out() && a.login.is_none();
+        tip.push_str(if signed_out {
+            "\nClick to sign in, in your browser"
+        } else if active {
+            "\nIn use: new turns run on this account. Click for usage (⇧⌘U)"
+        } else {
+            "\nClick to switch: threads go on with this account from their next turn"
+        });
+        let id = a.id().to_string();
+        let ws = ws.clone();
+        let quiet = a.signed_out() || a.login.is_some();
+        div()
+            .id(SharedString::from(format!("account-{id}")))
+            .role(gpui_kit::Role::Button)
+            .aria_label(format!("{label}{}", if active { ", in use" } else { "" }))
+            .flex()
+            .items_center()
+            .gap(px(space::S))
+            .h(px(18.))
+            .mx(px(-4.))
+            .px(px(4.))
+            .rounded(px(radius::SMALL))
+            .hover(|s| s.bg(theme.hover))
+            .text_size(px(text::CAPTION))
+            .text_color(theme.secondary)
+            .child(div().flex_none().size(px(6.)).rounded_full().when(active, |d| d.bg(theme.accent)).when(!active, |d| d.border_1().border_color(theme.tertiary)))
+            .child(div().flex_1().min_w_0().truncate().when(active, |d| d.font_weight(FontWeight::MEDIUM).text_color(theme.text)).child(label))
+            .when(!quiet, |d| d.child(mini(window("five_hour"))).child(mini(window("seven_day"))))
+            .when(quiet, |d| d.child(div().flex_none().text_color(theme.tertiary).child(if a.login.is_some() { "Signing in…" } else { "Signed out" })))
+            .tooltip(tooltip(tip))
+            .on_click(move |_, _, cx| {
+                cx.stop_propagation();
+                ws.update(cx, |ws, cx| {
+                    if signed_out {
+                        ws.sign_in(&id, cx)
+                    } else if active {
+                        if ws.page != Some(Page::Usage) {
+                            ws.toggle_usage(cx)
+                        }
+                    } else {
+                        ws.switch_account(&id, cx)
+                    }
+                })
+            })
+            .into_any_element()
+    }
+
     /// Usage limits, this app's memory, a refresh, Keep Awake and Settings.
     fn footer(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let ws = self.workspace.read(cx);
         let now = now();
-        let meters = yh_core::limits::meters(ws.limits.as_ref());
-        let updated = ws.limits_updated_at;
-        let (refreshing, error) = (ws.limits_refreshing, ws.limits_error.clone());
+        let active = ws.active();
+        let enabled: Vec<&crate::state::limits::AccountState> = ws.accounts.iter().filter(|a| a.account.enabled).collect();
+        let meters = yh_core::limits::meters(active.limits.as_ref());
+        let updated = active.limits_updated_at;
+        let refreshing = ws.limits_refreshing();
+        let errors: Vec<String> = enabled.iter().filter_map(|a| a.error.as_ref().map(|e| if enabled.len() > 1 { format!("{}: {e}", a.label()) } else { e.clone() })).collect();
+        let error = (!errors.is_empty()).then(|| errors.join("\n"));
         let refresh_tip = match &error {
             Some(e) => format!("Couldn't refresh: {e}"),
             None if refreshing => "Refreshing usage limits…".to_string(),
             None => {
-                let mut t = "Refresh usage limits (sends Claude a tiny Haiku request)".to_string();
+                let mut t = format!("Refresh usage limits (sends Claude a tiny Haiku request{})", if enabled.len() > 1 { " on each account" } else { "" });
                 if let Some(u) = updated {
                     t.push_str(&format!("\nUpdated {}", yh_core::clock::relative(u, now)));
                 }
@@ -964,21 +1069,24 @@ impl Sidebar {
             }
         };
         let usage_ws = self.workspace.clone();
-        let mut bars = div()
-            .id("limits")
-            .flex()
-            .flex_col()
-            .gap(px(2.))
-            .child(Self::subscription_row(ws.subscription.as_ref(), theme))
-            .on_click(move |_, _, cx| {
-                usage_ws.update(cx, |ws, cx| {
-                    if ws.page != Some(Page::Usage) {
-                        ws.toggle_usage(cx)
-                    }
-                })
-            });
-        for (name, window) in &meters {
-            bars = bars.child(Self::meter(name, window.as_ref(), updated, now, theme));
+        let mut bars = div().id("limits").flex().flex_col().gap(px(2.)).on_click(move |_, _, cx| {
+            usage_ws.update(cx, |ws, cx| {
+                if ws.page != Some(Page::Usage) {
+                    ws.toggle_usage(cx)
+                }
+            })
+        });
+        if enabled.len() > 1 {
+            // Several accounts: a row each, the one in use marked.
+            bars = bars.child(Self::accounts_header(theme));
+            for a in &enabled {
+                bars = bars.child(Self::account_row(a, a.id() == active.id(), now, theme, &self.workspace));
+            }
+        } else {
+            bars = bars.child(Self::subscription_row(active.subscription.as_ref(), theme));
+            for (name, window) in &meters {
+                bars = bars.child(Self::meter(name, window.as_ref(), updated, now, theme));
+            }
         }
         let (awake_ws, settings_ws, refresh_ws) = (self.workspace.clone(), self.workspace.clone(), self.workspace.clone());
         let awake = ws.keep_awake.reason.is_some();

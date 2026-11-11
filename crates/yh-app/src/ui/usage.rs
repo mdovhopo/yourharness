@@ -580,10 +580,16 @@ impl Render for UsagePage {
         }
         let active_days = report.days.iter().filter(|d| d.total.messages > 0).count().max(1);
         let t = &report.total;
-        let limits = self.workspace.read(cx).limits.clone();
+        // Every account that's on, each named when there's more than one.
+        let accounts: Vec<(String, Option<serde_json::Value>)> = {
+            let ws = self.workspace.read(cx);
+            ws.accounts.iter().filter(|a| a.account.enabled).map(|a| (a.label(), a.limits.clone())).collect()
+        };
+        let several = accounts.len() > 1;
         let mut limit_row = div().flex().flex_wrap().gap(px(space::M));
         let mut any_limit = false;
-        if let Some(windows) = limits.as_ref().and_then(|l| l["unifiedWindows"].as_object().cloned()) {
+        for (account, limits) in accounts {
+            let Some(windows) = limits.as_ref().and_then(|l| l["unifiedWindows"].as_object().cloned()) else { continue };
             for (name, w) in windows {
                 any_limit = true;
                 let used = w["utilization"].as_f64().unwrap_or(0.).clamp(0., 1.);
@@ -592,6 +598,7 @@ impl Render for UsagePage {
                     "seven_day" => "Weekly limit".to_string(),
                     other => other.replace('_', " "),
                 };
+                let label = if several { format!("{label} · {account}") } else { label };
                 // The fill carries how close it is; the track is a lighter step of the same hue.
                 let tint = if used > 0.8 { theme.warning } else { theme.accent };
                 limit_row = limit_row.child(

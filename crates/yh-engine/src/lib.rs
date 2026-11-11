@@ -75,6 +75,9 @@ pub enum Command {
     /// The effort it should run with: an idle `claude` with another ends now, a busy one once
     /// its turn is over.
     SetEffort { thread: String, effort: Option<String> },
+    /// Its `claude` starts over with what the app says next (another Claude account): an idle
+    /// one ends now, a busy one once its turn is over.
+    Relaunch { thread: String },
     Notice { thread: String, text: String, error: bool },
     ChangedFiles { thread: String, message: String, files: Vec<String> },
     CutOffJobs { thread: String, outcome: String },
@@ -109,7 +112,7 @@ impl Command {
     fn thread(&self) -> Option<&str> {
         use Command::*;
         match self {
-            Open { thread, .. } | Send { thread, .. } | Deliver { thread, .. } | Launch { thread, .. } | Interrupt { thread } | Stop { thread } | Respond { thread, .. } | AnswerElicitation { thread, .. } | Mcp { thread, .. } | End { thread, .. } | SetModel { thread, .. } | SetMode { thread, .. } | SetEffort { thread, .. } | Notice { thread, .. } | ChangedFiles { thread, .. } | CutOffJobs { thread, .. } | Withdraw { thread, .. } | SendNow { thread, .. } | StopJob { thread, .. } | TookRestored { thread, .. } | SetMcpServers { thread, .. } | SetSession { thread, .. } | Forget { thread } | Save { thread } | Events { thread, .. } => Some(thread),
+            Open { thread, .. } | Send { thread, .. } | Deliver { thread, .. } | Launch { thread, .. } | Interrupt { thread } | Stop { thread } | Respond { thread, .. } | AnswerElicitation { thread, .. } | Mcp { thread, .. } | End { thread, .. } | SetModel { thread, .. } | SetMode { thread, .. } | SetEffort { thread, .. } | Relaunch { thread } | Notice { thread, .. } | ChangedFiles { thread, .. } | CutOffJobs { thread, .. } | Withdraw { thread, .. } | SendNow { thread, .. } | StopJob { thread, .. } | TookRestored { thread, .. } | SetMcpServers { thread, .. } | SetSession { thread, .. } | Forget { thread } | Save { thread } | Events { thread, .. } => Some(thread),
             Snapshot { thread, .. } => Some(thread),
             Quit { .. } | Subscribe { .. } => None,
         }
@@ -551,6 +554,18 @@ impl Engine {
                     }
                 }
             }
+            Command::Relaunch { thread } => {
+                let busy = self.runs.get(&thread).is_some_and(|r| r.live.running || r.live.jobs.any_running());
+                if let Some(rt) = self.runtimes.get_mut(&thread) {
+                    if busy {
+                        rt.restart_when_idle = true;
+                        runtime_log(format!("{thread}: another account while working, its claude starts over once the turn ends"));
+                    } else {
+                        runtime_log(format!("{thread}: another account, its idle claude ends"));
+                        self.end_runtime(&thread);
+                    }
+                }
+            }
             Command::Notice { thread, text, error } => {
                 let run = self.run_of(&thread);
                 if error {
@@ -904,7 +919,7 @@ impl Engine {
         // Effort changed mid-turn: the process starts over now, unless jobs it left run on.
         let restart = self.runtimes.get(thread).is_some_and(|rt| rt.restart_when_idle) && !any_running && !waiting_on_jobs;
         if restart {
-            runtime_log(format!("{thread}: turn over, its claude ends for the new effort"));
+            runtime_log(format!("{thread}: turn over, its claude ends for the new effort or account"));
             self.end_runtime(thread);
         }
         if let Some(rt) = self.runtimes.get_mut(thread).filter(|_| !ids::aside(thread)) {

@@ -151,6 +151,7 @@ impl SettingsView {
             return;
         }
         self.found.refreshing = true;
+        self.workspace.update(cx, |ws, cx| ws.check_subscription(cx));
         let chosen = self.workspace.read(cx).library.setting("cliPathOverrides").and_then(|o| o["claude"].as_str().map(std::path::PathBuf::from));
         let task = cx.background_executor().spawn(async move {
             let mut statuses: Vec<(&'static str, Status)> = vec![];
@@ -261,19 +262,7 @@ impl SettingsView {
         if claude.as_ref().is_some_and(|s| !s.is_ready() && s.path.is_none()) {
             claude_section = claude_section.footer("Install Claude Code from docs.claude.com, then Detect Again.");
         }
-        let account: Group = match &self.found.account {
-            Some(a) if a.logged_in => section("Account")
-                .when_some(a.email.clone(), |s, e| s.child(row("Signed in as", div().text_color(theme.secondary).child(e))))
-                .when_some(a.plan_name(), |s, p| s.child(row("Plan", div().px(px(8.)).rounded_full().bg(theme.accent.opacity(0.15)).font_weight(FontWeight::MEDIUM).child(p))))
-                .when_some(a.org_name.clone(), |s, o| s.child(row("Organization", div().text_color(theme.secondary).child(o))))
-                .when_some(a.sign_in_method(), |s, m| s.child(row("Signed in with", div().text_color(theme.secondary).child(m))))
-                .child(self.usage_bars(theme, cx)),
-            Some(_) => section("Account").child(self.sign_in_hint(theme, cx)),
-            None if claude.as_ref().is_some_and(Status::is_ready) && self.found.refreshing => section("Account").child(row("Account", div().text_color(theme.secondary).child("Checking…"))),
-            None if claude.as_ref().is_some_and(Status::is_ready) => section("Account").child(row("Account", div().text_color(theme.secondary).child("Couldn't read sign-in status"))),
-            None => Group::untitled(),
-        };
-        let account = (!account.is_empty()).then_some(account);
+        let account = claude.as_ref().is_some_and(Status::is_ready).then(|| self.accounts_section(theme, cx));
         // Who `gh` and `glab` are signed in as, from the last look at a project's PRs.
         let accounts: std::collections::BTreeMap<yh_core::git::Forge, String> = {
             let ws = self.workspace.read(cx);
@@ -368,10 +357,153 @@ impl SettingsView {
             .into_any_element()
     }
 
-    /// The account's usage limits, as the sidebar's meters read them.
+    /// The Claude accounts: who each is signed in as, the one in use, switching, signing in and
+    /// out, on and off, adding and removing; then the limits of the one in use.
+    fn accounts_section(&self, theme: &Theme, cx: &mut Context<Self>) -> Group {
+        let only_main_signed_out = {
+            let ws = self.workspace.read(cx);
+            ws.accounts.len() == 1 && ws.accounts[0].signed_out()
+        };
+        let hint = only_main_signed_out.then(|| self.sign_in_hint(theme, cx));
+        let ws = self.workspace.read(cx);
+        let several = ws.accounts.len() > 1;
+        let enabled = ws.accounts.iter().filter(|a| a.account.enabled).count();
+        let mut group = section(if several { "Claude Accounts" } else { "Account" });
+        if let Some(hint) = hint {
+            group = group.child(hint);
+        }
+        for a in &ws.accounts {
+            let id = a.id().to_string();
+            let active = id == ws.active_account;
+            let label = a.label();
+            let detail = match (&a.subscription, &a.login) {
+                (_, Some(_)) => "Signing in: finish in your browser".to_string(),
+                (Some(s), _) => {
+                    let mut d = s.plan_name();
+                    if let Some(org) = s.org.as_ref().filter(|_| s.email.is_some()) {
+                        d.push_str(&format!(" · {org}"));
+                    }
+                    d
+                }
+                (None, _) if a.signed_out() => "Signed out".into(),
+                (None, _) => "Checking…".into(),
+            };
+            // The main account is Claude Code's own sign-in, the one Terminal uses.
+            let detail = if a.account.is_main() && several { format!("Main · {detail}") } else { detail };
+            let ws_entity = self.workspace.clone();
+            let mut controls = div().flex().items_center().gap(px(space::S));
+            if a.login.is_some() {
+                if let Some(url) = a.login.as_ref().and_then(|l| l.url.lock().unwrap().clone()) {
+                    controls = controls.child(Button::new(SharedString::from(format!("account-page-{id}"))).small().ghost().label("Open Page Again").on_click(move |_, _, cx| cx.open_url(&url)));
+                }
+                let (w, i) = (ws_entity.clone(), id.clone());
+                controls = controls.child(Button::new(SharedString::from(format!("account-cancel-{id}"))).small().outline().label("Cancel").on_click(move |_, _, cx| w.update(cx, |ws, cx| ws.cancel_sign_in(&i, cx))));
+            } else if a.signed_out() && !only_main_signed_out {
+                let (w, i) = (ws_entity.clone(), id.clone());
+                controls = controls.child(Button::new(SharedString::from(format!("account-signin-{id}"))).small().outline().label("Sign In…").on_click(move |_, _, cx| w.update(cx, |ws, cx| ws.sign_in(&i, cx))));
+            }
+            if several {
+                if active {
+                    controls = controls.child(crate::ui::page_kit::chip("In Use", theme.accent));
+                } else if a.account.enabled && !a.signed_out() && a.login.is_none() {
+                    let (w, i) = (ws_entity.clone(), id.clone());
+                    controls = controls.child(Button::new(SharedString::from(format!("account-use-{id}"))).small().outline().label("Use").on_click(move |_, _, cx| w.update(cx, |ws, cx| ws.switch_account(&i, cx))));
+                }
+                let (w, i) = (ws_entity.clone(), id.clone());
+                controls = controls.child(
+                    Switch::new(SharedString::from(format!("account-on-{id}")))
+                        .checked(a.account.enabled)
+                        .disabled(a.account.enabled && enabled == 1)
+                        .tooltip(if a.account.enabled { "On: you can switch to it" } else { "Off: kept and signed in, never used" })
+                        .on_change(move |on, _, cx| {
+                            let _ = w.update(cx, |ws, cx| ws.set_account_enabled(&i, *on, cx));
+                        }),
+                );
+            }
+            let (signed_in, main, dir) = (a.subscription.is_some(), a.account.is_main(), a.account.dir.clone().unwrap_or_else(yh_core::history::config_directory));
+            let (w, i, name) = (ws_entity.clone(), id.clone(), label.clone());
+            controls = controls.child(
+                Button::new(SharedString::from(format!("account-more-{id}"))).small().ghost().icon(Icon::new(IconName::Ellipsis)).tooltip("More").dropdown_menu(move |mut menu, _, _| {
+                    let (w1, i1) = (w.clone(), i.clone());
+                    menu = menu.item(PopupMenuItem::new("Refresh Limits").on_click(move |_, _, cx| w1.update(cx, |ws, cx| ws.refresh_account(&i1, cx))));
+                    if signed_in && !main {
+                        let (w2, i2) = (w.clone(), i.clone());
+                        menu = menu.item(PopupMenuItem::new("Sign Out").on_click(move |_, _, cx| w2.update(cx, |ws, cx| ws.sign_out(&i2, cx))));
+                    }
+                    let folder = dir.clone();
+                    menu = menu.item(PopupMenuItem::new("Show Folder in Finder").on_click(move |_, _, cx| cx.reveal_path(&folder)));
+                    if !main {
+                        let (w3, i3, name) = (w.clone(), i.clone(), name.clone());
+                        menu = menu.separator().item(PopupMenuItem::new("Remove…").on_click(move |_, window, cx| {
+                            let title = format!("Remove {name}?");
+                            let detail = "It's signed out on this Mac and forgotten here. Your conversations stay: they're shared with your other accounts.".to_string();
+                            let (w3, i3) = (w3.clone(), i3.clone());
+                            let remove = move |cx: &mut App| {
+                                let _ = w3.update(cx, |ws, cx| ws.remove_account(&i3, cx).map_err(|e| eprintln!("ACCOUNT couldn't remove: {e}")));
+                            };
+                            if let Ok(answer) = std::env::var("YH_ACCOUNT_REMOVE_ANSWER") {
+                                eprintln!("ACCOUNT asks: {title} / {detail} -> {answer}");
+                                if answer == "ok" {
+                                    remove(cx);
+                                }
+                                return;
+                            }
+                            let answer = window.prompt(gpui_kit::PromptLevel::Warning, &title, Some(&detail), &["Remove", "Cancel"], cx);
+                            cx.spawn(async move |cx| {
+                                if answer.await == Ok(0) {
+                                    let _ = cx.update(remove);
+                                }
+                            })
+                            .detach();
+                        }));
+                    }
+                    menu
+                }),
+            );
+            let tint = if a.signed_out() || a.error.is_some() { theme.warning } else { theme.secondary };
+            let detail = match &a.error {
+                Some(e) if a.login.is_none() => format!("{detail} · {e}"),
+                _ => detail,
+            };
+            group = group.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(space::L))
+                    .min_h(px(48.))
+                    .px(px(space::M))
+                    .py(px(space::XS + 2.))
+                    .when(!a.account.enabled, |d| d.opacity(0.6))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .gap(px(space::S))
+                            .child(Icon::new(IconName::CircleUser).size(px(16.)).text_color(if active && several { theme.accent } else { theme.secondary }))
+                            .child(div().min_w_0().flex().flex_col().child(div().truncate().font_weight(FontWeight::MEDIUM).child(label)).child(div().truncate().text_size(px(text::FOOTNOTE)).text_color(tint).child(detail))),
+                    )
+                    .child(controls.flex_none()),
+            );
+        }
+        let w = self.workspace.clone();
+        group = group
+            .child(div().flex().justify_end().px(px(space::M)).py(px(space::S)).child(Button::new("account-add").small().outline().icon(Icon::new(IconName::Plus)).label("Add Account…").on_click(move |_, _, cx| {
+                let _ = w.update(cx, |ws, cx| ws.add_account(cx).map_err(|e| eprintln!("ACCOUNT couldn't add: {e}")));
+            })))
+            .child(self.usage_bars(theme, cx));
+        group.footer(if several {
+            "New turns use the account in use; switching moves threads to it from their next turn, the conversation kept. Accounts sign in through Claude Code itself, in your browser: YourHarness never sees credentials. They share your Claude Code settings, CLAUDE.md, skills, plugins and history; MCP servers you added for yourself stay with each."
+        } else {
+            "Have another Claude subscription? Add it, and switch between them here or in the sidebar. It signs in through Claude Code itself, in your browser: YourHarness never sees credentials."
+        })
+    }
+
+    /// The account in use's usage limits, as the sidebar's meters read them.
     fn usage_bars(&self, theme: &Theme, cx: &App) -> AnyElement {
         let ws = self.workspace.read(cx);
-        let meters: Vec<(String, yh_core::limits::Window)> = yh_core::limits::meters(ws.limits.as_ref()).into_iter().filter_map(|(n, w)| w.map(|w| (n, w))).collect();
+        let meters: Vec<(String, yh_core::limits::Window)> = yh_core::limits::meters(ws.active().limits.as_ref()).into_iter().filter_map(|(n, w)| w.map(|w| (n, w))).collect();
         if meters.is_empty() {
             return row("Usage", div().text_color(theme.secondary).child("Appears after your first message"));
         }
@@ -926,10 +1058,6 @@ struct Group {
 impl Group {
     fn untitled() -> Group {
         Group { title: None, items: vec![], footers: vec![] }
-    }
-
-    fn is_empty(&self) -> bool {
-        self.items.is_empty() && self.footers.is_empty()
     }
 
     /// A row, under a hairline.

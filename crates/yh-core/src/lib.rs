@@ -2,6 +2,7 @@
 //! 0.0.x wrote), Claude Code's session files, the `claude` process and its stream-json,
 //! markdown parsing. No GPUI here, so it's testable on its own and the app stays thin over it.
 
+pub mod accounts;
 pub mod attachments;
 pub mod agents;
 pub mod claude;

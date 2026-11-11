@@ -1,7 +1,8 @@
 //! Claude's usage limits (the 5-hour and weekly windows) as the CLI reports them in a
 //! `rate_limit_event`, saved as 0.0.x saved them (`rateLimit`, `rateLimitUpdatedAt`),
 //! read for the sidebar's meters, and refreshed on demand with the smallest request there is.
-//! They belong to the subscription `claude` is signed in with (`Subscription`).
+//! They belong to the subscription `claude` is signed in with (`Subscription`), one per account
+//! (`accounts.rs`).
 
 use serde_json::{json, Value};
 use std::io::Read;
@@ -121,7 +122,7 @@ pub fn utilization(w: &Window, now: f64) -> f64 {
 }
 
 /// The subscription the limits belong to: who `claude` is signed in as, from `claude auth
-/// status` (never its credentials). One per Mac for now.
+/// status` (never its credentials). One per account.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Subscription {
     pub email: Option<String>,
@@ -174,12 +175,13 @@ pub fn parse_subscription(json: &str) -> Option<Subscription> {
     Some(Subscription { email: s("email"), org: s("orgName"), plan: s("subscriptionType"), method: s("authMethod") })
 }
 
-/// Who `claude` is signed in as (about 0.1 s, nothing sent to Claude). Blocks (10 s at most).
-/// `Ok(None)`: signed out.
-pub fn subscription(executable: &Path, path_env: Option<&str>) -> Result<Option<Subscription>, String> {
+/// Who `claude` is signed in as in an account's folder (`None`: Claude Code's own), about 0.1 s,
+/// nothing sent to Claude. Blocks (10 s at most). `Ok(None)`: signed out.
+pub fn subscription(executable: &Path, path_env: Option<&str>, dir: Option<&Path>) -> Result<Option<Subscription>, String> {
     let mut command = Command::new(executable);
     command.args(["auth", "status", "--json"]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
     crate::shell_env::apply(&mut command);
+    crate::shell_env::apply_claude_config(&mut command, dir);
     if let Some(path) = path_env {
         command.env("PATH", path);
     }
@@ -208,8 +210,9 @@ pub fn subscription(executable: &Path, path_env: Option<&str>) -> Result<Option<
 
 /// The CLI only reports limits alongside a real request, so this sends the smallest one it
 /// can: Haiku, one word, no tools, no MCP, none of your settings or hooks, nothing saved to
-/// session history. About 600 tokens, a couple of seconds. Blocks (45 s at most).
-pub fn probe(executable: &Path, path_env: Option<&str>) -> Result<Value, String> {
+/// session history. About 600 tokens, a couple of seconds, on one account's folder (`None`:
+/// Claude Code's own). Blocks (45 s at most).
+pub fn probe(executable: &Path, path_env: Option<&str>, dir: Option<&Path>) -> Result<Value, String> {
     let folder = std::env::temp_dir().join("yourharness-limits");
     let _ = std::fs::create_dir_all(&folder);
     let mut command = Command::new(executable);
@@ -221,6 +224,7 @@ pub fn probe(executable: &Path, path_env: Option<&str>) -> Result<Value, String>
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     crate::shell_env::apply(&mut command);
+    crate::shell_env::apply_claude_config(&mut command, dir);
     if let Some(path) = path_env {
         command.env("PATH", path);
     }

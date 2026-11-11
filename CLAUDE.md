@@ -135,7 +135,12 @@ synthetic session file, never the real `~/.claude`), `YH_OPEN_TASKS=1` (the head
 `YH_HOVER=<x,y>` (the pointer moved there in window points after `YH_DRAFT_DELAY`, through the window as a real move:
 snapshots of hover states such as a sidebar row's Pin/Settle/… or a project's Memory button),
 `YH_REFRESH_LIMITS=1` (the footer's refresh at launch: a tiny Haiku request through `claude`, printing `LIMITS
-refreshed` or why not), `YH_THREAD_ACTIONS=<a>,<b>,…` (after `YH_DRAFT_DELAY`, a second apart, on the open thread: `settle`,
+refreshed` or why not), `YH_ACCOUNT_ACTIONS=add,cancel:1,switch:1,off:0,on:0,signin:1,signout:1,refresh:1,remove:1,list`
+(the Claude accounts' buttons after `YH_DRAFT_DELAY`, a second apart, by index, the main account 0, each printed as `ACCOUNTS …`
+with the list after; `add` and `signin` run `claude auth login`, which opens the browser, so give the run a `YH_PATH`
+whose first folder has a stand-in `open` script; added accounts' folders link into Claude Code's own folder, so point
+`CLAUDE_CONFIG_DIR` at a scratch one unless the test needs the real sign-in; `YH_ACCOUNT_REMOVE_ANSWER=ok|cancel`
+answers Settings' Remove question), `YH_THREAD_ACTIONS=<a>,<b>,…` (after `YH_DRAFT_DELAY`, a second apart, on the open thread: `settle`,
 `unsettle:<n>`, `delete`, `pin`, `unpin`, `undo` (⌘Z), `new` (⌘N), `memory` (⇧⌘M), `project`, `add:<folder>` (Add
 Project), `next`, `inspector`, `settings`, `close` (the close button's quit question), `key:<keystroke>` (typed through the window: `key:alt-cmd-down`; not `cmd-,`, commas split steps); each printed as `ACTION <step>: <what's
 open> · <counts> · order: <the sidebar's live threads>`), `YH_QUIT_ANSWER=quit|cancel` (the quit question answered,

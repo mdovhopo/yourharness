@@ -131,15 +131,13 @@ pub struct Workspace {
     pids: HashMap<String, u32>,
     /// The CLI's models, as it last listed them (saved as `claudeModels`).
     pub models: Vec<ModelInfo>,
-    /// Usage limits as Claude last reported them.
-    pub limits: Option<Value>,
-    /// When they were (seconds), a refresh asked of Claude under way, and why the last failed
-    /// (`state/limits.rs`).
-    pub limits_updated_at: Option<f64>,
-    pub limits_refreshing: bool,
-    pub limits_error: Option<String>,
-    /// The subscription they belong to: who `claude` is signed in as (one per Mac for now).
-    pub subscription: Option<yh_core::limits::Subscription>,
+    /// The Claude accounts, the main one first, each with its usage limits and who it's signed
+    /// in as (`state/limits.rs`, `state/accounts.rs`). Never empty.
+    pub accounts: Vec<crate::state::limits::AccountState>,
+    /// The one new turns use.
+    pub active_account: String,
+    /// The account each thread's `claude` last started on, this launch.
+    pub(crate) runtime_accounts: HashMap<String, String>,
     /// Each project's slash commands and skills, as the CLI last listed them (`slashCommands`).
     commands: HashMap<String, Vec<SlashCommand>>,
     /// A folder's files for `@` mentions, kept 30 seconds.
@@ -323,11 +321,9 @@ impl Workspace {
             remote_actions,
             browser_hub,
             models,
-            limits: None,
-            limits_updated_at: None,
-            limits_refreshing: false,
-            limits_error: None,
-            subscription: None,
+            accounts: vec![crate::state::limits::AccountState::new(yh_core::accounts::Account::main())],
+            active_account: yh_core::accounts::MAIN.into(),
+            runtime_accounts: HashMap::new(),
             commands: HashMap::new(),
             files: HashMap::new(),
             new_count: 0,
@@ -2336,6 +2332,12 @@ impl Workspace {
         for id in std::mem::take(&mut self.pending_purge) {
             self.library.purge(&id);
         }
+        // A sign-in waiting on the browser would outlive the app.
+        for a in &mut self.accounts {
+            if let Some(login) = a.login.take() {
+                login.cancel();
+            }
+        }
         // The engine cuts off what still runs, saves every thread and ends every `claude`.
         let (done, finished) = flume::bounded(1);
         self.engine.send(Command::Quit { done });
@@ -3373,7 +3375,12 @@ mod tests {
 
 impl Workspace {
     /// A command about a thread to the engine, telling it of the thread first.
-    fn command(&mut self, thread_id: &str, command: Command, cx: &mut Context<Self>) {
+    /// Straight to the engine, for a thread it already knows.
+    pub(crate) fn engine_send(&self, command: Command) {
+        self.engine.send(command);
+    }
+
+    pub(crate) fn command(&mut self, thread_id: &str, command: Command, cx: &mut Context<Self>) {
         if !self.opened.contains(thread_id) {
             if let Some(t) = self.thread(thread_id) {
                 let t = t.read(cx);
@@ -3413,6 +3420,7 @@ impl Workspace {
                 Output::NeedsLaunch { thread } => {
                     let launch = match self.thread(&thread) {
                         Some(t) => {
+                            self.note_launch_account(&thread);
                             let effort = self.effort_of(t.read(cx));
                             let (options, note) = self.launch_options(&t, cx);
                             Command::Launch { thread: thread.clone(), options, effort, note }
@@ -3448,7 +3456,11 @@ impl Workspace {
                     let project = thread.read(cx).meta.project_id.clone();
                     self.note_catalog(models, commands, &project, cx);
                 }
-                Event::Limits(info) => self.note_limits(info, cx),
+                Event::Limits(info) => {
+                    // The account its `claude` runs on.
+                    let account = self.runtime_accounts.get(&id).cloned().unwrap_or_else(|| self.active_account.clone());
+                    self.note_limits(&account, info, cx)
+                }
                 Event::Assistant { blocks, .. } => {
                     for block in blocks {
                         if let yh_core::claude::Block::Tool { name, input, .. } = block {

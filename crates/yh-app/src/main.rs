@@ -615,6 +615,44 @@ fn main() {
         if env("YH_REFRESH_LIMITS").as_deref() == Some("1") {
             workspace.update(cx, |ws, cx| ws.refresh_limits(cx));
         }
+        // `YH_ACCOUNT_ACTIONS=add,switch:1,off:0,on:0,signin:1,cancel:1,remove:1,list`: the Claude
+        // accounts' buttons, after `YH_DRAFT_DELAY`, a second apart (accounts by index, the main
+        // one 0), each printed with the list after as `ACCOUNTS …`. `add` and `signin` run `claude
+        // auth login`, which opens the browser: give the run a `YH_PATH` whose `open` is a stand-in.
+        if let Some(steps) = env("YH_ACCOUNT_ACTIONS") {
+            let delay: f64 = env("YH_DRAFT_DELAY").and_then(|v| v.parse().ok()).unwrap_or(1.0);
+            let ws = workspace.clone();
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(Duration::from_secs_f64(delay)).await;
+                for step in steps.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    let _ = ws.update(cx, |ws, cx| {
+                        let (verb, n) = step.split_once(':').map_or((step, None), |(v, n)| (v, n.parse::<usize>().ok()));
+                        let id = n.and_then(|n| ws.accounts.get(n)).map(|a| a.id().to_string()).unwrap_or_default();
+                        let outcome: Result<(), String> = match verb {
+                            "add" => ws.add_account(cx).map(|_| ()),
+                            "switch" => Ok(ws.switch_account(&id, cx)),
+                            "off" => ws.set_account_enabled(&id, false, cx),
+                            "on" => ws.set_account_enabled(&id, true, cx),
+                            "signin" => Ok(ws.sign_in(&id, cx)),
+                            "cancel" => Ok(ws.cancel_sign_in(&id, cx)),
+                            "signout" => Ok(ws.sign_out(&id, cx)),
+                            "remove" => ws.remove_account(&id, cx),
+                            "refresh" => Ok(ws.refresh_account(&id, cx)),
+                            "list" => Ok(()),
+                            other => Err(format!("no such step: {other}")),
+                        };
+                        let list: Vec<String> = ws
+                            .accounts
+                            .iter()
+                            .map(|a| format!("{}{}{} {}{}", if a.id() == ws.active_account { "*" } else { "" }, a.id(), if a.account.enabled { "" } else { " (off)" }, a.label(), if a.login.is_some() { " [signing in]" } else if a.signed_out() { " [signed out]" } else { "" }))
+                            .collect();
+                        eprintln!("ACCOUNTS {step}: {} · {}", outcome.err().unwrap_or_else(|| "ok".into()), list.join(" | "));
+                    });
+                    cx.background_executor().timer(Duration::from_secs(1)).await;
+                }
+            })
+            .detach();
+        }
         // `YH_HOVER=<x,y>`: the pointer moved there (window points) after `YH_DRAFT_DELAY`, through
         // the window as a real move goes, for snapshots of hover states (a sidebar row's actions).
         if let Some((x, y)) = env("YH_HOVER").and_then(|v| v.split_once(',').and_then(|(x, y)| Some((x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?)))) {

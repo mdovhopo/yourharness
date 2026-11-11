@@ -9,6 +9,9 @@
 //!
 //! `YH_PATH` (test runs) skips the shell entirely: a test must never start the user's login
 //! shell, whose rc files can reach into `~/Downloads` and put a privacy prompt on the screen.
+//!
+//! The Claude account in use (`accounts.rs`) is a `CLAUDE_CONFIG_DIR` on top: every `claude`
+//! started from then on, and every command a thread runs, gets the active account's folder.
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -59,9 +62,41 @@ pub fn start() {
     });
 }
 
-/// The environment, once read. Waits for the read when it's under way (at most the shell's
-/// timeouts, seconds after launch at worst); starts it when nobody has.
+fn account_cell() -> &'static Mutex<Option<String>> {
+    static ACCOUNT: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+    ACCOUNT.get_or_init(|| Mutex::new(None))
+}
+
+/// The Claude Code config folder of the account in use; `None`: Claude Code's own (the shell's
+/// `CLAUDE_CONFIG_DIR`, else `~/.claude`).
+pub fn set_claude_config(dir: Option<String>) {
+    *account_cell().lock().unwrap() = dir;
+}
+
+pub fn claude_config() -> Option<String> {
+    account_cell().lock().unwrap().clone()
+}
+
+/// The environment, with the account in use. Waits for the read when it's under way (at most
+/// the shell's timeouts, seconds after launch at worst); starts it when nobody has.
 pub fn environment() -> HashMap<String, String> {
+    let mut env = shell_environment();
+    if let Some(dir) = claude_config() {
+        env.insert("CLAUDE_CONFIG_DIR".into(), dir);
+    }
+    env
+}
+
+/// A command for one account in particular (`None`: Claude Code's own folder), whichever is in use.
+pub fn apply_claude_config(command: &mut Command, dir: Option<&std::path::Path>) {
+    match dir.map(|d| d.as_os_str().to_owned()).or_else(|| shell_environment().get("CLAUDE_CONFIG_DIR").map(Into::into)) {
+        Some(d) => command.env("CLAUDE_CONFIG_DIR", d),
+        None => command.env_remove("CLAUDE_CONFIG_DIR"),
+    };
+}
+
+/// The environment as the shell gave it, no account on top.
+fn shell_environment() -> HashMap<String, String> {
     start();
     let s = state();
     let mut env = s.env.lock().unwrap();

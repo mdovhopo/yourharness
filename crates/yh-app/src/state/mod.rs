@@ -1,5 +1,6 @@
 //! What the app knows, with no drawing.
 
+pub mod accounts;
 pub mod file_watch;
 pub mod harness_tools;
 pub mod jobs;

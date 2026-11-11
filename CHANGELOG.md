@@ -9,6 +9,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 ### Added
 
 - Claude can hand work to other threads in the same project: start a thread with a task, send it follow-ups, stop it, wait for it to finish and read its reply, and answer its permission requests, questions and plans. Ask a thread to delegate and follow the work from there. On by default; Settings → General → Delegation turns it off.
+- More than one Claude subscription: add accounts in Settings → Agents, each signed in through Claude Code itself in your browser, and switch between them there or by clicking an account in the sidebar. Threads go on with the account you switched to from their next turn, conversation kept. The sidebar shows every account's 5-hour and weekly limits in one compact row each. An account can be turned off without removing it; one always stays on.
 
 ## [0.1.12] - 2026-11-11
 
