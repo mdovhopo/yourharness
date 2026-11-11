@@ -1,8 +1,9 @@
 //! Claude accounts (`yh_core::accounts`): added, signed in through `claude auth login`,
-//! switched by hand, turned off, removed. New turns use the active account; switching starts
-//! every thread's `claude` that runs on another over on it, an idle one now and a busy one once
-//! its turn is over, resuming the same session (the history is shared). Saved as
-//! `claudeAccounts` and `claudeActiveAccount`.
+//! turned off, removed, and one per thread. A thread keeps its account (its prompt cache warm
+//! there) until it's moved, which starts its `claude` over on the other account, an idle one now
+//! and a busy one once its turn is over, resuming the same session (the history is shared). New
+//! threads take the account chosen for them. Saved as `claudeAccounts`, `claudeActiveAccount`
+//! (new threads') and `claudeThreadAccounts` (`{thread: account}`).
 
 use crate::state::limits::AccountState;
 use crate::state::workspace::Workspace;
@@ -29,30 +30,71 @@ impl Workspace {
         self.data_dir.join("claude-accounts")
     }
 
-    /// New turns use this account from now on. Every thread's `claude` on another starts over on
-    /// it: an idle one now, a busy one once its turn is over.
+    /// New threads use this account from now on; threads that have one keep theirs.
     pub fn switch_account(&mut self, id: &str, cx: &mut Context<Self>) {
         if id == self.active_account || !self.account(id).is_some_and(|a| a.account.enabled) {
             return;
         }
         self.active_account = id.to_string();
-        log(format!("active: {id} ({})", self.account_label(id)));
+        log(format!("new threads: {id} ({})", self.account_label(id)));
         yh_core::shell_env::set_claude_config(self.active().account.dir.as_ref().map(|d| d.to_string_lossy().into_owned()));
         self.save_accounts();
         self.save_readings();
-        // Not a side chat or a memory specialist: nothing of theirs is saved to resume, so they
-        // finish on the account they began on.
-        let elsewhere: Vec<String> = self.runtime_accounts.iter().filter(|(t, a)| a.as_str() != id && !yh_engine::ids::aside(t)).map(|(t, _)| t.clone()).collect();
-        for thread in elsewhere {
-            self.command(&thread, Command::Relaunch { thread: thread.clone() }, cx);
-        }
         cx.notify();
     }
 
-    /// The account a thread's `claude` starts on (the active one), noted; a line in its
+    /// The account a thread runs on: its own while that's on, else the one new threads use. A
+    /// side chat is its thread's.
+    pub fn account_of(&self, thread: &str) -> &AccountState {
+        let thread = thread.strip_prefix(yh_engine::ids::SIDE).unwrap_or(thread);
+        self.thread_accounts.get(thread).and_then(|id| self.account(id)).filter(|a| a.account.enabled).unwrap_or_else(|| self.active())
+    }
+
+    fn save_thread_accounts(&self) {
+        let map: serde_json::Map<String, Value> = self.thread_accounts.iter().map(|(t, a)| (t.clone(), Value::from(a.clone()))).collect();
+        self.library.set_setting("claudeThreadAccounts", &Value::Object(map));
+    }
+
+    /// The thread moves to this account: its `claude` starts over there (an idle one now, a busy
+    /// one once its turn is over), the conversation kept.
+    pub fn move_thread(&mut self, thread: &str, id: &str, cx: &mut Context<Self>) {
+        if !self.account(id).is_some_and(|a| a.account.enabled) || self.account_of(thread).id() == id {
+            return;
+        }
+        log(format!("thread {thread} moves to {id} ({})", self.account_label(id)));
+        self.thread_accounts.insert(thread.to_string(), id.to_string());
+        self.save_thread_accounts();
+        self.relaunch_if_elsewhere(thread, cx);
+        cx.notify();
+    }
+
+    /// Its `claude` starts over when it runs on another account than the thread's now.
+    fn relaunch_if_elsewhere(&mut self, thread: &str, cx: &mut Context<Self>) {
+        let now = self.account_of(thread).id().to_string();
+        if self.runtime_accounts.get(thread).is_some_and(|a| *a != now) {
+            self.command(thread, Command::Relaunch { thread: thread.to_string() }, cx);
+        }
+    }
+
+    /// Threads on an account that's going (off, removed) go to the one new threads use. Side
+    /// chats and memory specialists finish where they began: nothing of theirs is saved to resume.
+    fn move_threads_off(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.thread_accounts.retain(|_, a| a != id);
+        self.save_thread_accounts();
+        let running: Vec<String> = self.runtime_accounts.iter().filter(|(t, a)| a.as_str() == id && !yh_engine::ids::aside(t)).map(|(t, _)| t.clone()).collect();
+        for thread in running {
+            self.relaunch_if_elsewhere(&thread, cx);
+        }
+    }
+
+    /// The account a thread's `claude` starts on, noted and kept as the thread's; a line in its
     /// transcript when that's another than it last ran on here.
     pub(crate) fn note_launch_account(&mut self, thread: &str) {
-        let id = self.active_account.clone();
+        let id = self.account_of(thread).id().to_string();
+        if yh_engine::ids::saved(thread) && self.thread_accounts.get(thread) != Some(&id) {
+            self.thread_accounts.insert(thread.to_string(), id.clone());
+            self.save_thread_accounts();
+        }
         let before = self.runtime_accounts.insert(thread.to_string(), id.clone());
         if before.is_some_and(|b| b != id) && yh_engine::ids::saved(thread) {
             let text = format!("Continues on {}. Claude reads the conversation again on this account, so the first turn uses more of its limits.", self.account_label(&id));
@@ -153,6 +195,9 @@ impl Workspace {
                 self.switch_account(&next, cx);
             }
         }
+        if !on {
+            self.move_threads_off(id, cx);
+        }
         self.save_accounts();
         cx.notify();
         Ok(())
@@ -176,7 +221,7 @@ impl Workspace {
         self.cancel_sign_in(id, cx);
         let i = self.accounts.iter().position(|a| a.id() == id).expect("found above");
         let dir = self.accounts.remove(i).account.dir;
-        self.runtime_accounts.retain(|_, a| a != id);
+        self.move_threads_off(id, cx);
         self.save_accounts();
         self.save_readings();
         log(format!("removed: {id}"));

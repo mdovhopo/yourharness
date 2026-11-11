@@ -89,9 +89,14 @@ impl Workspace {
         let active = self.library.setting("claudeActiveAccount").and_then(|v| v.as_str().map(str::to_string));
         self.active_account = active.filter(|id| self.accounts.iter().any(|a| a.id() == id && a.account.enabled)).unwrap_or_else(|| self.accounts.iter().find(|a| a.account.enabled).map(|a| a.id().to_string()).unwrap_or_default());
         yh_core::shell_env::set_claude_config(self.active().account.dir.as_ref().map(|d| d.to_string_lossy().into_owned()));
+        self.thread_accounts = self
+            .library
+            .setting("claudeThreadAccounts")
+            .and_then(|v| v.as_object().map(|o| o.iter().filter_map(|(t, a)| Some((t.clone(), a.as_str()?.to_string()))).collect()))
+            .unwrap_or_default();
     }
 
-    /// The account new turns use.
+    /// The account new threads use.
     pub fn active(&self) -> &AccountState {
         self.accounts.iter().find(|a| a.id() == self.active_account).unwrap_or(&self.accounts[0])
     }

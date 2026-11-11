@@ -172,8 +172,11 @@ pub struct Workspace {
     /// The Claude accounts, the main one first, each with its usage limits and who it's signed
     /// in as (`state/limits.rs`, `state/accounts.rs`). Never empty.
     pub accounts: Vec<crate::state::limits::AccountState>,
-    /// The one new turns use.
+    /// The one new threads use.
     pub active_account: String,
+    /// Each thread's account, once it has one (`claudeThreadAccounts`): it stays there, its
+    /// prompt cache warm, until moved.
+    pub(crate) thread_accounts: HashMap<String, String>,
     /// The account each thread's `claude` last started on, this launch.
     pub(crate) runtime_accounts: HashMap<String, String>,
     /// Each project's slash commands and skills, as the CLI last listed them (`slashCommands`).
@@ -364,6 +367,7 @@ impl Workspace {
             models,
             accounts: vec![crate::state::limits::AccountState::new(yh_core::accounts::Account::main())],
             active_account: yh_core::accounts::MAIN.into(),
+            thread_accounts: HashMap::new(),
             runtime_accounts: HashMap::new(),
             commands: HashMap::new(),
             files: HashMap::new(),
@@ -1807,6 +1811,7 @@ impl Workspace {
     /// The thread's `claude`, started if it isn't.    /// How to start the thread's `claude`, when the engine asks (`Output::NeedsLaunch`): its
     /// folder, model, effort, tools and prompt; and what `YH_RUNTIME_LOG` adds to its line.
     fn launch_options(&mut self, thread: &Entity<ThreadState>, cx: &mut Context<Self>) -> (Result<LaunchOptions, String>, Option<String>) {
+        let account = Some(self.account_of(thread.read(cx).id()).account.dir.clone());
         let t = thread.read(cx);
         let effort = self.effort_of(t);
         let project = self.project(&t.meta.project_id).cloned();
@@ -1859,6 +1864,7 @@ impl Workspace {
                 effort: effort.clone(),
                 add_dirs: vec![],
                 env,
+                claude_config: account.clone(),
                 append_system_prompt: Some(prompt.join("\n\n")),
                 allowed_tools: allowed,
                 servers,
@@ -1951,6 +1957,7 @@ impl Workspace {
                 effort: effort.clone(),
                 add_dirs: self.memory_agent_sources.get(t.id()).cloned().unwrap_or_default(),
                 env: vec![],
+                claude_config: None,
                 append_system_prompt: Some(yh_core::memory_agents::prompt(&role, &name)),
                 allowed_tools: vec!["mcp__memory".into(), "Read".into(), "Glob".into(), "Grep".into()],
                 servers: vec![std::sync::Arc::new(server)],
@@ -1981,6 +1988,7 @@ impl Workspace {
             effort: effort.clone(),
             add_dirs: vec![attachments.to_string_lossy().into_owned()],
             env,
+            claude_config: account,
             append_system_prompt: (!prompt.is_empty()).then(|| prompt.join("\n\n")),
             allowed_tools: allowed,
             servers,
@@ -3122,6 +3130,7 @@ fn read_catalog(folder: String) -> Option<(Value, Value)> {
         effort: None,
         add_dirs: vec![],
         env: vec![],
+        claude_config: None,
         append_system_prompt: None,
         allowed_tools: vec![],
         servers: vec![],

@@ -615,8 +615,8 @@ fn main() {
         if env("YH_REFRESH_LIMITS").as_deref() == Some("1") {
             workspace.update(cx, |ws, cx| ws.refresh_limits(cx));
         }
-        // `YH_ACCOUNT_ACTIONS=add,switch:1,off:0,on:0,signin:1,cancel:1,remove:1,list`: the Claude
-        // accounts' buttons, after `YH_DRAFT_DELAY`, a second apart (accounts by index, the main
+        // `YH_ACCOUNT_ACTIONS=add,switch:1,move:1,off:0,on:0,signin:1,cancel:1,remove:1,list`: the
+        // Claude accounts' buttons (`switch`: for new threads; `move`: the open thread), after `YH_DRAFT_DELAY`, a second apart (accounts by index, the main
         // one 0), each printed with the list after as `ACCOUNTS …`. `add` and `signin` run `claude
         // auth login`, which opens the browser: give the run a `YH_PATH` whose `open` is a stand-in.
         if let Some(steps) = env("YH_ACCOUNT_ACTIONS") {
@@ -631,6 +631,10 @@ fn main() {
                         let outcome: Result<(), String> = match verb {
                             "add" => ws.add_account(cx).map(|_| ()),
                             "switch" => Ok(ws.switch_account(&id, cx)),
+                            "move" => match ws.selected.clone() {
+                                Some(thread) => Ok(ws.move_thread(&thread, &id, cx)),
+                                None => Err("no thread open".into()),
+                            },
                             "off" => ws.set_account_enabled(&id, false, cx),
                             "on" => ws.set_account_enabled(&id, true, cx),
                             "signin" => Ok(ws.sign_in(&id, cx)),
@@ -646,7 +650,8 @@ fn main() {
                             .iter()
                             .map(|a| format!("{}{}{} {}{}", if a.id() == ws.active_account { "*" } else { "" }, a.id(), if a.account.enabled { "" } else { " (off)" }, ws.account_label(a.id()), if a.login.is_some() { " [signing in]" } else if a.signed_out() { " [signed out]" } else { "" }))
                             .collect();
-                        eprintln!("ACCOUNTS {step}: {} · {}", outcome.err().unwrap_or_else(|| "ok".into()), list.join(" | "));
+                        let open = ws.selected.clone().map(|t| format!(" · open thread on {}", ws.account_of(&t).id())).unwrap_or_default();
+                        eprintln!("ACCOUNTS {step}: {} · {}{open}", outcome.err().unwrap_or_else(|| "ok".into()), list.join(" | "));
                     });
                     cx.background_executor().timer(Duration::from_secs(1)).await;
                 }

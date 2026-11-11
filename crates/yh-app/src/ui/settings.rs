@@ -399,10 +399,10 @@ impl SettingsView {
             }
             if several {
                 if active {
-                    controls = controls.child(crate::ui::page_kit::chip("In Use", theme.accent));
+                    controls = controls.child(crate::ui::page_kit::chip("New Threads", theme.accent));
                 } else if a.account.enabled && !a.signed_out() && a.login.is_none() {
                     let (w, i) = (ws_entity.clone(), id.clone());
-                    controls = controls.child(Button::new(SharedString::from(format!("account-use-{id}"))).small().outline().label("Use").on_click(move |_, _, cx| w.update(cx, |ws, cx| ws.switch_account(&i, cx))));
+                    controls = controls.child(Button::new(SharedString::from(format!("account-use-{id}"))).small().outline().label("Use for New Threads").on_click(move |_, _, cx| w.update(cx, |ws, cx| ws.switch_account(&i, cx))));
                 }
                 let (w, i) = (ws_entity.clone(), id.clone());
                 controls = controls.child(
@@ -489,7 +489,7 @@ impl SettingsView {
             })))
             .child(self.usage_bars(theme, cx));
         group.footer(if several {
-            "New turns use the account in use; switching moves threads to it from their next turn, the conversation kept. Accounts sign in through Claude Code itself, in your browser: YourHarness never sees credentials. They share your Claude Code settings, CLAUDE.md, skills, plugins and history; MCP servers you added for yourself stay with each."
+            "New threads use the account marked New Threads; each thread keeps its own, shown in its header, where you can move it to another (its conversation kept). Accounts sign in through Claude Code itself, in your browser: YourHarness never sees credentials. They share your Claude Code settings, CLAUDE.md, skills, plugins and history; MCP servers you added for yourself stay with each."
         } else {
             "Have another Claude subscription? Add it, and switch between them here or in the sidebar. It signs in through Claude Code itself, in your browser: YourHarness never sees credentials."
         })

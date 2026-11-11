@@ -538,6 +538,49 @@ impl RootView {
         parts.join(" · ")
     }
 
+    /// With more than one Claude account on: the one this thread runs on, a menu away from
+    /// moving it to another.
+    fn account_chip(&self, thread: &Entity<crate::state::thread::ThreadState>, theme: &Theme, cx: &App) -> Option<gpui_kit::AnyElement> {
+        use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
+        let ws = self.workspace.read(cx);
+        let enabled: Vec<&crate::state::limits::AccountState> = ws.accounts.iter().filter(|a| a.account.enabled).collect();
+        if enabled.len() < 2 {
+            return None;
+        }
+        let id = thread.read(cx).id().to_string();
+        let current = ws.account_of(&id);
+        let current_id = current.id().to_string();
+        let label = ws.account_label(&current_id);
+        let mut tip = format!("This thread runs on {label}");
+        if let Some(who) = current.subscription.as_ref().and_then(|s| s.who()) {
+            tip.push_str(&format!(" ({who})"));
+        }
+        if ws.runtime_accounts.get(&id).is_some_and(|a| *a != current_id) {
+            tip.push_str(", from its next turn");
+        }
+        tip.push_str(".\nMove it to another account: its next turn reads the conversation again there.");
+        let items: Vec<(String, String, bool)> = enabled.iter().map(|a| (a.id().to_string(), ws.account_label(a.id()), a.signed_out())).collect();
+        let workspace = self.workspace.clone();
+        Some(
+            gpui_kit::component::button::Button::new("thread-account")
+                .xsmall()
+                .ghost()
+                .label(label)
+                .dropdown_caret(true)
+                .text_color(theme.secondary)
+                .tooltip(tip)
+                .dropdown_menu(move |mut menu, _, _| {
+                    for (account, name, signed_out) in &items {
+                        let (ws, thread, account) = (workspace.clone(), id.clone(), account.clone());
+                        let title = if *signed_out { format!("{name} (signed out)") } else { name.clone() };
+                        menu = menu.item(PopupMenuItem::new(title).checked(account == current_id).on_click(move |_, _, cx| ws.update(cx, |ws, cx| ws.move_thread(&thread, &account, cx))));
+                    }
+                    menu
+                })
+                .into_any_element(),
+        )
+    }
+
     /// The tasks this thread works on, from memory: the first's state and steps, "+N" for the
     /// rest; it opens a popover with each one's steps and the way to them in Memory.
     fn tasks_chip(&self, tasks: Vec<yh_core::memory::Memory>, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
@@ -789,6 +832,7 @@ impl Render for RootView {
         let selected = if page.is_some() { None } else { self.workspace.read(cx).selected_thread() };
         let title = selected.as_ref().map(|t| t.read(cx).title.clone()).unwrap_or_else(|| "YourHarness".into());
         let subtitle = selected.as_ref().map(|t| self.subtitle(t, cx)).unwrap_or_default();
+        let account_chip = selected.as_ref().and_then(|t| self.account_chip(t, &Theme::get(cx).clone(), cx));
         // Started by another thread's agent: which, a click away.
         let started_by: Option<(String, String)> = selected.as_ref().and_then(|t| {
             let parent = t.read(cx).meta.parent_id.clone()?;
@@ -974,6 +1018,7 @@ impl Render for RootView {
                                         .gap(px(space::S))
                                         .child(div().id("thread-title").role(gpui_kit::Role::Heading).aria_label(title.clone()).flex_none().max_w(gpui_kit::relative(0.7)).text_size(px(text::HEADLINE)).font_weight(FontWeight::SEMIBOLD).overflow_hidden().whitespace_nowrap().text_ellipsis().child(title))
                                         .child(div().min_w_0().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).overflow_hidden().whitespace_nowrap().text_ellipsis().child(subtitle))
+                                        .when_some(account_chip, |d, chip| d.child(div().flex_none().self_center().child(chip)))
                                         .when_some(started_by, |d, (parent, name)| {
                                             let ws = self.workspace.clone();
                                             d.child(

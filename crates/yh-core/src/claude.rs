@@ -384,6 +384,9 @@ pub struct LaunchOptions {
     /// More folders it may read without asking (the app's attachments).
     pub add_dirs: Vec<String>,
     pub env: Vec<(String, String)>,
+    /// The Claude account it runs on (`accounts.rs`): `Some(None)` Claude Code's own folder,
+    /// `Some(Some(dir))` an added account's; `None` the one new threads use (`shell_env`'s).
+    pub claude_config: Option<Option<std::path::PathBuf>>,
     /// What the agent is told on top of Claude Code's own prompt (the memory index…).
     pub append_system_prompt: Option<String>,
     /// Tools that never ask (`mcp__memory`: they touch only the app's own database).
@@ -471,6 +474,9 @@ impl ClaudeProcess {
         // The login shell's environment (`YH_PATH`'s in test runs), never an outer Claude Code
         // session's variables.
         crate::shell_env::apply(&mut command);
+        if let Some(dir) = &options.claude_config {
+            crate::shell_env::apply_claude_config(&mut command, dir.as_deref());
+        }
         for (k, v) in &options.env {
             command.env(k, v);
         }

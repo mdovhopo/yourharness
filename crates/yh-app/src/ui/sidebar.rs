@@ -1116,9 +1116,9 @@ impl Sidebar {
         tip.push_str(if signed_out {
             "\nClick to sign in, in your browser"
         } else if active {
-            "\nIn use: new turns run on this account. Click for usage (⇧⌘U)"
+            "\nNew threads use this account; each thread keeps its own (in its header). Click for usage (⇧⌘U)"
         } else {
-            "\nClick to switch: threads go on with this account from their next turn"
+            "\nClick to use it for new threads; each thread keeps its own (in its header)"
         });
         let id = a.id().to_string();
         let ws = ws.clone();
@@ -1126,7 +1126,7 @@ impl Sidebar {
         div()
             .id(SharedString::from(format!("account-{id}")))
             .role(gpui_kit::Role::Button)
-            .aria_label(format!("{label}{}", if active { ", in use" } else { "" }))
+            .aria_label(format!("{label}{}", if active { ", for new threads" } else { "" }))
             .flex()
             .items_center()
             .gap(px(space::S))

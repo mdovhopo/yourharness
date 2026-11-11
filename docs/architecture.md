@@ -34,7 +34,7 @@ flowchart TB
     events made into rows and live state, told as `RowChange`s; `golden.rs` checks it against
     the recorded sessions), `jobs.rs`, `history.rs` (its session
     files), `recovery.rs` (a turn cut off by a quit or crash), `titles.rs`, `limits.rs`,
-    `accounts.rs` (several Claude subscriptions, one `CLAUDE_CONFIG_DIR` each, switched by hand),
+    `accounts.rs` (several Claude subscriptions, one `CLAUDE_CONFIG_DIR` each, one per thread),
     `usage.rs`, `plan.rs`, `subagent_record.rs`;
   - what's drawn from text: `markdown.rs`, `links.rs`, `diagrams/` (Mermaid laid out into
     plain geometry), `find.rs`, `clock.rs`;
