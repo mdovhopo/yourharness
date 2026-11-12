@@ -10,6 +10,10 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 - Signing in another Claude account shows its sign-in link with Copy Link, for opening it in the browser that's signed in to that subscription.
 
+### Fixed
+
+- A browser screenshot in the transcript no longer draws over the lines below it when its picture loads after the step first shows.
+
 ## [0.1.13] - 2026-11-11
 
 ### Added

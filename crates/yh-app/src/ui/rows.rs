@@ -1945,7 +1945,14 @@ fn step(state: &ThreadState, ctx: &RowContext, pos: i64, n: usize, e: &EntryRef,
         );
     }
     if let (Some(shot), false) = (&shot, open) {
-        column = column.child(div().pl(px(30.)).pb(px(space::S)).child(gpui_kit::img(shot.clone()).max_w(px(260.)).max_h(px(160.)).rounded(px(radius::MEDIUM)).border_1().border_color(theme.separator)));
+        // Sized from the file's header, not the decoded picture: the list measures a row once, and
+        // a picture still loading then would draw over the rows below.
+        let (w, h) = fitted(&shot.to_string_lossy(), 260., 160.);
+        column = column.child(
+            div().pl(px(30.)).pb(px(space::S)).child(
+                gpui_kit::img(shot.clone()).w(px(w)).h(px(h)).object_fit(gpui_kit::ObjectFit::Contain).rounded(px(radius::MEDIUM)).border_1().border_color(theme.separator),
+            ),
+        );
     }
     if open {
         let mut details = div().flex().flex_col().gap(px(space::S)).px(px(10.)).pt(px(space::XS)).pb(px(10.));
@@ -1973,7 +1980,10 @@ fn step(state: &ThreadState, ctx: &RowContext, pos: i64, n: usize, e: &EntryRef,
             details = details.child(mono_box(text, failed.then_some(theme.error), theme));
         }
         if let Some(shot) = shot {
-            details = details.child(gpui_kit::img(shot).max_w_full().max_h(px(480.)).rounded(px(radius::MEDIUM)).border_1().border_color(theme.separator));
+            let (w, h) = fitted(&shot.to_string_lossy(), 640., 480.);
+            details = details.child(
+                gpui_kit::img(shot).w(px(w)).h(px(h)).max_w_full().object_fit(gpui_kit::ObjectFit::Contain).rounded(px(radius::MEDIUM)).border_1().border_color(theme.separator),
+            );
         }
         if is_browser {
             details = details.child(
