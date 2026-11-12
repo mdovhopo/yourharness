@@ -6,6 +6,7 @@
 
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 struct TranscriptScreen: View {
     let threadID: String
@@ -14,6 +15,8 @@ struct TranscriptScreen: View {
     @State private var draft = ProcessInfo.processInfo.environment["YH_PHONE_DRAFT"] ?? ""
     @State private var images: [OutgoingImage] = []
     @State private var composerHeight: CGFloat = 0
+    /// Pictures dragged over the thread (a screenshot's thumbnail, Photos, Files), not yet dropped.
+    @State private var dropTargeted = false
     /// `YH_PHONE_QUEUE`'s message went.
     @State private var queued = false
     @State private var askedAside = false
@@ -70,6 +73,21 @@ struct TranscriptScreen: View {
         }
     }
 
+    /// Dropped pictures, read off the main thread and added to what waits in the composer.
+    private func dropPictures(_ providers: [NSItemProvider]) -> Bool {
+        guard store.offersControl, store.serverProtocol != 1 else { return false }
+        let pictures = providers.filter { $0.hasItemConformingToTypeIdentifier(UTType.image.identifier) }
+        guard !pictures.isEmpty else { return false }
+        for provider in pictures {
+            _ = provider.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { data, _ in
+                guard let data, let image = OutgoingImage.prepared(data) else { return }
+                Task { @MainActor in images.append(image) }
+            }
+        }
+        Perf.shared.log("PHONE dropped \(pictures.count) picture(s)")
+        return true
+    }
+
     var body: some View {
         // Something always there, so it appears (and opens the thread) wherever it's placed:
         // an empty view never appears in a split view's detail.
@@ -88,6 +106,26 @@ struct TranscriptScreen: View {
             }
             .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { composerHeight = $0 }
         }
+        // Pictures dropped anywhere on the thread wait in the composer, as the picker's do.
+        .onDrop(of: [.image], isTargeted: $dropTargeted, perform: dropPictures)
+        .overlay {
+            if dropTargeted {
+                RoundedRectangle(cornerRadius: 24)
+                    .strokeBorder(.tint, style: StrokeStyle(lineWidth: 2, dash: [8, 6]))
+                    .background(.tint.opacity(0.08), in: .rect(cornerRadius: 24))
+                    .overlay {
+                        Label("Drop to Attach", systemImage: "photo.badge.plus")
+                            .font(.headline)
+                            .padding(.horizontal, 18)
+                            .padding(.vertical, 12)
+                            .glassEffect(in: .capsule)
+                    }
+                    .padding(10)
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.15), value: dropTargeted)
         // A demo recording typing (Demo.swift).
         .onChange(of: Demo.shared.draft) { _, typed in if let typed { draft = typed } }
         // Claude opened a page while you're here: beside the thread on an iPad, offered on a phone.

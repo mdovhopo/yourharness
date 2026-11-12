@@ -9,6 +9,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 ### Added
 
 - Signing in another Claude account shows its sign-in link with Copy Link, for opening it in the browser that's signed in to that subscription.
+- Phone: drag pictures onto a thread (a screenshot's thumbnail, from Photos or Files) to attach them to your message.
 
 ### Fixed
 
