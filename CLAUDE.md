@@ -21,6 +21,7 @@ app serves, storage, the browser, and what keeps it fast. The other docs cover o
   - `ui/`: `root.rs` (window, transcript deck), `sidebar.rs`, `transcript.rs`, `rows.rs`,
     `composer.rs` (with the permission, question and plan cards), `inspector.rs` (the right
     sidebar), the pages (`project.rs`, `memory.rs`, `usage.rs`), `settings.rs`, sheets.
+  - `state/voice.rs` and `crates/yh-voice` (voice input: speech models, the mic; docs/voice.md).
   - `browser/` and `webview.rs` (the agents' browser, WKWebViews over the window),
     `platform.rs` (AppKit), `probe.rs` (the perf run), `theme.rs`.
 - `patches/`, `scripts/vendor.sh`: GPUI crates we patch, unpacked into `vendor/` (not
@@ -36,7 +37,7 @@ app serves, storage, the browser, and what keeps it fast. The other docs cover o
 
 ```sh
 export PATH="$HOME/.cargo/bin:$PATH" DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
-scripts/vendor.sh && cargo build --release && cargo test
+scripts/vendor.sh && cargo build --release && cargo test   # needs an arm64 cmake (whisper.cpp)
 scripts/bundle.sh                 # → build/YourHarness Next.app
 APP=test-harness-root/next-test/app/"YourHarness Next.app" FEATURES=snapshots scripts/bundle.sh
 ```
@@ -70,6 +71,8 @@ and every capped tool box that can scroll, `key:offset/max`: for the 320 pt boxe
 open, also where its page and title prompt stand),
 `YH_AX_DUMP=<s>` (the window's accessibility tree as VoiceOver reads it, from inside the app so no permission
 prompt, printed as `AX …` lines; never dump another app's tree from outside, which needs Accessibility access),
+`YH_VOICE_FILE=<audio>` (stands in for the microphone: never record from a test), `YH_VOICE_MODELS=<folder>`,
+`YH_VOICE_USE=<id>`, `YH_VOICE_DOWNLOAD=<id>`, `YH_VOICE_LOG=1` (docs/voice.md; ⌥⌘D as `key:alt-cmd-d`),
 `YH_RUNTIME_LOG=1` (each thread's `claude` started and ended, `RUNTIME …`: its effort, whether `gh stack`'s
 instructions are in its prompt, an effort change mid-turn starting it over once the turn ends), `YH_DROP=<x,y>` with `YH_DROP_FILES=<a:b>` (files dragged in from Finder
 through GPUI's file-drop events after `YH_DRAFT_DELAY`, held `YH_DROP_HOLD` s (2) so a snapshot shows the

@@ -55,7 +55,26 @@ pub struct Composer {
     elicit: Option<(String, Entity<ElicitCard>)>,
     /// Nothing typed (Send greyed out), kept so typing redraws the composer only when it flips.
     empty: bool,
+    /// What the mic shows, kept so voice's changes (a download's progress) redraw the composer
+    /// only when it changes.
+    voice_seen: VoiceSeen,
     _subscriptions: Vec<Subscription>,
+}
+
+/// The mic as drawn: set up or not, the thread recording (or writing out), seconds recorded, and
+/// whether the last recording failed.
+#[derive(Clone, Default, PartialEq)]
+struct VoiceSeen {
+    ready: bool,
+    thread: Option<String>,
+    seconds: Option<u64>,
+    error: Option<String>,
+}
+
+impl VoiceSeen {
+    fn of(v: &crate::state::voice::Voice) -> VoiceSeen {
+        VoiceSeen { ready: v.ready(), thread: v.busy_thread().map(str::to_string), seconds: v.recorded_seconds(), error: v.recording_error().map(str::to_string) }
+    }
 }
 
 /// What an MCP server asks mid-call: a form, its fields filled with their defaults (yes/no as
@@ -412,6 +431,21 @@ impl Composer {
                 cx.notify();
             }),
         ];
+        let mut subscriptions = subscriptions;
+        let mut voice_seen = VoiceSeen::default();
+        if let Some(voice) = crate::state::voice::get(cx) {
+            voice_seen = VoiceSeen::of(voice.read(cx));
+            subscriptions.push(cx.observe(&voice, |this, voice, cx| {
+                let seen = VoiceSeen::of(voice.read(cx));
+                if seen != this.voice_seen {
+                    this.voice_seen = seen;
+                    cx.notify();
+                }
+            }));
+            subscriptions.push(cx.subscribe_in(&voice, window, |this, _, event: &crate::state::voice::VoiceEvent, window, cx| match event {
+                crate::state::voice::VoiceEvent::Heard { thread, text } => this.heard(thread, text, window, cx),
+            }));
+        }
         if let Ok(keys) = std::env::var("YH_KEYS") {
             Self::key_probe(keys, window, cx);
         }
@@ -429,6 +463,7 @@ impl Composer {
             _mentions: None,
             elicit: None,
             empty: true,
+            voice_seen,
             steering: false,
             suggest_scroll: gpui_kit::ScrollHandle::new(),
             _subscriptions: subscriptions,
@@ -449,6 +484,80 @@ impl Composer {
         self.input.update(cx, |i, cx| i.set_value(draft, window, cx));
         self.current = Some(id.to_string());
         self.sync_card(window, cx);
+    }
+
+    /// The mic (⌥⌘D): records for the open thread, or stops the recording wherever it was
+    /// started; not set up yet, it opens Settings → Voice.
+    pub fn toggle_voice(&mut self, cx: &mut Context<Self>) {
+        let Some(voice) = crate::state::voice::get(cx) else { return };
+        if !voice.read(cx).ready() {
+            crate::ui::settings::open_window(self.workspace.clone(), Some(crate::ui::settings::Tab::Voice), cx);
+            return;
+        }
+        let Some(thread) = self.current.clone() else { return };
+        let thread = voice.read(cx).busy_thread().map(str::to_string).unwrap_or(thread);
+        // Words to expect: the project's name (Whisper takes them as its prompt).
+        let glossary = {
+            let ws = self.workspace.read(cx);
+            let project = ws.thread(&thread).and_then(|t| ws.project(&t.read(cx).meta.project_id).map(|p| p.name.clone()));
+            project.map(|p| format!("{p}, Claude.")).unwrap_or_default()
+        };
+        voice.update(cx, |v, cx| v.toggle(&thread, glossary, cx));
+    }
+
+    /// What was said: at the caret if it's this thread's (spaced from what's around it, replacing
+    /// a selection as typing does), else added to that thread's draft.
+    fn heard(&mut self, thread: &str, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let text = text.trim();
+        if text.is_empty() {
+            return;
+        }
+        if self.current.as_deref() != Some(thread) {
+            let draft = self.workspace.read(cx).thread(thread).and_then(|t| t.read(cx).meta.draft.clone()).unwrap_or_default();
+            let joined = if draft.trim().is_empty() { text.to_string() } else { format!("{} {text}", draft.trim_end()) };
+            self.workspace.update(cx, |ws, cx| ws.save_draft(thread, &joined, cx));
+            return;
+        }
+        self.input.update(cx, |i, cx| {
+            let value = i.value().to_string();
+            let range = i.selected_range();
+            let (before, after) = (value.get(..range.start).and_then(|s| s.chars().last()), value.get(range.end..).and_then(|s| s.chars().next()));
+            let mut insert = text.to_string();
+            if before.is_some_and(|c| !c.is_whitespace()) {
+                insert.insert(0, ' ');
+            }
+            if after.is_some_and(|c| !c.is_whitespace()) {
+                insert.push(' ');
+            }
+            i.replace(insert, window, cx);
+        });
+        self.save_draft(cx);
+        if std::env::var("YH_DATA_DIR").is_ok() {
+            eprintln!("VOICE composer holds \"{}\"", self.input.read(cx).value());
+        }
+    }
+
+    /// The mic beside the paperclip: dimmed until a model is set up (then it opens Settings →
+    /// Voice), red with the seconds while recording, "…" while it's written out.
+    fn mic_button(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let seen = &self.voice_seen;
+        let here = seen.thread.is_some() && seen.thread == self.current;
+        let button = Button::new("mic").ghost().small();
+        let button = match (&seen.thread, seen.seconds) {
+            (Some(_), Some(s)) => button
+                .icon(icons::mic().size(px(14.)).text_color(theme.error))
+                .label(format!("{}:{:02}", s / 60, s % 60))
+                .tooltip(if here { "Stop and Write It Out (⌥⌘D) · ⎋ discards it" } else { "Recording for another thread: stop it there (⌥⌘D)" }),
+            (Some(_), None) => button.icon(icons::mic().size(px(14.)).text_color(theme.accent)).label("…").tooltip("Writing out what you said…"),
+            (None, _) if !seen.ready => button.icon(icons::mic().size(px(14.)).text_color(theme.tertiary)).tooltip("Voice Input: pick a speech model in Settings → Voice"),
+            (None, _) => button
+                .icon(icons::mic().size(px(14.)).text_color(if seen.error.is_some() { theme.warning } else { theme.secondary }))
+                .tooltip(match &seen.error {
+                    Some(e) => SharedString::from(format!("Voice Input (⌥⌘D) · Last time: {e}")),
+                    None => SharedString::from("Voice Input (⌥⌘D): speak, then click again; the text lands here and you still press Send"),
+                }),
+        };
+        button.on_click(cx.listener(|this, _, _, cx| this.toggle_voice(cx)))
     }
 
     /// Files attached and not sent yet, in any thread (held only while the app runs).
@@ -1066,6 +1175,7 @@ impl Render for Composer {
                             .tooltip("Attach Files… (files, folders or images; or paste and drop them)")
                             .on_click(cx.listener(|this, _, _, cx| this.attach(cx))),
                     )
+                    .child(self.mic_button(&theme, cx))
                     // The pickers give way first when the window is narrow: Send always shows.
                     .child(div().flex_1().min_w_0().overflow_hidden().flex().items_center().gap(px(2.)).child(self.pickers(&thread, compact, &theme, cx)).children(
                         (!mcp_chip.is_empty()).then(|| mcp_attention_chip(&mcp_chip, self.workspace.downgrade(), &theme)),
@@ -1750,6 +1860,14 @@ impl Composer {
     /// ↑↓ move through the menu, ↩ or ⇥ take an item, ⎋ closes it; before the field sees them.
     fn on_key(&mut self, event: &gpui_kit::KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let k = &event.keystroke;
+        // ⎋ while this thread records: thrown away.
+        if k.key == "escape" && self.voice_seen.seconds.is_some() && self.voice_seen.thread == self.current {
+            if let Some(voice) = crate::state::voice::get(cx) {
+                voice.update(cx, |v, cx| v.cancel(cx));
+                cx.stop_propagation();
+                return;
+            }
+        }
         if k.key == "v" && k.modifiers.platform && !k.modifiers.shift && self.paste_image(cx) {
             cx.stop_propagation();
             return;

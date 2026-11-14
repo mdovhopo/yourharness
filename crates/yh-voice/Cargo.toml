@@ -1,0 +1,19 @@
+[package]
+name = "yh-voice"
+version = "0.0.1"
+edition.workspace = true
+publish.workspace = true
+description = "YourHarness's voice input: speech models on the Mac (whisper.cpp, sherpa-onnx), their downloads, the microphone. No UI."
+
+[dependencies]
+whisper-rs = { version = "0.16", features = ["metal"] }
+# Shared, not static: its static onnxruntime runs Parakeet at half the speed of the official
+# library. scripts/bundle.sh copies the two dylibs into the app; build.rs finds them. Pinned: the
+# folder they unpack to is named by the version (build.rs).
+sherpa-onnx = { version = "=2.0.1", default-features = false, features = ["shared"] }
+cpal = "0.18"
+flume.workspace = true
+libc.workspace = true
+# macOS's speech recognizer (apple.rs): the versions the app already builds.
+objc = "0.2"
+block = "0.1"

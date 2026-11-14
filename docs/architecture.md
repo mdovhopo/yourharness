@@ -18,7 +18,9 @@ flowchart TB
   end
   Engine["crates/yh-engine · no GPUI: every thread's run and claude, on its own thread"]
   Core["crates/yh-core · no GPUI"]
+  Voice["crates/yh-voice · no GPUI: speech models, the mic"]
   State --> Engine
+  State --> Voice
   Engine --> Core
   State --> Core
   Core --> Claude["claude (stream-json)"]
@@ -50,6 +52,10 @@ flowchart TB
   app sends it `Command`s (send, stop, allow…) and applies the `ThreadUpdate`s it gets back, at
   most once a frame. It asks the app how to start a `claude` when one is needed
   (`NeedsLaunch`), lets idle ones go, and saves rows (docs/remote.md).
+- **yh-voice** is voice input (docs/voice.md): the speech models Settings → Voice offers
+  (`catalog.rs`), their downloads (`download.rs`), the microphone (`mic.rs`), and one thread
+  that holds the model in use (`worker.rs`): whisper.cpp on the GPU, Parakeet through
+  sherpa-onnx, or macOS's recognizer (`apple.rs`). `yh-app/state/voice.rs` is its entity.
 - **yh-app/state** owns what the app knows, as GPUI entities with no drawing. `workspace.rs`
   holds projects, threads, the selection, each thread's `claude` and every request the UI makes
   (send, stop, allow, pin, rename, settle…), and tells views what changed with

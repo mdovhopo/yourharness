@@ -25,7 +25,7 @@ actions!(
         Stop, Allow, Deny, Quit, NewThread, Find, FindNext, FindPrevious, OpenSettings, OpenSpotlight, ToggleInspector, OpenMemory, ToggleUsage,
         PreviousThread, NextThread, PreviousMessage, NextMessage, TopOfThread, EndOfThread, AddProject, ResumeSession, ExportState, ImportState,
         CheckForUpdates, UndoThreadAction, ToggleSidebar, About, HideApp, HideOthers, ShowAll, CloseWindow, ToggleFullScreen, Minimize, Zoom,
-        BringAllToFront, OpenHelp, CaptureTranscriptState, ShowDataFolder
+        BringAllToFront, OpenHelp, CaptureTranscriptState, ShowDataFolder, Dictate
     ]
 );
 
@@ -359,6 +359,11 @@ impl RootView {
             let removing = self.composer.read(cx).withdrawing.clone();
             ws.update(cx, |ws, cx| ws.stop(&t, &removing, cx));
         }
+    }
+
+    /// ⌥⌘D: the composer's mic.
+    fn on_dictate(&mut self, _: &Dictate, _: &mut Window, cx: &mut Context<Self>) {
+        self.composer.update(cx, |c, cx| c.toggle_voice(cx));
     }
 
     fn respond(&mut self, decision: Decision, cx: &mut Context<Self>) {
@@ -862,6 +867,7 @@ impl Render for RootView {
             .key_context("Harness")
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::on_stop))
+            .on_action(cx.listener(Self::on_dictate))
             .on_action(cx.listener(|this, _: &Allow, _, cx| {
                 if !this.composer.update(cx, |c, cx| c.card_shortcut(true, cx)) {
                     this.respond(Decision::allow(), cx)

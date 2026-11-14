@@ -42,6 +42,13 @@ COMMIT="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)$([[
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/YourHarness"
+# Voice input's sherpa-onnx (crates/yh-voice/Cargo.toml says why it's shared): its two dylibs in
+# Frameworks, where the binary's @executable_path/../Frameworks rpath finds them; the build's
+# own path to them taken out of the binary (crates/yh-app/build.rs puts it there for target/ runs).
+SHERPA="$ROOT/target/sherpa-onnx-prebuilt/sherpa-onnx-v2.0.1-osx-arm64-shared-lib/lib"
+mkdir -p "$APP/Contents/Frameworks"
+cp "$SHERPA/libsherpa-onnx-c-api.dylib" "$SHERPA/libonnxruntime.dylib" "$APP/Contents/Frameworks/"
+install_name_tool -delete_rpath "$SHERPA" "$APP/Contents/MacOS/YourHarness"
 cp "$ROOT/assets/icons/$ICON.icns" "$APP/Contents/Resources/AppIcon.icns"
 VERSION="${VERSION_OVERRIDE:-$(cat "$ROOT/VERSION")}"
 cat > "$APP/Contents/Info.plist" <<PLIST
@@ -63,6 +70,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
     <key>NSSupportsAutomaticTermination</key><false/>
     <key>NSHighResolutionCapable</key><true/>
+    <key>NSMicrophoneUsageDescription</key><string>Voice input writes what you say into the message you're typing.</string>
+    <key>NSSpeechRecognitionUsageDescription</key><string>Apple's speech recognition writes what you say into the message you're typing, when you pick it in Settings → Voice.</string>
     <key>NSPrincipalClass</key><string>NSApplication</string>
 </dict>
 </plist>
@@ -80,10 +89,13 @@ if [[ -n "${RELEASE:-}" || -n "${SIGN:-}" ]]; then
         IDENTITY="$(security find-certificate -a -Z "$KEYCHAIN" | awk '/SHA-1 hash:/ { print $3; exit }')"
     fi
 fi
+# The dylibs in Frameworks first: nested code is signed before the bundle around it.
 if [[ -n "${IDENTITY:-}" ]]; then
+    codesign --force --sign "$IDENTITY" --keychain "$KEYCHAIN" "$APP"/Contents/Frameworks/*.dylib >/dev/null
     codesign --force --sign "$IDENTITY" --keychain "$KEYCHAIN" "$APP" >/dev/null
     SIGNED="signed as $(security find-certificate -a -Z "$KEYCHAIN" | awk -F'"' '/"labl"/ { print $4; exit }')"
 else
+    codesign --force --sign - "$APP"/Contents/Frameworks/*.dylib >/dev/null 2>&1
     codesign --force --sign - "$APP" >/dev/null 2>&1
 fi
 echo "Built $NAME $VERSION (build $BUILD, $COMMIT, $SIGNED)" >&2

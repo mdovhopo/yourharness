@@ -80,6 +80,7 @@ fn main() {
         gpui_kit::init(cx);
         cx.bind_keys([
             KeyBinding::new("cmd-.", Stop, None),
+            KeyBinding::new("alt-cmd-d", ui::root::Dictate, None),
             KeyBinding::new("cmd-enter", Allow, Some("Harness")),
             KeyBinding::new("cmd-backspace", Deny, Some("Harness")),
             KeyBinding::new("cmd-n", NewThread, None),
@@ -178,6 +179,8 @@ fn main() {
             ..Default::default()
         };
         let library = library.clone();
+        // Voice input, before the window: the composer listens to it.
+        state::voice::Voice::start_global(library.clone(), cx);
         let (window, root) = gpui_kit::open_window(options, cx, |window, cx| {
             theme::apply_appearance(window.appearance(), window, cx);
             let workspace = cx.new(|cx| Workspace::new(library.clone(), cx));
@@ -272,6 +275,9 @@ fn main() {
             move |cx| {
                 browser::Browsers::save_now();
                 workspace.update(cx, |ws, cx| ws.prepare_for_quit(cx));
+                if let Some(voice) = state::voice::get(cx) {
+                    voice.read(cx).shutdown();
+                }
                 async {}
             }
         })

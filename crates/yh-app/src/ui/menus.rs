@@ -90,6 +90,8 @@ pub fn set(state: &MenuState, cx: &mut App) {
                 MenuItem::os_action("Paste", gpui_kit::component::input::Paste, OsAction::Paste),
                 MenuItem::os_action("Select All", gpui_kit::component::input::SelectAll, OsAction::SelectAll),
                 MenuItem::separator(),
+                MenuItem::action("Voice Input", Dictate),
+                MenuItem::separator(),
                 MenuItem::action("Search Everything…", OpenSpotlight),
                 MenuItem::action("Find in Thread…", Find).disabled(!s.thread_visible),
                 MenuItem::action("Find Next", FindNext).disabled(!s.finds),

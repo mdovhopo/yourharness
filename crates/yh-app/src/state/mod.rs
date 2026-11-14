@@ -11,4 +11,5 @@ pub mod pulls;
 pub mod thread;
 pub mod thread_tools;
 pub mod updater;
+pub mod voice;
 pub mod workspace;

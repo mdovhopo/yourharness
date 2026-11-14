@@ -1,7 +1,8 @@
-//! Settings (⌘,), five tabs: Agents (where `claude` is, its account, `gh` and
+//! Settings (⌘,), six tabs: Agents (where `claude` is, its account, `gh` and
 //! `glab`, the agents still to come), General (appearance, notifications, sleep, new thread
-//! defaults, settling, titles, memory, plans, browser, diagrams, Home and data), MCP, Phone
-//! (phones on this network, pairing by QR code) and Releases.
+//! defaults, settling, titles, memory, plans, browser, diagrams, Home and data), MCP, Voice (the
+//! speech models for the composer's mic), Phone (phones on this network, pairing by QR code) and
+//! Releases.
 //! Each change is saved at once, in the settings keys 0.0.x used, and takes effect at once or
 //! with each thread's next `claude`.
 
@@ -43,6 +44,7 @@ pub enum Tab {
     Agents,
     General,
     Mcp,
+    Voice,
     Phone,
     Releases,
 }
@@ -53,6 +55,7 @@ impl Tab {
             "agents" => Tab::Agents,
             "general" => Tab::General,
             "mcp" => Tab::Mcp,
+            "voice" => Tab::Voice,
             "phone" => Tab::Phone,
             "releases" => Tab::Releases,
             _ => return None,
@@ -94,6 +97,13 @@ impl SettingsView {
         let mut watch = vec![cx.observe(&workspace, |_, _, cx| cx.notify())];
         if let Some(u) = cx.try_global::<SettingsLinks>().map(|l| l.updater.clone()) {
             watch.push(cx.observe(&u, |_, _, cx| cx.notify()));
+        }
+        if let Some(voice) = crate::state::voice::get(cx) {
+            watch.push(cx.observe(&voice, |v, _, cx| {
+                if v.tab == Tab::Voice {
+                    cx.notify();
+                }
+            }));
         }
         let mut view = SettingsView { workspace, tab, found: Found::default(), title_prompt, body_scroll: gpui_kit::ScrollHandle::new(), mcp: None, copied: false, link_copied: false, _watch: watch };
         view.detect(cx);
@@ -1022,6 +1032,95 @@ impl SettingsView {
         page.child(paired.footer("A phone forgotten here can't connect again until it's paired again.")).into_any_element()
     }
 
+    /// The speech models for the composer's mic: each with what it's good at and costs, its
+    /// download, and which one is used; then the shortcut and the microphone's permission.
+    fn voice(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let Some(voice) = crate::state::voice::get(cx) else { return div().into_any_element() };
+        let v = voice.read(cx);
+        let chosen = v.default_model().map(|m| m.id);
+        let mut models = section("Speech Models");
+        for model in yh_voice::MODELS {
+            let installed = v.is_installed(model);
+            let progress = v.download_progress(model);
+            let size = if model.needs_download() { format!("{:.0} MB", model.bytes() as f64 / 1e6) } else { "No download".into() };
+            let id = |what: &str| gpui_kit::ElementId::Name(format!("voice-{what}-{}", model.id).into());
+            let mut controls = div().flex().items_center().gap(px(space::XS));
+            if let Some(p) = progress {
+                let voice = voice.clone();
+                controls = controls
+                    .child(div().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child(format!("{:.0}%", p * 100.)))
+                    .child(Button::new(id("cancel")).small().ghost().label("Cancel").on_click(move |_, _, cx| voice.update(cx, |v, _| v.cancel_download(model))));
+            } else if !installed {
+                let voice = voice.clone();
+                controls = controls.child(Button::new(id("download")).small().outline().icon(icons::download().size(px(13.))).label("Download").on_click(move |_, _, cx| voice.update(cx, |v, cx| v.download(model, cx))));
+            } else {
+                if model.needs_download() {
+                    let voice = voice.clone();
+                    controls = controls.child(Button::new(id("delete")).small().ghost().label("Delete").on_click(move |_, _, cx| voice.update(cx, |v, cx| v.remove(model, cx))));
+                }
+                controls = if chosen == Some(model.id) {
+                    controls.child(div().flex().items_center().gap(px(4.)).px(px(space::S)).text_size(px(text::FOOTNOTE)).text_color(theme.accent).child(Icon::new(IconName::Check).size(px(13.))).child("In Use"))
+                } else {
+                    let voice = voice.clone();
+                    controls.child(Button::new(id("use")).small().outline().label("Use").on_click(move |_, _, cx| voice.update(cx, |v, cx| v.set_default(model, cx))))
+                };
+            }
+            let error = v.errors.get(model.id).cloned();
+            models = models.child(
+                div()
+                    .flex()
+                    .items_start()
+                    .gap(px(space::L))
+                    .px(px(space::M))
+                    .py(px(space::S + 2.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(3.))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .flex_wrap()
+                                    .gap(px(space::S))
+                                    .child(div().font_weight(FontWeight::SEMIBOLD).child(model.name))
+                                    .when(model.recommended, |d| d.child(div().px(px(6.)).rounded(px(radius::SMALL)).bg(theme.accent_soft).text_color(theme.accent).text_size(px(text::CAPTION)).child("Recommended")))
+                                    .child(div().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child(format!("{} · {size}", model.languages))),
+                            )
+                            .child(div().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child(model.description))
+                            .child(div().text_size(px(text::CAPTION)).text_color(theme.tertiary).child(model.credit))
+                            .when_some(error, |d, e| d.child(div().text_size(px(text::FOOTNOTE)).text_color(theme.warning).child(e))),
+                    )
+                    .child(div().flex_shrink_0().pt(px(2.)).child(controls)),
+            );
+        }
+        models = models.footer("Click the mic beside the paperclip (or ⌥⌘D), speak, and click it again: what you said is written into the message, and you still press Send. Whisper and Parakeet run on this Mac, so what you say stays on it; Apple's recognizer may use Apple's servers for languages your Mac can't do itself.");
+        let mic = match yh_voice::mic::permission() {
+            yh_voice::mic::Permission::Allowed => "Allowed",
+            yh_voice::mic::Permission::NotAsked => "Asked the first time you record",
+            yh_voice::mic::Permission::Denied => "Not allowed",
+        };
+        let denied = yh_voice::mic::permission() == yh_voice::mic::Permission::Denied;
+        let using = section("Using It")
+            .child(row("Shortcut", div().text_color(theme.secondary).child("⌥⌘D")))
+            .child(row(
+                "Microphone",
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S))
+                    .child(div().text_color(if denied { theme.warning } else { theme.secondary }).child(mic))
+                    .when(denied, |d| {
+                        d.child(Button::new("voice-open-privacy").small().outline().label("Open Privacy Settings").on_click(|_, _, cx| cx.open_url("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")))
+                    }),
+            ))
+            .footer("⎋ while recording throws it away. A recording stops by itself after ten minutes. The model loads when you start speaking and is let go after five idle minutes.");
+        div().flex().flex_col().gap(px(space::L)).child(models).child(using).into_any_element()
+    }
+
     fn releases(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let Some(links) = cx.try_global::<SettingsLinks>() else { return div().into_any_element() };
         let (updater, notes) = (links.updater.clone(), links.notes.clone());
@@ -1184,6 +1283,7 @@ impl Render for SettingsView {
             Tab::Agents => self.agents(&theme, cx),
             Tab::General => self.general(&theme, cx),
             Tab::Mcp => self.mcp(&theme, cx),
+            Tab::Voice => self.voice(&theme, cx),
             Tab::Phone => self.phone(&theme, cx),
             Tab::Releases => self.releases(&theme, cx),
         };
@@ -1210,6 +1310,7 @@ impl Render for SettingsView {
                         .child(tab_button("settings-tab-agents", icons::bot(), "Agents", Tab::Agents, cx))
                         .child(tab_button("settings-tab-general", Icon::new(IconName::Settings), "General", Tab::General, cx))
                         .child(tab_button("settings-tab-mcp", icons::plug(), "MCP", Tab::Mcp, cx))
+                        .child(tab_button("settings-tab-voice", icons::audio_lines(), "Voice", Tab::Voice, cx))
                         .child(tab_button("settings-tab-phone", Icon::new(IconName::Inbox), "Phone", Tab::Phone, cx))
                         .child(tab_button("settings-tab-releases", icons::download(), "Releases", Tab::Releases, cx)),
                 ),
