@@ -6,6 +6,8 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+## [0.1.15] - 2026-11-15
+
 ### Added
 
 - Voice input on the Mac: a mic beside the paperclip (or ⌥⌘D) writes what you say into the message, and you still press Send. Pick a speech model in Settings → Voice, each with what it's good at and what it costs: Whisper Large v3 Turbo (recommended, all languages, keeps code words as written even in Ukrainian or Russian), Parakeet v2 (English only, fastest), Whisper Base (small), or Apple's built-in recognizer. Nothing downloads until you ask, and Whisper and Parakeet run on your Mac.
