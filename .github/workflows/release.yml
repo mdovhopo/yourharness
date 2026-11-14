@@ -70,6 +70,12 @@ jobs:
         with:
           cache-on-failure: true
 
+      # sherpa-onnx's build downloads its dylibs into target/sherpa-onnx-prebuilt and trusts the
+      # folder once it's there; rust-cache brings the folder back without the dylibs. Both gone,
+      # so its build script runs again and downloads them.
+      - name: Fresh sherpa-onnx libraries
+        run: rm -rf target/sherpa-onnx-prebuilt target/release/build/sherpa-onnx-sys-*
+
       # The patched GPUI crate (scripts/vendor.sh), so a release doesn't hang on crates.io.
       - uses: actions/cache@v4
         with:
