@@ -345,6 +345,14 @@ fn main() {
                 }
             });
         }
+        // `YH_NEW_THREAD=1`: a new thread in the first project at launch (its empty state).
+        if env("YH_NEW_THREAD").as_deref() == Some("1") {
+            workspace.update(cx, |ws, cx| {
+                if let Some(project) = ws.projects.first().map(|p| p.id.clone()) {
+                    ws.new_thread(&project, cx);
+                }
+            });
+        }
         // `YH_BROWSER_OPEN=<url>`: a page in the open thread's browser at launch, as you'd open it.
         if let Some(url) = env("YH_BROWSER_OPEN") {
             let found = workspace.read(cx).selected_thread().map(|t| (t.read(cx).id().to_string(), t.read(cx).meta.project_id.clone()));
@@ -362,14 +370,6 @@ fn main() {
                     .detach();
                 }
             }
-        }
-        // `YH_NEW_THREAD=1`: a new thread in the first project at launch (its empty state).
-        if env("YH_NEW_THREAD").as_deref() == Some("1") {
-            workspace.update(cx, |ws, cx| {
-                if let Some(project) = ws.projects.first().map(|p| p.id.clone()) {
-                    ws.new_thread(&project, cx);
-                }
-            });
         }
         // `YH_CEF_REFERENCE=<pages>:<out>`: the browser fidelity check's Chrome reference (chrome.rs).
         if let Some((pages, out)) = env("YH_CEF_REFERENCE").and_then(|v| v.split_once(':').map(|(a, b)| (a.to_string(), b.to_string()))) {

@@ -684,7 +684,7 @@ fn engine_note() -> Option<String> {
     match crate::webview::chrome::install_state() {
         crate::webview::chrome::Install::Downloading(got, total) if total > 0 => Some(format!("The browser engine (Chrome) is downloading, {} of {} MB: pages open once it's done.", got / 1_000_000, total / 1_000_000)),
         crate::webview::chrome::Install::Downloading(..) => Some("The browser engine (Chrome) is downloading: pages open once it's done.".into()),
-        crate::webview::chrome::Install::Failed(e) => Some(format!("The browser engine (Chrome) couldn't be installed{}. The user can try again, or switch to WebKit in Settings → Browser.", if e.is_empty() { String::new() } else { format!(": {e}") })),
+        crate::webview::chrome::Install::Failed(e) => Some(format!("The browser engine (Chrome) isn't available{}. The user can try again, or switch to WebKit in Settings → Browser.", if e.is_empty() { String::new() } else { format!(": {e}") })),
         _ => None,
     }
 }
@@ -962,7 +962,14 @@ impl BrowserTools {
     fn script(&self, id: u32, body: String, in_page: bool, timeout: Duration) -> Result<Value, Fail> {
         let (tx, rx) = flume::bounded(1);
         self.with_tab(id, move |t| t.web.call(&body, in_page, tx))?;
-        let text = rx.recv_timeout(timeout).map_err(|_| "The page didn't answer in time.".to_string())?.map_err(|e| script_error(&e))?;
+        let text = rx
+            .recv_timeout(timeout)
+            .map_err(|e| match e {
+                // Dropped unanswered: the page has no engine to run in (Chrome's isn't available).
+                flume::RecvTimeoutError::Disconnected => engine_note().unwrap_or_else(|| "The page is gone.".to_string()),
+                flume::RecvTimeoutError::Timeout => "The page didn't answer in time.".to_string(),
+            })?
+            .map_err(|e| script_error(&e))?;
         Ok(serde_json::from_str(&text).unwrap_or(Value::String(text)))
     }
 
@@ -2114,6 +2121,27 @@ pub fn run_probe(path: String, thread: String, project: Option<String>) {
                 }
                 eprintln!("== {index} {what} {on}");
                 std::thread::sleep(Duration::from_millis(200));
+                continue;
+            }
+            // `{"engine": "webkit"}`: the engine switched, as Settings → Browser → Engine does.
+            if let Some(engine) = step["engine"].as_str().and_then(crate::webview::Engine::from_name) {
+                if let Some(jobs) = JOBS.get() {
+                    let _ = jobs.send(Box::new(move |_, cx| {
+                        // Not inside the browsers: switching closes their pages.
+                        cx.defer(move |_| Browsers::switch_engine(engine));
+                    }));
+                }
+                std::thread::sleep(Duration::from_millis(500));
+                eprintln!("== {index} engine {}", engine.name());
+                continue;
+            }
+            // `{"retry_engine": true}`: the panel's Try Again after the Chrome engine's download failed.
+            if step["retry_engine"].as_bool() == Some(true) {
+                if let Some(jobs) = JOBS.get() {
+                    let _ = jobs.send(Box::new(|_, _| crate::webview::chrome::retry()));
+                }
+                std::thread::sleep(Duration::from_millis(200));
+                eprintln!("== {index} retry engine");
                 continue;
             }
             // `{"crash": true}`: the current tab's web content process is ended, as a crash would.

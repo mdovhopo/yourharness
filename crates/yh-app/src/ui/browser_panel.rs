@@ -1050,7 +1050,7 @@ impl Render for BrowserPanel {
             } else {
                 "Downloading the browser engine (Chrome). The page opens when it's done.".to_string()
             }),
-            Some(crate::webview::chrome::Install::Failed(e)) => Some(format!("The browser engine couldn't be installed{}.", if e.is_empty() { String::new() } else { format!(": {e}") })),
+            Some(crate::webview::chrome::Install::Failed(e)) => Some(format!("The browser engine (Chrome) isn't available{}. Try again, or use WebKit in Settings → Browser.", if e.is_empty() { String::new() } else { format!(": {e}") })),
             _ => None,
         };
         if matches!(install, Some(crate::webview::chrome::Install::Downloading(..))) {

@@ -107,6 +107,12 @@ fn install() {
             }
             Err(e) => {
                 eprintln!("CHROME couldn't install the browser engine: {e}");
+                // curl's own words for "no network" read as what they mean.
+                let e = if ["Failed to connect", "resolve host", "offline", "timed out", "Connection reset"].iter().any(|m| e.contains(m)) {
+                    "it couldn't be downloaded: you're offline, or GitHub can't be reached".to_string()
+                } else {
+                    format!("it couldn't be downloaded: {e}")
+                };
                 set_install(Install::Failed(e));
                 main_queue(|| fail_pending());
             }
@@ -433,7 +439,8 @@ extern "C" fn enter_run_loop(_: *mut c_void, _: *mut c_void) {
     let started = std::time::Instant::now();
     if initialize(Some(args.as_main_args()), Some(&settings), Some(&mut app), std::ptr::null_mut()) != 1 {
         eprintln!("CHROME CEF didn't start");
-        set_install(Install::Failed("The browser engine didn't start.".into()));
+        // Chromium runs one process per profile folder: another copy of the app on the same data.
+        set_install(Install::Failed("it didn't start (is another copy of YourHarness open on the same data?)".into()));
         fail_pending();
         return;
     }
@@ -452,7 +459,7 @@ fn start_on_main() {
         let binary = CString::new(framework.join("Chromium Embedded Framework").to_string_lossy().as_bytes()).unwrap_or_default();
         if load_library(Some(&*binary.as_ptr())) != 1 {
             eprintln!("CHROME couldn't load {}", framework.display());
-            set_install(Install::Failed("The browser engine couldn't be loaded.".into()));
+            set_install(Install::Failed("its files couldn't be loaded".into()));
             fail_pending();
             return;
         }
@@ -507,18 +514,13 @@ wrap_request_context_handler! {
     impl RequestContextHandler {
         fn on_request_context_initialized(&self, _request_context: Option<&mut RequestContext>) {
             let key = self.key.clone();
-            let ready = PROFILES.with(|p| {
-                let mut p = p.borrow_mut();
-                let profile = p.get_mut(&key)?;
-                profile.ready = true;
-                Some((profile.context.clone(), std::mem::take(&mut profile.waiting), profile.fresh))
-            });
-            let Some((context, waiting, fresh)) = ready else { return };
+            let fresh = PROFILES.with(|p| p.borrow().get(&key).is_some_and(|p| p.fresh));
+            // A project's new profile is ready once its WebKit sign-ins are in: its pages' first
+            // requests go signed in.
             if fresh && is_uuid(&key) {
                 migrate_webkit_cookies(&key);
-            }
-            for w in waiting {
-                w(&context);
+            } else {
+                release_profile(&key);
             }
         }
     }
@@ -668,15 +670,43 @@ fn put_cookies(context: &RequestContext, cookies: Vec<yh_core::cookies::Cookie>,
     manager.flush_store(None);
 }
 
-/// A project's WebKit sign-ins, into its new Chrome profile. WebKit answers on the main thread
-/// from its run loop; they're waited for off it, then put in from the main queue.
+/// The profile `key` is ready: what waited for it runs.
+fn release_profile(key: &str) {
+    let ready = PROFILES.with(|p| {
+        let mut p = p.borrow_mut();
+        let profile = p.get_mut(key)?;
+        profile.ready = true;
+        Some((profile.context.clone(), std::mem::take(&mut profile.waiting)))
+    });
+    let Some((context, waiting)) = ready else { return };
+    for w in waiting {
+        w(&context);
+    }
+}
+
+/// Profiles to release from the main queue (`release_profile`), by key.
+static RELEASE: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn release_later(key: String) {
+    RELEASE.lock().unwrap().push(key);
+    main_queue(|| {
+        for key in std::mem::take(&mut *RELEASE.lock().unwrap()) {
+            release_profile(&key);
+        }
+    });
+}
+
+/// A project's WebKit sign-ins, into its new Chrome profile, which is then ready. WebKit answers
+/// on the main thread from its run loop; they're waited for off it (10 s at most), then put in
+/// from the main queue.
 fn migrate_webkit_cookies(project: &str) {
     let (tx, rx) = flume::bounded(1);
     super::webkit::read_cookies(project, tx);
     let project = project.to_string();
     std::thread::spawn(move || {
-        let Ok(cookies) = rx.recv_timeout(std::time::Duration::from_secs(10)) else { return };
+        let cookies = rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap_or_default();
         if cookies.is_empty() {
+            release_later(project);
             return;
         }
         if log() {
@@ -691,10 +721,56 @@ static MIGRATIONS: Mutex<Vec<(String, Vec<yh_core::cookies::Cookie>)>> = Mutex::
 
 fn run_migrations() {
     for (project, cookies) in std::mem::take(&mut *MIGRATIONS.lock().unwrap()) {
-        profile_now(&project, move |context| {
-            let (tx, _rx) = flume::bounded(1);
-            put_cookies(context, cookies, tx);
+        let context = PROFILES.with(|p| p.borrow().get(&project).map(|p| p.context.clone()));
+        let Some(context) = context else { continue };
+        let (tx, rx) = flume::bounded(1);
+        put_cookies(&context, cookies, tx);
+        std::thread::spawn(move || {
+            let _ = rx.recv_timeout(std::time::Duration::from_secs(5));
+            release_later(project);
         });
+    }
+}
+
+wrap_completion_callback! {
+    struct Flushed {
+        left: std::sync::Arc<AtomicUsize>,
+    }
+
+    impl CompletionCallback {
+        fn on_complete(&self) {
+            self.left.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+}
+
+unsafe extern "C" {
+    fn CFRunLoopRunInMode(mode: *const c_void, seconds: f64, return_after_source_handled: u8) -> i32;
+}
+
+/// As the app quits: every profile's cookies written out (Chromium writes them in batches, every
+/// 30 s), waited for up to a second with the run loop turning so its work goes on. Never inside
+/// one of the app's own updates.
+pub fn flush_for_quit() {
+    if !READY.load(Ordering::Acquire) {
+        return;
+    }
+    let contexts: Vec<RequestContext> = PROFILES.try_with(|p| p.borrow().values().filter(|p| p.ready).map(|p| p.context.clone()).collect()).unwrap_or_default();
+    let left = std::sync::Arc::new(AtomicUsize::new(contexts.len()));
+    for c in &contexts {
+        match c.cookie_manager(None) {
+            Some(m) if m.flush_store(Some(&mut Flushed::new(left.clone()))) == 1 => {}
+            _ => {
+                left.fetch_sub(1, Ordering::AcqRel);
+            }
+        }
+    }
+    let started = std::time::Instant::now();
+    while left.load(Ordering::Acquire) > 0 && started.elapsed() < std::time::Duration::from_secs(1) {
+        unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.02, 1) };
+    }
+    if log() {
+        eprintln!("CHROME cookies flushed for quit: {} of {} profiles in {} ms", contexts.len() - left.load(Ordering::Acquire), contexts.len(), started.elapsed().as_millis());
     }
 }
 
@@ -896,11 +972,20 @@ fn make_pending() {
 /// Pages waiting when the engine can't start: what the agent waits on ends; they stay waiting
 /// for a retry (`retry`).
 fn fail_pending() {
+    let why = match install_state() {
+        Install::Failed(e) if !e.is_empty() => format!(": {e}"),
+        _ => String::new(),
+    };
     for key in PENDING.with(|p| p.borrow().clone()) {
-        if let Some(inner) = inner_of(key) {
-            inner.borrow_mut().loading = false;
-        }
-        post(WebEvent::Failed { view: key, error: "The browser engine couldn't be installed. Switch to WebKit in Settings → Browser, or try again.".into(), url: None });
+        // What waited on the page ends now (its replies with it); the address stays, to open
+        // once the engine is there (`retry`).
+        let url = inner_of(key).and_then(|inner| {
+            let mut i = inner.borrow_mut();
+            i.loading = false;
+            i.queue.clear();
+            i.url.clone()
+        });
+        post(WebEvent::Failed { view: key, error: format!("The browser engine (Chrome) isn't available{why}. Try again, or switch to WebKit in Settings → Browser."), url });
     }
 }
 
@@ -927,12 +1012,12 @@ fn make_browser(key: usize, context: &RequestContext) {
         eprintln!("CHROME couldn't make a browser");
         return;
     };
-    adopt(key, browser);
+    adopt(key, browser, false);
 }
 
 /// The browser `browser` becomes the page `key`'s: its view fills the holder, its scripts go in,
 /// then what waited for it.
-fn adopt(key: usize, browser: Browser) {
+fn adopt(key: usize, browser: Browser, popup: bool) {
     let Some(inner) = inner_of(key) else { return };
     BY_BROWSER.with(|b| b.borrow_mut().insert(browser.identifier(), key));
     if let Some(host) = browser.host() {
@@ -966,11 +1051,20 @@ fn adopt(key: usize, browser: Browser) {
     // renderer: a load would go straight to the page, ahead of the scripts.
     let b = browser.clone();
     cdp(&browser, "Page.addScriptToEvaluateOnNewDocument", json!({"source": format!("if (window === window.top) {{\n{HELPERS}\n}}"), "worldName": HELPER_WORLD}), move |_| {
-        let queue = {
+        let (queue, kept) = {
             let mut i = inner.borrow_mut();
             i.browser = Some(b.clone());
-            std::mem::take(&mut i.queue)
+            (std::mem::take(&mut i.queue), i.url.clone())
         };
+        // A page whose load was dropped while the engine couldn't be had (`fail_pending`): its
+        // address, now. (A popup is already on its way to it.)
+        if queue.is_empty() && !popup {
+            if let Some(url) = kept.filter(|u| !u.is_empty() && u != "about:blank") {
+                if let Some(f) = b.main_frame() {
+                    f.load_url(Some(&CefString::from(url.as_str())));
+                }
+            }
+        }
         for f in queue {
             f(&b);
         }
@@ -1295,7 +1389,7 @@ wrap_life_span_handler! {
             let profile = inner_of(opener).map(|i| i.borrow().profile.clone()).unwrap_or_default();
             let inner = Rc::new(RefCell::new(Inner::new(holder, profile)));
             TABS.with(|t| t.borrow_mut().insert(holder, inner));
-            adopt(holder, browser.clone());
+            adopt(holder, browser.clone(), true);
             let made = super::popup_made(opener, super::Popup::Chrome(Popup { holder: holder as id }), url);
             if made.is_none() {
                 // Past the most tabs: it goes.
@@ -1543,12 +1637,14 @@ impl WebView {
     }
 
     /// Runs `f` with the browser now, or once it's made.
+    /// Runs `f` with the browser now, or once it's made; dropped (its reply with it, which ends
+    /// the wait) while the engine can't be had.
     fn with_browser(&self, f: impl FnOnce(&Browser) + 'static) {
         let browser = self.inner.borrow().browser.clone();
         match browser {
             Some(b) => f(&b),
-            None if !self.inner.borrow().closed => self.inner.borrow_mut().queue.push(Box::new(f)),
-            None => {}
+            None if self.inner.borrow().closed || matches!(install_state(), Install::Failed(_)) => {}
+            None => self.inner.borrow_mut().queue.push(Box::new(f)),
         }
     }
 

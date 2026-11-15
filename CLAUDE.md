@@ -88,8 +88,9 @@ result printed, screenshots next to the file as `<steps>.<n>.jpg`, then `== plac
 `YH_BROWSER_PROBE_QUIT=1` quits after; `YH_BROWSER_AUTO_SHOW=0` keeps the page parked, the sidebar closed;
 `YH_BROWSER_PROBE_THREAD=<id>` runs it on that thread while `YH_SELECT` opens another; steps may also be
 `{"control": true|false}`, Take Control and Give Back as the panel's button does, `{"keyboard": true|false}`, the
-Typing in Page toggle (`YH_TYPE_KEYS_CLICKS` then shows where your clicks put the keyboard), and `{"crash": true}`, the tab's web
-content process ended as a crash would). Browser panel checks: `YH_BROWSER_ACTIVITY_LOG=1` prints each time the page
+Typing in Page toggle (`YH_TYPE_KEYS_CLICKS` then shows where your clicks put the keyboard), `{"crash": true}`, the tab's web
+content process ended as a crash would, `{"engine": "webkit"}`, the engine switched as Settings does, and `{"retry_engine": true}`,
+the panel's Try Again after the Chrome engine's download failed). Browser panel checks: `YH_BROWSER_ACTIVITY_LOG=1` prints each time the page
 shows where the agent acts (`YH_BROWSER_ACTIVITY_SHOT=<png>` draws that overlay alone, which screenshots leave out),
 `YH_BROWSER_DIALOG_ANSWER=ok|cancel` answers a page's alert, confirm or prompt through the card you'd click,
 `YH_BROWSER_PANE=console|network|none` picks the log strip's pane or folds it (`YH_BROWSER_ERRORS_ONLY=1` filtered),

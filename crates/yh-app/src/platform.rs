@@ -891,6 +891,8 @@ pub fn guard_terminate(needs_asking: impl Fn() -> bool + 'static, ask: impl Fn()
             eprintln!("QUIT applicationShouldTerminate allowed={allowed} asks={asks}");
         }
         if !asks {
+            // The Chrome engine's cookies on disk before the process goes.
+            crate::webview::chrome::flush_for_quit();
             return 1; // NSTerminateNow
         }
         run_on_main(Box::new(|| {
