@@ -1,9 +1,11 @@
 (() => {
   if (window.__yhHooked) return;
   window.__yhHooked = true;
+  // WebKit's message handler, or Chrome's DevTools binding.
   const handler = window.webkit?.messageHandlers?.yourHarnessLog;
-  if (!handler) return;
-  const post = (m) => { try { handler.postMessage(m); } catch {} };
+  const binding = typeof window.__yhLog === 'function' ? window.__yhLog : null;
+  if (!handler && !binding) return;
+  const post = handler ? (m) => { try { handler.postMessage(m); } catch {} } : (m) => { try { binding(JSON.stringify(m)); } catch {} };
   const fmt = (a) => {
     try {
       if (typeof a === 'string') return a;

@@ -367,8 +367,9 @@ impl Browsers {
     }
 
     /// The tab a page opens (`window.open`, `target=_blank`, a sign-in popup), in its opener's
-    /// browser, made with the configuration WebKit gives; None past the most tabs.
-    fn popup(opener: usize, configuration: cocoa::base::id, url: Option<String>) -> Option<cocoa::base::id> {
+    /// browser (made with the configuration WebKit gives, or the page Chromium made); None past
+    /// the most tabs.
+    fn popup(opener: usize, popup: crate::webview::Popup, url: Option<String>) -> Option<usize> {
         BROWSERS.with(|b| {
             // Never inside another change to the browsers (WebKit asks from the run loop).
             let mut b = b.try_borrow_mut().ok()?;
@@ -376,8 +377,8 @@ impl Browsers {
             if b.sessions.get(&thread).is_some_and(|s| s.tabs.len() >= MAX_TABS) || b.host == 0 {
                 return None;
             }
-            let web = WebView::with_configuration(b.host as cocoa::base::id, configuration);
-            let view = web.key() as cocoa::base::id;
+            let web = WebView::from_popup(b.host as cocoa::base::id, popup);
+            let view = web.key();
             let s = b.session(&thread);
             s.next_id += 1;
             let id = s.next_id;

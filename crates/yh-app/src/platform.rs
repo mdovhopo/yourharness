@@ -928,7 +928,7 @@ unsafe extern "C" {
 }
 
 /// Runs on the main thread at the next turn of its run loop, outside whatever is going on now.
-fn run_on_main(job: Box<dyn FnOnce()>) {
+pub(crate) fn run_on_main(job: Box<dyn FnOnce()>) {
     extern "C" fn run(ctx: *mut c_void) {
         let job = unsafe { Box::from_raw(ctx as *mut Box<dyn FnOnce()>) };
         job();

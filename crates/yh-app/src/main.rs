@@ -9,7 +9,6 @@ mod state;
 mod theme;
 mod ui;
 mod webview;
-mod chrome;
 mod keep_awake;
 mod browser;
 mod video_thumb;
@@ -1025,10 +1024,6 @@ fn main() {
                 drop(web);
             })
             .detach();
-        }
-        // `YH_CEF_SPIKE=<url>`: the Chrome engine's spike (chrome.rs).
-        if let Some(url) = env("YH_CEF_SPIKE") {
-            chrome::spike(window, url, cx);
         }
         // `YH_OPEN_USAGE=1`: Usage opened after `YH_DRAFT_DELAY` (`YH_USAGE_RANGE`,
         // `YH_USAGE_METRIC=cost`, `YH_USAGE_HOVER=<days ago>`).

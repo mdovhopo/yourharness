@@ -1,11 +1,12 @@
 #!/bin/zsh
-# Puts CEF's helper apps in a built bundle: scripts/cef-helpers.sh <app> [identity keychain].
-# CEF starts its processes from `Contents/Frameworks/<exe> Helper[ (GPU|Renderer|Plugin|Alerts)].app`,
-# one binary (yh-cef-helper) in each. Signed inside-out, then the app again around them.
+# Puts the Chrome engine's helper apps in a built bundle: scripts/cef-helpers.sh <app> [identity
+# keychain]. CEF starts its processes from `Contents/Frameworks/<exe> Helper[ (GPU|Renderer|Plugin|
+# Alerts)].app`, one binary (yh-cef-helper) in each. Signed, then the app again around them
+# (SKIP_OUTER_SIGN=1: bundle.sh signs it). Ad hoc without an identity.
 set -euo pipefail
 ROOT="${0:A:h:h}"
 APP="$1" IDENTITY="${2:-}" KEYCHAIN="${3:-}"
-BIN="$ROOT/target/release/yh-cef-helper"
+BIN="${CARGO_TARGET_DIR:-$ROOT/target}/release/yh-cef-helper"
 [[ -x $BIN ]] || { echo "no $BIN: cargo build --release -p yh-cef-helper" >&2; exit 1; }
 EXE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Contents/Info.plist")"
 BASE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Contents/Info.plist")"

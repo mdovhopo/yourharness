@@ -18,10 +18,12 @@ export DEVELOPER_DIR=${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer
 export PATH="$HOME/.cargo/bin:$PATH"
 # The binary's minimum macOS (LC_BUILD_VERSION minos) matches LSMinimumSystemVersion below.
 export MACOSX_DEPLOYMENT_TARGET=26.0
+# CEF's distribution, for building against (the `cef` crate's version; downloaded once, ~135 MB).
+export CEF_PATH=${CEF_PATH:-$HOME/.cache/yourharness-cef}
 "$ROOT/scripts/vendor.sh"
 # A failed build stops here, so a binary left by an earlier build never gets bundled.
 LOG="$(mktemp)"
-if ! (cd "$ROOT" && cargo build --release -p yh-app ${FEATURES:+--features=$FEATURES}) >"$LOG" 2>&1; then
+if ! (cd "$ROOT" && cargo build --release -p yh-app -p yh-cef-helper ${FEATURES:+--features=$FEATURES}) >"$LOG" 2>&1; then
     cat "$LOG" >&2; rm -f "$LOG"
     echo "build failed" >&2; exit 1
 fi
@@ -89,7 +91,9 @@ if [[ -n "${RELEASE:-}" || -n "${SIGN:-}" ]]; then
         IDENTITY="$(security find-certificate -a -Z "$KEYCHAIN" | awk '/SHA-1 hash:/ { print $3; exit }')"
     fi
 fi
-# The dylibs in Frameworks first: nested code is signed before the bundle around it.
+# The dylibs and the Chrome engine's helper apps in Frameworks first: nested code is signed
+# before the bundle around it.
+SKIP_OUTER_SIGN=1 "$ROOT/scripts/cef-helpers.sh" "$APP" "${IDENTITY:-}" "${KEYCHAIN:-}" 2>/dev/null
 if [[ -n "${IDENTITY:-}" ]]; then
     codesign --force --sign "$IDENTITY" --keychain "$KEYCHAIN" "$APP"/Contents/Frameworks/*.dylib >/dev/null
     codesign --force --sign "$IDENTITY" --keychain "$KEYCHAIN" "$APP" >/dev/null
