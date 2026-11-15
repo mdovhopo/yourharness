@@ -295,24 +295,6 @@ fn main() {
                 }
             });
         }
-        // `YH_BROWSER_OPEN=<url>`: a page in the open thread's browser at launch, as you'd open it.
-        if let Some(url) = env("YH_BROWSER_OPEN") {
-            let found = workspace.read(cx).selected_thread().map(|t| (t.read(cx).id().to_string(), t.read(cx).meta.project_id.clone()));
-            if let Some((thread, project)) = found {
-                browser::Browsers::open_for_user(&thread, Some(&project), Some(&url));
-                // `YH_BROWSER_PICK=<x,y>`: then the element picker, and a click at that point.
-                if let Some((x, y)) = env("YH_BROWSER_PICK").and_then(|p| p.split_once(',').map(|(a, b)| (a.trim().parse::<f64>().ok(), b.trim().parse::<f64>().ok()))).and_then(|(a, b)| Some((a?, b?))) {
-                    let inspector = root.read(cx).inspector.clone();
-                    cx.spawn(async move |cx| {
-                        cx.background_executor().timer(Duration::from_secs(3)).await;
-                        let _ = cx.update(|cx| inspector.update(cx, |i, cx| i.pick(&thread, cx)));
-                        cx.background_executor().timer(Duration::from_millis(600)).await;
-                        let _ = cx.update(|_| browser::Browsers::with_tab(&thread, |t| t.web.click(x, y, false, 1, 0)));
-                    })
-                    .detach();
-                }
-            }
-        }
         // `YH_OPEN_BROWSER_WINDOW=1`: the open thread's browser in its own window, as the panel's
         // ⋯ → Open in Window does, after `YH_DRAFT_DELAY` (`YH_BROWSER_WINDOW_SNAPSHOT=<png>` draws
         // it 2 s later; `YH_BROWSER_WINDOW_CLOSE=<seconds>` then closes it, the pages going back).
@@ -362,6 +344,24 @@ fn main() {
                     None => eprintln!("no thread {wanted}"),
                 }
             });
+        }
+        // `YH_BROWSER_OPEN=<url>`: a page in the open thread's browser at launch, as you'd open it.
+        if let Some(url) = env("YH_BROWSER_OPEN") {
+            let found = workspace.read(cx).selected_thread().map(|t| (t.read(cx).id().to_string(), t.read(cx).meta.project_id.clone()));
+            if let Some((thread, project)) = found {
+                browser::Browsers::open_for_user(&thread, Some(&project), Some(&url));
+                // `YH_BROWSER_PICK=<x,y>`: then the element picker, and a click at that point.
+                if let Some((x, y)) = env("YH_BROWSER_PICK").and_then(|p| p.split_once(',').map(|(a, b)| (a.trim().parse::<f64>().ok(), b.trim().parse::<f64>().ok()))).and_then(|(a, b)| Some((a?, b?))) {
+                    let inspector = root.read(cx).inspector.clone();
+                    cx.spawn(async move |cx| {
+                        cx.background_executor().timer(Duration::from_secs(3)).await;
+                        let _ = cx.update(|cx| inspector.update(cx, |i, cx| i.pick(&thread, cx)));
+                        cx.background_executor().timer(Duration::from_millis(600)).await;
+                        let _ = cx.update(|_| browser::Browsers::with_tab(&thread, |t| t.web.click(x, y, false, 1, 0)));
+                    })
+                    .detach();
+                }
+            }
         }
         // `YH_NEW_THREAD=1`: a new thread in the first project at launch (its empty state).
         if env("YH_NEW_THREAD").as_deref() == Some("1") {
