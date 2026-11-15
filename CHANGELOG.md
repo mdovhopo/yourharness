@@ -6,6 +6,11 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+### Changed
+
+- The built-in browser runs on Chrome: Chromium, embedded in the app, so pages look and behave as they do in Chrome, and the agent drives them through Chrome's own DevTools. It downloads its engine (about 150 MB) the first time a page opens; its pages are sandboxed as in Chrome. Each project keeps its own sign-ins, and the ones you had in the browser come along. WebKit (Safari's engine) is still there: Settings → Browser → Engine.
+- The browser's More menu opens Chrome's DevTools for the page.
+
 ## [0.1.15] - 2026-11-15
 
 ### Added

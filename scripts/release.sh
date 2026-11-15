@@ -1,7 +1,8 @@
 #!/bin/zsh
 # Cuts a release: scripts/release.sh 0.1.0 [git commit options, e.g. --trailer "..."]
 #
-# 1. Runs the tests (cargo test --release).
+# 1. Checks the Chrome engine's pinned download is there (and warns when the CEF pin is over six
+#    weeks old), then runs the tests (cargo test --release).
 # 2. Files CHANGELOG.md's Unreleased notes under the new version, sets VERSION, commits
 #    "Release <version>" and tags v<version>, locally.
 # 3. Builds the signed app and its DMG as the release workflow does (RELEASE=1
@@ -31,6 +32,18 @@ CURRENT="$(<VERSION)"
 
 export DEVELOPER_DIR=${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}
 export PATH="$HOME/.cargo/bin:$PATH"
+export CEF_PATH=${CEF_PATH:-$HOME/.cache/yourharness-cef}
+# The Chrome engine's framework, downloaded on first use: the pinned zip must be there to
+# download (scripts/cef-package.sh makes it, a `cef-<version>` pre-release holds it).
+CHROME_RS=crates/yh-app/src/webview/chrome.rs
+ZIP_URL="$(sed -n 's/^const ZIP_URL: &str = "\(.*\)";/\1/p' $CHROME_RS)"
+curl -sfIL --max-time 30 -o /dev/null "$ZIP_URL" || die "The Chrome engine's download isn't there: $ZIP_URL (upload it: scripts/cef-package.sh)."
+# Chromium's security fixes reach users only through a new CEF: say when the pin is getting old.
+CEF_VERSION="$(sed -n 's/^pub const CEF_VERSION: &str = "\(.*\)";/\1/p' $CHROME_RS)"
+pinned="$(git log -1 --format=%ct -S"CEF_VERSION: &str = \"$CEF_VERSION\"" -- $CHROME_RS 2>/dev/null || true)"
+if [[ -n "$pinned" ]] && (( ($(date +%s) - pinned) / 86400 > 42 )); then
+    echo "warning: CEF $CEF_VERSION was pinned $(( ($(date +%s) - pinned) / 86400 )) days ago; bump it (the cef crate) for Chromium's security fixes." >&2
+fi
 scripts/vendor.sh
 cargo test --release --locked
 

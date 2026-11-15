@@ -7,6 +7,7 @@
 #     that links only system libraries and the app's own in Contents/Frameworks (voice input's
 #     sherpa-onnx), found through @executable_path only (no build machine's path left in)
 #   - codesign --verify --deep --strict passes; with an identity, it's signed by it (not ad hoc)
+#   - the Chrome engine's five helper apps are there, arm64, system-only, signed the same way
 set -euo pipefail
 ROOT="${0:A:h:h}"
 DMG="${1:?usage: scripts/check-dmg.sh <dmg> [<signing identity name>]}"
@@ -59,6 +60,18 @@ for lib in "$FRAMEWORKS"/*.dylib(N); do
     codesign --verify --strict "$lib" || fail "${lib:t} isn't signed"
     [[ -z "$AUTHORITY" || "$(codesign -dvv "$lib" 2>&1)" == *"Authority=$AUTHORITY"* ]] || fail "${lib:t} isn't signed by $AUTHORITY"
 done
+# The Chrome engine's helper apps (scripts/cef-helpers.sh): all five, arm64, linking only the
+# system (the framework itself is downloaded, never in the app), signed like the app.
+for flavor in "" " (GPU)" " (Renderer)" " (Plugin)" " (Alerts)"; do
+    helper="$FRAMEWORKS/YourHarness Helper$flavor.app"
+    exe="$helper/Contents/MacOS/YourHarness Helper$flavor"
+    [[ -x $exe ]] || fail "YourHarness Helper$flavor.app is missing"
+    [[ "$(lipo -archs "$exe")" == arm64 ]] || fail "YourHarness Helper$flavor is $(lipo -archs "$exe")"
+    [[ -z "$(outside "$exe")" ]] || fail "YourHarness Helper$flavor links $(outside "$exe" | head -1)"
+    codesign --verify --strict "$helper" || fail "YourHarness Helper$flavor.app isn't signed"
+    [[ -z "$AUTHORITY" || "$(codesign -dvv "$helper" 2>&1)" == *"Authority=$AUTHORITY"* ]] || fail "YourHarness Helper$flavor.app isn't signed by $AUTHORITY"
+done
+[[ ! -e "$FRAMEWORKS/Chromium Embedded Framework.framework" ]] || fail "the CEF framework is in the app (it's downloaded on first use)"
 if [[ -n "$AUTHORITY" ]]; then
     [[ "$info" == *"Authority=$AUTHORITY"* ]] || fail "not signed by $AUTHORITY"
     [[ "$info" != *"Signature=adhoc"* ]] || fail "signed ad hoc"

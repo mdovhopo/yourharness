@@ -12,7 +12,7 @@ flowchart TB
   subgraph App["crates/yh-app · GPUI"]
     UI["ui: window, sidebar, transcript, composer, right sidebar, pages, sheets"]
     State["state: entities that own what the app knows"]
-    Mac["platform, webview, browser: what only AppKit and WebKit do"]
+    Mac["platform, webview, browser: what only AppKit, CEF and WebKit do"]
     UI --> State
     State --> Mac
   end
@@ -71,8 +71,8 @@ flowchart TB
   (`project.rs`, `memory.rs`, `usage.rs`, built from `page_kit.rs`), `settings.rs`,
   `spotlight.rs` (⌘K), `mcp.rs` (`/mcp`), `menus.rs`, and sheets and smaller views.
 - **yh-app's AppKit edge**: `platform.rs` (the NSWindow, real events sent to it, the screen's
-  refresh rate, memory and CPU, whether a run can be trusted), `webview.rs` (WKWebViews laid
-  over the GPUI window), Quick Look, notifications, the Dock badge, `keep_awake.rs`,
+  refresh rate, memory and CPU, whether a run can be trusted), `webview.rs` (pages laid over the
+  GPUI window: Chromium through CEF, or WKWebViews), Quick Look, notifications, the Dock badge, `keep_awake.rs`,
   `video_thumb.rs`. `probe.rs` is the performance run.
 - **GPUI** comes through gpui-kit (GPUI 0.3.11 and gpui-component): inputs, selects, popovers,
   dialogs, tables, charts, menus. Three crates are patched (`patches/`, unpacked into
@@ -125,9 +125,11 @@ background. See docs/storage.md.
 
 ## The browser
 
-Each thread has its own browser, real WKWebViews (Safari's engine) laid over the spot GPUI
-keeps for them, in the right sidebar or in a window of their own; a page nobody shows is parked
-off screen. Each project has its own cookie store, so sign-ins stay within it.
+Each thread has its own browser, real pages laid over the spot GPUI keeps for them, in the
+right sidebar or in a window of their own; a page nobody shows is parked off screen. The engine
+is Chrome (Chromium embedded through CEF, its framework downloaded on first use, its helper apps
+in the bundle) unless Settings picks WebKit (WKWebView, Safari's engine); both sit behind one
+interface (`webview.rs`). Each project has its own cookie store, so sign-ins stay within it.
 The agent drives it through the `browser` tools; you watch, and can take control. See
 docs/browser.md, and run `scripts/browser-fidelity/run.sh` after changing it.
 

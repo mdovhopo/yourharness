@@ -26,12 +26,16 @@ We keep the shape: a panel per thread, a typed tool set, refs from snapshots, sh
 
 ## Decisions
 
-### Engine: WebKit (`WKWebView`), not a bundled Chromium
+### Engine: Chrome (embedded Chromium, CEF), WebKit behind a setting
 
-- It's already on every Mac: no download, no second browser to keep updated, and it's Safari's engine, which your users have.
-- Each tab costs one WebContent process (tens of MB, outside the app's footprint), not a Chromium instance.
-- The trade-off is that Chrome-only bugs aren't caught. "Open in Default Browser" is always one click away, and driving the user's Chrome over CDP can come later as a second engine behind the same tools.
-- The app's own UI is drawn by GPUI, never a web view. A page under test is web content by definition, so it's the one native view laid over the GPUI window (`webview.rs`): GPUI keeps its spot empty and draws the panel around it (URL bar, console, network, controls).
+- **Chrome is the default** (since 0.1.16): Chromium embedded through CEF, so pages look and behave as in the browser most people use, and the agent drives them through Chrome's own DevTools protocol, in process. Settings → Browser → Engine picks WebKit instead (`WKWebView`, Safari's engine), the engine until 0.1.15; switching reopens open pages in the other.
+- **One interface over both** (`webview.rs`): a page is `WebView::Chrome` or `WebView::WebKit`, with the same calls and the same events, so the tools, the panel, the browser window and the phone don't know which. Where a page shows (its container over the window, parking, the overlay) is shared too (`webview/page.rs`).
+- **The framework is downloaded on first use**, not in the app: a pinned, SHA-256-checked zip (about 150 MB) from a `cef-<version>` GitHub pre-release, into `<data>/Browser Engine/<version>`. The DMG stays small and updates don't carry it again. The five helper apps CEF starts (`YourHarness Helper*.app`, one small binary: `crates/yh-cef-helper`) are in the app, signed like it, and load the framework from there.
+- **Its sandbox is on.** Chromium's sandbox lets helpers read only the app's bundle; the framework is outside it. The policies Chromium compiles in the app (renderers, utilities) get one read-only rule for the framework's folder: the framework's `sandbox_compile_string` import is rebound to a wrapper that adds it. Those it sends as source (the GPU process) are widened by the helper before Chromium applies them (`--seatbelt-client`). If either fails, the helper stops: the browser fails, never unsandboxed. Each CEF update must pass the fidelity suite, which needs that.
+- **Its event loop** is Chromium's own, entered from a run-loop timer and nested in GPUI's `[NSApp run]` (it sees NSApp running and runs a loop of its own that hands every event to NSApp). CEF's external pump busy-waits up to 10 ms at a time on the main thread for timers due inside its slice. CEF's `CefAppProtocol` is added to GPUI's `GPUIApplication` class at run time.
+- **Each page is a windowed CEF browser** beside a container view: Chromium sizes its page by the view, so a viewport other than the view's (a preset, a parked page at half size) is DevTools' device emulation scaled to fit, as its device mode does; the agent's input is in view coordinates under it.
+- **Cost:** a GPU, a network and a storage process, and a renderer per site: about 500 MB with two tabs, against WebKit's tens of MB a tab. Idle teardown closes pages, not the engine. Chromium's security fixes reach users only through a new CEF and a release (`scripts/release.sh` warns when the pin is six weeks old).
+- The app's own UI is drawn by GPUI, never a web view. A page under test is web content by definition, so it's the one native view laid over the GPUI window: GPUI keeps its spot empty and draws the panel around it (URL bar, console, network, controls).
 
 ### Transport: in-process MCP over the CLI's control channel
 
@@ -54,7 +58,7 @@ When it's off:
 
 ### Real input events, not synthetic DOM ones
 
-Clicks and keys are sent to the `WKWebView` as `NSEvent`s at the element's position. That way pages see trusted events (`isTrusted`), focus, hover and default actions just as with a person. Scripted `element.click()` is the fallback when an element can't be hit (covered or off screen). Spike 3 checks this.
+Clicks and keys are real input at the element's position: `NSEvent`s sent to the `WKWebView`, or DevTools' `Input.dispatch*` for Chrome. That way pages see trusted events (`isTrusted`), focus, hover and default actions just as with a person. Scripted `element.click()` is the fallback when an element can't be hit (covered or off screen). Chrome's HTML drag and drop goes through `Input.setInterceptDrags` and `dispatchDragEvent`.
 
 ## What you see
 
@@ -88,9 +92,9 @@ The right sidebar has a **Browser** tab, beside Side Chat, Sub-agents, Files and
   - browser calls render as their own rows: "Open localhost:3000", "Click 'Sign in'", "Type into Email";
   - a screenshot shows as a thumbnail you can click;
   - clicking a row shows the Browser tab.
-- **Web Inspector:**
-  - `isInspectable` is on, so Safari's full Web Inspector can attach (Develop menu);
-  - the More menu explains this if Safari's Develop menu is off.
+- **Inspector:**
+  - Chrome: the More menu's Show DevTools opens Chrome's DevTools for the page, in a window of its own;
+  - WebKit: `isInspectable` is on, so Safari's full Web Inspector can attach (Develop menu); the More menu explains this if Safari's Develop menu is off.
 
 ## Tools
 
@@ -120,13 +124,13 @@ Server name `browser`, so Claude sees `mcp__browser__<tool>`.
 | `close` | Closes a tab the agent opened | — |
 
 How the snapshot works:
-- It's JS in an isolated `WKContentWorld`, so the page can't see or spoof it.
+- It's JS in a world of its own (WebKit's `WKContentWorld`, Chrome's isolated world `YourHarness`), so the page can't see or spoof it.
 - It computes roles and accessible names (ARIA first, then the HTML semantics), keeps what's visible, and gives elements refs in a `WeakMap`.
 - Refs carry a generation that changes on navigation and on Take Control, so a stale ref fails with "Take a fresh snapshot".
 
 How console and network are captured:
-- **Console:** hooked in the page world at document start: `console.*`, `error` and `unhandledrejection`.
-- **Network:** `fetch`/XHR are wrapped, `PerformanceObserver` covers every resource, and navigation responses come from the delegate.
+- **Console:** hooked in the page world at document start: `console.*`, `error` and `unhandledrejection` (`hooks.js`; it posts through WebKit's message handler, or Chrome's DevTools binding `__yhLog`).
+- **Network:** `fetch`/XHR are wrapped, `PerformanceObserver` covers every resource, and navigation responses come from the engine (WebKit's delegate, CEF's load handler).
 - **Buffers:** ring buffers per tab (2,000 entries each).
 
 ## Local servers
@@ -143,7 +147,7 @@ What it gives you:
 ## Lifecycle and memory
 
 - **Created on demand:** a thread's browser exists only once the agent calls `open`, or you type a URL.
-- **Cookies:** one persistent `WKWebsiteDataStore` per project (`dataStoreForIdentifier:`, keyed by the project's UUID as 0.0.x keyed them, so sign-ins carry over), so logins survive and stay out of Safari and other projects. Clear Browsing Data resets it. A private tab uses a non-persistent store.
+- **Cookies:** one persistent store per project, so logins survive and stay out of other browsers and other projects: Chrome's a profile (`RequestContext`) in `<data>/Chrome/<project UUID>`, WebKit's a `WKWebsiteDataStore` (`dataStoreForIdentifier:`, keyed by the project's UUID as 0.0.x keyed them). The first time a project's Chrome profile is made, its WebKit sign-ins are copied in. Clear Browsing Data resets the engine in use's. A private tab uses one in memory.
 - **Idle teardown:** tabs of threads you aren't looking at are closed after 30 minutes idle. The URL and history are kept, so the next `open`/`status` or your visit brings them back.
 - **Ending:** settling or deleting a thread closes its tabs. Quitting closes all of them.
 - **Limits:** at most 8 tabs per thread. Popups become tabs.
@@ -156,7 +160,8 @@ What it gives you:
   - `claude.rs`: the process registers the app's servers in `initialize` and answers `mcp_message` control requests by calling them, each call on a thread of its own.
 - **yh-app:**
   - `browser/mod.rs`: `Browsers` on the main thread, one session per thread (tabs, control state, console and network buffers), and the tool set; a tool call sends the main thread jobs and waits on their replies, so waiting for a page never holds up the window.
-  - `webview.rs`: one `WKWebView` per tab, laid over the spot GPUI keeps for it, its delegates and injected scripts, and the parking panel.
+  - `webview.rs`: the interface over both engines, the parking panel and keyboard focus; `webview/page.rs`, where a page shows; `webview/chrome.rs`, CEF (its start, download, sandbox, profiles, handlers and DevTools calls); `webview/webkit.rs`, one `WKWebView` per tab with its delegates and injected scripts.
+  - `crates/yh-cef-helper`: the helper apps' binary (`scripts/cef-helpers.sh` puts them in the bundle).
   - Scripts (snapshot, refs, console/network hooks, picker) are `browser/helpers.js` and `browser/hooks.js`, built into the binary.
   - `ui/browser_panel.rs`, `ui/browser_window.rs`: the sidebar tab and the window. Browser calls read as their own steps in the transcript (`ui/steps.rs`).
 - **Instructions:** one paragraph in `--append-system-prompt` when enabled. It says:
@@ -176,6 +181,8 @@ What it gives you:
 4. **Hidden rendering.** WebKit treats a page in an occluded or off-screen window as hidden: timers drop to 1 Hz, `requestAnimationFrame` stops, `visibilityState` is `hidden`. With `_setWindowOcclusionDetectionEnabled:` off, a page in any window that's ordered in runs at full speed and screenshots fine; out of a window it's suspended either way. So pages not on screen wait in an off-screen, never-key panel (it doesn't keep the app open), and moving a web view between windows keeps its state. Occlusion detection is off for every page, from the moment its web view is made (`WebView::new` in `webview.rs`), so a page parked off screen, or one a phone is watching, keeps running and drawing. Both switches are private WebKit API, looked up first: without them, pages are throttled and the agent's clicks take focus, but nothing breaks.
 5. **Snapshots.** Measured on real pages: a login form 1 KB, TodoMVC 1 KB, Hacker News' front page 17.5 KB with all 30 stories, a long Wikipedia article and apple.com capped at 18 KB with text and off-screen parts dropped first. Layout tables are flattened, boxes around a single link collapse into it, and punctuation between links is dropped.
 
+6. **Chrome (2026-11-15).** CEF 156 inside GPUI's app: CEF's protocol added to `GPUIApplication` at run time; the external pump busy-waits (CEF's `MessagePumpExternal` spins for timers due within its 10 ms slice), so Chromium's own pump is nested in GPUI's loop, CEF started inside it (its run-loop observers crash outside); `DoClose` returns true and takes the view out, or CEF closes the app's window; Chromium's page view refuses the keyboard unless typing is on (`acceptsFirstResponder`); parked pages keep full speed (`--disable-renderer-backgrounding` and friends); scripts are in before the first load only if the load waits for the renderer's answer to them. With two tabs: ~300 ms to start, ~500 MB of helpers.
+
 ## On the phone
 
 The phone shows a thread's browser and acts in it (protocol 7): its shown tab streamed as JPEGs
@@ -186,11 +193,11 @@ thread's browser" (`browser/remote.rs`, `yh_server::browser`).
 
 - Recordings and annotations.
 - Localhost URLs inside code spans aren't links, so they don't open in the browser yet.
-- The same tools for Codex over localhost HTTP; Chrome over CDP as a second engine.
+- The same tools for Codex over localhost HTTP.
 
 ## How it's tested
 
-`YH_BROWSER_PROBE=<steps.json>` runs tool calls at launch and prints the results (see CLAUDE.md). `scripts/browser-fidelity/run.sh` checks the page, screenshots and input against a plain WKWebView. The MCP plumbing has unit tests (`cargo test -p yh-core -- mcp::`).
+`YH_BROWSER_PROBE=<steps.json>` runs tool calls at launch and prints the results (see CLAUDE.md). `scripts/browser-fidelity/run.sh` checks the page, screenshots and input against a plain page of the engine (`ENGINE=webkit`: a WKWebView; Chrome: a plain Chrome window the app makes, `YH_CEF_REFERENCE`); both must pass after a change. The MCP plumbing has unit tests (`cargo test -p yh-core -- mcp::`).
 
 ## Decided
 

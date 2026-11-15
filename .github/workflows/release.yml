@@ -33,6 +33,8 @@ env:
   CARGO_TERM_COLOR: never
   CARGO_INCREMENTAL: "0"
   CARGO_NET_RETRY: "10"
+  # CEF's distribution for the Chrome engine's build (cached below).
+  CEF_PATH: /Users/runner/.cache/yourharness-cef
 
 jobs:
   dmg:
@@ -98,6 +100,18 @@ jobs:
             xcodebuild -downloadComponent MetalToolchain
             xcrun metal --version
           fi
+
+      # The Chrome engine: the `cef` crate builds CEF's C++ wrapper with cmake and Ninja, against
+      # CEF's distribution (~135 MB, downloaded once per CEF version into CEF_PATH). The framework
+      # itself isn't in the app: it's downloaded on first use (webview/chrome.rs).
+      - name: Ninja for CEF
+        run: command -v ninja || brew install ninja
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/yourharness-cef
+          key: cef-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cef-
 
       - name: Test
         run: cargo test --release --locked
