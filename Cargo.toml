@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/yh-core", "crates/yh-engine", "crates/yh-proto", "crates/yh-server", "crates/yh-voice", "crates/yh-app"]
+members = ["crates/yh-core", "crates/yh-engine", "crates/yh-proto", "crates/yh-server", "crates/yh-voice", "crates/yh-app", "crates/yh-cef-helper"]
 
 [workspace.package]
 edition = "2024"

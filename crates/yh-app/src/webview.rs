@@ -628,7 +628,7 @@ const PARKED_SCALE: f64 = 0.5;
 /// mouse, stays out of the Window menu, Mission Control, Exposé and ⌘` cycling, and stays
 /// ordered in, so WebKit keeps laying pages out, running their timers and animation frames
 /// and drawing screenshots (its occlusion detection is off for every page). Made on first use.
-fn parking_view() -> id {
+pub(crate) fn parking_view() -> id {
     use objc::declare::ClassDecl;
     use objc::runtime::{Object, Sel};
     static VIEW: std::sync::OnceLock<usize> = std::sync::OnceLock::new();

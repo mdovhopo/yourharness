@@ -1,0 +1,15 @@
+[package]
+name = "yh-cef-helper"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+# The helper apps CEF starts (renderer, GPU, network, …): one binary, copied into each
+# `YourHarness Helper*.app` in the bundle's Frameworks.
+[[bin]]
+name = "yh-cef-helper"
+path = "src/main.rs"
+
+[dependencies]
+cef = "=156.5.0"
+libc.workspace = true

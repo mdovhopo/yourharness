@@ -30,6 +30,8 @@ resvg = "0.46"
 notify = "8.2"
 # Settings → Phone: the pairing link as a QR code, drawn as squares.
 qrcode = { version = "0.14", default-features = false }
+# The browser's Chrome engine (chrome.rs): CEF through its C API, the framework loaded at run time.
+cef = "=156.5.0"
 # Only for the snapshots feature: the same GPUI gpui-kit pins, with its test support turned on.
 gpui = { package = "gpui-pre", version = "=0.3.11", optional = true }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.11", optional = true }
