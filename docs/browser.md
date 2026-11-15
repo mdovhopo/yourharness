@@ -58,7 +58,7 @@ When it's off:
 
 ### Real input events, not synthetic DOM ones
 
-Clicks and keys are real input at the element's position: `NSEvent`s sent to the `WKWebView`, or DevTools' `Input.dispatch*` for Chrome. That way pages see trusted events (`isTrusted`), focus, hover and default actions just as with a person. Scripted `element.click()` is the fallback when an element can't be hit (covered or off screen). Chrome's HTML drag and drop goes through `Input.setInterceptDrags` and `dispatchDragEvent`.
+Clicks and keys are real input at the element's position: `NSEvent`s sent to the `WKWebView`, or DevTools' `Input.dispatch*` for Chrome. That way pages see trusted events (`isTrusted`), focus, hover and default actions just as with a person. Scripted `element.click()` is the fallback when an element can't be hit (covered or off screen). Chrome's HTML drag and drop goes through `Input.setInterceptDrags` and `dispatchDragEvent`, with interception on only while the agent holds the mouse down: on all the time, a drag you start with your own mouse was handed over too, nothing played it on, and the page took no more mouse input. Yours go to the Mac's drag and drop.
 
 ## What you see
 

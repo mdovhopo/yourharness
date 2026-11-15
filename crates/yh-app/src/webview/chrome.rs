@@ -155,11 +155,15 @@ fn download() -> Result<(), String> {
         }
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::rename(&unpacked, &dir).map_err(|e| e.to_string())?;
-        // Older versions go: only this one is used.
-        if let Ok(entries) = std::fs::read_dir(&parent) {
+        // Older versions go: only this one is used. Only in the app's own `Browser Engine`
+        // folder: a `YH_CEF_FRAMEWORK` folder's neighbours aren't ours (pointed inside a real
+        // install, this emptied it).
+        let ours = std::env::var_os("YH_CEF_FRAMEWORK").is_none() && parent.file_name().is_some_and(|n| n == "Browser Engine");
+        if let Some(entries) = ours.then(|| std::fs::read_dir(&parent).ok()).flatten() {
             for e in entries.flatten() {
                 let name = e.file_name().to_string_lossy().into_owned();
-                if name != CEF_VERSION && !name.starts_with('.') {
+                let version = name.split('.').all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+                if name != CEF_VERSION && version {
                     let _ = std::fs::remove_dir_all(e.path());
                 }
             }
@@ -1087,7 +1091,8 @@ fn adopt(key: usize, browser: Browser, popup: bool) {
     }
     // The helpers in their own world; the console and network hooks in the page's, posting
     // through a binding (`__yhLog`) instead of WebKit's message handler. Main frame only.
-    fire(&browser, "Input.setInterceptDrags", json!({"enabled": true}));
+    // A new browser hands no drags over until the agent presses (`intercept_drags`).
+    INTERCEPTING.with(|i| i.borrow_mut().remove(&key));
     fire(&browser, "Runtime.enable", json!({}));
     fire(&browser, "Runtime.addBinding", json!({"name": "__yhLog"}));
     fire(&browser, "Page.enable", json!({}));
@@ -1168,6 +1173,18 @@ thread_local! {
     static CALLS: RefCell<HashMap<i32, Answer>> = RefCell::new(HashMap::new());
     /// A drag the page started that Chromium handed over (`Input.dragIntercepted`), by page.
     static DRAGS: RefCell<HashMap<usize, Value>> = RefCell::new(HashMap::new());
+    /// Pages whose drags are handed over while the agent holds the mouse down (`mouse_down` to
+    /// `mouse_up`). Only then: on all the time, the user's own drags were handed over too, nothing
+    /// played them on, and the page took no more mouse input.
+    static INTERCEPTING: RefCell<std::collections::HashSet<usize>> = RefCell::new(Default::default());
+}
+
+/// Drags the page starts handed over to us (on) or to the Mac's drag and drop (off).
+fn intercept_drags(browser: &Browser, key: usize, on: bool) {
+    let changed = INTERCEPTING.with(|i| if on { i.borrow_mut().insert(key) } else { i.borrow_mut().remove(&key) });
+    if changed {
+        fire(browser, "Input.setInterceptDrags", json!({"enabled": on}));
+    }
 }
 
 /// A DevTools call; `then` gets its result.
@@ -2148,6 +2165,7 @@ impl WebView {
                         cdp(&b2, "Input.dispatchDragEvent", json!({"type": kind, "x": bx, "y": by, "data": data2, "modifiers": 0}), move |_| {
                             if kind == "drop" {
                                 fire(&b3, "Input.dispatchMouseEvent", release);
+                                intercept_drags(&b3, key, false);
                             }
                         });
                     });
@@ -2155,6 +2173,9 @@ impl WebView {
                 }
             }
             fire(b, "Input.dispatchMouseEvent", params);
+            if kind == "mouseReleased" {
+                intercept_drags(b, key, false);
+            }
         });
     }
 
@@ -2172,7 +2193,9 @@ impl WebView {
     }
 
     pub fn mouse_down(&self, x: f64, y: f64) {
-        DRAGS.with(|d| d.borrow_mut().remove(&self.key()));
+        let key = self.key();
+        DRAGS.with(|d| d.borrow_mut().remove(&key));
+        self.with_browser(move |b| intercept_drags(b, key, true));
         self.mouse("mouseMoved", x, y, "none", 0, 0, 0);
         self.mouse("mousePressed", x, y, "left", 1, 1, 0);
     }

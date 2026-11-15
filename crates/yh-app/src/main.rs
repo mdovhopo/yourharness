@@ -687,14 +687,15 @@ fn main() {
         // `YH_CLICK=<x,y>[;<x,y>…]`: clicks there (window points) through the window, a second
         // apart, after `YH_DRAFT_DELAY` (+0.5 s after `YH_HOVER`): for menus and buttons only a
         // click opens (the composer's pickers, the plan card's Approve menu). `r<x,y>` right-clicks
-        // (context menus), `h<x,y>` only moves the pointer there (a menu row highlighted).
+        // (context menus), `h<x,y>` only moves the pointer there (a menu row highlighted), `q<x,y>`
+        // clicks through the app's event queue, as the window server's clicks come.
         if let Some(points) = env("YH_CLICK") {
             let points: Vec<(char, f32, f32)> = points
                 .split(';')
                 .filter_map(|p| {
                     let p = p.trim();
                     let (kind, p) = match p.chars().next()? {
-                        k @ ('r' | 'h') => (k, &p[1..]),
+                        k @ ('r' | 'h' | 'q') => (k, &p[1..]),
                         _ => ('l', p),
                     };
                     p.split_once(',').and_then(|(x, y)| Some((kind, x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?)))
@@ -711,6 +712,7 @@ fn main() {
                         match kind {
                             'r' => crate::platform::right_click(ns, x, y),
                             'h' => {}
+                            'q' => crate::platform::queued_click(ns, x, y),
                             _ => crate::platform::click(ns, x, y),
                         }
                         eprintln!("CLICK {kind} {x},{y}");

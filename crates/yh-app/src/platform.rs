@@ -144,6 +144,21 @@ pub fn click(w: id, x: f32, y: f32) {
     }
 }
 
+/// A click put on the application's event queue, as the window server delivers one: through
+/// NSApp's `sendEvent:` and the app's event monitors, where `click` skips them.
+pub fn queued_click(w: id, x: f32, y: f32) {
+    unsafe {
+        let point = window_point(w, x, y);
+        let app: id = msg_send![class!(NSApplication), sharedApplication];
+        for kind in [NSLeftMouseDown, NSLeftMouseUp] {
+            let event = mouse_event(w, kind, point, 1);
+            if event != nil {
+                let _: () = msg_send![app, postEvent: event atStart: NO];
+            }
+        }
+    }
+}
+
 /// A right click (a context menu) at a point in window coordinates, through the window: sent as
 /// a control-click, which GPUI takes as a right click (a made-up right-button event carries no
 /// button number, so it would read as the left).
