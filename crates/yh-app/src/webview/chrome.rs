@@ -374,7 +374,9 @@ wrap_browser_process_handler! {
             if log() {
                 eprintln!("CHROME ready");
             }
-            make_pending();
+            // Out of Chromium's notification first: making profiles and browsers inside it adds
+            // observers to the list it's walking (Chromium flags the reentrancy).
+            crate::platform::run_on_main(Box::new(make_pending));
         }
     }
 }
@@ -520,7 +522,8 @@ wrap_request_context_handler! {
             if fresh && is_uuid(&key) {
                 migrate_webkit_cookies(&key);
             } else {
-                release_profile(&key);
+                // Out of Chromium's notification first (`on_context_initialized` says why).
+                crate::platform::run_on_main(Box::new(move || release_profile(&key)));
             }
         }
     }
@@ -1462,6 +1465,96 @@ wrap_life_span_handler! {
     }
 }
 
+/// The right-click menu's own commands (Chromium runs its built-in ones itself).
+const MENU_OPEN_LINK: i32 = 26_501;
+const MENU_COPY_LINK: i32 = 26_502;
+const MENU_INSPECT: i32 = 26_503;
+
+wrap_context_menu_handler! {
+    struct Menus;
+
+    impl ContextMenuHandler {
+        /// What a browser's right-click menu has, from what's under the pointer: a link's Open in
+        /// New Tab and Copy Link, a field's editing, a selection's Copy, then Back, Forward,
+        /// Reload and Inspect. (CEF's own has only Copy.)
+        fn on_before_context_menu(&self, _browser: Option<&mut Browser>, _frame: Option<&mut Frame>, params: Option<&mut ContextMenuParams>, model: Option<&mut MenuModel>) {
+            let (Some(params), Some(model)) = (params, model) else { return };
+            model.clear();
+            let item = |id: i32, label: &str| {
+                model.add_item(id, Some(&CefString::from(label)));
+            };
+            let link = CefString::from(&params.link_url()).to_string();
+            if !link.is_empty() {
+                item(MENU_OPEN_LINK, "Open Link in New Tab");
+                item(MENU_COPY_LINK, "Copy Link");
+                model.add_separator();
+            }
+            if params.is_editable() == 1 {
+                item(112, "Cut");
+                item(113, "Copy");
+                item(114, "Paste");
+                item(117, "Select All");
+                model.add_separator();
+            } else if !CefString::from(&params.selection_text()).to_string().is_empty() {
+                item(113, "Copy");
+                model.add_separator();
+            }
+            item(100, "Back");
+            item(101, "Forward");
+            item(102, "Reload");
+            model.add_separator();
+            item(MENU_INSPECT, "Inspect");
+            if std::env::var_os("YH_CHROME_MENU").is_some() {
+                let items: Vec<String> = (0..model.count()).map(|i| CefString::from(&model.label_at(i)).to_string()).filter(|l| !l.is_empty()).collect();
+                eprintln!("CHROME context menu: {}", items.join(" | "));
+            }
+        }
+
+        /// Test runs (`YH_CHROME_MENU=log`): the menu listed, never shown.
+        fn run_context_menu(&self, _browser: Option<&mut Browser>, _frame: Option<&mut Frame>, _params: Option<&mut ContextMenuParams>, _model: Option<&mut MenuModel>, callback: Option<&mut RunContextMenuCallback>) -> i32 {
+            if std::env::var("YH_CHROME_MENU").as_deref() == Ok("log") {
+                if let Some(c) = callback {
+                    c.cancel();
+                }
+                return 1;
+            }
+            0
+        }
+
+        fn on_context_menu_command(&self, browser: Option<&mut Browser>, _frame: Option<&mut Frame>, params: Option<&mut ContextMenuParams>, command_id: i32, _event_flags: EventFlags) -> i32 {
+            let (Some(browser), Some(params)) = (browser, params) else { return 0 };
+            let link = CefString::from(&params.link_url()).to_string();
+            match command_id {
+                // A tab of its own, as a page's link with target=_blank opens (same profile, the
+                // opener known): the popup path.
+                MENU_OPEN_LINK => {
+                    let script = format!("window.open({}, '_blank')", serde_json::to_string(&link).unwrap_or_default());
+                    fire(browser, "Runtime.evaluate", json!({"expression": script, "userGesture": true}));
+                    1
+                }
+                MENU_COPY_LINK => {
+                    unsafe {
+                        let board: id = msg_send![class!(NSPasteboard), generalPasteboard];
+                        let _: isize = msg_send![board, clearContents];
+                        let kind = super::ns_string("public.utf8-plain-text");
+                        let _: bool = msg_send![board, setString: super::ns_string(&link) forType: kind];
+                    }
+                    1
+                }
+                MENU_INSPECT => {
+                    if let Some(host) = browser.host() {
+                        let info = WindowInfo { runtime_style: RuntimeStyle::ALLOY, ..Default::default() };
+                        let at = Point { x: params.xcoord(), y: params.ycoord() };
+                        host.show_dev_tools(Some(&info), None, Some(&BrowserSettings::default()), Some(&at));
+                    }
+                    1
+                }
+                _ => 0,
+            }
+        }
+    }
+}
+
 wrap_client! {
     struct TabClient;
 
@@ -1500,6 +1593,10 @@ wrap_client! {
 
         fn focus_handler(&self) -> Option<FocusHandler> {
             Some(Focus::new())
+        }
+
+        fn context_menu_handler(&self) -> Option<ContextMenuHandler> {
+            Some(Menus::new())
         }
     }
 }
