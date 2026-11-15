@@ -953,6 +953,9 @@ fn new_holder() -> id {
         let view: id = msg_send![holder_class(), alloc];
         let view: id = msg_send![view, initWithFrame: NSRect::new(NSPoint::new(0., 0.), NSSize::new(super::LAPTOP.0, super::LAPTOP.1))];
         let _: () = msg_send![view, setAutoresizesSubviews: YES];
+        // Views don't clip what's in them by default (macOS 14+): Chromium's page view, bigger
+        // than the spot under device emulation, drew past it, over the panel around it.
+        let _: () = msg_send![view, setClipsToBounds: YES];
         view
     }
 }
@@ -1032,8 +1035,8 @@ fn adopt(key: usize, browser: Browser, popup: bool) {
                 }
                 let bounds: NSRect = msg_send![holder, bounds];
                 let _: () = msg_send![view, setFrame: bounds];
-                // NSViewWidthSizable | NSViewHeightSizable: it follows the holder.
-                let _: () = msg_send![view, setAutoresizingMask: 18usize];
+                // Placed by `fit_view` each time the holder changes, never by autoresizing.
+                let _: () = msg_send![view, setAutoresizingMask: 0usize];
             }
         }
         let observer = host.add_dev_tools_message_observer(Some(&mut Observer::new(key)));
@@ -1056,6 +1059,8 @@ fn adopt(key: usize, browser: Browser, popup: bool) {
             i.browser = Some(b.clone());
             (std::mem::take(&mut i.queue), i.url.clone())
         };
+        // The holder may have moved or changed size while the browser was being set up.
+        fit(key, &b);
         // A page whose load was dropped while the engine couldn't be had (`fail_pending`): its
         // address, now. (A popup is already on its way to it.)
         if queue.is_empty() && !popup {
@@ -1072,6 +1077,23 @@ fn adopt(key: usize, browser: Browser, popup: bool) {
 }
 
 const HELPER_WORLD: &str = "YourHarness";
+
+/// Chromium's view of `browser` exactly over the holder `key` (`WebView::fit_view`).
+fn fit(key: usize, browser: &Browser) {
+    let Some(host) = browser.host() else { return };
+    let view = host.window_handle() as id;
+    if view == nil {
+        return;
+    }
+    unsafe {
+        let bounds: NSRect = msg_send![key as id, bounds];
+        let now: NSRect = msg_send![view, frame];
+        if now.origin.x != 0. || now.origin.y != 0. || now.size.width != bounds.size.width || now.size.height != bounds.size.height {
+            let _: () = msg_send![view, setFrame: bounds];
+            host.was_resized();
+        }
+    }
+}
 
 /// The page's window as a browser window its size would be: its outer size its own (not the
 /// app's window, or the parking panel, it's drawn in), the screen's free area the real one (under
@@ -1657,12 +1679,47 @@ impl WebView {
     }
 
     pub fn move_to(&self, host: id) {
-        self.page.move_to(host)
+        self.page.move_to(host);
+        self.fit_view();
+    }
+
+    /// Chromium's view exactly over its holder. Not left to autoresizing: that keeps the margins
+    /// the view had, and once the holder was squashed (moved between windows, parked small) the
+    /// page sat offset from its spot, clicks landing beside where they were aimed or on nothing.
+    fn fit_view(&self) {
+        if let Some(b) = self.inner.borrow().browser.clone() {
+            fit(self.key(), &b);
+        }
     }
 
     pub fn set_frame(&self, bounds: Option<(f64, f64, f64, f64)>) {
         self.page.set_frame(bounds);
+        self.fit_view();
         self.emulate();
+        if log() {
+            eprintln!("CHROME frames after set_frame({bounds:?}): {}", self.view_frames());
+        }
+    }
+
+    /// The holder's frame and every view inside it, for `YH_CHROME_LOG`.
+    fn view_frames(&self) -> String {
+        fn walk(view: id, depth: usize, out: &mut Vec<String>) {
+            unsafe {
+                let f: NSRect = msg_send![view, frame];
+                let class = rust_string(msg_send![view, className]).unwrap_or_default();
+                out.push(format!("{}{class} {:.0},{:.0} {:.0}x{:.0}", "  ".repeat(depth), f.origin.x, f.origin.y, f.size.width, f.size.height));
+                if depth < 3 {
+                    let subs: id = msg_send![view, subviews];
+                    let n: usize = msg_send![subs, count];
+                    for i in 0..n {
+                        walk(msg_send![subs, objectAtIndex: i], depth + 1, out);
+                    }
+                }
+            }
+        }
+        let mut out = vec![];
+        walk(self.key() as id, 0, &mut out);
+        out.join(" | ")
     }
 
     /// The page laid out at its CSS size and drawn at the size it has on screen: Chromium sizes
@@ -1692,6 +1749,7 @@ impl WebView {
 
     pub fn set_viewport(&self, viewport: Option<(f64, f64)>) {
         self.page.set_viewport(viewport);
+        self.fit_view();
         self.emulate();
     }
 
