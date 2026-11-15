@@ -36,6 +36,17 @@
       post({ kind: 'console', level: 'error', text: 'Uncaught ' + (e.error ? fmt(e.error) : e.message) + where });
     }
   }, true);
+  // The page would take typing: a text field you clicked into, or text you selected (for ⌘C).
+  // The app gives it the keyboard only right after your own press in it (webview.rs).
+  const textual = (t) => t && (t.isContentEditable || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' ||
+    (t.tagName === 'INPUT' && /^(|text|search|email|url|tel|password|number|date|datetime-local|month|week|time)$/i.test(t.type || '')));
+  // On the click itself: while the page doesn't have the keyboard its window counts as unfocused,
+  // and focus moves to a field without any focus event.
+  addEventListener('mouseup', (e) => {
+    if (!e.isTrusted) return;
+    if (textual(document.activeElement)) post({ kind: 'keyboard', why: 'field' });
+    else if (String(getSelection()).length) post({ kind: 'keyboard', why: 'selection' });
+  }, true);
   addEventListener('unhandledrejection', (e) => post({ kind: 'console', level: 'error', text: 'Unhandled rejection: ' + fmt(e.reason) }));
 
   const originalFetch = window.fetch;

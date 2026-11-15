@@ -1029,7 +1029,9 @@ impl Render for BrowserPanel {
             None
         };
         let menu = self.menu(&shown, &theme, cx);
-        let progress = shown.loading.then(|| div().h(px(2.)).mx(px(space::S)).child(div().h_full().rounded(px(1.)).bg(theme.accent).w(gpui_kit::relative(shown.progress.clamp(0.05, 1.) as f32))));
+        // Not while the engine downloads: its banner says how far that is.
+        let downloading = crate::webview::engine() == crate::webview::Engine::Chrome && matches!(crate::webview::chrome::install_state(), crate::webview::chrome::Install::Downloading(..));
+        let progress = (shown.loading && !downloading).then(|| div().h(px(2.)).mx(px(space::S)).child(div().h_full().rounded(px(1.)).bg(theme.accent).w(gpui_kit::relative(shown.progress.clamp(0.05, 1.) as f32))));
         let banner = control.then(|| {
             let thread = thread.clone();
             notice_card(&theme)
@@ -1046,9 +1048,9 @@ impl Render for BrowserPanel {
         let install = (crate::webview::engine() == crate::webview::Engine::Chrome).then(crate::webview::chrome::install_state);
         let installing = match &install {
             Some(crate::webview::chrome::Install::Downloading(got, total)) => Some(if *total > 0 {
-                format!("Downloading the browser engine (Chrome): {} of {} MB. The page opens when it's done.", got / 1_000_000, total / 1_000_000)
+                format!("Downloading the browser engine (Chrome): {} of {} MB. The page opens when it's done; this happens once.", got / 1_000_000, total / 1_000_000)
             } else {
-                "Downloading the browser engine (Chrome). The page opens when it's done.".to_string()
+                "Downloading the browser engine (Chrome). The page opens when it's done; this happens once.".to_string()
             }),
             Some(crate::webview::chrome::Install::Failed(e)) => Some(format!("The browser engine (Chrome) isn't available{}. Try again, or use WebKit in Settings → Browser.", if e.is_empty() { String::new() } else { format!(": {e}") })),
             _ => None,

@@ -108,6 +108,16 @@ thread_local! {
     /// The pages you may type into (`set_keyboard`), by key: a click of yours in one gives it the
     /// keyboard, as a field on a web page takes focus.
     pub(super) static TYPING: std::cell::RefCell<std::collections::HashSet<usize>> = Default::default();
+    /// Pages given the keyboard for now (`grant_keyboard`): a field you clicked into, text you
+    /// selected. Your next press anywhere else takes it back.
+    pub(super) static GRANTED: std::cell::RefCell<std::collections::HashSet<usize>> = Default::default();
+    /// Your last press in a page: which, and when.
+    static LAST_PRESS: std::cell::Cell<Option<(usize, std::time::Instant)>> = const { std::cell::Cell::new(None) };
+}
+
+/// Whether you pressed in the page `key` just now (the page wanting the keyboard follows from it).
+pub fn pressed_recently(key: usize) -> bool {
+    LAST_PRESS.with(|p| p.get()).is_some_and(|(k, at)| k == key && at.elapsed() < std::time::Duration::from_millis(1500))
 }
 
 /// A page a page opened (`window.open`, `target=_blank`): WebKit gives the configuration to make
@@ -176,15 +186,43 @@ pub(super) fn watch_focus() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| unsafe {
         let handler = ConcreteBlock::new(|event: id| -> id {
-            focus_for_press(event);
+            let kind: u64 = msg_send![event, type];
+            if kind == 2 {
+                note_release(event);
+            } else {
+                focus_for_press(event);
+            }
             event
         })
         .copy();
-        // Left, right and other mouse down.
-        let mask: u64 = (1 << 1) | (1 << 3) | (1 << 25);
+        // Left, right and other mouse down; left mouse up (a drag that selected text ends there).
+        let mask: u64 = (1 << 1) | (1 << 2) | (1 << 3) | (1 << 25);
         let monitor: id = msg_send![class!(NSEvent), addLocalMonitorForEventsMatchingMask: mask handler: &*handler];
         let _: id = msg_send![monitor, retain];
     });
+}
+
+/// The left button let go over a page: what the page asks for right after (the keyboard, for text
+/// a drag selected) counts as yours however long the drag took.
+pub fn note_release(event: id) {
+    unsafe {
+        let window: id = msg_send![event, window];
+        if window == nil {
+            return;
+        }
+        let content: id = msg_send![window, contentView];
+        if content == nil {
+            return;
+        }
+        let frame: id = msg_send![content, superview];
+        let at: NSPoint = msg_send![event, locationInWindow];
+        let local: NSPoint = if frame == nil { at } else { msg_send![frame, convertPoint: at fromView: nil] };
+        let hit: id = msg_send![content, hitTest: local];
+        let page = web_view_of(hit);
+        if page != nil {
+            LAST_PRESS.with(|p| p.set(Some((page as usize, std::time::Instant::now()))));
+        }
+    }
 }
 
 /// Where a mouse press moves the keyboard (`watch_focus`).
@@ -206,6 +244,9 @@ pub fn focus_for_press(event: id) {
             msg_send![content, hitTest: local]
         };
         let pressed = web_view_of(hit);
+        if pressed != nil {
+            LAST_PRESS.with(|p| p.set(Some((pressed as usize, std::time::Instant::now()))));
+        }
         let first: id = msg_send![window, firstResponder];
         let is_view: bool = first != nil && msg_send![first, isKindOfClass: class!(NSView)];
         let focused = if is_view { web_view_of(first) } else { nil };
@@ -216,6 +257,12 @@ pub fn focus_for_press(event: id) {
             }
         } else if focused != nil && focused != pressed {
             let _: bool = msg_send![window, makeFirstResponder: app_view(window)];
+        }
+        // A page given the keyboard for a field or a selection keeps it only until you press elsewhere.
+        let back: Vec<usize> = GRANTED.with(|g| g.borrow().iter().copied().filter(|k| *k != pressed as usize).collect());
+        for k in back {
+            GRANTED.with(|g| g.borrow_mut().remove(&k));
+            TYPING.with(|t| t.borrow_mut().remove(&k));
         }
     }
 }
@@ -401,6 +448,16 @@ impl WebView {
     pub fn call(&self, body: &str, in_page: bool, reply: flume::Sender<Result<String, String>>) { both!(self, w => w.call(body, in_page, reply)) }
     /// Whether you may type into the page (Typing in Page).
     pub fn set_keyboard(&self, allowed: bool) { both!(self, w => w.set_keyboard(allowed)) }
+    /// The keyboard to the page for now: you clicked into a field or selected text in it.
+    pub fn grant_keyboard(&self) {
+        let key = self.key();
+        if TYPING.with(|t| t.borrow().contains(&key)) {
+            return;
+        }
+        GRANTED.with(|g| g.borrow_mut().insert(key));
+        TYPING.with(|t| t.borrow_mut().insert(key));
+        both!(self, w => w.take_keyboard())
+    }
     /// A click at a point in CSS pixels, as real input: `left` or `right`, `count` times.
     pub fn click(&self, x: f64, y: f64, right: bool, count: isize, modifiers: usize) { both!(self, w => w.click(x, y, right, count, modifiers)) }
     pub fn hover(&self, x: f64, y: f64) { both!(self, w => w.hover(x, y)) }

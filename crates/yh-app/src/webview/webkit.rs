@@ -695,6 +695,16 @@ impl WebView {
         }
     }
 
+    /// The keyboard to this page now (`grant_keyboard`).
+    pub fn take_keyboard(&self) {
+        unsafe {
+            let window: id = msg_send![self.view, window];
+            if window != nil {
+                take_keyboard(window, self.view);
+            }
+        }
+    }
+
     /// A click at a point in CSS pixels, as real mouse events: `left` or `right`, `count` times.
     /// It never takes the keyboard from the composer: WebKit's first-responder changes are
     /// suppressed.

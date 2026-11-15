@@ -552,9 +552,15 @@ impl Browsers {
     }
 
     /// A tab you open from the panel (an address, or a blank page with None).
+    /// It fits the panel (readable, its buttons a size you can hit); Claude's own pages open at
+    /// the laptop size, the layout it should test.
     pub fn open_for_user(thread: &str, project: Option<&str>, url: Option<&str>) {
         Browsers::with(|b| {
-            b.open_tab(thread, project, url.unwrap_or(""));
+            let id = b.open_tab(thread, project, url.unwrap_or(""));
+            if let Some(t) = b.sessions.get_mut(thread).and_then(|s| s.tabs.iter_mut().find(|t| t.id == id)) {
+                t.web.set_viewport(None);
+            }
+            b.place();
         });
     }
 
@@ -798,10 +804,22 @@ fn take_event(b: &mut Browsers, event: WebEvent) -> bool {
         return true;
     }
     let mut navigated = false;
+    let keyboard_on = b.sessions.get(&thread).is_some_and(|s| s.keyboard);
     let Some(tab) = b.tab_mut(view) else { return false };
     let notify = match event {
         WebEvent::Log { json, .. } => {
             if let Ok(v) = serde_json::from_str::<Value>(&json) {
+                if v["kind"] == "keyboard" {
+                    if std::env::var("YH_DATA_DIR").is_ok() {
+                        eprintln!("BROWSER page wants the keyboard ({}): keyboard on {keyboard_on}, pressed just now {}", v["why"].as_str().unwrap_or("?"), crate::webview::pressed_recently(view));
+                    }
+                    // A field you clicked into, or text you selected: the page takes your typing
+                    // (and ⌘C) until you press elsewhere. Only after your own press there.
+                    if !keyboard_on && crate::webview::pressed_recently(view) {
+                        tab.web.grant_keyboard();
+                    }
+                    return false;
+                }
                 tab.log(&v);
             }
             // The log strip shows counts: told a few times a second at most.

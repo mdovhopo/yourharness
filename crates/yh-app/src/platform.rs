@@ -179,6 +179,12 @@ pub fn mouse_button(w: id, x: f32, y: f32, press: Press) {
     unsafe {
         let event = mouse_event(w, kind, window_point(w, x, y), if matches!(press, Press::Drag) { 0 } else { 1 });
         if event != nil {
+            // Sent to the window, it skips the app's event monitors: what they'd see, told.
+            match press {
+                Press::Down => crate::webview::focus_for_press(event),
+                Press::Up => crate::webview::note_release(event),
+                Press::Drag => {}
+            }
             let _: () = msg_send![w, sendEvent: event];
         }
     }
@@ -394,6 +400,23 @@ fn screen_state() -> (bool, bool) {
             }
         }
         (locked, asleep)
+    }
+}
+
+/// Windows open and close without macOS's zoom animation. AppKit runs it on a worker thread
+/// (`_NSWindowTransformAnimation`), committing the whole app's Core Animation work there; one of
+/// Chromium's frames in flight then had its block released off the main thread, and Chromium
+/// stopped the app (a window opening at launch, with the browser just starting). Before any window.
+pub fn no_window_animations() {
+    use objc::runtime::{Object, Sel};
+    unsafe extern "C" {
+        fn class_replaceMethod(cls: *const objc::runtime::Class, name: Sel, imp: *const std::ffi::c_void, types: *const std::ffi::c_char) -> *const std::ffi::c_void;
+    }
+    extern "C" fn none(_: &Object, _: Sel) -> isize {
+        2 // NSWindowAnimationBehaviorNone
+    }
+    unsafe {
+        class_replaceMethod(class!(NSWindow), sel!(animationBehavior), none as *const std::ffi::c_void, c"q@:".as_ptr());
     }
 }
 

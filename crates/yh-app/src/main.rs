@@ -181,6 +181,7 @@ fn main() {
         let library = library.clone();
         // Voice input, before the window: the composer listens to it.
         state::voice::Voice::start_global(library.clone(), cx);
+        platform::no_window_animations();
         let (window, root) = gpui_kit::open_window(options, cx, |window, cx| {
             theme::apply_appearance(window.appearance(), window, cx);
             let workspace = cx.new(|cx| Workspace::new(library.clone(), cx));

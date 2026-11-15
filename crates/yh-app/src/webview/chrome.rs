@@ -1912,6 +1912,36 @@ impl WebView {
         }
     }
 
+    /// The keyboard to this page now (`grant_keyboard`): Chromium's page view, which accepts it
+    /// while the page is in `TYPING`.
+    pub fn take_keyboard(&self) {
+        fn page_view(view: id) -> id {
+            unsafe {
+                let class = rust_string(msg_send![view, className]).unwrap_or_default();
+                if class == "RenderWidgetHostViewCocoa" {
+                    return view;
+                }
+                let subs: id = msg_send![view, subviews];
+                let n: usize = msg_send![subs, count];
+                for i in 0..n {
+                    let found = page_view(msg_send![subs, objectAtIndex: i]);
+                    if found != nil {
+                        return found;
+                    }
+                }
+                nil
+            }
+        }
+        unsafe {
+            let holder = self.key() as id;
+            let window: id = msg_send![holder, window];
+            let view = page_view(holder);
+            if window != nil && view != nil {
+                let _: bool = msg_send![window, makeFirstResponder: view];
+            }
+        }
+    }
+
     fn mouse(&self, kind: &'static str, x: f64, y: f64, button: &'static str, buttons: i32, clicks: isize, mods: usize) {
         let key = self.key();
         // Under device emulation, DevTools takes input where it lands in the view, scaled.
