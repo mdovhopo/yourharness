@@ -2153,6 +2153,28 @@ pub fn run_probe(path: String, thread: String, project: Option<String>) {
                 eprintln!("== {index} engine {}", engine.name());
                 continue;
             }
+            // `{"cursor": true}`: whether the cursor shown is the one the page asked for (Chrome).
+            if step["cursor"].as_bool() == Some(true) {
+                let (tx, rx) = flume::bounded(1);
+                if let Some(jobs) = JOBS.get() {
+                    let _ = jobs.send(Box::new(move |_, cx| {
+                        // After a frame GPUI drew (it resets the cursor then).
+                        cx.refresh_windows();
+                        let _ = tx.send(());
+                    }));
+                }
+                let _ = rx.recv_timeout(Duration::from_secs(2));
+                std::thread::sleep(Duration::from_millis(300));
+                let (tx, rx) = flume::bounded(1);
+                if let Some(jobs) = JOBS.get() {
+                    let _ = jobs.send(Box::new(move |_, _| {
+                        let _ = tx.send((crate::webview::chrome::page_cursor_is_current(), crate::webview::chrome::cursor_is_hand()));
+                    }));
+                }
+                let got = rx.recv_timeout(Duration::from_secs(2)).ok();
+                eprintln!("== {index} cursor: the page's {:?}, pointing hand {:?}", got.map(|g| g.0), got.map(|g| g.1));
+                continue;
+            }
             // `{"retry_engine": true}`: the panel's Try Again after the Chrome engine's download failed.
             if step["retry_engine"].as_bool() == Some(true) {
                 if let Some(jobs) = JOBS.get() {

@@ -410,13 +410,13 @@ fn screen_state() -> (bool, bool) {
 pub fn no_window_animations() {
     use objc::runtime::{Object, Sel};
     unsafe extern "C" {
-        fn class_replaceMethod(cls: *const objc::runtime::Class, name: Sel, imp: *const std::ffi::c_void, types: *const std::ffi::c_char) -> *const std::ffi::c_void;
+        fn class_replaceMethod(cls: *mut std::ffi::c_void, name: Sel, imp: *const std::ffi::c_void, types: *const std::ffi::c_char) -> *const std::ffi::c_void;
     }
     extern "C" fn none(_: &Object, _: Sel) -> isize {
         2 // NSWindowAnimationBehaviorNone
     }
     unsafe {
-        class_replaceMethod(class!(NSWindow), sel!(animationBehavior), none as *const std::ffi::c_void, c"q@:".as_ptr());
+        class_replaceMethod(class!(NSWindow) as *const objc::runtime::Class as *mut std::ffi::c_void, sel!(animationBehavior), none as *const std::ffi::c_void, c"q@:".as_ptr());
     }
 }
 

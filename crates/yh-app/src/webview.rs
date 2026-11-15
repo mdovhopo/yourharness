@@ -183,14 +183,14 @@ pub(super) fn web_view_of(mut view: id) -> id {
 /// never take it by themselves (WebKit's first-responder changes stay suppressed, Chromium's
 /// view accepts it only while typing is on).
 pub(super) fn watch_focus() {
+    install_send_event();
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| unsafe {
         let handler = ConcreteBlock::new(|event: id| -> id {
             let kind: u64 = msg_send![event, type];
-            if kind == 2 {
-                note_release(event);
-            } else {
-                focus_for_press(event);
+            match kind {
+                2 => note_release(event),
+                _ => focus_for_press(event),
             }
             event
         })
@@ -200,6 +200,88 @@ pub(super) fn watch_focus() {
         let monitor: id = msg_send![class!(NSEvent), addLocalMonitorForEventsMatchingMask: mask handler: &*handler];
         let _: id = msg_send![monitor, retain];
     });
+}
+
+/// Whether NSApp is in `sendEvent:` (CEF's `CrAppProtocol` asks).
+pub(super) static HANDLING_SEND_EVENT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+extern "C" fn send_event(this: &objc::runtime::Object, _: objc::runtime::Sel, event: id) {
+    if page_edit_shortcut(event) {
+        return;
+    }
+    let was = HANDLING_SEND_EVENT.swap(true, Ordering::Relaxed);
+    unsafe {
+        let _: () = msg_send![super(this, class!(NSApplication)), sendEvent: event];
+    }
+    HANDLING_SEND_EVENT.store(was, Ordering::Relaxed);
+}
+
+/// NSApp's `sendEvent:` (GPUI's `GPUIApplication` has none of its own): editing shortcuts to a
+/// page that has the keyboard, and CEF's sending-an-event flag. Once.
+pub(super) fn install_send_event() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| unsafe {
+        unsafe extern "C" {
+            fn object_getClass(obj: id) -> *mut std::ffi::c_void;
+            fn class_addMethod(cls: *mut std::ffi::c_void, name: objc::runtime::Sel, imp: *const std::ffi::c_void, types: *const std::ffi::c_char) -> bool;
+        }
+        let app: id = msg_send![class!(NSApplication), sharedApplication];
+        class_addMethod(object_getClass(app), sel!(sendEvent:), send_event as *const std::ffi::c_void, c"v@:@".as_ptr());
+    });
+}
+
+/// ⌘A, ⌘C, ⌘V, ⌘X, ⌘Z and ⇧⌘Z while a page has the keyboard: the page's editing (its view's
+/// `selectAll:`, `copy:`…), not the app's menu's. GPUI's key bindings otherwise take them first,
+/// and Select All, Copy and Paste in a page's field did nothing to it.
+fn page_edit_shortcut(event: id) -> bool {
+    unsafe {
+        let kind: u64 = msg_send![event, type];
+
+        if kind != 10 {
+            return false;
+        }
+        let flags: u64 = msg_send![event, modifierFlags];
+        let (cmd, shift, others) = (flags & (1 << 20) != 0, flags & (1 << 17) != 0, flags & ((1 << 18) | (1 << 19)) != 0);
+        if !cmd || others {
+            return false;
+        }
+        let window: id = msg_send![event, window];
+        if window == nil {
+            return false;
+        }
+        let first: id = msg_send![window, firstResponder];
+        let is_view: bool = first != nil && msg_send![first, isKindOfClass: class!(NSView)];
+        if !is_view || web_view_of(first) == nil {
+            return false;
+        }
+        let key = rust_string(msg_send![event, charactersIgnoringModifiers]).unwrap_or_default().to_lowercase();
+        let (action, command) = match (key.as_str(), shift) {
+            ("a", false) => (sel!(selectAll:), "selectAll"),
+            ("c", false) => (sel!(copy:), "copy"),
+            ("v", false) => (sel!(paste:), "paste"),
+            ("x", false) => (sel!(cut:), "cut"),
+            ("z", false) => (sel!(undo:), "undo"),
+            ("z", true) => (sel!(redo:), "redo"),
+            _ => return false,
+        };
+        // Chromium's page view doesn't take editing actions (they went up to the app's): the
+        // command goes to the page as its own key event would carry it.
+        let page = web_view_of(first);
+        if chrome::is_page_view(page) {
+            let code: u16 = msg_send![event, keyCode];
+            let done = chrome::edit_command(page as usize, command, &key, code, shift);
+            if std::env::var_os("YH_CHROME_LOG").is_some() {
+                eprintln!("PAGE shortcut ⌘{key}: {command} {}", if done { "sent" } else { "not sent" });
+            }
+            return done;
+        }
+        let app: id = msg_send![class!(NSApplication), sharedApplication];
+        let done: bool = msg_send![app, sendAction: action to: nil from: nil];
+        if std::env::var_os("YH_CHROME_LOG").is_some() {
+            eprintln!("PAGE shortcut ⌘{key}: {} to {}", if done { "sent" } else { "not taken" }, rust_string(msg_send![first, className]).unwrap_or_default());
+        }
+        done
+    }
 }
 
 /// The left button let go over a page: what the page asks for right after (the keyboard, for text
@@ -456,7 +538,10 @@ impl WebView {
         }
         GRANTED.with(|g| g.borrow_mut().insert(key));
         TYPING.with(|t| t.borrow_mut().insert(key));
-        both!(self, w => w.take_keyboard())
+        both!(self, w => w.take_keyboard());
+        // The field you clicked, focused now that the page may have it (WebKit didn't focus it).
+        let (tx, _rx) = flume::bounded(1);
+        self.call("const f = window.__yhField; if (f && document.activeElement !== f) f.focus(); return true", true, tx);
     }
     /// A click at a point in CSS pixels, as real input: `left` or `right`, `count` times.
     pub fn click(&self, x: f64, y: f64, right: bool, count: isize, modifiers: usize) { both!(self, w => w.click(x, y, right, count, modifiers)) }

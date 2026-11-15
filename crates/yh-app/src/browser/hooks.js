@@ -42,9 +42,13 @@
     (t.tagName === 'INPUT' && /^(|text|search|email|url|tel|password|number|date|datetime-local|month|week|time)$/i.test(t.type || '')));
   // On the click itself: while the page doesn't have the keyboard its window counts as unfocused,
   // and focus moves to a field without any focus event.
+  // WebKit doesn't focus it at all then: what was clicked counts, and the app focuses it once the
+  // page has the keyboard (`window.__yhField`).
   addEventListener('mouseup', (e) => {
     if (!e.isTrusted) return;
-    if (textual(document.activeElement)) post({ kind: 'keyboard', why: 'field' });
+    const clicked = e.target && e.target.closest ? e.target.closest('input, textarea, select, [contenteditable]') : null;
+    const field = textual(document.activeElement) ? document.activeElement : textual(clicked) ? clicked : null;
+    if (field) { window.__yhField = field; post({ kind: 'keyboard', why: 'field' }); }
     else if (String(getSelection()).length) post({ kind: 'keyboard', why: 'selection' });
   }, true);
   addEventListener('unhandledrejection', (e) => post({ kind: 'console', level: 'error', text: 'Unhandled rejection: ' + fmt(e.reason) }));

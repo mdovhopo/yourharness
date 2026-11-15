@@ -476,6 +476,8 @@ fn main() {
                     eprintln!("TYPE first responder before typing: {}", platform::first_responder_class(w));
                 }
                 for step in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    // `cmd-<key>`: with ⌘ (a shortcut through the whole AppKit path).
+                    let (cmd, step) = match step.strip_prefix("cmd-") { Some(k) => (true, k), None => (false, step) };
                     let (shift, key) = match step.strip_prefix("shift-") { Some(k) => (true, k), None => (false, step) };
                     let (plain, code): (String, u16) = match key {
                         "space" => (" ".into(), 49),
@@ -487,7 +489,7 @@ fn main() {
                         other => { eprintln!("TYPE can't read {other}"); continue }
                     };
                     let chars = if shift { plain.to_uppercase() } else { plain.clone() };
-                    let flags = if shift { 1u64 << 17 } else { 0 };
+                    let flags = if shift { 1u64 << 17 } else { 0 } | if cmd { 1u64 << 20 } else { 0 };
                     #[allow(deprecated)]
                     let target = ns as cocoa::base::id;
                     platform::key_event(target, &chars, &plain, code, flags);

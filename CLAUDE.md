@@ -89,8 +89,9 @@ result printed, screenshots next to the file as `<steps>.<n>.jpg`, then `== plac
 `YH_BROWSER_PROBE_THREAD=<id>` runs it on that thread while `YH_SELECT` opens another; steps may also be
 `{"control": true|false}`, Take Control and Give Back as the panel's button does, `{"keyboard": true|false}`, the
 Typing in Page toggle (`YH_TYPE_KEYS_CLICKS` then shows where your clicks put the keyboard), `{"crash": true}`, the tab's web
-content process ended as a crash would, `{"engine": "webkit"}`, the engine switched as Settings does, and `{"retry_engine": true}`,
-the panel's Try Again after the Chrome engine's download failed). Browser panel checks: `YH_BROWSER_ACTIVITY_LOG=1` prints each time the page
+content process ended as a crash would, `{"engine": "webkit"}`, the engine switched as Settings does, `{"retry_engine": true}`,
+the panel's Try Again after the Chrome engine's download failed, and `{"cursor": true}`, whether the cursor shown is the page's;
+`YH_CHROME_MENU=log` lists Chrome's right-click menus instead of showing them). Browser panel checks: `YH_BROWSER_ACTIVITY_LOG=1` prints each time the page
 shows where the agent acts (`YH_BROWSER_ACTIVITY_SHOT=<png>` draws that overlay alone, which screenshots leave out),
 `YH_BROWSER_DIALOG_ANSWER=ok|cancel` answers a page's alert, confirm or prompt through the card you'd click,
 `YH_BROWSER_PANE=console|network|none` picks the log strip's pane or folds it (`YH_BROWSER_ERRORS_ONLY=1` filtered),
@@ -116,7 +117,7 @@ its empty state), `YH_QUEUE=<text>` (sent `YH_QUEUE_DELAY` s after launch, 3, so
 `YH_SEND` turn; `YH_QUEUE_ACTION=now|edit|remove` then does what its buttons do, `YH_QUEUE_ACTION_DELAY` s later), `YH_STOP=<s>` (⌘. that long after launch, through the window: prints `STOP pressed` and what the composer holds 3 s later),
 `YH_SEND_SEQ=<a>|<b>|…` (sent to the selected thread one after another, each once the last turn is over: for
 `/btw`, `/model`, `/effort`, `/rename`, `/clear`, `/context`, `/usage`, or a second message naming a skill to chain),
-`YH_SCROLL_BARS=always` shows the transcript's and sub-agent detail's scroll bars all the time, for snapshots (they follow the Mac's Show scroll bars setting otherwise). `YH_TYPE_KEYS=h,i,shift-space,x,space,y` types into the composer as real key events sent through the application (key equivalents first, as a key press goes; `shift-<key>`, `space`, `return`, letters and digits), `YH_TYPE_KEYS_DELAY` seconds after launch (3), then prints `TYPE composer holds "…"`; `YH_TYPE_KEYS_CLICKS=0.88,0.4;0.4,0.93` clicks those fractions of the window first (the browser's page, then the composer, as a person would) instead of focusing the composer. `YH_DRAFT=<text>` (typed in the composer:
+`YH_SCROLL_BARS=always` shows the transcript's and sub-agent detail's scroll bars all the time, for snapshots (they follow the Mac's Show scroll bars setting otherwise). `YH_TYPE_KEYS=h,i,shift-space,x,space,y` types into the composer as real key events sent through the application (key equivalents first, as a key press goes; `shift-<key>`, `cmd-<key>`, `space`, `return`, letters and digits), `YH_TYPE_KEYS_DELAY` seconds after launch (3), then prints `TYPE composer holds "…"`; `YH_TYPE_KEYS_CLICKS=0.88,0.4;0.4,0.93` clicks those fractions of the window first (the browser's page, then the composer, as a person would) instead of focusing the composer. `YH_DRAFT=<text>` (typed in the composer:
 `/co` opens the command menu, `@no` the file menu; `YH_DRAFT_DELAY`), `YH_FIND=<words>` (Find
 opened), `YH_EXPAND_WORK=1` (folded work drawn open), `YH_ACTIONS_PROBE=1` (pin, rename, settle,
 delete on the first threads). Also `YH_SNAPSHOT=<png>` (`_DELAY`, `_QUIT`), `YH_DEMO=<script.json>` (a scripted demo recorded to video with a drawn pointer, captions and zooms for the edit; `crates/yh-app/src/demo.rs`, scripts/demo/README.md), `YH_WINDOW_SIZE=<w>x<h>`, `YH_BACKGROUND=1`,

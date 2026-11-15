@@ -179,8 +179,6 @@ fn main_queue(f: fn()) {
 
 // ---- NSApp: the protocol CEF asks of it ----
 
-static HANDLING_SEND_EVENT: AtomicBool = AtomicBool::new(false);
-
 unsafe extern "C" {
     fn object_getClass(obj: id) -> *mut c_void;
     fn objc_getClass(name: *const std::ffi::c_char) -> *mut c_void;
@@ -191,19 +189,11 @@ unsafe extern "C" {
 }
 
 extern "C" fn is_handling_send_event(_: &Object, _: Sel) -> objc::runtime::BOOL {
-    HANDLING_SEND_EVENT.load(Ordering::Relaxed)
+    super::HANDLING_SEND_EVENT.load(Ordering::Relaxed)
 }
 
 extern "C" fn set_handling_send_event(_: &Object, _: Sel, value: objc::runtime::BOOL) {
-    HANDLING_SEND_EVENT.store(value, Ordering::Relaxed);
-}
-
-extern "C" fn send_event(this: &Object, _: Sel, event: id) {
-    let was = HANDLING_SEND_EVENT.swap(true, Ordering::Relaxed);
-    unsafe {
-        let _: () = msg_send![super(this, class!(NSApplication)), sendEvent: event];
-    }
-    HANDLING_SEND_EVENT.store(was, Ordering::Relaxed);
+    super::HANDLING_SEND_EVENT.store(value, Ordering::Relaxed);
 }
 
 /// Adds CEF's `CefAppProtocol` to NSApp's class (GPUI's `GPUIApplication`): the two methods and
@@ -215,7 +205,8 @@ unsafe fn install_app_protocol() {
         let cls = object_getClass(app);
         class_addMethod(cls, sel!(isHandlingSendEvent), is_handling_send_event as *const c_void, c"c@:".as_ptr());
         class_addMethod(cls, sel!(setHandlingSendEvent:), set_handling_send_event as *const c_void, c"v@:c".as_ptr());
-        class_addMethod(cls, sel!(sendEvent:), send_event as *const c_void, c"v@:@".as_ptr());
+        // Its `sendEvent:` marks events being handled (webview.rs).
+        super::install_send_event();
         for name in [c"CrAppProtocol", c"CrAppControlProtocol", c"CefAppProtocol"] {
             let p = objc_getProtocol(name.as_ptr());
             if !p.is_null() {
@@ -239,6 +230,41 @@ unsafe fn guard_first_responder() {
         if !cls.is_null() {
             class_replaceMethod(cls, sel!(acceptsFirstResponder), accepts_first_responder as *const c_void, c"c@:".as_ptr());
         }
+    }
+}
+
+// ---- The cursor over a page ----
+
+/// The cursor a page last asked for (retained), or 0.
+static PAGE_CURSOR: AtomicUsize = AtomicUsize::new(0);
+/// The cursor a page last asked for, for test runs.
+pub fn page_cursor_is_current() -> Option<bool> {
+    let page = PAGE_CURSOR.load(Ordering::Acquire);
+    if page == 0 {
+        return None;
+    }
+    unsafe {
+        let current: id = msg_send![class!(NSCursor), currentCursor];
+        Some(current as usize == page)
+    }
+}
+
+fn cursor_is(cursor: id, which: &str) -> bool {
+    unsafe {
+        let other: id = match which {
+            "pointingHandCursor" => msg_send![class!(NSCursor), pointingHandCursor],
+            _ => msg_send![class!(NSCursor), arrowCursor],
+        };
+        cursor == other
+    }
+}
+
+/// Whether the cursor shown is the pointing hand, for test runs.
+pub fn cursor_is_hand() -> bool {
+    unsafe {
+        let current: id = msg_send![class!(NSCursor), currentCursor];
+        let hand: id = msg_send![class!(NSCursor), pointingHandCursor];
+        current == hand
     }
 }
 
@@ -919,12 +945,26 @@ fn with_inner<T>(browser: Option<&mut Browser>, f: impl FnOnce(&mut Inner) -> T)
     Some(f(&mut i))
 }
 
-/// The view a page's browser is made in: a plain view, known by its class.
+/// The view a page's browser is made in: a plain view, known by its class, whose cursor rect is
+/// the page's cursor (`on_cursor_change`).
 fn holder_class() -> &'static objc::runtime::Class {
     use objc::declare::ClassDecl;
     static CLASS: OnceLock<usize> = OnceLock::new();
+    extern "C" fn reset_cursor_rects(this: &Object, _: Sel) {
+        let cursor = PAGE_CURSOR.load(Ordering::Acquire) as id;
+        if cursor == nil {
+            return;
+        }
+        unsafe {
+            let bounds: NSRect = msg_send![this, bounds];
+            let _: () = msg_send![this, addCursorRect: bounds cursor: cursor];
+        }
+    }
     let ptr = *CLASS.get_or_init(|| {
-        let decl = ClassDecl::new("YHChromeView", class!(NSView)).expect("YHChromeView");
+        let mut decl = ClassDecl::new("YHChromeView", class!(NSView)).expect("YHChromeView");
+        unsafe {
+            decl.add_method(sel!(resetCursorRects), reset_cursor_rects as extern "C" fn(&Object, Sel));
+        }
         decl.register() as *const objc::runtime::Class as usize
     });
     unsafe { &*(ptr as *const objc::runtime::Class) }
@@ -1255,6 +1295,35 @@ wrap_display_handler! {
 
         fn on_loading_progress_change(&self, browser: Option<&mut Browser>, progress: f64) {
             with_inner(browser, |i| i.progress = progress);
+        }
+
+        /// The cursor the page wants (a hand over a link, an I-beam over text). GPUI covers its
+        /// whole view with a cursor rect of its own style (the arrow over a page), which AppKit
+        /// enforces on every move: the page's holder declares the page's cursor in its own rect,
+        /// which wins over its superview's there (`holder_class`). Chromium sets it itself too.
+        fn on_cursor_change(&self, browser: Option<&mut Browser>, cursor: *mut u8, _type_: CursorType, _custom_cursor_info: Option<&CursorInfo>) -> i32 {
+            let cursor = cursor as id;
+            let holder = key_of(browser).map_or(nil, |k| k as id);
+            if cursor != nil {
+                unsafe {
+                    let _: id = msg_send![cursor, retain];
+                }
+                let old = PAGE_CURSOR.swap(cursor as usize, Ordering::AcqRel);
+                if old != 0 {
+                    unsafe {
+                        let _: () = msg_send![old as id, release];
+                    }
+                }
+                if holder != nil && old != cursor as usize {
+                    unsafe {
+                        let window: id = msg_send![holder, window];
+                        if window != nil {
+                            let _: () = msg_send![window, invalidateCursorRectsForView: holder];
+                        }
+                    }
+                }
+            }
+            0
         }
     }
 }
@@ -1620,6 +1689,18 @@ impl Inner {
             _observer: None,
         }
     }
+}
+
+/// An editing command (`selectAll`, `copy`, `paste`, `cut`, `undo`, `redo`) to the page `key`, as
+/// its ⌘ shortcut's key event carries it (`webview::page_edit_shortcut`). False when there's no
+/// browser to take it.
+pub fn edit_command(key: usize, command: &str, plain: &str, code: u16, shift: bool) -> bool {
+    let Some(browser) = inner_of(key).and_then(|i| i.borrow().browser.clone()) else { return false };
+    let (code_name, vk) = char_code(plain.chars().next().unwrap_or('a'));
+    let modifiers = 4 | if shift { 8 } else { 0 };
+    fire(&browser, "Input.dispatchKeyEvent", json!({"type": "rawKeyDown", "key": plain, "code": code_name, "windowsVirtualKeyCode": vk, "nativeVirtualKeyCode": code, "modifiers": modifiers, "commands": [command]}));
+    fire(&browser, "Input.dispatchKeyEvent", json!({"type": "keyUp", "key": plain, "code": code_name, "windowsVirtualKeyCode": vk, "nativeVirtualKeyCode": code, "modifiers": modifiers}));
+    true
 }
 
 /// A page's popup, made by Chromium in `holder`.
