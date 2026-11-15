@@ -25,6 +25,123 @@ use std::time::{Duration, Instant};
 /// The framework's binary, inside the folder it was unpacked to.
 const FRAMEWORK: &str = "Chromium Embedded Framework.framework";
 
+// ---- The sandbox: the downloaded framework readable by the helpers ----
+//
+// Chromium's sandbox lets helpers read the app's own bundle, and the framework is downloaded
+// outside it. Policies for renderers and utilities are compiled here, in the app, by the
+// framework calling libsandbox's `sandbox_compile_string`; that import is pointed at
+// `compile_widened`, which adds one read-only rule for the framework's folder and calls the real
+// one. (Other helpers get their policy as source and widen it themselves: `yh-cef-helper`.)
+
+type CompileFn = unsafe extern "C" fn(*const std::ffi::c_char, *mut c_void, *mut *mut std::ffi::c_char) -> *mut c_void;
+static REAL_COMPILE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static FRAMEWORK_RULE: OnceLock<CString> = OnceLock::new();
+static WIDENED: AtomicU64 = AtomicU64::new(0);
+
+unsafe extern "C" fn compile_widened(profile: *const std::ffi::c_char, params: *mut c_void, error: *mut *mut std::ffi::c_char) -> *mut c_void {
+    let real: CompileFn = unsafe { std::mem::transmute(REAL_COMPILE.load(Ordering::Acquire)) };
+    let (Some(rule), false) = (FRAMEWORK_RULE.get(), profile.is_null()) else { return unsafe { real(profile, params, error) } };
+    let mut text = unsafe { std::ffi::CStr::from_ptr(profile) }.to_bytes().to_vec();
+    text.extend_from_slice(rule.as_bytes());
+    let widened = CString::new(text).unwrap_or_default();
+    WIDENED.fetch_add(1, Ordering::Relaxed);
+    unsafe { real(widened.as_ptr(), params, error) }
+}
+
+unsafe extern "C" {
+    fn _dyld_image_count() -> u32;
+    fn _dyld_get_image_header(index: u32) -> *const u8;
+    fn _dyld_get_image_vmaddr_slide(index: u32) -> isize;
+    fn _dyld_get_image_name(index: u32) -> *const std::ffi::c_char;
+    static mach_task_self_: u32;
+    fn vm_protect(task: u32, address: usize, size: usize, set_maximum: i32, protection: i32) -> i32;
+}
+
+/// Points every import of `symbol` in the loaded image whose path ends with `image` at
+/// `replacement` (as fishhook does: its symbol-pointer sections, through the indirect symbol
+/// table), returning the address it pointed at, or None when there's none.
+unsafe fn rebind(image: &str, symbol: &str, replacement: usize) -> Option<usize> {
+    unsafe {
+        let index = (0.._dyld_image_count()).find(|&i| {
+            let name = _dyld_get_image_name(i);
+            !name.is_null() && std::ffi::CStr::from_ptr(name).to_string_lossy().ends_with(image)
+        })?;
+        let header = _dyld_get_image_header(index);
+        let slide = _dyld_get_image_vmaddr_slide(index);
+        let read32 = |p: *const u8| (p as *const u32).read_unaligned();
+        let read64 = |p: *const u8| (p as *const u64).read_unaligned();
+        let ncmds = read32(header.add(16));
+        let mut cmd = header.add(32);
+        let (mut linkedit, mut symtab, mut dysymtab) = (None, None, None);
+        let mut sections = Vec::new();
+        for _ in 0..ncmds {
+            let (kind, size) = (read32(cmd), read32(cmd.add(4)));
+            match kind {
+                0x19 => {
+                    let segname = std::ffi::CStr::from_ptr(cmd.add(8).cast()).to_bytes().to_vec();
+                    if segname == b"__LINKEDIT" {
+                        linkedit = Some((read64(cmd.add(24)), read64(cmd.add(40))));
+                    } else if segname.starts_with(b"__DATA") || segname.starts_with(b"__AUTH") {
+                        let nsects = read32(cmd.add(64));
+                        let mut sect = cmd.add(72);
+                        for _ in 0..nsects {
+                            let flags = read32(sect.add(64));
+                            if matches!(flags & 0xff, 0x6 | 0x7) {
+                                sections.push((read64(sect.add(32)), read64(sect.add(40)), read32(sect.add(68))));
+                            }
+                            sect = sect.add(80);
+                        }
+                    }
+                }
+                0x2 => symtab = Some((read32(cmd.add(8)), read32(cmd.add(16)))),
+                0xb => dysymtab = Some(read32(cmd.add(56))),
+                _ => {}
+            }
+            cmd = cmd.add(size as usize);
+        }
+        let ((link_vm, link_off), (symoff, stroff), indirectoff) = (linkedit?, symtab?, dysymtab?);
+        let base = (slide as i64 + link_vm as i64 - link_off as i64) as usize as *const u8;
+        let (syms, strs, indirect) = (base.add(symoff as usize), base.add(stroff as usize), base.add(indirectoff as usize));
+        let mut previous = None;
+        for (addr, size, first) in sections {
+            let slots = (slide as i64 + addr as i64) as usize as *mut usize;
+            for i in 0..(size / 8) as usize {
+                let sym = read32(indirect.add((first as usize + i) * 4));
+                if sym & 0xC000_0000 != 0 {
+                    continue;
+                }
+                let strx = read32(syms.add(sym as usize * 16));
+                if std::ffi::CStr::from_ptr(strs.add(strx as usize).cast()).to_bytes() != symbol.as_bytes() {
+                    continue;
+                }
+                let slot = slots.add(i);
+                let page = (slot as usize) & !(16383);
+                // VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY: a private copy of the page.
+                if vm_protect(mach_task_self_, page, 16384, 0, 0x1 | 0x2 | 0x10) != 0 {
+                    return previous;
+                }
+                previous.get_or_insert(slot.read());
+                slot.write(replacement);
+            }
+        }
+        previous
+    }
+}
+
+/// Widens the sandbox Chromium compiles to the framework at `framework` (its `.framework`).
+unsafe fn widen_sandbox(framework: &std::path::Path) -> bool {
+    let dir = std::fs::canonicalize(framework).unwrap_or_else(|_| framework.to_path_buf());
+    let quoted = dir.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"");
+    let _ = FRAMEWORK_RULE.set(CString::new(format!("\n; YourHarness: the downloaded framework, read-only.\n(allow file-read* (subpath \"{quoted}\"))\n")).unwrap_or_default());
+    match unsafe { rebind("/Chromium Embedded Framework", "_sandbox_compile_string", compile_widened as usize) } {
+        Some(real) => {
+            REAL_COMPILE.store(real, Ordering::Release);
+            true
+        }
+        None => false,
+    }
+}
+
 // ---- NSApp: the protocol CEF asks of it ----
 
 static HANDLING_SEND_EVENT: AtomicBool = AtomicBool::new(false);
@@ -306,6 +423,7 @@ pub fn start(framework_dir: &std::path::Path, root_cache: &std::path::Path) -> R
             let _ = api_hash(sys::CEF_API_VERSION_LAST, 0);
             install_app_protocol();
             guard_first_responder();
+            eprintln!("CEF sandbox widened to the framework: {}", widen_sandbox(&framework));
             *STATS.lock().unwrap() = Some(PumpStats::default());
             // `YH_CEF_BUNDLE`: the downloaded browser bundle (the framework and the helpers in its
             // Frameworks), which CEF takes as its main bundle: the sandbox lets helpers read it.
@@ -699,7 +817,11 @@ fn first_responder(window: id) -> String {
     }
 }
 
-/// Memory of the app and of every process it started, in MB.
+unsafe extern "C" {
+    fn sandbox_check(pid: libc::pid_t, operation: *const std::ffi::c_char, filter: i32, ...) -> i32;
+}
+
+/// Memory of the app and of every process it started, in MB, and whether each is sandboxed.
 fn memory() -> String {
     let me = std::process::id();
     let Ok(out) = std::process::Command::new("ps").args(["-axo", "pid=,ppid=,rss=,comm="]).output() else { return "ps failed".into() };
@@ -719,10 +841,12 @@ fn memory() -> String {
     let mut total = 0;
     for r in rows.iter().filter(|r| r.1 == me) {
         let name = r.3.rsplit('/').next().unwrap_or(&r.3).to_string();
-        helpers.push(format!("{name} {} MB", r.2 / 1024));
+        let sandboxed = unsafe { sandbox_check(r.0 as libc::pid_t, std::ptr::null(), 0) } != 0;
+        let _ = WIDENED.load(Ordering::Relaxed);
+        helpers.push(format!("{name} {} MB{}", r.2 / 1024, if sandboxed { " (sandboxed)" } else { "" }));
         total += r.2;
     }
-    format!("app {} MB; {} children {} MB: {}", own / 1024, helpers.len(), total / 1024, helpers.join(", "))
+    format!("policies widened {} · app {} MB; {} children {} MB: {}", WIDENED.load(Ordering::Relaxed), own / 1024, helpers.len(), total / 1024, helpers.join(", "))
 }
 
 /// Spike: a main-queue heartbeat every 2 ms, how late each one ran (ms × 100, worst and >8 ms).
