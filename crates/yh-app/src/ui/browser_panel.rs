@@ -98,6 +98,8 @@ pub struct BrowserPanel {
     servers: Option<(String, Vec<String>)>,
     scanning: bool,
     _rescan: Option<Task<()>>,
+    /// While the Chrome engine downloads: the panel drawn again now and then, for its progress.
+    _installing: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -146,6 +148,7 @@ impl BrowserPanel {
             servers: None,
             scanning: false,
             _rescan: None,
+            _installing: None,
             _subscriptions: subscriptions,
         }
     }
@@ -654,8 +657,9 @@ impl BrowserPanel {
                 menu.separator()
                     .item(PopupMenuItem::new("Open in Default Browser").icon(IconName::ExternalLink).disabled(u1.is_empty()).on_click(move |_, _, cx| cx.open_url(&u1)))
                     .item(PopupMenuItem::new("Copy Address").icon(IconName::Copy).disabled(u2.is_empty()).on_click(move |_, _, cx| cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(u2.clone()))))
-                    .item(PopupMenuItem::new("Show Web Inspector").icon(IconName::Inspector).on_click(move |_, window, cx| {
-                        if Browsers::with_tab(&t3, |t| t.web.show_inspector()) != Some(true) {
+                    .item(PopupMenuItem::new(if crate::webview::engine() == crate::webview::Engine::Chrome { "Show DevTools" } else { "Show Web Inspector" }).icon(IconName::Inspector).on_click(move |_, window, cx| {
+                        let webkit = Browsers::with_tab(&t3, |t| t.web.engine() == crate::webview::Engine::WebKit).unwrap_or(false);
+                        if Browsers::with_tab(&t3, |t| t.web.show_inspector()) != Some(true) && webkit {
                             window.open_alert_dialog(cx, |a, _, _| {
                                 a.title("Open the Web Inspector from Safari").description("In Safari, turn on Settings → Advanced → Show features for web developers, then choose Develop → this Mac → YourHarness → the page.").ok_text("OK")
                             });
@@ -1038,6 +1042,44 @@ impl Render for BrowserPanel {
                     cx.notify();
                 })))
         });
+        // The Chrome engine, downloading or not installed: said over the page, which waits.
+        let install = (crate::webview::engine() == crate::webview::Engine::Chrome).then(crate::webview::chrome::install_state);
+        let installing = match &install {
+            Some(crate::webview::chrome::Install::Downloading(got, total)) => Some(if *total > 0 {
+                format!("Downloading the browser engine (Chrome): {} of {} MB. The page opens when it's done.", got / 1_000_000, total / 1_000_000)
+            } else {
+                "Downloading the browser engine (Chrome). The page opens when it's done.".to_string()
+            }),
+            Some(crate::webview::chrome::Install::Failed(e)) => Some(format!("The browser engine couldn't be installed{}.", if e.is_empty() { String::new() } else { format!(": {e}") })),
+            _ => None,
+        };
+        if matches!(install, Some(crate::webview::chrome::Install::Downloading(..))) {
+            if self._installing.is_none() {
+                self._installing = Some(cx.spawn(async move |this, cx| loop {
+                    cx.background_executor().timer(Duration::from_millis(500)).await;
+                    let more = matches!(crate::webview::chrome::install_state(), crate::webview::chrome::Install::Downloading(..));
+                    if this.update(cx, |_, cx| cx.notify()).is_err() || !more {
+                        break;
+                    }
+                }));
+            }
+        } else {
+            self._installing = None;
+        }
+        let failed = matches!(install, Some(crate::webview::chrome::Install::Failed(_)));
+        let installing = installing.map(|text| {
+            notice_card(&theme)
+                .items_center()
+                .gap(px(space::S))
+                .child(Icon::new(IconName::Globe).size(px(14.)).text_color(theme.secondary))
+                .child(div().flex_1().min_w_0().whitespace_normal().text_size(px(text::FOOTNOTE)).child(text))
+                .children(failed.then(|| {
+                    Button::new("browser-engine-retry").small().outline().label("Try Again").on_click(cx.listener(|_, _, _, cx| {
+                        crate::webview::chrome::retry();
+                        cx.notify();
+                    }))
+                }))
+        });
         let dialog = match shown.dialog.clone() {
             Some(d) => Some(self.dialog_card(&d, shown.tab, &theme, window, cx)),
             None => None,
@@ -1106,6 +1148,7 @@ impl Render for BrowserPanel {
                     .children(last),
             )
             .children(progress)
+            .children(installing)
             .children(banner)
             .children(dialog)
             .children(confirm)

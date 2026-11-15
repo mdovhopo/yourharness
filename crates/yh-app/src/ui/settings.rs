@@ -892,7 +892,24 @@ impl SettingsView {
                 section("Browser")
                     .child(self.toggle("browserTools", "Let Claude use the browser", cx))
                     .child(self.toggle("browserAutoShow", "Show the browser when Claude opens a page", cx))
-                    .footer("Claude opens, reads, clicks and types in a browser built into the app, to test what it builds; you watch in the sidebar and can take control. Each project keeps its own cookies."),
+                    .child(row(
+                        "Engine",
+                        picker(
+                            "browser-engine",
+                            crate::webview::engine().name().to_string(),
+                            vec![("chrome".into(), "Chrome".into()), ("webkit".into(), "WebKit (Safari's)".into())],
+                            {
+                                let lib = self.workspace.read(cx).library.clone();
+                                move |v, _, cx| {
+                                    let Some(engine) = crate::webview::Engine::from_name(&v) else { return };
+                                    lib.set_setting("browserEngine", &Value::from(v));
+                                    crate::browser::Browsers::switch_engine(engine);
+                                    cx.refresh_windows();
+                                }
+                            },
+                        ),
+                    ))
+                    .footer("Claude opens, reads, clicks and types in a browser built into the app, to test what it builds; you watch in the sidebar and can take control. Each project keeps its own cookies. Chrome downloads its engine (about 150 MB) the first time it's used; switching engines reopens open pages in the other one."),
             )
             .child(
                 section("Diagrams")

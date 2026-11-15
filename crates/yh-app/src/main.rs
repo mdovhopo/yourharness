@@ -371,6 +371,10 @@ fn main() {
                 }
             });
         }
+        // `YH_CEF_REFERENCE=<pages>:<out>`: the browser fidelity check's Chrome reference (chrome.rs).
+        if let Some((pages, out)) = env("YH_CEF_REFERENCE").and_then(|v| v.split_once(':').map(|(a, b)| (a.to_string(), b.to_string()))) {
+            webview::chrome::reference(pages, out, cx);
+        }
         // `YH_BROWSER_PROBE=<steps.json>`: browser tool calls run on the selected thread's browser
         // (a new thread in the first project if none is), each result printed (browser::run_probe).
         // `YH_BROWSER_AUTO_SHOW=0` first turns off showing the browser when a page opens, so it

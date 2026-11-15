@@ -37,8 +37,8 @@ use std::sync::{Mutex, OnceLock};
 pub const CEF_VERSION: &str = "156.0.28";
 const FRAMEWORK: &str = "Chromium Embedded Framework.framework";
 const ZIP_URL: &str = "https://github.com/mdovhopo/yourharness/releases/download/cef-156.0.28/Chromium-Embedded-Framework-156.0.28-macos-arm64.zip";
-const ZIP_SHA256: &str = "PENDING";
-const ZIP_BYTES: u64 = 0;
+const ZIP_SHA256: &str = "9ca84bbf342e58b8ec4227e4c449663170b0c350950168517b8c866ee82a7511";
+const ZIP_BYTES: u64 = 146_390_881;
 
 // ---- The framework: where it is, its download ----
 
@@ -76,6 +76,15 @@ pub fn install_state() -> Install {
 
 fn set_install(state: Install) {
     *INSTALL.lock().unwrap() = Some(state);
+}
+
+/// After a failed install: downloads again, and pages waiting for it are made once it's in.
+pub fn retry() {
+    if matches!(install_state(), Install::Failed(_)) {
+        *INSTALL.lock().unwrap() = None;
+        STARTED.store(false, Ordering::Release);
+        install();
+    }
 }
 
 /// Downloads the framework if it's not here (once at a time), then starts CEF on the main thread.
@@ -884,13 +893,12 @@ fn make_pending() {
     }
 }
 
-/// Pages waiting when the engine can't start: their waits end.
+/// Pages waiting when the engine can't start: what the agent waits on ends; they stay waiting
+/// for a retry (`retry`).
 fn fail_pending() {
-    for key in PENDING.with(|p| std::mem::take(&mut *p.borrow_mut())) {
+    for key in PENDING.with(|p| p.borrow().clone()) {
         if let Some(inner) = inner_of(key) {
-            let mut i = inner.borrow_mut();
-            i.queue.clear();
-            i.loading = false;
+            inner.borrow_mut().loading = false;
         }
         post(WebEvent::Failed { view: key, error: "The browser engine couldn't be installed. Switch to WebKit in Settings → Browser, or try again.".into(), url: None });
     }
@@ -953,6 +961,7 @@ fn adopt(key: usize, browser: Browser) {
     fire(&browser, "Runtime.addBinding", json!({"name": "__yhLog"}));
     fire(&browser, "Page.enable", json!({}));
     fire(&browser, "Page.addScriptToEvaluateOnNewDocument", json!({"source": format!("if (window === window.top) {{\n{HOOKS}\n}}")}));
+    fire(&browser, "Page.addScriptToEvaluateOnNewDocument", json!({"source": window_script()}));
     // What waited for the browser goes once the last of these is in, answered by the page's
     // renderer: a load would go straight to the page, ahead of the scripts.
     let b = browser.clone();
@@ -969,6 +978,27 @@ fn adopt(key: usize, browser: Browser) {
 }
 
 const HELPER_WORLD: &str = "YourHarness";
+
+/// The page's window as a browser window its size would be: its outer size its own (not the
+/// app's window, or the parking panel, it's drawn in), the screen's free area the real one (under
+/// device emulation Chromium gives the whole screen).
+fn window_script() -> String {
+    let (aw, ah) = unsafe {
+        let screen: id = msg_send![class!(NSScreen), mainScreen];
+        if screen == nil {
+            (0., 0.)
+        } else {
+            let visible: NSRect = msg_send![screen, visibleFrame];
+            (visible.size.width, visible.size.height)
+        }
+    };
+    let avail = if aw > 0. {
+        format!("for (const [k, v] of [['availWidth', {aw}], ['availHeight', {ah}]]) try {{ Object.defineProperty(Screen.prototype, k, {{ get: () => v, configurable: true }}); }} catch {{}}")
+    } else {
+        String::new()
+    };
+    format!("(() => {{ if (window !== window.top) return; for (const [k, v] of [['outerWidth', () => innerWidth], ['outerHeight', () => innerHeight]]) try {{ Object.defineProperty(window, k, {{ get: v, configurable: true }}); }} catch {{}} {avail} }})();")
+}
 
 // ---- DevTools, in process ----
 
@@ -2005,4 +2035,61 @@ impl Drop for WebView {
             }
         }
     }
+}
+
+/// The browser fidelity check's reference for this engine (`YH_CEF_REFERENCE=<pages>:<out>`):
+/// `layout.html` in a plain page whose window is exactly each viewport, unscaled, as Chrome
+/// draws it. Writes `reference.json` (what the page measures) and `reference-<size>.png`, then
+/// quits (scripts/browser-fidelity).
+pub fn reference(pages: String, out: String, cx: &mut gpui_kit::App) {
+    use std::time::{Duration, Instant};
+    cx.spawn(async move |cx| {
+        let sizes: serde_json::Map<String, Value> = std::fs::read_to_string(format!("{pages}/sizes.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        let metrics = std::fs::read_to_string(format!("{pages}/metrics.js")).unwrap_or_default();
+        let mut results = serde_json::Map::new();
+        for (name, size) in sizes {
+            let (w, h) = (size[0].as_f64().unwrap_or(1000.), size[1].as_f64().unwrap_or(700.));
+            let web = cx.update(|_| unsafe {
+                let window: id = msg_send![class!(NSWindow), alloc];
+                // Borderless, buffered, far off screen.
+                let window: id = msg_send![window, initWithContentRect: NSRect::new(NSPoint::new(-30_000., -30_000.), NSSize::new(w, h)) styleMask: 0usize backing: 2usize defer: cocoa::base::NO];
+                let _: () = msg_send![window, setReleasedWhenClosed: cocoa::base::NO];
+                let _: () = msg_send![window, orderFrontRegardless];
+                let host: id = msg_send![window, contentView];
+                let web = WebView::new(host, None);
+                web.set_viewport(None);
+                web.set_frame(Some((0., 0., w, h)));
+                web.load(&format!("file://{pages}/layout.html?{name}"));
+                (web, window as usize)
+            });
+            let (web, window) = web;
+            let started = Instant::now();
+            cx.background_executor().timer(Duration::from_millis(300)).await;
+            while started.elapsed() < Duration::from_secs(20) && cx.update(|_| web.is_loading()) {
+                cx.background_executor().timer(Duration::from_millis(50)).await;
+            }
+            cx.background_executor().timer(Duration::from_millis(600)).await;
+            let (tx, rx) = flume::bounded::<Result<String, String>>(1);
+            cx.update(|_| web.evaluate(&metrics, tx));
+            if let Ok(Ok(json)) = rx.recv_async().await {
+                results.insert(name.clone(), serde_json::from_str(&json).unwrap_or_default());
+            }
+            let (tx, rx) = flume::bounded::<Result<(), String>>(1);
+            cx.update(|_| web.snapshot(format!("{out}/reference-{name}.png"), tx));
+            let shot = rx.recv_async().await;
+            eprintln!("REFERENCE {name} {w}x{h}: {}", if matches!(shot, Ok(Ok(()))) { "ok" } else { "no screenshot" });
+            cx.update(|_| {
+                drop(web);
+                unsafe {
+                    let _: () = msg_send![window as id, orderOut: nil];
+                }
+            });
+        }
+        let json = serde_json::to_string_pretty(&Value::Object(results)).unwrap_or_default();
+        let _ = std::fs::write(format!("{out}/reference.json"), json);
+        eprintln!("REFERENCE done");
+        cx.background_executor().timer(Duration::from_millis(500)).await;
+        std::process::exit(0);
+    })
+    .detach();
 }

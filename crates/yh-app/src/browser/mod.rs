@@ -475,6 +475,23 @@ impl Browsers {
         }
     }
 
+    /// The engine new pages use changed (Settings → Browser): every open page closes, its address
+    /// kept, to open again in the new engine when its browser is next used.
+    pub fn switch_engine(engine: crate::webview::Engine) {
+        crate::webview::set_engine(engine);
+        Browsers::with(|b| {
+            for s in b.sessions.values_mut() {
+                if s.tabs.is_empty() {
+                    continue;
+                }
+                s.restorable = s.tabs.iter().filter_map(|t| t.web.url()).filter(|u| u != "about:blank").collect();
+                s.tabs.clear();
+                s.selected = None;
+            }
+            b.place();
+        });
+    }
+
     /// Pages nobody has used or looked at for 30 minutes (`YH_BROWSER_IDLE_SECS`) are closed:
     /// each tab is a web content process. Their addresses stay, to open again.
     pub fn close_idle(&mut self) {
@@ -659,6 +676,19 @@ impl Browsers {
     }
 }
 
+/// While the Chrome engine is downloading or couldn't be: a line saying so, for the agent.
+fn engine_note() -> Option<String> {
+    if crate::webview::engine() != crate::webview::Engine::Chrome {
+        return None;
+    }
+    match crate::webview::chrome::install_state() {
+        crate::webview::chrome::Install::Downloading(got, total) if total > 0 => Some(format!("The browser engine (Chrome) is downloading, {} of {} MB: pages open once it's done.", got / 1_000_000, total / 1_000_000)),
+        crate::webview::chrome::Install::Downloading(..) => Some("The browser engine (Chrome) is downloading: pages open once it's done.".into()),
+        crate::webview::chrome::Install::Failed(e) => Some(format!("The browser engine (Chrome) couldn't be installed{}. The user can try again, or switch to WebKit in Settings → Browser.", if e.is_empty() { String::new() } else { format!(": {e}") })),
+        _ => None,
+    }
+}
+
 /// Starts the browser: the window's view to lay pages over, where threads are saved (their tabs
 /// go with them), and the loops that run tool calls' jobs and take in what pages report.
 pub fn start(
@@ -668,6 +698,10 @@ pub fn start(
     changed: impl Fn(&mut App) + 'static,
     cx: &mut App,
 ) {
+    // The engine from Settings → Browser (Chrome unless WebKit was picked).
+    if let Some(e) = library.as_ref().and_then(|l| l.setting("browserEngine")).and_then(|v| v.as_str().and_then(crate::webview::Engine::from_name)) {
+        crate::webview::set_engine(e);
+    }
     Browsers::with(|b| {
         b.host = host as usize;
         b.library = library;
@@ -1154,6 +1188,9 @@ impl BrowserTools {
                 let failed = t.network.iter().filter(|r| r.failed()).count();
                 lines.push(format!("Logged: {} ({}), {} ({failed} failed).", count(t.console.len(), "console message"), count(errors, "error"), count(t.network.len(), "request")));
             }
+            if let Some(note) = engine_note() {
+                lines.push(note);
+            }
             lines.push(if s.user_has_control {
                 "The user has taken control: you can look, but actions fail until they give it back.".into()
             } else {
@@ -1323,7 +1360,11 @@ impl BrowserTools {
                 }
                 self.wait_for_navigation(id, a, Some(&asked))?;
                 let short = self.with_tab(id, |t| t.short_url())?;
-                Ok(self.result(id, &format!("Opened {short} in tab {id}"), true))
+                let mut opened = format!("Opened {short} in tab {id}");
+                if let Some(note) = engine_note() {
+                    opened = format!("{note}\n{opened}");
+                }
+                Ok(self.result(id, &opened, true))
             }
             "navigate" => {
                 let id = self.tab_id(a)?;
