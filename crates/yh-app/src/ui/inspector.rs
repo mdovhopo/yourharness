@@ -1348,7 +1348,21 @@ impl Inspector {
                     .on_click(cx.listener(move |this, _, _, cx| this.choose_panel(p, cx))),
             );
         }
-        div().flex().items_center().px(px(space::M)).h(px(44.)).flex_none().border_b_1().border_color(theme.separator).child(track)
+        // Hides the sidebar: the same icon as the header's Show button, which comes back in its place.
+        let ws = self.workspace.clone();
+        let close = tool_button("inspector-hide", Icon::new(IconName::PanelRight), "Hide the right sidebar (⌥⌘0)", theme)
+            .on_click(move |_, _, cx| ws.update(cx, |ws, cx| ws.set_shows_inspector(false, cx)));
+        div()
+            .flex()
+            .items_center()
+            .gap(px(space::XS))
+            .px(px(space::M))
+            .h(px(44.))
+            .flex_none()
+            .border_b_1()
+            .border_color(theme.separator)
+            .child(track)
+            .child(close)
     }
 
     fn subagents(&mut self, theme: &Theme, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
