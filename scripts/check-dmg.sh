@@ -39,7 +39,12 @@ BIN="$APP/Contents/MacOS/YourHarness"
 # Each library outside the system is @rpath/<name>, shipped in Frameworks, arm64, and itself
 # links only the system and its neighbours there.
 FRAMEWORKS="$APP/Contents/Frameworks"
-outside() { otool -L "$1" | tail -n +2 | awk '{ print $1 }' | grep -v -E '^(/usr/lib/|/System/Library/)' || true }
+# otool reads `name (GPU)` as an archive member: a path with parentheses goes through a link.
+outside() {
+    local f="$1"
+    if [[ "$f" == *"("* ]]; then f="$(mktemp -d)/bin"; ln -s "$1" "$f"; fi
+    otool -L "$f" | tail -n +2 | awk '{ print $1 }' | grep -v -E '^(/usr/lib/|/System/Library/)' || true
+}
 for lib in $(outside "$BIN"); do
     name="${lib#@rpath/}"
     [[ "$lib" == @rpath/* && "$name" != */* && -f "$FRAMEWORKS/$name" ]] || fail "the executable links $lib, which isn't in the app's Frameworks"
