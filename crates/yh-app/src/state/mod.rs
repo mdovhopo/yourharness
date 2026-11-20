@@ -1,6 +1,7 @@
 //! What the app knows, with no drawing.
 
 pub mod accounts;
+pub mod automations;
 pub mod command_line;
 pub mod file_watch;
 pub mod harness_tools;

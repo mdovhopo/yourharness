@@ -68,6 +68,10 @@ pub enum ToolRequest {
     /// the user sent, so a title is asked for once per message at most.
     /// An agent's memory tools changed the memory: pages showing it read it again.
     MemoryChanged,
+    /// An agent's automation tools changed the automations.
+    AutomationsChanged,
+    /// An agent's `run_automation`. Reply: the thread it ran in, or why not.
+    RunAutomation { id: String, reply: flume::Sender<Result<String, String>> },
     /// A control request to the caller's `claude` (`mcp_status`, `mcp_authenticate`).
     Mcp { caller: String, request: serde_json::Value, reply: flume::Sender<Result<serde_json::Value, String>> },
     /// Shows a sign-in card in the caller's thread (None clears it).

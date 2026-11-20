@@ -77,7 +77,7 @@ open, also where its page and title prompt stand),
 prompt, printed as `AX …` lines; never dump another app's tree from outside, which needs Accessibility access),
 `YH_VOICE_FILE=<audio>` (stands in for the microphone: never record from a test), `YH_VOICE_MODELS=<folder>`,
 `YH_VOICE_USE=<id>`, `YH_VOICE_DOWNLOAD=<id>`, `YH_VOICE_LOG=1` (docs/voice.md; ⌥⌘D as `key:alt-cmd-d`),
-`YH_RUNTIME_LOG=1` (each thread's `claude` started and ended, `RUNTIME …`: its effort, whether `gh stack`'s
+`YH_AUTOMATIONS=0` (no automation runs; perf runs never run them), `YH_AUTOMATION_LOG=1` (each run, `AUTOMATION ran …` or `couldn't run`, and what the project page lists, `AUTOMATION listed …`), `YH_AUTOMATION_FORM=new|edit` (with `YH_OPEN_PROJECT=1`: the New Automation sheet, or the first one's Edit, opened for a snapshot; docs/automations.md), `YH_RUNTIME_LOG=1` (each thread's `claude` started and ended, `RUNTIME …`: its effort, whether `gh stack`'s
 instructions are in its prompt, an effort change mid-turn starting it over once the turn ends), `YH_DROP=<x,y>` with `YH_DROP_FILES=<a:b>` (files dragged in from Finder
 through GPUI's file-drop events after `YH_DRAFT_DELAY`, held `YH_DROP_HOLD` s (2) so a snapshot shows the
 overlay, then dropped), `YH_PREVIEW_MEDIA=1|draft` (the thread's last pictures, or what waits in the composer,

@@ -6,6 +6,8 @@ pub mod accounts;
 pub mod acp;
 pub mod agent_process;
 pub mod attachments;
+pub mod automation_tools;
+pub mod automations;
 pub mod agents;
 pub mod claude;
 pub mod golden;

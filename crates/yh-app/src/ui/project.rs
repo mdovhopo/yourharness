@@ -59,6 +59,8 @@ pub struct ProjectPage {
     compact: bool,
     /// Narrower still: PR rows leave out when they changed, for their branches' room.
     narrow: bool,
+    /// The prompts this project runs by itself.
+    automations: Entity<crate::ui::automations::AutomationsSection>,
     _poll: Option<Task<()>>,
 }
 
@@ -113,7 +115,9 @@ impl ProjectPage {
         if let Ok(words) = std::env::var("YH_PROJECT_FILTER") {
             filter.update(cx, |f, cx| f.set_value(words, window, cx));
         }
+        let automations = cx.new(|cx| crate::ui::automations::AutomationsSection::new(workspace.clone(), project.clone(), cx));
         let mut page = ProjectPage {
+            automations,
             workspace,
             project,
             core: None,
@@ -1786,9 +1790,10 @@ impl Render for ProjectPage {
                 .child(Icon::new(IconName::Folder).size(px(36.)).text_color(theme.tertiary))
                 .child(div().mt(px(space::S)).text_size(px(text::TITLE)).font_weight(FontWeight::SEMIBOLD).child("No Git Repositories"))
                 .child(div().max_w(px(380.)).text_center().text_color(theme.secondary).child("Repos and pull requests show up here once this folder, or folders inside it, are git repositories."))
+                .child(div().w_full().pt(px(40.)).child(self.automations.clone()))
                 .into_any_element()
         } else {
-            div().flex().flex_col().child(self.pulls_section(&theme, cx)).child(self.repos_section(&theme, cx)).into_any_element()
+            div().flex().flex_col().child(self.pulls_section(&theme, cx)).child(self.automations.clone()).child(self.repos_section(&theme, cx)).into_any_element()
         };
         let pad = if self.narrow { space::L } else { 32. };
         let nudge = self.claude_memory_nudge(&theme, cx);

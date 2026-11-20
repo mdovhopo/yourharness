@@ -44,6 +44,7 @@ flowchart TB
     `memory_stats.rs`;
   - git and forges: `git.rs`, `github.rs`, `gitlab.rs`, `forge.rs`, `stacks.rs`,
     `workspace.rs` (a project's repos, worktrees and PRs), `footprint.rs`, `turn_changes.rs`;
+  - automations: `automations.rs` (schedules, next runs, the `automations` setting), `automation_tools.rs`;
   - the rest: `mcp.rs` (the in-app MCP servers' plumbing), `files.rs`, `attachments.rs`,
     `cookies.rs`, `dev_servers.rs`, `agents.rs`, `shell_env.rs`, `updates.rs`.
 
@@ -128,6 +129,7 @@ requests (`yh_core::mcp`), so there's no port, no token, and nothing else can ca
 | `memory` | The workspace's memory: search, read, save, update, link, forget, track tasks. Every call is recorded for the Memory page's activity (docs/memory.md). |
 | `threads` | Look through the app's threads (list, read, search), tidy them (rename, settle, pin), bring in Claude Code sessions, and hand work to other threads: `start_thread`, `send_to_thread`, `stop_thread`, `wait_for_threads` (until they finish or need an answer, then their last reply or what they wait on) and `answer_thread` (permissions, questions, plans, MCP questions), taken as the phone's actions are (`take_remote`). Only within the caller's project (Home reaches all); at most 8 threads working per project; a plan is never approved into Bypass. A thread an agent starts records its parent (`parentThreadID` in its record) and sits under it in the sidebar, foldable; its messages from the parent are marked (`agentMessageIDs`), the parent's answers leave a notice, and while the parent's turn runs its requests don't notify you (they do once that turn ends). Against loops: threads two levels down can't start more, each thread starts at most 20, and commands only go down the tree (never to a thread above, nor to another thread's workers). Settings → Delegation turns the control tools off (`agentControlsThreads`, on by default, checked on every call). Nothing can be deleted. |
 | `browser` | Drive the thread's browser: open, navigate, snapshot, screenshot, click, type, and the rest (docs/browser.md). |
+| `automations` | The project's automations: list, create, update (pause, resume), run now, delete. Scoped to the caller's project; Settings → Automations turns them off (`agentAutomations`). See docs/automations.md. |
 | `harness` | `sign_in_to_mcp_server`: a card in the thread asks you to sign in to an MCP server Claude needs. |
 
 The names, schemas and replies are the ones agents already use: keep them stable. The thread's

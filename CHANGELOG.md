@@ -9,6 +9,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 ### Added
 
 - Threads can run on Google's Antigravity: pick an Antigravity model in a new thread's model picker. It runs Google's own `agy acp`, signed in as you (install Antigravity's CLI and run `agy` once to sign in). Replies, thinking, commands, file edits, its plan and its questions show as Claude's do, and permission cards work as usual; in Accept Edits and Bypass the app answers for you. Settings → Agents shows whether it's found. Antigravity threads don't get the app's memory, thread and browser tools yet.
+- Automations: prompts a project runs by itself, once at a time or on a schedule (every so many minutes or hours, at a time on some weekdays, or a cron line). Each run starts a thread of its own, or goes to the same thread every time. Ask in any thread ("every weekday at 9, look over my open PRs", "remind me tomorrow at 10 to…") and Claude makes one, or make and edit them on the project's page, where each shows its next and last run with Run Now and a switch to pause it. They run while YourHarness is open; a run missed while it was closed happens once when it's back. Settings → Automations turns off Claude's access.
 
 ## [0.3.0] - 2026-11-20
 

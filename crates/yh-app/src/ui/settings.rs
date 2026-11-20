@@ -788,6 +788,11 @@ impl SettingsView {
                     .footer("Claude can start threads in the same project, send them messages, stop them, and answer their permission requests, questions and plans, so one thread can hand work to others. Home threads reach every project."),
             )
             .child(
+                section("Automations")
+                    .child(self.toggle("agentAutomations", "Let Claude make and change automations", cx))
+                    .footer("When you ask for something later or again and again, Claude can make an automation: a prompt the project runs by itself, once or on a schedule. Every project's page lists them. Off, the ones there keep running, and threads already open keep the tools until their Claude starts again."),
+            )
+            .child(
                 section("Thread Titles")
                     .child(row(
                         "Generate with",

@@ -223,6 +223,8 @@ pub struct Workspace {
     pub page: Option<Page>,
     /// Goes up whenever memory changes (an agent's tools, the Memory page), for views of it.
     pub memory_revision: u64,
+    /// Goes up when the automations change (`state/automations.rs`).
+    pub automations_revision: u64,
     /// Each project's repos and worktrees with their status, read aside when one of its threads
     /// opens: which checkouts a thread works in, for the toolbar.
     pub scans: HashMap<String, yh_core::workspace::Workspace>,
@@ -402,6 +404,7 @@ impl Workspace {
             shows_inspector: false,
             panel: Panel::SideChat,
             memory_revision: 0,
+            automations_revision: 0,
             scans: HashMap::new(),
             scanning: Default::default(),
             scanned_at: HashMap::new(),
@@ -466,6 +469,8 @@ impl Workspace {
             })
             .detach();
         }
+        // Automations run when they're due (state/automations.rs).
+        crate::state::automations::start(cx);
         // Idle threads settle on their own: now, and every hour.
         cx.spawn(async move |this, cx| loop {
             cx.background_executor().timer(Duration::from_secs(5)).await;
@@ -1030,7 +1035,7 @@ impl Workspace {
         }
     }
 
-    fn update_meta(&mut self, id: &str, cx: &mut Context<Self>, change: impl FnOnce(&mut ThreadMeta, &mut serde_json::Map<String, Value>)) {
+    pub(crate) fn update_meta(&mut self, id: &str, cx: &mut Context<Self>, change: impl FnOnce(&mut ThreadMeta, &mut serde_json::Map<String, Value>)) {
         let Some(thread) = self.thread(id) else { return };
         let mut record_change: Option<serde_json::Map<String, Value>> = None;
         thread.update(cx, |t, cx| {
@@ -2041,6 +2046,28 @@ impl Workspace {
                 updates_title,
                 controls,
             }));
+            // Automations: prompts the project runs by itself, made and changed from the chat.
+            if self.library.setting("agentAutomations").and_then(|v| v.as_bool()).unwrap_or(true) {
+                let name = if home { "Home".to_string() } else { project.name.clone() };
+                prompt.push(yh_core::automation_tools::instructions(&name));
+                allowed.push("mcp__automations".to_string());
+                let (changed, run) = (self.tool_requests.clone(), self.tool_requests.clone());
+                servers.push(std::sync::Arc::new(yh_core::automation_tools::AutomationTools {
+                    store: self.library.clone(),
+                    project_id: project.id.clone(),
+                    project_name: name,
+                    caller: t.id().to_string(),
+                    on_change: Box::new(move || {
+                        let _ = changed.send(ToolRequest::AutomationsChanged);
+                    }),
+                    run_now: Box::new(move |id| {
+                        let (reply, answer) = flume::bounded(1);
+                        run.send(ToolRequest::RunAutomation { id, reply }).map_err(|_| "The app is gone.".to_string())?;
+                        answer.recv_timeout(std::time::Duration::from_secs(20)).map_err(|_| "The app didn't answer.".to_string())?
+                    }),
+                    now: yh_core::automations::now,
+                }));
+            }
         }
         // A memory specialist: its own prompt, read-only file tools, the specialist memory tools,
         // nothing saved; the importer may read the sources it was given.
@@ -2774,6 +2801,10 @@ impl Workspace {
                 let _ = reply.send(snapshot);
             }
             ToolRequest::MemoryChanged => self.memory_changed(cx),
+            ToolRequest::AutomationsChanged => self.automations_changed(cx),
+            ToolRequest::RunAutomation { id, reply } => {
+                let _ = reply.send(self.run_automation(&id, true, cx));
+            }
             ToolRequest::Mcp { caller, request, reply } => {
                 let Some(thread) = self.thread(&caller) else {
                     let _ = reply.send(Err("This thread is gone.".into()));
