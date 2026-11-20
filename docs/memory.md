@@ -27,6 +27,8 @@ leaves them out: the memories list, Insights (and the reconciler's `stats`), Act
 Settings → General → Memory → "Show tasks in stats and graph" (off by default) puts them back,
 counted like any memory. "Track tasks in memory" (on by default) turned off, agents get neither
 the `track` tool nor the tasks part of the prompt; the tasks there are stay on the Tasks tab.
+A task opened from the board, a thread's toolbar or Activity shows on the Tasks tab (All Tasks goes
+back). A save that fails (`Store::save`) is an error to the agent and a `MEMORY couldn't save` line.
 
 ## What a memory is
 

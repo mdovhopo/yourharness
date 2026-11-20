@@ -14,6 +14,11 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 - Clicking into a text field in a page, or selecting text there, lets you type into it (and copy with ⌘C) without turning on Typing in Page; clicking anywhere else hands the keyboard back.
 - In the browser, ⌘A, ⌘C, ⌘V, ⌘X and ⌘Z act on the page while it has the keyboard, and right-clicking offers Open Link in New Tab, Copy Link, editing, Back, Forward, Reload and Inspect.
 - Tasks stay on the Memory page's Tasks tab: the memories list, Insights, Activity and Graph leave them out, so a board of rarely-read tasks no longer drags the figures down. Settings → General → Memory has **Show tasks in stats and graph** (off) to bring them back, and **Track tasks in memory** (on) to stop agents tracking tasks at all.
+- A task opened from the board shows on the Tasks tab, with All Tasks to go back.
+
+### Fixed
+
+- When a memory or task can't be saved, the agent is told so instead of getting an ID that was never written.
 
 ## [0.1.15] - 2026-11-15
 

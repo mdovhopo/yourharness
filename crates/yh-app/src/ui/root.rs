@@ -695,7 +695,7 @@ impl RootView {
                 page.update(cx, |p, cx| {
                     p.tab = if tasks { crate::ui::memory::Tab::Tasks } else { crate::ui::memory::Tab::Memories };
                     if let Some(id) = &memory {
-                        p.select(id, cx);
+                        p.open_memory(id, cx);
                     }
                     cx.notify();
                 });
