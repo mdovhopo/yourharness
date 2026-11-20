@@ -6,6 +6,8 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-20
+
 ### Added
 
 - A Workflow picker next to reasoning effort: Default, or Ultracode, where Claude runs tasks as workflows of many agents. It switches instantly, even mid-turn, and each thread keeps its own. A thread in Ultracode shows it in its header and with a small mark in the sidebar. Set the default for new threads in Settings → General. `/effort ultracode` switches it too, and Ultracode is greyed out when the model or Claude Code can't run it.
