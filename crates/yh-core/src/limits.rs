@@ -50,6 +50,20 @@ pub fn meters(info: Option<&Value>) -> Vec<(String, Option<Window>)> {
     out
 }
 
+/// A new reading over the last: each report carries only the windows the request's model
+/// counts against (a Haiku turn says nothing of Fable's weekly allowance), so a window it leaves
+/// out stays as it was until it resets.
+pub fn merge(old: Option<&Value>, new: &Value, now: f64) -> Value {
+    let mut out = new.clone();
+    let (Some(old), Some(unified)) = (old.and_then(|o| o["unifiedWindows"].as_object()), out["unifiedWindows"].as_object_mut()) else { return out };
+    for (name, w) in old {
+        if !unified.contains_key(name) && w["resetsAt"].as_f64().is_some_and(|at| at > now) {
+            unified.insert(name.clone(), w.clone());
+        }
+    }
+    out
+}
+
 /// As it's saved (0.0.x's shape): `{status, windows: [{name, utilization, resetsAt}]}`, dates ISO.
 pub fn to_saved(info: &Value) -> Value {
     let windows: Vec<Value> = windows(info)
@@ -358,6 +372,20 @@ mod tests {
         // Seconds since 2001, as 0.0.x saved them, too.
         let swift = json!({"status": "allowed", "windows": [{"name": "five_hour", "utilization": 0.5, "resetsAt": 815_000_000.0}]});
         assert_eq!(windows(&from_saved(&swift).unwrap())[0].resets_at, Some(815_000_000.0 + 978_307_200.));
+    }
+
+    #[test]
+    fn a_report_without_a_window_keeps_it_until_it_resets() {
+        let old = json!({"unifiedWindows": {
+            "five_hour": {"utilization": 0.1, "resetsAt": 500.0},
+            "seven_day_overage_included": {"utilization": 0.4, "resetsAt": 1000.0}
+        }});
+        let haiku = json!({"status": "allowed", "unifiedWindows": {"five_hour": {"utilization": 0.2, "resetsAt": 500.0}}});
+        let merged = merge(Some(&old), &haiku, 100.);
+        assert_eq!(merged["unifiedWindows"]["five_hour"]["utilization"], 0.2);
+        assert_eq!(merged["unifiedWindows"]["seven_day_overage_included"]["utilization"], 0.4);
+        // Past its reset, it goes.
+        assert!(merge(Some(&old), &haiku, 2000.)["unifiedWindows"].get("seven_day_overage_included").is_none());
     }
 
     #[test]

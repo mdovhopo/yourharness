@@ -187,6 +187,7 @@ impl Workspace {
         }
         let now = yh_core::library::now_ms() / 1000.0;
         let Some(a) = self.account_mut(id) else { return };
+        let info = &yh_core::limits::merge(a.limits.as_ref(), info, now);
         let changed = a.limits.as_ref() != Some(info);
         // Saved when it changed, or once a minute: the "Updated …" in the tooltip.
         let save = changed || a.limits_updated_at.is_none_or(|t| now - t > 60.);
