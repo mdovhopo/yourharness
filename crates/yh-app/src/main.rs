@@ -421,7 +421,7 @@ fn main() {
                             let composer = root.read(cx).composer.clone();
                             composer.update(cx, |c, cx| {
                                 c.type_draft(&text, window, cx);
-                                c.submit(false, window, cx);
+                                c.submit(yh_core::claude::Timing::Steer, window, cx);
                             });
                         });
                     })
@@ -523,8 +523,9 @@ fn main() {
             composer.update(cx, |c, cx| c.add_files(&paths, cx));
         }
         // `YH_QUEUE=<text>`: sent `YH_QUEUE_DELAY` seconds after launch (3), while the first turn
-        // works, so it waits as a queued message; `YH_QUEUE_ACTION=now|edit|remove` then does to it
-        // what its buttons do, `YH_QUEUE_ACTION_DELAY` seconds later (1).
+        // works, so it waits as a queued message (`YH_QUEUE_TIMING=steer|queue`: for Claude's
+        // current step, the default, or for the turn's end); `YH_QUEUE_ACTION=now|edit|remove` then
+        // does to it what its buttons do, `YH_QUEUE_ACTION_DELAY` seconds later (1).
         if let Some(text) = env("YH_QUEUE") {
             let delay: f64 = env("YH_QUEUE_DELAY").and_then(|v| v.parse().ok()).unwrap_or(3.0);
             let after: f64 = env("YH_QUEUE_ACTION_DELAY").and_then(|v| v.parse().ok()).unwrap_or(1.0);
@@ -534,8 +535,9 @@ fn main() {
                 let _ = cx.update(|cx| {
                     workspace.update(cx, |ws, cx| {
                         if let Some(t) = ws.selected_thread() {
-                            eprintln!("queue: sending while running={}", t.read(cx).run.running);
-                            ws.send(&t, &text, false, cx);
+                            let timing = if env("YH_QUEUE_TIMING").as_deref() == Some("queue") { yh_core::claude::Timing::Queue } else { yh_core::claude::Timing::Steer };
+                            eprintln!("queue: sending while running={} ({timing:?})", t.read(cx).run.running);
+                            ws.send_message(&t, &text, vec![], vec![], timing, cx);
                         }
                     })
                 });

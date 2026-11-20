@@ -134,7 +134,7 @@ fn streams_what_claude_writes_and_takes_actions() {
     c.expect("idle", |m| matches!(m, ToApp::Live { live, .. } if !live.running));
 
     let t = || "t1".to_string();
-    engine.send(Command::Send { thread: t(), text: "go".into(), attachments: vec![], message_id: "u1".into(), now: false, effort: None, deliver: None });
+    engine.send(Command::Send { thread: t(), text: "go".into(), attachments: vec![], message_id: "u1".into(), timing: yh_core::claude::Timing::Steer, effort: None, deliver: None });
     c.expect("working", |m| matches!(m, ToApp::Live { live, .. } if live.running));
     c.expect("your message", |m| matches!(m, ToApp::RowsChanged { rows, .. } if rows.iter().any(|r| r.seq == 1 && r.text == "go")));
     let start = yh_core::claude::Event::BlockStart { message: "m".into(), index: 0, parent: None, kind: yh_core::claude::BlockKind::Text };
@@ -167,14 +167,14 @@ fn streams_what_claude_writes_and_takes_actions() {
     // Protocol 5: a side chat watched beside the thread; both go on streaming.
     c.send(FromApp::SubscribeThread { thread: "side:t1".into(), limit: None, known: None });
     c.expect("side snapshot", |m| matches!(m, ToApp::Snapshot { thread, count: 0, .. } if thread == "side:t1"));
-    engine.send(Command::Send { thread: "side:t1".into(), text: "why?".into(), attachments: vec![], message_id: "s1".into(), now: false, effort: None, deliver: None });
+    engine.send(Command::Send { thread: "side:t1".into(), text: "why?".into(), attachments: vec![], message_id: "s1".into(), timing: yh_core::claude::Timing::Steer, effort: None, deliver: None });
     c.expect("the side question", |m| matches!(m, ToApp::RowsChanged { thread, rows, .. } if thread == "side:t1" && rows[0].text == "why?"));
     engine.send(Command::Events { thread: t(), events: vec![delta("m", "!")] });
     c.expect("the thread still streams", |m| matches!(m, ToApp::RowsChanged { thread, rows, .. } if thread == "t1" && rows.iter().any(|r| r.text == "Hello, world!")));
     // The side chat closed: its rows stop, the thread's go on.
     c.send(FromApp::UnsubscribeThread { thread: Some("side:t1".into()) });
     std::thread::sleep(Duration::from_millis(100));
-    engine.send(Command::Send { thread: "side:t1".into(), text: "and?".into(), attachments: vec![], message_id: "s2".into(), now: false, effort: None, deliver: None });
+    engine.send(Command::Send { thread: "side:t1".into(), text: "and?".into(), attachments: vec![], message_id: "s2".into(), timing: yh_core::claude::Timing::Steer, effort: None, deliver: None });
     engine.send(Command::Events { thread: t(), events: vec![delta("m", "?")] });
     let m = c.expect("only the thread", |m| matches!(m, ToApp::RowsChanged { .. }));
     assert!(matches!(&m, ToApp::RowsChanged { thread, .. } if thread == "t1"), "{m:?}");

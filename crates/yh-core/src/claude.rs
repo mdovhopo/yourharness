@@ -41,6 +41,29 @@ pub struct ToolResult {
     pub full: Option<String>,
 }
 
+/// When your message, sent while Claude works, reaches it: after the current step (`Steer`),
+/// once the turn is over as a turn of its own (`Queue`), or right away, the turn stopped for it
+/// (`Now`). Idle, each simply starts a turn.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Timing {
+    #[default]
+    Steer,
+    Queue,
+    Now,
+}
+
+impl Timing {
+    /// The CLI's `priority` for a message sent while it works: `now` interrupts, `later` waits
+    /// for the turn's end, none joins after the current step.
+    pub fn priority(self) -> Option<&'static str> {
+        match self {
+            Timing::Steer => None,
+            Timing::Queue => Some("later"),
+            Timing::Now => Some("now"),
+        }
+    }
+}
+
 /// How a permission request is settled.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Decision {
@@ -580,7 +603,8 @@ impl ClaudeProcess {
     }
 
     /// Your message. `id` comes back in the CLI's message lifecycle; `priority` `now`
-    /// interrupts the turn for it, none waits for the current step (steering).
+    /// interrupts the turn for it, `later` waits for the turn's end, none waits for the current
+    /// step (steering). See `Timing::priority`.
     pub fn send(&self, text: &str, images: &[(String, String)], id: &str, priority: Option<&str>) {
         // Images first, then the text: (media type, base64).
         let mut content: Vec<Value> = images

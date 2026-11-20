@@ -407,7 +407,7 @@ impl Director {
                 let composer = root.read(cx).composer.clone();
                 composer.update(cx, |c, cx| {
                     c.type_draft(&text, window, cx);
-                    c.submit(false, window, cx);
+                    c.submit(yh_core::claude::Timing::Steer, window, cx);
                 });
             });
             self.sleep(step["after"].as_f64().unwrap_or(0.5)).await;

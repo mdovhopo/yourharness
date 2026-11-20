@@ -6,6 +6,10 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+### Added
+
+- While Claude works, a message can now wait for the turn to end and then go as a turn of its own: press ⌥↩ or the clock button next to Steer. ↩ still steers (Claude reads it after its current step) and ⌘↩ still stops Claude and sends now. Queued and steering messages are labelled above the message box, and the thread tells you it's finished only once the queued turn is done too.
+
 ### Changed
 
 - Tasks stay on the Memory page's Tasks tab: the memories list, Insights, Activity and Graph leave them out, so a board of rarely-read tasks no longer drags the figures down. Settings → General → Memory has **Show tasks in stats and graph** (off) to bring them back, and **Track tasks in memory** (on) to stop agents tracking tasks at all.

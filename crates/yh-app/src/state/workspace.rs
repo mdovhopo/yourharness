@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use yh_core::claude::{Decision, Event, LaunchOptions, ModelInfo, SlashCommand};
+use yh_core::claude::{Decision, Event, LaunchOptions, ModelInfo, SlashCommand, Timing};
 use yh_engine::{Command, Delivery, Output, ThreadUpdate, TurnEnd};
 use yh_core::library::{cli_mode, control_mode, data_directory, iso_now, Library, ProjectMeta, ThreadMeta};
 
@@ -1691,18 +1691,20 @@ impl Workspace {
 
     /// With images already saved in `attachments/` (by name).
     pub fn send_with_images(&mut self, thread: &Entity<ThreadState>, text: &str, images: Vec<String>, now: bool, cx: &mut Context<Self>) {
-        self.send_message(thread, text, images, vec![], now, cx)
+        self.send_message(thread, text, images, vec![], if now { Timing::Now } else { Timing::Steer }, cx)
     }
 
     /// With images (saved in `attachments/`, by name) and other files or folders, which Claude
     /// is told the paths of. Commands the app answers itself (`/btw`, `/model`…) stop here.
+    /// While Claude works, `timing` says when it gets it: after its current step, once the turn
+    /// is over, or now.
     pub fn send_message(
         &mut self,
         thread: &Entity<ThreadState>,
         text: &str,
         images: Vec<String>,
         files: Vec<yh_core::attachments::FileAttachment>,
-        now: bool,
+        timing: Timing,
         cx: &mut Context<Self>,
     ) {
         let from_agent = self.agent_sender.take();
@@ -1789,9 +1791,9 @@ impl Workspace {
             .collect();
         if files.is_empty() {
             let deliver = Some(Delivery { text: for_agent, blocks });
-            self.command(&id, Command::Send { thread: id.clone(), text, attachments, message_id, now, effort, deliver }, cx);
+            self.command(&id, Command::Send { thread: id.clone(), text, attachments, message_id, timing, effort, deliver }, cx);
         } else {
-            self.command(&id, Command::Send { thread: id.clone(), text, attachments, message_id: message_id.clone(), now, effort: effort.clone(), deliver: None }, cx);
+            self.command(&id, Command::Send { thread: id.clone(), text, attachments, message_id: message_id.clone(), timing, effort: effort.clone(), deliver: None }, cx);
             // Copied into the thread's attachments first (off the main thread), then sent with
             // where each one is.
             let dir = self.data_dir.clone();
@@ -1801,7 +1803,7 @@ impl Workspace {
                     let paths = files.iter().zip(&file_names).map(|(f, name)| (f.copy_in(&dir, name), f.is_dir)).collect::<Vec<_>>();
                     let note = yh_core::attachments::files_note(&paths);
                     let message = if for_agent.is_empty() { note } else { format!("{for_agent}\n\n{note}") };
-                    engine.send(Command::Deliver { thread: id, message_id, now, effort, delivery: Delivery { text: message, blocks } });
+                    engine.send(Command::Deliver { thread: id, message_id, timing, effort, delivery: Delivery { text: message, blocks } });
                 })
                 .detach();
         }
@@ -2035,7 +2037,13 @@ impl Workspace {
                 self.note_attention(&w, cx);
             }
         }
-        if !end.waiting_on_jobs && !stopped && !id.starts_with(SIDE) {
+        // A message you queued for the turn's end starts the next: Claude isn't done, and that
+        // turn's changes are read from here.
+        let followed = end.followed_by.is_some();
+        if let Some(message) = &end.followed_by {
+            self.begin_turn_changes(thread, message, cx);
+        }
+        if !end.waiting_on_jobs && !stopped && !followed && !id.starts_with(SIDE) {
             let body = Self::last_reply(thread.read(cx));
             self.notify_about(crate::state::notify::Kind::Finished, thread, body, cx);
         }
@@ -2044,7 +2052,7 @@ impl Workspace {
             self.refine_title(thread, cx);
         }
         let (title, session) = thread.update(cx, |t, _| {
-            t.meta.turn_in_progress = false;
+            t.meta.turn_in_progress = followed;
             t.meta.updated_at = yh_core::library::now_ms();
             if !selected {
                 t.unread = true;
@@ -2052,7 +2060,9 @@ impl Workspace {
             (t.title.clone(), t.run.session_id.clone())
         });
         self.library.update_thread(&id, |r| {
-            r.remove("turnInProgress");
+            if !followed {
+                r.remove("turnInProgress");
+            }
             r.insert("title".into(), title.into());
             // None after a resume that failed: the next message starts a new session.
             r.insert("sessionID".into(), session.map_or(Value::Null, Value::from));
@@ -3680,7 +3690,7 @@ impl Workspace {
         // The window around the thread draws again only when what it shows changed (status,
         // cards, a turn's end): the thread's rows and status redraw through the thread itself.
         // On every update, 20 threads streaming redrew the whole window each frame.
-        let chrome = u.chrome || u.turn_ended.is_some() || u.agents_changed;
+        let chrome = u.chrome || ended || u.agents_changed;
         if u.chrome {
             self.note_attention(&thread, cx);
             self.answer_for_tests(&thread, cx);

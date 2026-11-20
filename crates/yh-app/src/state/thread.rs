@@ -540,8 +540,8 @@ impl ThreadState {
         self.touch_pos(pos);
     }
 
-    /// Queued messages still waiting for Claude, oldest first: (id, text, attachments).
-    pub fn queued_messages(&self) -> Vec<(String, String, usize)> {
+    /// Queued messages still waiting for Claude, oldest first: (id, text, attachments, for the turn's end).
+    pub fn queued_messages(&self) -> Vec<(String, String, usize, bool)> {
         self.run.queued_messages()
     }
 
@@ -946,7 +946,7 @@ mod tests {
         for step in steps {
             match step {
                 Step::Event(e) => engine.send(Command::Events { thread: id.clone(), events: vec![e] }),
-                Step::User { id: message, text, .. } => engine.send(Command::Send { thread: id.clone(), text: text.into(), attachments: vec![], message_id: message.into(), now: false, effort: None, deliver: None }),
+                Step::User { id: message, text, .. } => engine.send(Command::Send { thread: id.clone(), text: text.into(), attachments: vec![], message_id: message.into(), timing: yh_core::claude::Timing::Steer, effort: None, deliver: None }),
                 Step::Interrupt => engine.send(Command::Stop { thread: id.clone() }),
                 Step::ChangedFiles { message, files } => engine.send(Command::ChangedFiles { thread: id.clone(), message: message.into(), files: files.into_iter().map(str::to_string).collect() }),
             }

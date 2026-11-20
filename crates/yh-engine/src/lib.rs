@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use yh_core::claude::{Block, ClaudeProcess, Decision, Event, LaunchOptions};
+use yh_core::claude::{Block, ClaudeProcess, Decision, Event, LaunchOptions, Timing};
 use yh_core::db::{Database, Row, RowQuery};
 use yh_core::library::EntryData;
 use yh_core::thread_run::{LiveState, RowChange, RowSource, ThreadRun, TranscriptRow};
@@ -51,11 +51,11 @@ pub struct Delivery {
 pub enum Command {
     /// A thread as the app knows it, before anything else is asked of it (again: ignored).
     Open { thread: String, session_id: Option<String>, context_tokens: Option<u64>, context_window: Option<u64> },
-    /// Your message, into the transcript (or queued while Claude works, or stopping the turn
-    /// with `now`), and to Claude when `deliver` says what to send; otherwise `Deliver` follows
-    /// (files are copied in first).
-    Send { thread: String, text: String, attachments: Vec<String>, message_id: String, now: bool, effort: Option<String>, deliver: Option<Delivery> },
-    Deliver { thread: String, message_id: String, now: bool, effort: Option<String>, delivery: Delivery },
+    /// Your message, into the transcript (or, while Claude works, queued for its current step or
+    /// its turn's end, or stopping the turn: `timing`), and to Claude when `deliver` says what to
+    /// send; otherwise `Deliver` follows (files are copied in first).
+    Send { thread: String, text: String, attachments: Vec<String>, message_id: String, timing: Timing, effort: Option<String>, deliver: Option<Delivery> },
+    Deliver { thread: String, message_id: String, timing: Timing, effort: Option<String>, delivery: Delivery },
     /// How to start the thread's `claude`, asked for with `NeedsLaunch`; an error ends the turn
     /// with it. With a `note`, `YH_RUNTIME_LOG` says it started, the note after.
     Launch { thread: String, options: Result<LaunchOptions, String>, effort: Option<String>, note: Option<String> },
@@ -120,12 +120,15 @@ impl Command {
 }
 
 /// A turn is over.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TurnEnd {
     /// You stopped it (or a message sent now did): nothing to tell.
     pub stopped_by_you: bool,
     /// Claude waits on jobs it started: it's back when they report.
     pub waiting_on_jobs: bool,
+    /// A message you queued for this turn's end starts the next one (picked up already, or
+    /// about to be): Claude isn't done.
+    pub followed_by: Option<String>,
 }
 
 /// What changed in one thread.
@@ -168,7 +171,7 @@ impl ThreadUpdate {
         self.pulls |= later.pulls;
         self.session_reset |= later.session_reset;
         self.agents_changed |= later.agents_changed;
-        self.turn_ended = later.turn_ended.or(self.turn_ended);
+        self.turn_ended = later.turn_ended.or(self.turn_ended.take());
         self.batch = match (self.batch, later.batch) {
             (Some((n, ms)), Some((m, more))) => Some((n + m, ms + more)),
             (a, b) => a.or(b),
@@ -239,7 +242,8 @@ struct Runtime {
 #[derive(Default)]
 struct Launching {
     effort: Option<String>,
-    messages: Vec<(String, bool, Delivery)>,
+    /// (message id, the CLI's priority, what to send).
+    messages: Vec<(String, Option<&'static str>, Delivery)>,
     requests: Vec<(serde_json::Value, flume::Sender<Result<serde_json::Value, String>>)>,
 }
 
@@ -471,11 +475,12 @@ impl Engine {
                     }
                 }
             }
-            Command::Send { thread, text, attachments, message_id, now, effort, deliver } => {
+            Command::Send { thread, text, attachments, message_id, timing, effort, deliver } => {
                 let run = self.run_of(&thread);
                 let running = run.live.running;
+                let now = timing == Timing::Now;
                 let delivery = running.then_some(if now { "interrupted" } else { "steered" });
-                run.add_user(&text, &attachments, &message_id, running && !now, delivery);
+                run.add_user(&text, &attachments, &message_id, running && !now, timing == Timing::Queue, delivery);
                 run.live.running = true;
                 // A new turn: no word yet of whether you stop it.
                 if !running {
@@ -483,16 +488,16 @@ impl Engine {
                 }
                 self.told(&thread);
                 match deliver {
-                    Some(d) => self.deliver(&thread, message_id, now, effort, d, running),
+                    Some(d) => self.deliver(&thread, message_id, timing, effort, d, running),
                     None => {
                         self.steering.insert(message_id, running);
                     }
                 }
                 self.save(&thread);
             }
-            Command::Deliver { thread, message_id, now, effort, delivery } => {
+            Command::Deliver { thread, message_id, timing, effort, delivery } => {
                 let running = self.steering.remove(&message_id).unwrap_or(false);
-                self.deliver(&thread, message_id, now, effort, delivery, running);
+                self.deliver(&thread, message_id, timing, effort, delivery, running);
             }
             Command::Launch { thread, options, effort, note } => self.launch(&thread, options, effort, note),
             Command::Interrupt { thread } => {
@@ -715,15 +720,20 @@ impl Engine {
         false
     }
 
-    /// To Claude; `running`: a turn was under way when it was sent (it steers in).
-    fn deliver(&mut self, thread: &str, message_id: String, now: bool, effort: Option<String>, delivery: Delivery, running: bool) {
+    /// To Claude; `running`: a turn was under way when it was sent (it steers in, waits for
+    /// the turn's end or stops it, as `timing` says). Idle, it starts a turn whatever `timing`.
+    fn deliver(&mut self, thread: &str, message_id: String, timing: Timing, effort: Option<String>, delivery: Delivery, running: bool) {
+        let priority = match timing {
+            Timing::Queue if !running => None,
+            t => t.priority(),
+        };
         if !self.ready(thread, &effort, running) {
-            self.launching.get_mut(thread).expect("launching").messages.push((message_id, now, delivery));
+            self.launching.get_mut(thread).expect("launching").messages.push((message_id, priority, delivery));
             return;
         }
         let rt = self.runtimes.get_mut(thread).expect("ready");
         rt.idle_at = None;
-        rt.process.send(&delivery.text, &delivery.blocks, &message_id, now.then_some("now"));
+        rt.process.send(&delivery.text, &delivery.blocks, &message_id, priority);
     }
 
     fn request(&mut self, thread: &str, request: serde_json::Value, reply: flume::Sender<Result<serde_json::Value, String>>) {
@@ -755,7 +765,7 @@ impl Engine {
                 let was_running = std::mem::replace(&mut run.live.running, false);
                 self.told(thread);
                 if was_running || !waiting.messages.is_empty() {
-                    self.turn_end(thread);
+                    self.turn_end(thread, None);
                 }
                 return;
             }
@@ -784,8 +794,8 @@ impl Engine {
             .expect("a thread for its events");
         self.emit(Output::Runtime { thread: thread.to_string(), pid: Some(pid) });
         let rt = self.runtimes.get_mut(thread).expect("just started");
-        for (message_id, now, d) in waiting.messages {
-            rt.process.send(&d.text, &d.blocks, &message_id, now.then_some("now"));
+        for (message_id, priority, d) in waiting.messages {
+            rt.process.send(&d.text, &d.blocks, &message_id, priority);
         }
         for (request, reply) in waiting.requests {
             self.request(thread, request, reply);
@@ -807,7 +817,7 @@ impl Engine {
             self.run_of(thread).apply(Event::Exit { code: 0, tail: String::new() }, &src);
             self.told(thread);
             self.update(thread).chrome = true;
-            self.turn_end(thread);
+            self.turn_end(thread, None);
         }
         self.save(thread);
     }
@@ -899,22 +909,27 @@ impl Engine {
                 self.emit(Output::Runtime { thread: thread.to_string(), pid: None });
             }
         }
-        // A message sent now (after a stop) starts its own turn right after the stop's end.
-        let restarted = !exited && self.run_of(thread).live.running;
+        // A message sent now (after a stop) starts its own turn right after the stop's end: one
+        // turn. One queued for the turn's end does too, but after the turn ends.
+        let queued_turn = self.run_of(thread).live.queued_turn.take();
+        let restarted = !exited && self.run_of(thread).live.running && queued_turn.is_none();
         if ended && !restarted {
-            self.turn_end(thread);
+            self.turn_end(thread, queued_turn);
         }
     }
 
     /// The turn is over: saved, its `claude` let go of later (or started over now for a new
-    /// effort).
-    fn turn_end(&mut self, thread: &str) {
+    /// effort). `queued_turn`: a message queued for its end that Claude already picked up, the
+    /// next turn under way.
+    fn turn_end(&mut self, thread: &str, queued_turn: Option<String>) {
         let run = self.run_of(thread);
-        run.live.running = false;
+        run.live.running = queued_turn.is_some();
         let waiting_on_jobs = run.live.jobs.waiting() > 0;
         let stopped_by_you = std::mem::take(&mut run.live.stopped_by_you);
         let any_running = run.live.jobs.any_running();
-        self.update(thread).turn_ended = Some(TurnEnd { stopped_by_you, waiting_on_jobs });
+        // Stopped, Claude Code hands back what was queued (the app withdrew it first).
+        let followed_by = queued_turn.or_else(|| (!stopped_by_you).then(|| run.live.queue.iter().find(|q| q.later).map(|q| q.id.clone())).flatten());
+        self.update(thread).turn_ended = Some(TurnEnd { stopped_by_you, waiting_on_jobs, followed_by });
         self.save(thread);
         // Effort changed mid-turn: the process starts over now, unless jobs it left run on.
         let restart = self.runtimes.get(thread).is_some_and(|rt| rt.restart_when_idle) && !any_running && !waiting_on_jobs;
@@ -981,7 +996,7 @@ mod tests {
         for step in steps {
             match step {
                 Step::Event(e) => engine.send(Command::Events { thread: thread.clone(), events: vec![e] }),
-                Step::User { id, text, .. } => engine.send(Command::Send { thread: thread.clone(), text: text.into(), attachments: vec![], message_id: id.into(), now: false, effort: None, deliver: None }),
+                Step::User { id, text, .. } => engine.send(Command::Send { thread: thread.clone(), text: text.into(), attachments: vec![], message_id: id.into(), timing: Timing::Steer, effort: None, deliver: None }),
                 Step::Interrupt => engine.send(Command::Stop { thread: thread.clone() }),
                 Step::ChangedFiles { message, files } => engine.send(Command::ChangedFiles { thread: thread.clone(), message: message.into(), files: files.into_iter().map(str::to_string).collect() }),
             }

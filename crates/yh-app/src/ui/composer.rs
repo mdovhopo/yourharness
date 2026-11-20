@@ -1,5 +1,6 @@
 //! The composer and the cards above it. ↩ sends; while Claude works it steers (joins the turn
-//! after the current step), ⌘↩ stops the turn and sends now. A draft stays with its thread.
+//! after the current step), ⌥↩ queues (a turn of its own once Claude is done), ⌘↩ stops the
+//! turn and sends now. A draft stays with its thread.
 //! Model, effort and mode are pickers from the CLI's catalog. Cards: a tool waiting for
 //! permission, a question Claude asks (`AskUserQuestion`), a plan to approve (`ExitPlanMode`).
 
@@ -18,7 +19,7 @@ use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use yh_core::attachments::FileAttachment;
 use std::rc::Rc;
-use yh_core::claude::Decision;
+use yh_core::claude::{Decision, Timing};
 use yh_core::markdown;
 
 /// Built-in models until the CLI's catalog arrives (it does on the first start).
@@ -583,17 +584,17 @@ impl Composer {
     }
 
     /// ↩ sends (steering while Claude works); ⌘↩ answers a waiting tool, or stops the turn and
-    /// sends now.
+    /// sends now. (⌥↩, queueing, is taken in `on_key`.)
     fn enter(&mut self, secondary: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(thread) = self.thread(cx) else { return };
         // ⌘↩ with nothing typed and a card waiting was answered by `on_enter`.
         if secondary && thread.read(cx).waiting_for_you() && self.input.read(cx).value().trim().is_empty() {
             return;
         }
-        self.submit(secondary, window, cx);
+        self.submit(if secondary { Timing::Now } else { Timing::Steer }, window, cx);
     }
 
-    pub fn submit(&mut self, now: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn submit(&mut self, timing: Timing, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.input.read(cx).value().to_string();
         let Some(thread) = self.thread(cx) else { return };
         let key = thread.read(cx).id().to_string();
@@ -611,7 +612,7 @@ impl Composer {
         self.suggest = None;
         self.input.update(cx, |i, cx| i.set_value("", window, cx));
         // The app's own commands (`/btw`, `/mcp`, `/model`…) are answered in `send_message`.
-        self.workspace.update(cx, |ws, cx| ws.send_message(&thread, &text, images, files, now, cx));
+        self.workspace.update(cx, |ws, cx| ws.send_message(&thread, &text, images, files, timing, cx));
         cx.notify();
     }
 
@@ -1067,7 +1068,7 @@ impl Render for Composer {
             self.steering = running;
             let input = self.input.clone();
             cx.defer_in(window, move |_, window, cx| {
-                let text = if running { "Steer Claude… ↩ after its current step, ⌘↩ right now" } else { "Ask Claude…" };
+                let text = if running { "Steer Claude… ↩ after its current step, ⌥↩ once it's done, ⌘↩ right now" } else { "Ask Claude…" };
                 input.update(cx, |i, cx| i.set_placeholder(text, window, cx));
             });
         }
@@ -1202,7 +1203,8 @@ impl Render for Composer {
                             let _ = w.update(cx, |ws, cx| ws.stop(&stop_thread, &removing, cx));
                         })))
                     })
-                    // Something to send while Claude works: stop it and send this now (⌘↩).
+                    // Something to send while Claude works: stop it and send this now (⌘↩), or
+                    // queue it for when Claude is done (⌥↩).
                     .when(running && has_text, |d| {
                         d.child(
                             Button::new("interrupt-send")
@@ -1210,7 +1212,15 @@ impl Render for Composer {
                                 .ghost()
                                 .icon(icons::zap().size(px(15.)).text_color(theme.text))
                                 .tooltip("Interrupt and Send: stop Claude and send this now (⌘↩)")
-                                .on_click(cx.listener(|this, _, window, cx| this.submit(true, window, cx))),
+                                .on_click(cx.listener(|this, _, window, cx| this.submit(Timing::Now, window, cx))),
+                        )
+                        .child(
+                            Button::new("queue-send")
+                                .small()
+                                .ghost()
+                                .icon(icons::clock().size(px(15.)).text_color(theme.text))
+                                .tooltip("Queue (⌥↩): send this once Claude is done, as a turn of its own")
+                                .on_click(cx.listener(|this, _, window, cx| this.submit(Timing::Queue, window, cx))),
                         )
                     })
                     .child(if running {
@@ -1221,8 +1231,8 @@ impl Render for Composer {
                             .disabled(!has_text)
                             .icon(icons::corner_down_right().size(px(13.)))
                             .label("Steer")
-                            .tooltip("Steer (↩): Claude reads it after its current step. ⌘↩ stops and sends now.")
-                            .on_click(cx.listener(|this, _, window, cx| this.submit(false, window, cx)))
+                            .tooltip("Steer (↩): Claude reads it after its current step. ⌥↩ queues it for when Claude is done, ⌘↩ stops and sends now.")
+                            .on_click(cx.listener(|this, _, window, cx| this.submit(Timing::Steer, window, cx)))
                     } else {
                         Button::new("send")
                             .small()
@@ -1231,7 +1241,7 @@ impl Render for Composer {
                             .rounded(px(12.))
                             .icon(icons::arrow_up().size(px(15.)))
                             .tooltip("Send (↩)")
-                            .on_click(cx.listener(|this, _, window, cx| this.submit(false, window, cx)))
+                            .on_click(cx.listener(|this, _, window, cx| this.submit(Timing::Steer, window, cx)))
                     }),
             );
         div()
@@ -1449,15 +1459,16 @@ impl Composer {
 }
 
 impl Composer {
-    /// Messages sent while Claude works, waiting for its current step. Each can still go now
-    /// (Claude is interrupted), come back to the composer, or be dropped.
+    /// Messages sent while Claude works, waiting for its current step (steering) or for the
+    /// turn's end (queued). Each can still go now (Claude is interrupted), come back to the
+    /// composer, or be dropped.
     fn queued_strip(&self, thread: &Entity<ThreadState>, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui_kit::Div> {
         let queued = thread.read(cx).queued_messages();
         if queued.is_empty() {
             return None;
         }
         let mut list = div().flex().flex_col().gap(px(space::XS + 2.)).mb(px(space::S));
-        for (i, (id, text, attachments)) in queued.into_iter().enumerate() {
+        for (i, (id, text, attachments, later)) in queued.into_iter().enumerate() {
             let (sending, taking) = {
                 let c = &thread.read(cx).run.composer;
                 (c.sending_now.contains(&id), c.restore_on_withdraw.contains(&id) || self.withdrawing.contains(&id))
@@ -1466,8 +1477,10 @@ impl Composer {
                 "Interrupting Claude to send this…"
             } else if taking {
                 "Taking it back…"
+            } else if later {
+                "Queued · sent once Claude is done"
             } else {
-                "Queued · Claude reads it after its current step"
+                "Steering · Claude reads it after its current step"
             };
             let label = match (text.is_empty(), attachments) {
                 (false, _) => text,
@@ -1486,7 +1499,7 @@ impl Composer {
                 .border_color(theme.separator)
                 .bg(theme.card)
                 .text_size(px(text::FOOTNOTE))
-                .child(div().pt(px(1.)).flex_none().child(if sending { icons::zap() } else { icons::clock() }.size(px(14.)).text_color(if sending { theme.warning } else { theme.secondary })))
+                .child(div().pt(px(1.)).flex_none().child(if sending { icons::zap() } else if later { icons::clock() } else { icons::corner_down_right() }.size(px(14.)).text_color(if sending { theme.warning } else { theme.secondary })))
                 .child(
                     div()
                         .flex_1()
@@ -1964,7 +1977,7 @@ impl Composer {
         let Some(choice) = s.items.into_iter().nth(index) else { return };
         if let Some(command) = choice.run.filter(|_| run) {
             self.input.update(cx, |i, cx| i.set_value(command, window, cx));
-            self.submit(false, window, cx);
+            self.submit(Timing::Steer, window, cx);
             return;
         }
         self.input.update(cx, |i, cx| {
@@ -1985,6 +1998,13 @@ impl Composer {
                 cx.stop_propagation();
                 return;
             }
+        }
+        // ⌥↩ queues: sent once Claude is done (idle, it simply sends). Not with the menu open,
+        // nor in a card's field.
+        if k.key == "enter" && k.modifiers.alt && !k.modifiers.platform && !k.modifiers.shift && self.suggest.is_none() && self.input.focus_handle(cx).is_focused(window) {
+            cx.stop_propagation();
+            self.submit(Timing::Queue, window, cx);
+            return;
         }
         if k.key == "v" && k.modifiers.platform && !k.modifiers.shift && self.paste_image(cx) {
             cx.stop_propagation();
@@ -2313,7 +2333,7 @@ impl PlanCard {
             ws.update(cx, |ws, cx| {
                 ws.approve_plan(&t, mode, cx);
                 if !feedback.is_empty() {
-                    ws.send_message(&t, &feedback, vec![], vec![], false, cx);
+                    ws.send_message(&t, &feedback, vec![], vec![], Timing::Steer, cx);
                 }
             });
         }

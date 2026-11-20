@@ -272,13 +272,16 @@ pub enum RowChange {
     Changed { seq: usize, text: TextPatch, input: TextPatch, row: Option<Box<TranscriptRow>> },
 }
 
-/// Your message sent while Claude works, waiting for its current step.
+/// Your message sent while Claude works, waiting for its current step, or with `later` for the
+/// turn's end.
 #[derive(Clone, Debug)]
 pub struct Queued {
     pub id: String,
     pub text: String,
     /// Images (names in `attachments/`), then files.
     pub attachments: Vec<String>,
+    /// Queued for the turn's end (`Timing::Queue`): it starts a turn of its own.
+    pub later: bool,
 }
 
 /// An MCP server's question mid-call, waiting for you.
@@ -397,6 +400,9 @@ pub struct LiveState {
     /// Your messages sent while Claude works, oldest first, until it picks them up: shown above
     /// the composer, not in the transcript.
     pub queue: Vec<Queued>,
+    /// A message queued for the turn's end that Claude just picked up, starting the next turn:
+    /// the engine takes it to end the last turn first.
+    pub queued_turn: Option<String>,
     pub composer: ComposerState,
     /// What Claude left running (background commands, watches): never saved.
     pub jobs: Jobs,
@@ -423,9 +429,10 @@ impl LiveState {
         self.elicitations.first()
     }
 
-    /// Queued messages still waiting for Claude, oldest first: (id, text, attachments).
-    pub fn queued_messages(&self) -> Vec<(String, String, usize)> {
-        self.queue.iter().map(|q| (q.id.clone(), q.text.clone(), q.attachments.len())).collect()
+    /// Queued messages still waiting for Claude, oldest first: (id, text, attachments, for the
+    /// turn's end).
+    pub fn queued_messages(&self) -> Vec<(String, String, usize, bool)> {
+        self.queue.iter().map(|q| (q.id.clone(), q.text.clone(), q.attachments.len(), q.later)).collect()
     }
 }
 
@@ -555,10 +562,10 @@ impl ThreadRun {
 
     /// Your message, as sent: `id` is what the CLI's lifecycle events name it by. Sent while
     /// Claude works (`queued`), it waits above the composer and joins the transcript where
-    /// Claude picks it up: never in both places.
-    pub fn add_user(&mut self, text: &str, images: &[String], id: &str, queued: bool, delivery: Option<&str>) {
+    /// Claude picks it up: never in both places. `later`: queued for the turn's end.
+    pub fn add_user(&mut self, text: &str, images: &[String], id: &str, queued: bool, later: bool, delivery: Option<&str>) {
         if queued {
-            self.live.queue.push(Queued { id: id.to_string(), text: text.to_string(), attachments: images.to_vec() });
+            self.live.queue.push(Queued { id: id.to_string(), text: text.to_string(), attachments: images.to_vec(), later });
             return;
         }
         let mut data = EntryData::new(id, Kind::User, text);
@@ -598,6 +605,11 @@ impl ThreadRun {
                 let q = self.live.queue.remove(at);
                 let delivery = if self.live.composer.sending_now.remove(id) {
                     Some("interrupted")
+                } else if q.later {
+                    // Queued for the turn's end: the next turn, which the engine starts after
+                    // ending the last.
+                    self.live.queued_turn = Some(q.id.clone());
+                    None
                 } else if self.live.running {
                     Some("steered")
                 } else {
@@ -605,7 +617,7 @@ impl ThreadRun {
                     None
                 };
                 self.live.running = true;
-                self.add_user(&q.text, &q.attachments, &q.id, false, delivery);
+                self.add_user(&q.text, &q.attachments, &q.id, false, false, delivery);
                 true
             }
             "cancelled" => {
@@ -1303,7 +1315,7 @@ mod tests {
                 }
                 Step::User { id, text, queued } => {
                     let running = run.live.running;
-                    run.add_user(text, &[], id, queued && running, None);
+                    run.add_user(text, &[], id, queued && running, false, None);
                     run.live.running = true;
                 }
                 Step::Interrupt => run.live.interrupt_requested = true,
@@ -1366,7 +1378,7 @@ mod tests {
     #[test]
     fn a_turn_after_one_the_cli_ended_first_is_under_way() {
         let mut run = ThreadRun { live: LiveState { total: Some(0), ..Default::default() }, ..Default::default() };
-        run.add_user("proceed", &[], "u", false, None);
+        run.add_user("proceed", &[], "u", false, false, None);
         run.live.running = true;
         assert!(run.apply(Event::Done { is_error: false, text: String::new() }, &NoRows).chrome);
         assert!(!run.live.running);
@@ -1377,6 +1389,28 @@ mod tests {
         run.apply(Event::Done { is_error: false, text: String::new() }, &NoRows);
         run.apply(Event::Delta { message: "m2".into(), index: 0, parent: None, kind: DeltaKind::Text, text: "Hi".into() }, &NoRows);
         assert!(run.live.running);
+    }
+
+    /// Queued for the turn's end, a message waits through the turn and starts the next one, not
+    /// steered into it; one steered in joins the turn.
+    #[test]
+    fn a_message_queued_for_the_turns_end_starts_the_next() {
+        let mut run = ThreadRun { live: LiveState { total: Some(0), ..Default::default() }, ..Default::default() };
+        run.add_user("go", &[], "u", false, false, None);
+        run.live.running = true;
+        run.add_user("then this", &[], "q", true, true, None);
+        run.add_user("and mind that", &[], "s", true, false, None);
+        let queued: Vec<(String, bool)> = run.live.queued_messages().into_iter().map(|(id, .., later)| (id, later)).collect();
+        assert_eq!(queued, [("q".to_string(), true), ("s".to_string(), false)]);
+        run.apply(Event::Lifecycle { id: "s".into(), state: "started".into() }, &NoRows);
+        assert_eq!(run.live.queued_turn, None);
+        run.apply(Event::Done { is_error: false, text: String::new() }, &NoRows);
+        run.apply(Event::Lifecycle { id: "q".into(), state: "started".into() }, &NoRows);
+        assert!(run.live.queue.is_empty());
+        assert_eq!(run.live.queued_turn.as_deref(), Some("q"));
+        assert!(run.live.running);
+        let deliveries: Vec<(String, Option<String>)> = run.rows.values().filter(|r| r.data.kind == Kind::User).map(|r| (r.data.id.clone(), r.delivery.clone())).collect();
+        assert_eq!(deliveries, [("u".to_string(), None), ("s".to_string(), Some("steered".to_string())), ("q".to_string(), None)]);
     }
 
     #[test]
@@ -1404,7 +1438,7 @@ mod tests {
     fn holds_only_what_it_may_still_change() {
         let mut run = ThreadRun { live: LiveState { total: Some(0), ..Default::default() }, ..Default::default() };
         run.live.running = true;
-        run.add_user("go", &[], "u", false, None);
+        run.add_user("go", &[], "u", false, false, None);
         run.apply(Event::Assistant { message: "m".into(), parent: None, blocks: vec![Block::Tool { id: "a".into(), name: "Agent".into(), input: "{}".into() }] }, &NoRows);
         run.apply(Event::SubagentStarted { tool_id: "a".into(), description: "bg".into(), task_id: Some("k".into()), background: true }, &NoRows);
         run.apply(Event::ToolResults { parent: None, results: vec![crate::claude::ToolResult { id: "a".into(), text: "started".into(), len: 7, is_error: false, full: None }] }, &NoRows);
