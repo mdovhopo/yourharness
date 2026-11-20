@@ -86,13 +86,18 @@ pub fn from_saved(saved: &Value) -> Option<Value> {
     Some(json!({"status": saved["status"].as_str().unwrap_or("unknown"), "unifiedWindows": unified}))
 }
 
-/// "5h", "7d", "Opus", "Sonnet": a meter's label.
+/// The weekly allowance of the one model outside the plan's own limits, which the CLI names
+/// only by its kind (`get_usage` calls it by the model, `model_scoped`): Fable, so far.
+const OVERAGE_INCLUDED: &str = "seven_day_overage_included";
+
+/// "5h", "7d", "Opus", "Fable": a meter's label.
 pub fn short_label(name: &str) -> String {
     match name {
         "five_hour" => "5h".into(),
         "seven_day" => "7d".into(),
         "seven_day_opus" => "Opus".into(),
         "seven_day_sonnet" => "Sonnet".into(),
+        OVERAGE_INCLUDED => "Fable".into(),
         other => {
             let s: String = other.chars().take(4).collect();
             capitalize(&s)
@@ -107,8 +112,48 @@ pub fn title(name: &str) -> String {
         "seven_day" => "Weekly limit".into(),
         "seven_day_opus" => "Weekly Opus limit".into(),
         "seven_day_sonnet" => "Weekly Sonnet limit".into(),
+        OVERAGE_INCLUDED => "Weekly Fable limit".into(),
         other => other.split('_').map(capitalize).collect::<Vec<_>>().join(" "),
     }
+}
+
+/// "5-hour", "Weekly", "Weekly · Fable": a window's name in a list of limits.
+pub fn label(name: &str) -> String {
+    match name {
+        "five_hour" => "5-hour".into(),
+        "seven_day" => "Weekly".into(),
+        n if n.starts_with("seven_day_") => format!("Weekly · {}", short_label(n)),
+        other => title(other),
+    }
+}
+
+/// How long a window is, in seconds, when its name says.
+pub fn length(name: &str) -> Option<f64> {
+    match name {
+        "five_hour" => Some(5. * 3600.),
+        n if n == "seven_day" || n.starts_with("seven_day_") => Some(7. * 86_400.),
+        _ => None,
+    }
+}
+
+/// How much of a window has gone by, 0…1: where even spending would have it.
+pub fn elapsed(w: &Window, now: f64) -> Option<f64> {
+    let (at, len) = (w.resets_at?, length(&w.name)?);
+    (at > now).then(|| ((len - (at - now)) / len).clamp(0., 1.))
+}
+
+/// Spending against the window's time: ahead of it runs out early.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pace {
+    Ahead,
+    On,
+    Under,
+}
+
+/// Within five points of even counts as on pace.
+pub fn pace(w: &Window, now: f64) -> Option<Pace> {
+    let gap = (utilization(w, now) - elapsed(w, now)?) * 100.;
+    Some(if gap > 5. { Pace::Ahead } else if gap < -5. { Pace::Under } else { Pace::On })
 }
 
 fn capitalize(s: &str) -> String {
@@ -313,6 +358,21 @@ mod tests {
         // Seconds since 2001, as 0.0.x saved them, too.
         let swift = json!({"status": "allowed", "windows": [{"name": "five_hour", "utilization": 0.5, "resetsAt": 815_000_000.0}]});
         assert_eq!(windows(&from_saved(&swift).unwrap())[0].resets_at, Some(815_000_000.0 + 978_307_200.));
+    }
+
+    #[test]
+    fn names_and_pace() {
+        assert_eq!(label("seven_day_overage_included"), "Weekly · Fable");
+        assert_eq!(short_label("seven_day_overage_included"), "Fable");
+        assert_eq!(label("five_hour"), "5-hour");
+        // 2 of 5 hours gone, 60% used: ahead.
+        let w = Window { name: "five_hour".into(), utilization: 0.6, resets_at: Some(10_800.) };
+        assert!((elapsed(&w, 0.).unwrap() - 0.4).abs() < 1e-9);
+        assert_eq!(pace(&w, 0.), Some(Pace::Ahead));
+        assert_eq!(pace(&Window { utilization: 0.42, ..w.clone() }, 0.), Some(Pace::On));
+        assert_eq!(pace(&Window { utilization: 0.1, ..w.clone() }, 0.), Some(Pace::Under));
+        // Reset already: nothing to pace.
+        assert_eq!(pace(&w, 20_000.), None);
     }
 
     #[test]

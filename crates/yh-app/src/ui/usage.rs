@@ -177,6 +177,54 @@ impl UsagePage {
     }
 
     /// Esc: back to the thread.
+    /// Every account that's on, its limits a row each: the name and how much is used, a bar
+    /// with a tick where even spending would be, how the spending runs against that and when the
+    /// window resets. Accounts are named when there's more than one.
+    fn limits_card(&self, narrow: bool, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
+        let now = yh_core::library::now_ms() / 1000.;
+        let ws = self.workspace.read(cx);
+        let accounts: Vec<(String, Option<f64>, Vec<yh_core::limits::Window>)> = ws
+            .accounts
+            .iter()
+            .filter(|a| a.account.enabled)
+            .map(|a| (ws.account_label(a.id()), a.limits_updated_at, yh_core::limits::meters(a.limits.as_ref()).into_iter().filter_map(|(_, w)| w).collect::<Vec<_>>()))
+            .filter(|(_, _, w)| !w.is_empty())
+            .collect();
+        if accounts.is_empty() {
+            return None;
+        }
+        let refreshing = ws.accounts.iter().any(|a| a.refreshing);
+        let updated = accounts.iter().filter_map(|a| a.1).fold(None, |m: Option<f64>, t| Some(m.map_or(t, |m| m.max(t))));
+        let several = accounts.len() > 1;
+        let (label_w, tail_w) = if narrow { (124., 92.) } else { (172., 140.) };
+        let workspace = self.workspace.clone();
+        let mut card = page_kit::card(theme).px(px(space::L)).pt(px(space::M)).pb(px(space::M - 2.)).flex().flex_col().child(
+            div()
+                .pb(px(space::XS))
+                .flex()
+                .items_center()
+                .gap(px(space::S))
+                .child(div().flex_1().flex().flex_col().child(page_kit::section_title("Limits".to_string(), None, theme)).when_some(updated, |d, t| {
+                    d.child(div().text_size(px(text::CAPTION)).text_color(theme.secondary).child(format!("Updated {}", yh_core::clock::relative(t, now))))
+                }))
+                .child(
+                    crate::ui::thread_toolbar::icon_button("limits-refresh", gpui_kit::component::Icon::new(gpui_kit::component::IconName::RefreshCw), "Ask Claude for the limits now", theme)
+                        .loading(refreshing)
+                        .disabled(refreshing)
+                        .on_click(move |_, _, cx| workspace.update(cx, |ws, cx| ws.refresh_limits(cx))),
+                ),
+        );
+        for (account, _, windows) in accounts {
+            if several {
+                card = card.child(div().pt(px(space::S)).pb(px(2.)).text_size(px(text::CAPTION)).font_weight(FontWeight::MEDIUM).text_color(theme.tertiary).child(account.clone()));
+            }
+            for w in windows {
+                card = card.child(limit_row(&account, &w, now, label_w, tail_w, theme));
+            }
+        }
+        Some(card.into_any_element())
+    }
+
     fn close(&mut self, cx: &mut Context<Self>) {
         self.workspace.update(cx, |ws, cx| {
             if ws.page == Some(crate::state::workspace::Page::Usage) {
@@ -227,6 +275,99 @@ impl UsagePage {
 }
 
 /// "12.4M", "830K", "912".
+/// Where the window stands, as T3 Code draws it: `Weekly · Fable  12% used │━━━━━┃────│ ↘ resets in 2d 4h`.
+/// The bar's tick is where even spending would be; the fill past it is spending ahead of time.
+fn limit_row(account: &str, w: &yh_core::limits::Window, now: f64, label_w: f32, tail_w: f32, theme: &Theme) -> gpui_kit::Stateful<gpui_kit::Div> {
+    use yh_core::limits::Pace;
+    let used = yh_core::limits::utilization(w, now);
+    let elapsed = yh_core::limits::elapsed(w, now);
+    let pace = yh_core::limits::pace(w, now);
+    let tint = if used >= 0.9 { theme.error } else if used >= 0.7 { theme.warning } else { theme.accent };
+    let percent = (used * 100.).round() as i64;
+    let resets = w.resets_at.filter(|at| *at > now);
+    let mut tip = format!("{}: {percent}% used", yh_core::limits::title(&w.name));
+    if let Some(e) = elapsed {
+        tip.push_str(&format!(" · {}% of the window gone", (e * 100.).round() as i64));
+        tip.push_str(match pace {
+            Some(Pace::Ahead) => "\nAhead of pace: spending faster than the window goes by",
+            Some(Pace::Under) => "\nUnder pace: room left for the rest of the window",
+            _ => "\nOn pace with the window",
+        });
+        tip.push_str("\nThe line is where even spending would be.");
+    }
+    match resets {
+        Some(at) => tip.push_str(&format!("\nResets {}, {}", yh_core::clock::relative(at, now), yh_core::clock::short_date_time(at))),
+        None if w.resets_at.is_some() => tip.push_str("\nReset since the last reading"),
+        None => {}
+    }
+    // The tick sits in a gap of the card's colour, so it reads over the fill and the track alike.
+    let tick = elapsed.map(|e| {
+        div()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .left(gpui_kit::relative(e as f32))
+            .ml(px(-3.))
+            .w(px(6.))
+            .flex()
+            .justify_center()
+            .bg(theme.card)
+            .child(div().w(px(2.)).h_full().rounded_full().bg(theme.text.opacity(0.7)))
+    });
+    let pace_icon = pace.map(|p| match p {
+        Pace::Ahead => icons::trending_up().size(px(13.)).text_color(if used >= 0.7 { tint } else { theme.secondary }),
+        Pace::On => icons::gauge().size(px(13.)).text_color(theme.tertiary),
+        Pace::Under => icons::trending_down().size(px(13.)).text_color(theme.tertiary),
+    });
+    div()
+        .id(SharedString::from(format!("limit-{account}-{}", w.name)))
+        .flex()
+        .items_center()
+        .gap(px(space::M))
+        .h(px(30.))
+        .text_size(px(text::FOOTNOTE))
+        .child(
+            div()
+                .w(px(label_w))
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(space::S))
+                .child(div().flex_1().min_w_0().truncate().text_color(theme.secondary).child(yh_core::limits::label(&w.name)))
+                .child(div().flex_none().font_weight(FontWeight::MEDIUM).text_color(theme.text).child(format!("{percent}%"))),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(40.))
+                .h(px(16.))
+                .relative()
+                .flex()
+                .items_center()
+                .child(div().w_full().h(px(8.)).rounded_full().bg(theme.selected).overflow_hidden().when(used > 0., |d| d.child(div().h_full().rounded_full().min_w(px(8.)).w(gpui_kit::relative(used as f32)).bg(tint))))
+                .children(tick),
+        )
+        .child(
+            div()
+                .w(px(tail_w))
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .text_color(theme.tertiary)
+                .whitespace_nowrap()
+                .children(pace_icon)
+                .child(div().flex_1())
+                .child(match resets {
+                    Some(at) if tail_w >= 120. => format!("resets in {}", yh_core::clock::countdown(at, now)),
+                    Some(at) => yh_core::clock::countdown(at, now),
+                    None if w.resets_at.is_some() => "reset".into(),
+                    None => String::new(),
+                }),
+        )
+        .tooltip(crate::ui::sidebar::tooltip(tip))
+}
+
 fn tokens(v: f64) -> String {
     match v {
         v if v >= 1e9 => format!("{:.1}B", v / 1e9),
@@ -580,49 +721,7 @@ impl Render for UsagePage {
         }
         let active_days = report.days.iter().filter(|d| d.total.messages > 0).count().max(1);
         let t = &report.total;
-        // Every account that's on, each named when there's more than one.
-        let accounts: Vec<(String, Option<serde_json::Value>)> = {
-            let ws = self.workspace.read(cx);
-            ws.accounts.iter().filter(|a| a.account.enabled).map(|a| (ws.account_label(a.id()), a.limits.clone())).collect()
-        };
-        let several = accounts.len() > 1;
-        let mut limit_row = div().flex().flex_wrap().gap(px(space::M));
-        let mut any_limit = false;
-        for (account, limits) in accounts {
-            let Some(windows) = limits.as_ref().and_then(|l| l["unifiedWindows"].as_object().cloned()) else { continue };
-            for (name, w) in windows {
-                any_limit = true;
-                let used = w["utilization"].as_f64().unwrap_or(0.).clamp(0., 1.);
-                let label = match name.as_str() {
-                    "five_hour" => "5-hour limit".to_string(),
-                    "seven_day" => "Weekly limit".to_string(),
-                    other => other.replace('_', " "),
-                };
-                let label = if several { format!("{label} · {account}") } else { label };
-                // The fill carries how close it is; the track is a lighter step of the same hue.
-                let tint = if used > 0.8 { theme.warning } else { theme.accent };
-                limit_row = limit_row.child(
-                    page_kit::card(&theme)
-                        .flex_1()
-                        .min_w(px(200.))
-                        .px(px(space::L))
-                        .py(px(space::M))
-                        .flex()
-                        .flex_col()
-                        .gap(px(space::S))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(6.))
-                                .child(icons::gauge().size(px(14.)).text_color(theme.secondary))
-                                .child(div().flex_1().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child(label))
-                                .child(div().font_weight(FontWeight::SEMIBOLD).child(format!("{:.0}%", used * 100.))),
-                        )
-                        .child(div().h(px(6.)).rounded(px(3.)).bg(tint.opacity(0.16)).child(div().h_full().rounded(px(3.)).w(gpui_kit::relative(used as f32)).bg(tint))),
-                );
-            }
-        }
+        let limits = self.limits_card(narrow, &theme, cx);
         let figures = div()
             .flex()
             .flex_wrap()
@@ -764,7 +863,7 @@ impl Render for UsagePage {
                         .flex()
                         .flex_col()
                         .gap(px(space::M + 2.))
-                        .when(any_limit, |d| d.child(limit_row))
+                        .children(limits)
                         .child(figures)
                         .child(chart_card)
                         .child(table)

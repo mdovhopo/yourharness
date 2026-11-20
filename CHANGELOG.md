@@ -8,6 +8,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ### Added
 
+- Usage's limits are now one card with a row per limit: how much is used, a bar with a line where even spending would put you, whether you're ahead of or under that pace, and when it resets. Refresh them right there. Fable's weekly limit is called Weekly · Fable (Fable in the sidebar) instead of "seven day overage included".
 - While Claude works, a message can now wait for the turn to end and then go as a turn of its own: press ⌥↩ or the clock button next to Steer. ↩ still steers (Claude reads it after its current step) and ⌘↩ still stops Claude and sends now. Queued and steering messages are labelled above the message box, and the thread tells you it's finished only once the queued turn is done too.
 
 ### Changed

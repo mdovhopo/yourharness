@@ -98,6 +98,16 @@ pub fn folder_git_2() -> Icon {
     lucide(concat!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">"#, r#"<path d="M18 19a5 5 0 0 1-5-5v8" /><path d="M9 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v5" /><circle cx="13" cy="12" r="2" /><circle cx="20" cy="19" r="2" />"#, "</svg>"))
 }
 
+/// Ahead of pace: spending faster than the window goes by.
+pub fn trending_up() -> Icon {
+    lucide(concat!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">"#, r#"<path d="M16 7h6v6" /><path d="m22 7-8.5 8.5-5-5L2 17" />"#, "</svg>"))
+}
+
+/// Under pace: room left for the rest of the window.
+pub fn trending_down() -> Icon {
+    lucide(concat!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">"#, r#"<path d="M16 17h6v-6" /><path d="m22 17-8.5-8.5-5 5L2 7" />"#, "</svg>"))
+}
+
 #[allow(dead_code)]
 pub fn gauge() -> Icon {
     lucide(concat!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">"#, r#"<path d="m12 14 4-4" /><path d="M3.34 19a10 10 0 1 1 17.32 0" />"#, "</svg>"))
