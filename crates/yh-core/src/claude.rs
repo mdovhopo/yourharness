@@ -340,6 +340,9 @@ pub enum Event {
     SubagentProgress { tool_id: String, activity: Option<String>, usage: SubagentUsage },
     /// A sub-agent's end, with its summary (a background one's report comes only here).
     SubagentFinished { tool_id: String, status: String, summary: Option<String>, usage: SubagentUsage },
+    /// A workflow's phases and agents (the `Workflow` tool, run as a background sub-agent
+    /// under its call): the whole of them each time.
+    WorkflowProgress { tool_id: String, run: crate::subagent_record::WorkflowRun },
     /// A job Claude left running: a command in the background (`run_in_background`), a
     /// foreground one that's taking a while, or a watch (Monitor). `task_id` is what
     /// `stop_task` takes; `tool_id` the call that started it; `parent_task` the sub-agent's
@@ -741,6 +744,49 @@ struct Parser {
     current: HashMap<Option<String>, String>,
     /// Tasks that are jobs rather than sub-agents: their end says only which task it was.
     jobs: std::collections::HashSet<String>,
+    /// Workflows by task ID: their name (`workflow_name`), for their progress, which lacks it.
+    workflows: HashMap<String, Option<String>>,
+}
+
+/// Task types that run as a sub-agent under the call that started them: a sub-agent's, a workflow's.
+fn agent_task(task_type: &Value) -> bool {
+    matches!(task_type.as_str(), Some("local_agent" | "local_workflow"))
+}
+
+/// The most of a workflow's result its card shows.
+const WORKFLOW_RESULT_LIMIT: usize = 16_000;
+
+/// What a finished workflow returned, from its output file (`{"result": …, "logs": […]}`):
+/// shown as its report. Read on the reader thread; a big file is skipped. The CLI sends the
+/// end a few milliseconds before it writes the file, so a missing or half-written one is
+/// tried again for up to half a second.
+fn workflow_result(output_file: &str) -> Option<String> {
+    for _ in 0..10 {
+        if let Some(result) = read_workflow_result(output_file) {
+            return result;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    None
+}
+
+/// `Some(None)`: the file is whole but returned nothing; `None`: not readable yet.
+fn read_workflow_result(output_file: &str) -> Option<Option<String>> {
+    let v: Value = serde_json::from_slice(&read_small(output_file)?).ok()?;
+    let text = match &v["result"] {
+        Value::Null => return Some(None),
+        Value::String(s) => s.clone(),
+        r => format!("```json\n{}\n```", serde_json::to_string_pretty(r).ok()?),
+    };
+    Some(Some(head(&text, WORKFLOW_RESULT_LIMIT).to_string()))
+}
+
+fn read_small(path: &str) -> Option<Vec<u8>> {
+    let meta = std::fs::metadata(path).ok()?;
+    if meta.len() > 4 << 20 {
+        return None;
+    }
+    std::fs::read(path).ok()
 }
 
 impl Parser {
@@ -764,7 +810,7 @@ impl Parser {
                 }
                 "session_title_changed" => object["title"].as_str().map(|t| vec![Event::TitleChanged(t.into())]).unwrap_or_default(),
                 // A command or a watch (`local_bash`, `monitor`…) rather than a sub-agent (`local_agent`).
-                "task_started" if object["task_type"].as_str().is_some_and(|t| t != "local_agent") && object["task_id"].is_string() => {
+                "task_started" if object["task_type"].is_string() && !agent_task(&object["task_type"]) && object["task_id"].is_string() => {
                     let task_id = object["task_id"].as_str().unwrap_or("").to_string();
                     self.jobs.insert(task_id.clone());
                     vec![Event::JobStarted {
@@ -774,6 +820,23 @@ impl Parser {
                         background: object["is_backgrounded"] == true,
                         parent_task: object["parent_task_id"].as_str().filter(|t| !t.is_empty()).map(str::to_string),
                     }]
+                }
+                // A workflow runs in the background, its agents' steps never in the stream.
+                "task_started" if object["task_type"] == "local_workflow" => {
+                    let tool_id = object["tool_use_id"].as_str().unwrap_or("").to_string();
+                    let name = object["workflow_name"].as_str().filter(|n| !n.is_empty()).map(str::to_string);
+                    if let Some(task) = object["task_id"].as_str() {
+                        self.workflows.insert(task.to_string(), name.clone());
+                    }
+                    vec![
+                        Event::SubagentStarted {
+                            tool_id: tool_id.clone(),
+                            description: object["description"].as_str().filter(|d| !d.is_empty()).or(name.as_deref()).unwrap_or("Workflow").into(),
+                            task_id: object["task_id"].as_str().map(str::to_string),
+                            background: true,
+                        },
+                        Event::WorkflowProgress { tool_id, run: crate::subagent_record::WorkflowRun { name, ..Default::default() } },
+                    ]
                 }
                 "task_started" => vec![Event::SubagentStarted {
                     tool_id: object["tool_use_id"].as_str().unwrap_or("").into(),
@@ -792,24 +855,37 @@ impl Parser {
                 "background_tasks_changed" => match object["tasks"].as_array() {
                     Some(tasks) => {
                         let ids = |agents: bool| {
-                            tasks.iter().filter(|t| (t["task_type"] == "local_agent") == agents).filter_map(|t| t["task_id"].as_str().map(str::to_string)).collect()
+                            tasks.iter().filter(|t| agent_task(&t["task_type"]) == agents).filter_map(|t| t["task_id"].as_str().map(str::to_string)).collect()
                         };
                         vec![Event::JobsRunning(ids(false)), Event::AgentsRunning(ids(true))]
                     }
                     None => vec![],
                 },
-                "task_notification" => vec![Event::SubagentFinished {
-                    tool_id: object["tool_use_id"].as_str().unwrap_or("").into(),
-                    status: object["status"].as_str().unwrap_or("completed").into(),
-                    summary: object["summary"].as_str().map(str::to_string),
-                    usage: SubagentUsage::from_json(&object["usage"]),
-                }],
-                "task_progress" => match object["tool_use_id"].as_str() {
-                    Some(id) => vec![Event::SubagentProgress {
-                        tool_id: id.into(),
-                        activity: object["description"].as_str().filter(|d| !d.is_empty()).map(str::to_string),
+                "task_notification" => {
+                    // A workflow's summary only says it finished: what it returned is in its file.
+                    let workflow = object["task_id"].as_str().is_some_and(|t| self.workflows.contains_key(t));
+                    let result = if workflow { object["output_file"].as_str().filter(|f| !f.is_empty()).and_then(workflow_result) } else { None };
+                    vec![Event::SubagentFinished {
+                        tool_id: object["tool_use_id"].as_str().unwrap_or("").into(),
+                        status: object["status"].as_str().unwrap_or("completed").into(),
+                        summary: result.or_else(|| object["summary"].as_str().map(str::to_string)),
                         usage: SubagentUsage::from_json(&object["usage"]),
-                    }],
+                    }]
+                }
+                "task_progress" => match object["tool_use_id"].as_str() {
+                    Some(id) => {
+                        let mut events = vec![Event::SubagentProgress {
+                            tool_id: id.into(),
+                            activity: object["description"].as_str().filter(|d| !d.is_empty()).map(str::to_string),
+                            usage: SubagentUsage::from_json(&object["usage"]),
+                        }];
+                        if let Some(items) = object["workflow_progress"].as_array() {
+                            let mut run = crate::subagent_record::WorkflowRun::from_progress(items);
+                            run.name = object["task_id"].as_str().and_then(|t| self.workflows.get(t).cloned().flatten());
+                            events.push(Event::WorkflowProgress { tool_id: id.into(), run });
+                        }
+                        events
+                    }
                     None => vec![],
                 },
                 "status" => object["status"].as_str().map(|s| vec![Event::Status(s.into())]).unwrap_or_default(),
@@ -1323,6 +1399,34 @@ mod tests {
         assert!(matches!(&parse(r#"{"type":"system","subtype":"status","status":"compacting"}"#)[..], [Event::Status(s)] if s == "compacting"));
         assert!(parse(r#"{"type":"system","subtype":"status","status":null}"#).is_empty());
         assert!(parse(r#"{"type":"system","subtype":"task_progress","description":"x"}"#).is_empty());
+    }
+
+    #[test]
+    fn a_workflow_runs_as_a_background_agent_and_reports_its_result() {
+        let dir = std::env::temp_dir().join(format!("yh-workflow-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("w1.output");
+        std::fs::write(&out, r#"{"summary":"Count","result":{"total":6}}"#).unwrap();
+        let mut parser = Parser::default();
+        let mut events = vec![];
+        for line in [
+            r#"{"type":"system","subtype":"task_started","task_id":"w1","tool_use_id":"t1","description":"Count","task_type":"local_workflow","workflow_name":"count"}"#.to_string(),
+            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"w1","task_type":"local_workflow"}]}"#.to_string(),
+            r#"{"type":"system","subtype":"task_progress","task_id":"w1","tool_use_id":"t1","description":"Count: a","workflow_progress":[{"type":"workflow_phase","index":1,"title":"Count"},{"type":"workflow_agent","index":1,"label":"a","phaseIndex":1,"state":"done"}]}"#.to_string(),
+            format!(r#"{{"type":"system","subtype":"task_notification","task_id":"w1","tool_use_id":"t1","status":"completed","output_file":{:?},"summary":"Dynamic workflow completed"}}"#, out.to_str().unwrap()),
+        ] {
+            events.extend(parser.parse(&serde_json::from_str(&line).unwrap()));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(matches!(&events[0], Event::SubagentStarted { background: true, task_id: Some(t), .. } if t == "w1"));
+        assert!(matches!(&events[1], Event::WorkflowProgress { run, .. } if run.name.as_deref() == Some("count")));
+        assert!(matches!(&events[2], Event::JobsRunning(j) if j.is_empty()));
+        assert!(matches!(&events[3], Event::AgentsRunning(a) if a == &["w1"]));
+        assert!(matches!(&events[5], Event::WorkflowProgress { run, .. } if run.name.as_deref() == Some("count") && run.agents.len() == 1 && run.phases == ["Count"]));
+        match &events[6] {
+            Event::SubagentFinished { summary: Some(s), .. } => assert!(s.contains("\"total\": 6"), "{s}"),
+            e => panic!("{e:?}"),
+        }
     }
 
     #[test]

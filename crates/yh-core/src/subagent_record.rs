@@ -23,6 +23,104 @@ pub struct SubagentRecord {
     /// Seconds since 1970.
     pub started_at: f64,
     pub entries: Vec<SubagentEntry>,
+    /// A workflow's phases and agents (the `Workflow` tool); none for a sub-agent.
+    pub workflow: Option<WorkflowRun>,
+}
+
+/// A workflow's run (the `Workflow` tool, `ultracode`) as its `workflow_progress` last said:
+/// saved under the run's `workflow` key, which 0.0.x never reads.
+#[derive(Clone, Debug, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct WorkflowRun {
+    /// Its script's `meta.name` (`count-txt-lines`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Phase titles, in order (`phaseIndex` counts from 1).
+    pub phases: Vec<String>,
+    pub agents: Vec<WorkflowAgent>,
+}
+
+/// One of a workflow's agents.
+#[derive(Clone, Debug, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct WorkflowAgent {
+    pub label: String,
+    /// Its phase, counting from 1; 0 when outside any.
+    pub phase: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// As the CLI says it: `start`, `progress`, `done`, or a failure.
+    pub state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_tool: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    /// The start of what it returned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
+    /// The start of what it was asked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+}
+
+impl WorkflowAgent {
+    pub fn running(&self) -> bool {
+        !self.done() && !self.failed()
+    }
+    pub fn done(&self) -> bool {
+        matches!(self.state.as_str(), "done" | "completed" | "cached")
+    }
+    pub fn failed(&self) -> bool {
+        matches!(self.state.as_str(), "error" | "failed" | "killed" | "stopped" | "cancelled")
+    }
+}
+
+impl WorkflowRun {
+    /// From a `workflow_progress` list: its phases and agents, anything else skipped.
+    pub fn from_progress(items: &[Value]) -> WorkflowRun {
+        let s = |v: &Value, k: &str| v[k].as_str().filter(|s| !s.is_empty()).map(str::to_string);
+        let mut phases: Vec<(u64, String)> = vec![];
+        let mut agents: Vec<(u64, WorkflowAgent)> = vec![];
+        for item in items {
+            match item["type"].as_str() {
+                Some("workflow_phase") => phases.push((item["index"].as_u64().unwrap_or(0), s(item, "title").unwrap_or_default())),
+                Some("workflow_agent") => agents.push((
+                    item["index"].as_u64().unwrap_or(0),
+                    WorkflowAgent {
+                        label: s(item, "label").unwrap_or_else(|| "Agent".into()),
+                        phase: item["phaseIndex"].as_u64().unwrap_or(0) as usize,
+                        agent_id: s(item, "agentId"),
+                        model: s(item, "model"),
+                        state: s(item, "state").unwrap_or_else(|| "start".into()),
+                        last_tool: s(item, "lastToolName"),
+                        last_detail: s(item, "lastToolSummary"),
+                        tokens: item["tokens"].as_u64(),
+                        tool_calls: item["toolCalls"].as_u64(),
+                        duration_ms: item["durationMs"].as_u64(),
+                        result: s(item, "resultPreview"),
+                        prompt: s(item, "promptPreview"),
+                    },
+                )),
+                _ => {}
+            }
+        }
+        phases.sort_by_key(|p| p.0);
+        agents.sort_by_key(|a| a.0);
+        WorkflowRun { name: None, phases: phases.into_iter().map(|p| p.1).collect(), agents: agents.into_iter().map(|a| a.1).collect() }
+    }
+
+    /// The phase it's in: the last one with an agent working, or the last one started.
+    pub fn current_phase(&self) -> Option<usize> {
+        self.agents.iter().filter(|a| a.running()).map(|a| a.phase).max().or_else(|| self.agents.iter().map(|a| a.phase).max())
+    }
 }
 
 /// One thing it did: a message (`kind` assistant) or a tool call with its result.
@@ -169,6 +267,9 @@ impl SubagentRecord {
             })
             .collect();
         w.raw("entries", &format!("[{}]", entries.join(",")));
+        if let Some(run) = &self.workflow {
+            w.raw("workflow", &serde_json::to_string(run).unwrap_or_else(|_| "{}".into()));
+        }
         w.end().into_bytes()
     }
 
@@ -232,6 +333,7 @@ impl SubagentRecord {
             report: s("report"),
             started_at,
             entries,
+            workflow: o.get("workflow").and_then(|w| serde_json::from_value(w.clone()).ok()),
         })
     }
 }
@@ -274,6 +376,7 @@ mod tests {
             report: Some("Found".into()),
             started_at: REFERENCE_DATE + 814183200.,
             entries: vec![SubagentEntry { id: "t1".into(), kind: "tool".into(), tool_name: Some("Read".into()), ..Default::default() }],
+            workflow: None,
         };
         let s = SubagentRecord::summary(&run.encode()).unwrap();
         let full = SubagentRecord::decode(&run.encode()).unwrap();
@@ -285,6 +388,25 @@ mod tests {
         assert_eq!(s.started_at, full.started_at);
         assert_eq!(SubagentRecord::summary(b"[1]"), None);
         assert_eq!(SubagentRecord::summary(b"{}").map(|s| s.status), Some("stopped".into()));
+    }
+
+    #[test]
+    fn a_workflow_keeps_its_phases_and_agents() {
+        let items: Vec<Value> = serde_json::from_str(
+            r#"[{"type":"workflow_phase","index":2,"title":"Sum"},{"type":"workflow_phase","index":1,"title":"Count"},
+            {"type":"workflow_agent","index":2,"label":"sum","phaseIndex":2,"state":"start"},
+            {"type":"workflow_agent","index":1,"label":"count:a.txt","phaseIndex":1,"agentId":"a1","model":"claude-haiku-5-5","state":"done","tokens":19342,"toolCalls":2,"resultPreview":"{\"lines\":2}"},
+            {"type":"workflow_log","text":"x"}]"#,
+        )
+        .unwrap();
+        let mut run = WorkflowRun::from_progress(&items);
+        assert_eq!(run.phases, ["Count", "Sum"]);
+        assert_eq!(run.agents.iter().map(|a| a.label.as_str()).collect::<Vec<_>>(), ["count:a.txt", "sum"]);
+        assert!(run.agents[0].done() && run.agents[1].running());
+        assert_eq!(run.current_phase(), Some(2));
+        run.name = Some("count".into());
+        let record = SubagentRecord { description: "Count".into(), status: "completed".into(), workflow: Some(run), ..Default::default() };
+        assert_eq!(SubagentRecord::decode(&record.encode()), Some(record));
     }
 
     #[test]

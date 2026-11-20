@@ -16,6 +16,7 @@ pub const SESSIONS: &[(&str, &str)] = &[
     ("subagent-background", include_str!("../fixtures/subagent-background.jsonl")),
     ("subagent-background-commands", include_str!("../fixtures/subagent-background-commands.jsonl")),
     ("subagent-continued", include_str!("../fixtures/subagent-continued.jsonl")),
+    ("workflow", include_str!("../fixtures/workflow.jsonl")),
 ];
 
 /// A session's events as the app takes them: consecutive deltas of a block joined, as one
@@ -137,6 +138,12 @@ pub fn describe(rows: &[(usize, Row)], state: &[String]) -> String {
                 "  sub {:?} {} uses={:?} tokens={:?} ms={:?} report={:?} background={} type={:?}",
                 sub.description, sub.status, sub.tool_uses, sub.tokens, sub.duration_ms, sub.report, sub.is_background, sub.agent_type
             );
+            if let Some(w) = &sub.workflow {
+                let _ = writeln!(out, "    workflow {:?} phases={:?}", w.name, w.phases);
+                for a in &w.agents {
+                    let _ = writeln!(out, "      agent {:?} phase={} {} model={:?} tokens={:?} calls={:?} result={:?}", a.label, a.phase, a.state, a.model, a.tokens, a.tool_calls, a.result);
+                }
+            }
             for e in &sub.entries {
                 let _ = writeln!(out, "    {} {} {:?} {:?} {:?} {:?}", e.kind, e.id, e.text, e.tool_name, e.tool_result, e.tool_is_error);
             }

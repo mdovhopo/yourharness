@@ -961,6 +961,108 @@ fn subagent_stats(status: &str, steps: usize, activity: Option<String>) -> Strin
     }
 }
 
+/// How many of a workflow's agents its card lists while it works, and opened.
+const WORKFLOW_ROWS_RUNNING: usize = 8;
+const WORKFLOW_ROWS_OPEN: usize = 200;
+
+/// "Phase 1 of 2 · Count · 2 of 3 agents done" while it works; "4 agents · 75k tokens" after.
+fn workflow_stats(status: &str, w: &yh_core::subagent_record::WorkflowRun, tokens: Option<u64>) -> String {
+    let mut parts = vec![];
+    let total = w.agents.len();
+    let done = w.agents.iter().filter(|a| a.done()).count();
+    let failed = w.agents.iter().filter(|a| a.failed()).count();
+    match status {
+        "running" => {
+            match w.current_phase().filter(|p| *p > 0) {
+                Some(p) if w.phases.len() > 1 => {
+                    parts.push(format!("Phase {p} of {}", w.phases.len()));
+                    parts.extend(w.phases.get(p - 1).filter(|t| !t.is_empty()).cloned());
+                }
+                Some(p) => parts.extend(w.phases.get(p - 1).filter(|t| !t.is_empty()).cloned()),
+                None => parts.push("Starting".into()),
+            }
+            if total > 0 {
+                parts.push(format!("{done} of {total} agents done"));
+            }
+        }
+        "failed" => parts.push("Failed".into()),
+        "stopped" | "killed" => parts.push("Stopped".into()),
+        _ => {}
+    }
+    if status != "running" {
+        parts.push(if total == 1 { "1 agent".into() } else { format!("{total} agents") });
+        if let Some(t) = tokens.filter(|t| *t > 0) {
+            parts.push(format!("{} tokens", yh_core::claude::compact_tokens(t)));
+        }
+    }
+    if failed > 0 {
+        parts.push(format!("{failed} failed"));
+    }
+    parts.join(" · ")
+}
+
+/// A workflow's agents under their phases: each one's state, label, model and what it's doing
+/// or returned. At most `limit` rows: the working ones first, then the latest.
+fn workflow_agents(w: &yh_core::subagent_record::WorkflowRun, limit: usize, theme: &Theme) -> AnyElement {
+    let mut shown: Vec<usize> = (0..w.agents.len()).filter(|&i| w.agents[i].running()).collect();
+    shown.extend((0..w.agents.len()).rev().filter(|&i| !w.agents[i].running()));
+    shown.truncate(limit);
+    shown.sort();
+    let hidden = w.agents.len() - shown.len();
+    let mut list = div().flex().flex_col().gap(px(4.)).px(px(space::M)).py(px(space::S)).border_t_1().border_color(theme.separator).bg(theme.canvas).text_size(px(ts::FOOTNOTE));
+    let mut phase = usize::MAX;
+    for i in shown {
+        let a = &w.agents[i];
+        if a.phase != phase && w.phases.len() > 1 {
+            phase = a.phase;
+            let title = w.phases.get(a.phase.wrapping_sub(1)).cloned().unwrap_or_default();
+            let in_phase: Vec<_> = w.agents.iter().filter(|x| x.phase == a.phase).collect();
+            let done = in_phase.iter().filter(|x| x.done()).count();
+            list = list.child(
+                div()
+                    .flex()
+                    .gap(px(6.))
+                    .pt(px(if phase == w.agents[0].phase { 0. } else { 4. }))
+                    .text_size(px(ts::CAPTION))
+                    .text_color(theme.secondary)
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child(if title.is_empty() { format!("Phase {}", a.phase) } else { title }))
+                    .child(div().text_color(theme.tertiary).child(format!("{done}/{}", in_phase.len()))),
+            );
+        }
+        let (glyph, color) = if a.done() {
+            (IconName::CircleCheck, theme.success)
+        } else if a.failed() {
+            (IconName::CircleX, theme.error)
+        } else {
+            (IconName::LoaderCircle, theme.accent)
+        };
+        let detail = if a.running() {
+            match (&a.last_tool, &a.last_detail) {
+                (Some(t), Some(d)) => format!("{t} {d}"),
+                (Some(t), None) => t.clone(),
+                _ => "Working".into(),
+            }
+        } else {
+            a.result.clone().unwrap_or_default().replace('\n', " ")
+        };
+        let model = a.model.as_deref().map(yh_core::usage::display_name).unwrap_or_default();
+        list = list.child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(div().w(px(18.)).flex().justify_center().child(icon(glyph, 13., color)))
+                .child(div().flex_none().max_w(px(220.)).overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(theme.text).child(a.label.clone()))
+                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_family(MONO).text_size(px(ts::CAPTION)).text_color(theme.secondary).child(detail))
+                .when(!model.is_empty(), |d| d.child(div().flex_none().text_size(px(ts::CAPTION)).text_color(theme.tertiary).child(model))),
+        );
+    }
+    if hidden > 0 {
+        list = list.child(div().pl(px(26.)).text_size(px(ts::CAPTION)).text_color(theme.tertiary).child(format!("{hidden} more")));
+    }
+    list.into_any_element()
+}
+
 /// A sub-agent's call: what it's doing (its last few steps while it works), then its report.
 fn agent_row(thread: &Entity<ThreadState>, item: &Item, theme: &Theme) -> AnyElement {
     let e = item.entries[0].borrow();
@@ -972,7 +1074,11 @@ fn agent_row(thread: &Entity<ThreadState>, item: &Item, theme: &Theme) -> AnyEle
         .filter(|d| !d.is_empty())
         .or_else(|| input["description"].as_str().map(str::to_string))
         .unwrap_or_else(|| "Sub-agent".into());
-    let kind = input["subagent_type"].as_str().unwrap_or("").to_string();
+    let workflow = e.sub.as_ref().and_then(|s| s.workflow.clone());
+    let kind = match &workflow {
+        Some(w) => w.name.clone().unwrap_or_else(|| "Workflow".into()),
+        None => input["subagent_type"].as_str().unwrap_or("").to_string(),
+    };
     let status = e.sub.as_ref().map(|s| s.status.clone()).unwrap_or_else(|| match &e.data.tool_result {
         Some(_) if e.data.is_error => "failed".into(),
         Some(_) => "completed".into(),
@@ -981,7 +1087,15 @@ fn agent_row(thread: &Entity<ThreadState>, item: &Item, theme: &Theme) -> AnyEle
     let steps = e.sub.as_ref().map_or(0, |s| s.steps);
     let running = status == "running";
     let failed = status == "failed" || e.data.is_error;
-    let report = e.sub.as_ref().and_then(|s| s.report.clone()).or_else(|| e.data.tool_result.as_deref().map(crate::ui::steps::subagent_report)).unwrap_or_default();
+    // A workflow's call says only that it launched: its report is what it returned.
+    let report = match &workflow {
+        Some(_) => e.sub.as_ref().and_then(|s| s.report.clone()).unwrap_or_default(),
+        None => e.sub.as_ref().and_then(|s| s.report.clone()).or_else(|| e.data.tool_result.as_deref().map(crate::ui::steps::subagent_report)).unwrap_or_default(),
+    };
+    let stats = match &workflow {
+        Some(w) => workflow_stats(&status, w, e.sub.as_ref().and_then(|s| s.tokens)),
+        None => subagent_stats(&status, steps, None),
+    };
     // Its last three tool calls while it works, so it visibly moves.
     let recent: Vec<(steps::Presentation, bool, bool)> = if running {
         e.sub
@@ -1001,6 +1115,8 @@ fn agent_row(thread: &Entity<ThreadState>, item: &Item, theme: &Theme) -> AnyEle
         vec![]
     };
     let activity = recent.last().map(|(p, _, _)| if p.detail.is_empty() { p.verb.clone() } else { format!("{} {}", p.verb, p.detail) });
+    let stats = if workflow.is_none() && activity.is_some() { subagent_stats(&status, steps, activity) } else { stats };
+    let has_agents = workflow.as_ref().is_some_and(|w| !w.agents.is_empty());
     let followable = e.sub.is_some();
     let tool_id = e.data.id.clone();
     drop(e);
@@ -1049,7 +1165,7 @@ fn agent_row(thread: &Entity<ThreadState>, item: &Item, theme: &Theme) -> AnyEle
                                     d.child(div().flex_none().text_size(px(ts::CAPTION)).line_height(px(16.)).px(px(6.)).rounded(px(radius::SMALL)).bg(theme.selected).text_color(theme.secondary).child(kind))
                                 }),
                         )
-                        .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(ts::FOOTNOTE)).text_color(theme.secondary).child(subagent_stats(&status, steps, activity))),
+                        .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(ts::FOOTNOTE)).text_color(theme.secondary).child(stats)),
                 )
                 .when(followable, |d| {
                     d.child(
@@ -1073,7 +1189,7 @@ fn agent_row(thread: &Entity<ThreadState>, item: &Item, theme: &Theme) -> AnyEle
                             }),
                     )
                 })
-                .when(!report.is_empty(), |d| d.child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, 13., theme.tertiary)))
+                .when(!report.is_empty() || has_agents, |d| d.child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, 13., theme.tertiary)))
                 .on_click(move |_, _, cx| {
                     handle.update(cx, |t, cx| {
                         t.toggle_item(pos);
@@ -1097,6 +1213,10 @@ fn agent_row(thread: &Entity<ThreadState>, item: &Item, theme: &Theme) -> AnyEle
             );
         }
         card = card.child(list);
+    }
+    // A workflow's agents by phase: while it works, and open after.
+    if let Some(w) = workflow.as_ref().filter(|w| !w.agents.is_empty() && (running || open)) {
+        card = card.child(workflow_agents(w, if open { WORKFLOW_ROWS_OPEN } else { WORKFLOW_ROWS_RUNNING }, theme));
     }
     if open && !report.is_empty() {
         let md = markdown::parse(&report);

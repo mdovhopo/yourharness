@@ -8,6 +8,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ### Added
 
+- Workflows (`ultracode`) show as cards of their own: the workflow's name, which phase it's in and how many of its agents are done, and each agent with its model and what it's doing or returned. When the workflow finishes, the card shows what it returned. Open the card in the right sidebar's Sub-agents tab to see its script and every agent: what each was asked, its tool calls, tokens and time. Stop it there, as you would a sub-agent.
 - Usage's limits are now one card with a row per limit: how much is used, a bar with a line where even spending would put you, whether you're ahead of or under that pace, and when it resets. Refresh them right there. Fable's weekly limit is called Weekly · Fable (Fable in the sidebar) instead of "seven day overage included", and it no longer disappears after a request to another model: it stays until it resets.
 - While Claude works, a message can now wait for the turn to end and then go as a turn of its own: press ⌥↩ or the clock button next to Steer. ↩ still steers (Claude reads it after its current step) and ⌘↩ still stops Claude and sends now. Queued and steering messages are labelled above the message box, and the thread tells you it's finished only once the queued turn is done too.
 

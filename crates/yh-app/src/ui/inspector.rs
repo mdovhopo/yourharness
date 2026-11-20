@@ -1426,7 +1426,7 @@ impl Inspector {
                             if live.contains(id) {
                                 Some("In background".to_string())
                             } else {
-                                b.data.tool_input.as_deref().and_then(|i| serde_json::from_str::<serde_json::Value>(i).ok()).and_then(|v| v["subagent_type"].as_str().map(str::to_string))
+                                b.data.tool_input.as_deref().and_then(|i| serde_json::from_str::<serde_json::Value>(i).ok()).and_then(|v| v["subagent_type"].as_str().map(str::to_string)).or_else(|| (b.data.tool_name.as_deref() == Some("Workflow")).then(|| "Workflow".to_string()))
                             },
                             |d, kind| {
                                 let color = if live.contains(id) { theme.accent } else { theme.secondary };
@@ -1449,7 +1449,10 @@ impl Inspector {
         let sub = entry.sub.clone();
         let input: serde_json::Value = entry.data.tool_input.as_deref().and_then(|i| serde_json::from_str(i).ok()).unwrap_or_default();
         let prompt = input["prompt"].as_str().unwrap_or("").to_string();
-        let agent_type = input["subagent_type"].as_str().map(str::to_string);
+        let workflow = sub.as_ref().and_then(|s| s.workflow.clone());
+        let agent_type = input["subagent_type"].as_str().map(str::to_string).or_else(|| workflow.as_ref().map(|w| w.name.clone().map_or("Workflow".into(), |n| format!("Workflow {n}"))));
+        // A workflow's script, folded as a sub-agent's task is.
+        let prompt = if prompt.is_empty() { input["script"].as_str().map(|s| format!("```js\n{}\n```", s.trim())).unwrap_or_default() } else { prompt };
         let log: Vec<SubStep> = sub.as_ref().map(|s| s.log.clone()).unwrap_or_default();
         // A sub-agent hands its report back with a SubagentHandback call; the Agent tool's own
         // result then only says it was delivered.
@@ -1586,15 +1589,23 @@ impl Inspector {
                             .text_size(px(text::CAPTION))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.secondary)
-                            .child("Task")
+                            .child(if workflow.is_some() { "Script" } else { "Task" })
                             .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).size(px(12.)).text_color(theme.tertiary)),
                     )
-                    .child(div().text_size(px(text::FOOTNOTE)).line_height(px(17.)).text_color(theme.secondary).whitespace_normal().when(!open, |d| d.line_clamp(3)).child(prompt))
+                    .child(if prompt.starts_with("```") {
+                        let md = yh_core::markdown::parse(&prompt);
+                        div().max_h(px(if open { 100_000. } else { 64. })).overflow_hidden().child(crate::ui::rows::markdown_view(&md, theme)).into_any_element()
+                    } else {
+                        div().text_size(px(text::FOOTNOTE)).line_height(px(17.)).text_color(theme.secondary).whitespace_normal().when(!open, |d| d.line_clamp(3)).child(prompt).into_any_element()
+                    })
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.prompt_open = !this.prompt_open;
                         cx.notify();
                     })),
             );
+        }
+        if let Some(w) = &workflow {
+            detail = detail.child(workflow_agents_detail(w, theme));
         }
         // Its steps as the transcript reads them: what it said as Markdown, each tool call by its
         // icon, verb and the argument that matters, its output under it, all selectable.
@@ -2639,6 +2650,97 @@ fn local_stack_card(repo: &str, stack: &yh_core::github::LocalStack, theme: &The
         );
     }
     card.into_any_element()
+}
+
+/// A workflow's agents by phase, each with what it was asked and what it's doing or returned.
+fn workflow_agents_detail(w: &yh_core::subagent_record::WorkflowRun, theme: &Theme) -> gpui_kit::AnyElement {
+    let mut column = div().flex().flex_col().gap(px(space::S));
+    if w.agents.is_empty() {
+        let phases = if w.phases.is_empty() { String::new() } else { format!(" · {}", w.phases.join(" → ")) };
+        return column.child(div().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child(format!("No agents yet{phases}"))).into_any_element();
+    }
+    let mut phase = usize::MAX;
+    for a in &w.agents {
+        if a.phase != phase {
+            phase = a.phase;
+            let title = w.phases.get(a.phase.wrapping_sub(1)).cloned().filter(|t| !t.is_empty()).unwrap_or_else(|| format!("Phase {}", a.phase));
+            let in_phase: Vec<_> = w.agents.iter().filter(|x| x.phase == a.phase).collect();
+            let done = in_phase.iter().filter(|x| x.done()).count();
+            column = column.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(space::XS + 2.))
+                    .pt(px(space::XS))
+                    .text_size(px(text::CAPTION))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.secondary)
+                    .child(if w.phases.len() > 1 { format!("{} of {} · {title}", a.phase, w.phases.len()) } else { title })
+                    .child(div().font_weight(FontWeight::NORMAL).text_color(theme.tertiary).child(format!("{done}/{} done", in_phase.len()))),
+            );
+        }
+        let (glyph, color) = if a.done() {
+            (IconName::CircleCheck, theme.success)
+        } else if a.failed() {
+            (IconName::CircleX, theme.error)
+        } else {
+            (IconName::LoaderCircle, theme.accent)
+        };
+        let mut facts: Vec<String> = a.model.as_deref().map(yh_core::usage::display_name).into_iter().collect();
+        if let Some(n) = a.tool_calls.filter(|n| *n > 0) {
+            facts.push(format!("{n} tool{}", if n == 1 { "" } else { "s" }));
+        }
+        if let Some(t) = a.tokens.filter(|t| *t > 0) {
+            facts.push(format!("{} tokens", yh_core::claude::compact_tokens(t)));
+        }
+        if let Some(ms) = a.duration_ms {
+            facts.push(crate::state::jobs::clock(ms / 1000));
+        }
+        let doing = a.running().then(|| match (&a.last_tool, &a.last_detail) {
+            (Some(t), Some(d)) => format!("{t} {d}…"),
+            (Some(t), None) => format!("{t}…"),
+            _ => "Working…".into(),
+        });
+        column = column.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(space::XS))
+                .px(px(space::M))
+                .py(px(space::S))
+                .rounded(px(radius::MEDIUM))
+                .bg(theme.card)
+                .border_1()
+                .border_color(if a.failed() { theme.error.opacity(0.45) } else { theme.separator })
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(space::XS + 2.))
+                        .text_size(px(text::FOOTNOTE))
+                        .child(div().flex_none().child(Icon::new(glyph).size(px(13.)).text_color(color)))
+                        .child(div().flex_1().min_w_0().truncate().font_weight(FontWeight::MEDIUM).child(a.label.clone()))
+                        .child(div().flex_none().text_size(px(text::CAPTION)).text_color(theme.tertiary).child(facts.join(" · "))),
+                )
+                .when_some(a.prompt.clone(), |d, p| d.child(div().text_size(px(text::CAPTION)).line_height(px(15.)).text_color(theme.secondary).whitespace_normal().line_clamp(2).child(p)))
+                .when_some(doing, |d, now| d.child(div().text_size(px(text::CAPTION)).text_color(theme.accent).truncate().child(now)))
+                .when_some(a.result.clone().filter(|_| !a.running()), |d, r| {
+                    d.child(
+                        div()
+                            .px(px(space::S))
+                            .py(px(space::XS + 1.))
+                            .rounded(px(radius::SMALL))
+                            .bg(theme.code)
+                            .font_family(MONO)
+                            .text_size(px(text::CAPTION))
+                            .line_height(px(15.))
+                            .text_color(theme.secondary)
+                            .child(crate::ui::rows::selectable(first_lines(&r, 6), theme)),
+                    )
+                }),
+        );
+    }
+    column.into_any_element()
 }
 
 fn run_label(e: &crate::state::thread::Entry) -> (String, String) {

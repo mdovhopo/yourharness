@@ -11,11 +11,12 @@ use crate::claude::{Block, BlockKind, DeltaKind, Event};
 use crate::db::Row;
 use crate::jobs::Jobs;
 use crate::library::{now_ms, new_uuid, EntryData, Kind};
-use crate::subagent_record::{SubagentEntry, SubagentRecord, SubagentSummary};
+use crate::subagent_record::{SubagentEntry, SubagentRecord, SubagentSummary, WorkflowRun};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-/// Tools whose call is a sub-agent: shown as a card of its own.
-pub const AGENT_TOOLS: &[&str] = &["Agent", "Task"];
+/// Tools whose call is a sub-agent: shown as a card of its own. A workflow (`ultracode`)
+/// runs as one in the background, its agents listed on its card.
+pub const AGENT_TOOLS: &[&str] = &["Agent", "Task", "Workflow"];
 
 /// How many of a sub-agent's steps are kept for following it.
 const SUBAGENT_LOG: usize = 200;
@@ -40,6 +41,8 @@ pub struct Subagent {
     /// When it started (seconds since 1970), and how long it ran, as the CLI counts it.
     pub started_at: f64,
     pub duration_ms: Option<u64>,
+    /// A workflow's phases and agents, as its progress last said; none for a sub-agent.
+    pub workflow: Option<WorkflowRun>,
     /// What it had used before it was continued (`SendMessage`): the CLI counts a continued
     /// run afresh, so its numbers go on from these.
     base: crate::claude::SubagentUsage,
@@ -69,6 +72,7 @@ impl Subagent {
             tool_uses: None,
             started_at: now_ms() / 1000.0,
             duration_ms: None,
+            workflow: None,
             base: Default::default(),
         }
     }
@@ -78,9 +82,9 @@ impl Subagent {
         let input: serde_json::Value = input.and_then(|i| serde_json::from_str(i).ok()).unwrap_or_default();
         SubagentRecord {
             description: self.description.clone(),
-            agent_type: input["subagent_type"].as_str().map(str::to_string),
+            agent_type: input["subagent_type"].as_str().map(str::to_string).or_else(|| self.workflow.is_some().then(|| "Workflow".into())),
             prompt: input["prompt"].as_str().unwrap_or("").to_string(),
-            is_background: input["run_in_background"] == true,
+            is_background: input["run_in_background"] == true || self.workflow.is_some(),
             status: self.status.clone(),
             tool_uses: self.tool_uses.or_else(|| (self.steps > 0).then_some(self.steps as u64)),
             tokens: self.tokens,
@@ -104,6 +108,7 @@ impl Subagent {
                     None => SubagentEntry { id: format!("s{n}"), kind: "assistant".into(), text: step.text.clone(), ..Default::default() },
                 })
                 .collect(),
+            workflow: self.workflow.clone(),
         }
     }
 
@@ -131,6 +136,7 @@ impl Subagent {
             tool_uses: r.tool_uses,
             started_at: r.started_at,
             duration_ms: r.duration_ms,
+            workflow: r.workflow,
             base: Default::default(),
         }
     }
@@ -149,6 +155,7 @@ impl Subagent {
             tool_uses: s.tool_uses,
             started_at: s.started_at,
             duration_ms: s.duration_ms,
+            workflow: None,
             base: Default::default(),
         }
     }
@@ -661,6 +668,27 @@ impl ThreadRun {
                         sub.activity = activity;
                     }
                     sub.apply(usage);
+                    self.live.subagents_version += 1;
+                    self.show(seq);
+                }
+                Outcome::default()
+            }
+            Event::WorkflowProgress { tool_id, mut run } => {
+                if let Some(seq) = self.tool(&tool_id, src) {
+                    let r = self.row_mut(seq);
+                    if !r.is_agent() {
+                        return Outcome::default();
+                    }
+                    let sub = r.sub.get_or_insert_with(|| Subagent::new(String::new()));
+                    // The start names it; later progress says only phases and agents.
+                    if let Some(old) = sub.workflow.take() {
+                        run.name = run.name.or(old.name);
+                        if run.phases.is_empty() && run.agents.is_empty() {
+                            run.phases = old.phases;
+                            run.agents = old.agents;
+                        }
+                    }
+                    sub.workflow = Some(run);
                     self.live.subagents_version += 1;
                     self.show(seq);
                 }

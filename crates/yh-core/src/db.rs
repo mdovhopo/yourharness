@@ -1213,6 +1213,7 @@ mod tests {
             started_at: 1_700_000_000.0,
             // Enough steps to go in `blobs`.
             entries: (0..steps).map(|n| SubagentEntry { id: format!("t{n}"), kind: "tool".into(), tool_name: Some("Read".into()), tool_result: Some("x".repeat(100)), ..Default::default() }).collect(),
+            workflow: None,
             ..Default::default()
         };
         let rows = vec![
