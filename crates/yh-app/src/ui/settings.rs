@@ -203,13 +203,14 @@ impl SettingsView {
         self.workspace.read(cx).library.setting(key)
     }
 
-    fn flag(&self, key: &str, cx: &App) -> bool {
-        self.setting(key, cx).and_then(|v| v.as_bool()).unwrap_or(true)
-    }
-
     /// A switch saved under `key`, on unless turned off.
     fn toggle(&self, key: &'static str, label: &'static str, cx: &mut Context<Self>) -> AnyElement {
-        let on = self.flag(key, cx);
+        self.toggle_or(key, label, true, cx)
+    }
+
+    /// A switch saved under `key`, `default` until changed.
+    fn toggle_or(&self, key: &'static str, label: &'static str, default: bool, cx: &mut Context<Self>) -> AnyElement {
+        let on = self.setting(key, cx).and_then(|v| v.as_bool()).unwrap_or(default);
         let ws = self.workspace.clone();
         row(
             label,
@@ -827,6 +828,8 @@ impl SettingsView {
                 section("Memory")
                     .child(self.toggle("memoryEnabled", "Give agents the workspace's memory", cx))
                     .child(self.toggle("claudeCodeMemoryOff", "Turn off Claude Code's own memory files", cx))
+                    .child(self.toggle("memoryTrackTasks", "Track tasks in memory", cx))
+                    .child(self.toggle_or("memoryTasksInStats", "Show tasks in stats and graph", false, cx))
                     .child(row(
                         "Claude Code's memory outside the app",
                         if off_everywhere {
@@ -881,7 +884,7 @@ impl SettingsView {
                                 move |v, _, _| lib.set_setting("memoryAgentEffort", &if v.is_empty() { Value::Null } else { Value::from(v) })
                             })),
                     ))
-                    .footer("Each project has its own memory, which every thread there starts with: an index of what's remembered and tools to search, read and save. With the second switch on, Claude Code's memory files are off in YourHarness's threads, so there's one memory, not two."),
+                    .footer("Each project has its own memory, which every thread there starts with: an index of what's remembered and tools to search, read and save. With the second switch on, Claude Code's memory files are off in YourHarness's threads, so there's one memory, not two. Tracked tasks show on the Memory page's Tasks tab; they're left out of its list, Insights, Activity and Graph unless you show them there."),
             )
             .child(
                 section("Plans")

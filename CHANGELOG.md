@@ -15,6 +15,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 - Pages you open in the browser fit the sidebar (or its window), readable and easy to click; pages Claude opens keep a laptop-sized layout to test.
 - Clicking into a text field in a page, or selecting text there, lets you type into it (and copy with ⌘C) without turning on Typing in Page; clicking anywhere else hands the keyboard back.
 - In the browser, ⌘A, ⌘C, ⌘V, ⌘X and ⌘Z act on the page while it has the keyboard, and right-clicking offers Open Link in New Tab, Copy Link, editing, Back, Forward, Reload and Inspect.
+- Tasks stay on the Memory page's Tasks tab: the memories list, Insights, Activity and Graph leave them out, so a board of rarely-read tasks no longer drags the figures down. Settings → General → Memory has **Show tasks in stats and graph** (off) to bring them back, and **Track tasks in memory** (on) to stop agents tracking tasks at all.
 
 ## [0.1.15] - 2026-11-15
 

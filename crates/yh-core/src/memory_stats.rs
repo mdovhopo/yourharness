@@ -40,7 +40,8 @@ pub struct Stats {
     pub by_origin: Vec<(String, usize)>,
     pub pinned: usize,
     /// Active tasks by state. Tasks are memories, but they record work rather than knowledge
-    /// and are rarely read by design, so every other figure here leaves them out.
+    /// and are rarely read by design, so every other figure here leaves them out, unless
+    /// `compute` was asked to count them (Settings → Memory → "Show tasks in stats and graph").
     pub tasks: Vec<(String, usize)>,
     /// Active tasks, all states.
     pub task_count: usize,
@@ -60,6 +61,8 @@ pub struct Stats {
     pub days: Vec<Day>,
     pub likely_duplicates: Vec<Vec<Summary>>,
     pub window: usize,
+    /// Tasks are counted in the figures above.
+    pub with_tasks: bool,
 }
 
 impl Stats {
@@ -109,20 +112,21 @@ fn sorted_counts(map: HashMap<String, usize>) -> Vec<(String, usize)> {
     v
 }
 
-/// Counts for `scope` as of now, over the last `window` days.
-pub fn compute(store: &Store, scope: &str, window: usize) -> Stats {
+/// Counts for `scope` as of now, over the last `window` days, tasks among them `with_tasks`.
+pub fn compute(store: &Store, scope: &str, window: usize, with_tasks: bool) -> Stats {
     let now = crate::library::now_ms() / 1000.;
     let memories = store.memories(Some(scope), None);
     let events = events_since(store, scope, now - window as f64 * 86_400.);
-    compute_from(&memories, &events, now, window)
+    compute_from(&memories, &events, now, window, with_tasks)
 }
 
-/// What `compute` counts, from the memories and the window's events. Tasks are counted by
-/// state only: what agents did with them (reads, progress) and the tasks themselves are left
-/// out of every other figure, so a board of tasks doesn't drag the read rate down.
-fn compute_from(all: &[Memory], events: &[Event], now: f64, window: usize) -> Stats {
-    let mut s = Stats { window, ..Default::default() };
-    let task_ids: HashSet<&str> = all.iter().filter(|m| m.is_task()).map(|m| m.id.as_str()).collect();
+/// What `compute` counts, from the memories and the window's events. Unless `with_tasks`,
+/// tasks are counted by state only: what agents did with them (reads, progress) and the tasks
+/// themselves are left out of every other figure, so a board of tasks doesn't drag the read
+/// rate down.
+fn compute_from(all: &[Memory], events: &[Event], now: f64, window: usize, with_tasks: bool) -> Stats {
+    let mut s = Stats { window, with_tasks, ..Default::default() };
+    let task_ids: HashSet<&str> = all.iter().filter(|m| m.is_task() && !with_tasks).map(|m| m.id.as_str()).collect();
     let about_task = |e: &Event| e.memory_id.as_deref().is_some_and(|id| task_ids.contains(id));
     let events: Vec<&Event> = events.iter().filter(|e| !about_task(e)).collect();
     let mut tasks: HashMap<String, usize> = HashMap::new();
@@ -131,7 +135,7 @@ fn compute_from(all: &[Memory], events: &[Event], now: f64, window: usize) -> St
         s.task_count += 1;
     }
     s.tasks = sorted_counts(tasks);
-    let memories: Vec<&Memory> = all.iter().filter(|m| !m.is_task()).collect();
+    let memories: Vec<&Memory> = all.iter().filter(|m| with_tasks || !m.is_task()).collect();
     let active: Vec<&Memory> = memories.iter().copied().filter(|m| m.status == "active").collect();
     s.active = active.len();
     s.proposed = memories.iter().filter(|m| m.status == "proposed").count();
@@ -292,7 +296,8 @@ pub fn describe(s: &Stats, day: impl Fn(f64) -> String) -> String {
         format!("Kinds: {}.", { let mut k = s.by_kind.clone(); k.sort(); k.iter().map(|(n, c)| format!("{n} {c}")).collect::<Vec<_>>().join(", ") }),
         format!("Links: {}; memories with none: {}.", s.links, s.orphans),
         format!(
-            "Tasks (not counted above): {}{}.",
+            "Tasks ({}): {}{}.",
+            if s.with_tasks { "counted above" } else { "not counted above" },
             s.task_count,
             if s.tasks.is_empty() { String::new() } else { format!(" ({})", s.tasks.iter().map(|(st, c)| format!("{st} {c}")).collect::<Vec<_>>().join(", ")) }
         ),
@@ -423,7 +428,7 @@ mod tests {
             store.note_recall(vec![t0.clone()], &agent);
         }
         store.db.flush();
-        let s = compute(&store, scope, 30);
+        let s = compute(&store, scope, 30, false);
         assert_eq!(s.active, 4);
         assert_eq!(s.task_count, 5);
         assert_eq!(s.tasks.iter().find(|(k, _)| k == "active").map(|(_, c)| *c), Some(2));
@@ -440,6 +445,13 @@ mod tests {
         assert_eq!(s.days.iter().map(|d| d.recalled).sum::<usize>(), 2);
         assert_eq!(s.days.last().map(|d| d.total), Some(4));
         assert!(describe(&s, |_| String::new()).contains("Tasks (not counted above): 5"));
+        // Asked to count them, tasks are memories like the rest: their reads, links and kind.
+        let s = compute(&store, scope, 30, true);
+        assert_eq!((s.active, s.task_count), (9, 5));
+        assert_eq!((s.recalls_in_window, s.recalled_in_window), (7, 3));
+        assert_eq!(s.by_kind.iter().find(|(k, _)| k == "task").map(|(_, c)| *c), Some(5));
+        assert_eq!(s.links, 1);
+        assert_eq!(s.days.last().map(|d| d.total), Some(9));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

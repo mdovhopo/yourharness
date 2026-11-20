@@ -109,6 +109,11 @@ impl ClaudeMemory {
     }
 }
 
+/// Tasks show outside the Memory page's Tasks tab: off unless turned on in Settings → Memory.
+fn tasks_shown(lib: &yh_core::library::Library) -> bool {
+    lib.setting("memoryTasksInStats").and_then(|v| v.as_bool()).unwrap_or(false)
+}
+
 /// When a project's Claude Code memory was last brought in (seconds since 1970). 0.0.x
 /// saved dates from 2001; those are moved over.
 fn synced_at(lib: &yh_core::library::Library, project: &str) -> Option<f64> {
@@ -136,6 +141,9 @@ pub struct MemoryPage {
     /// The memory's text in its editor (Edit) rather than as Markdown (Preview).
     editing_body: bool,
     loaded_revision: Option<u64>,
+    /// Tasks show outside the Tasks tab (in the list, Insights, Activity and Graph), as of the
+    /// last read: Settings → Memory → "Show tasks in stats and graph".
+    tasks_shown: bool,
     pub loaded: bool,
     /// Claude Code's own memory here, read with the rest.
     claude: Option<ClaudeMemory>,
@@ -203,7 +211,7 @@ impl MemoryPage {
                 }
             }),
             cx.observe(&workspace, |this, ws, cx| {
-                if this.loaded_revision != Some(ws.read(cx).memory_revision) {
+                if this.loaded_revision != Some(ws.read(cx).memory_revision) || this.tasks_shown != tasks_shown(&ws.read(cx).library) {
                     this.reload(cx);
                 }
             }),
@@ -238,6 +246,7 @@ impl MemoryPage {
             activity_filter: "all",
             editing_body: false,
             loaded_revision: None,
+            tasks_shown: false,
             claude: None,
             pressed_one_memory: false,
             loaded: false,
@@ -283,6 +292,8 @@ impl MemoryPage {
         };
         let revision = self.workspace.read(cx).memory_revision;
         self.loaded_revision = Some(revision);
+        let with_tasks = tasks_shown(&self.workspace.read(cx).library);
+        self.tasks_shown = with_tasks;
         let scope = self.scope();
         let (folder, since) = (self.project_path(cx), synced_at(&self.workspace.read(cx).library, &self.project));
         let is_home = {
@@ -297,8 +308,8 @@ impl MemoryPage {
                     let mut all = store.memories(Some(&scope), None);
                     all.retain(|m| m.status != "proposed" || m.merged_into.is_none());
                     all.sort_by(|a, b| b.pinned.cmp(&a.pinned).then(b.updated_at.total_cmp(&a.updated_at)));
-                    let stats = yh_core::memory_stats::compute(&store, &scope, 30);
-                    let active: Vec<&Memory> = all.iter().filter(|m| m.status == "active").collect();
+                    let stats = yh_core::memory_stats::compute(&store, &scope, 30, with_tasks);
+                    let active: Vec<&Memory> = all.iter().filter(|m| m.status == "active" && (with_tasks || !m.is_task())).collect();
                     let ids: Vec<String> = active.iter().map(|m| m.id.clone()).collect();
                     let edges: Vec<(usize, usize)> = active
                         .iter()
@@ -317,7 +328,13 @@ impl MemoryPage {
                             is_home,
                         }
                     });
-                    (all, store.activity(&scope, 300), stats, Graph { ids, edges, points }, claude)
+                    // What happened to tasks stays off Activity too, unless they're shown.
+                    let mut events = store.activity(&scope, 300);
+                    if !with_tasks {
+                        let tasks: std::collections::HashSet<&str> = all.iter().filter(|m| m.is_task()).map(|m| m.id.as_str()).collect();
+                        events.retain(|e| e.memory.as_deref().is_none_or(|id| !tasks.contains(id)));
+                    }
+                    (all, events, stats, Graph { ids, edges, points }, claude)
                 })
                 .await;
             let _ = this.update(cx, |page, cx| {
@@ -398,6 +415,7 @@ impl MemoryPage {
         self.memories
             .iter()
             .filter(|m| (m.status == "archived") == self.archived)
+            .filter(|m| self.tasks_shown || !m.is_task())
             .filter(|m| self.kind_filter.is_none_or(|k| m.kind == k))
             .filter(|m| {
                 let text = format!("{} {} {}", m.title, m.description, m.body).to_lowercase();
@@ -697,8 +715,9 @@ impl MemoryPage {
     }
 
     fn summary(&self) -> String {
-        let active: Vec<&Memory> = self.memories.iter().filter(|m| m.status == "active").collect();
-        let archived = self.memories.iter().filter(|m| m.status == "archived").count();
+        let shown: Vec<&Memory> = self.memories.iter().filter(|m| self.tasks_shown || !m.is_task()).collect();
+        let active: Vec<&Memory> = shown.iter().copied().filter(|m| m.status == "active").collect();
+        let archived = shown.iter().filter(|m| m.status == "archived").count();
         if active.is_empty() && archived == 0 {
             return "Nothing remembered yet".into();
         }
@@ -901,7 +920,7 @@ impl MemoryPage {
                 }))
         };
         chips = chips.child(filter_chip("kind-all".into(), "All", self.kind_filter.is_none(), None, None, cx));
-        for (kind, label) in KINDS {
+        for (kind, label) in KINDS.into_iter().filter(|(k, _)| self.tasks_shown || *k != "task") {
             chips = chips.child(filter_chip(format!("kind-{kind}"), label, self.kind_filter == Some(kind), Some(kind_color(kind, theme)), Some(kind), cx));
         }
         let page = cx.entity().downgrade();
@@ -1579,7 +1598,7 @@ impl MemoryPage {
         }
         let count = |k: &str| st.tasks.iter().find(|(s, _)| s == k).map_or(0, |(_, c)| *c);
         let open = count("active") + count("blocked") + count("todo");
-        if open > 0 {
+        if open > 0 && st.with_tasks {
             let blocked = count("blocked");
             lines.push((format!("{open} task{} open{}: every session starts knowing where they stand and what's next.", if open == 1 { " is" } else { "s are" }, if blocked > 0 { format!(", {blocked} blocked") } else { String::new() }), blocked > 0));
         }
@@ -1625,7 +1644,7 @@ impl MemoryPage {
             .flex()
             .flex_wrap()
             .gap(px(space::M))
-            .child(page_kit::stat_tile("Memories", st.active.to_string(), (st.task_count > 0).then(|| format!("Tasks: {} (not counted here)", st.task_count)), theme))
+            .child(page_kit::stat_tile("Memories", st.active.to_string(), (st.with_tasks && st.task_count > 0).then(|| format!("{} of them tasks", st.task_count)), theme))
             .child(page_kit::stat_tile("Index each session", format!("~{index_tokens}"), Some("tokens".into()), theme))
             .child(page_kit::stat_tile("Read, last 30 days", match st.recall_rate() { Some(r) => format!("{:.0}%", r * 100.), None => "—".into() }, Some("of memories in use".into()), theme))
             .child(page_kit::stat_tile("Searches that found something", match st.search_hit_rate() { Some(r) => format!("{:.0}%", r * 100.), None => "—".into() }, Some(if st.searches == 0 { "no searches yet".into() } else { format!("of {}", st.searches) }), theme));
@@ -1860,7 +1879,7 @@ impl MemoryPage {
             .gap(px(space::M))
             .text_size(px(text::CAPTION))
             .text_color(theme.secondary)
-            .children(KINDS.iter().map(|(k, l)| div().flex().items_center().gap(px(5.)).child(page_kit::dot(kind_color(k, theme), 7.)).child(*l)))
+            .children(KINDS.iter().filter(|(k, _)| self.tasks_shown || *k != "task").map(|(k, l)| div().flex().items_center().gap(px(5.)).child(page_kit::dot(kind_color(k, theme), 7.)).child(*l)))
             .child(div().text_color(theme.tertiary).child("Bigger: read more · Ringed: pinned · Lines: links"));
         // The hovered memory, in a card at the bottom right.
         let card = hovered.and_then(|h| self.memories.iter().find(|m| m.id == self.graph.ids[h])).map(|m| {
@@ -2308,7 +2327,7 @@ impl SpecialistSetup {
             let Some(store) = self.workspace.read(cx).memory_store() else { return };
             let scope = yh_core::memory::scope_of(&self.project);
             cx.spawn(async move |this, cx| {
-                let stats = cx.background_executor().spawn(async move { yh_core::memory_stats::compute(&store, &scope, 30) }).await;
+                let stats = cx.background_executor().spawn(async move { yh_core::memory_stats::compute(&store, &scope, 30, false) }).await;
                 let _ = this.update(cx, |s, cx| {
                     s.stats = Some(stats);
                     cx.notify();
