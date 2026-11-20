@@ -38,6 +38,13 @@ pub struct Composer {
     current: Option<String>,
     card: Option<(String, Card)>,
     plan_open: bool,
+    /// The open thread's tasks in memory (what `track` keeps), newest first: the root reads
+    /// them when the thread or memory changes.
+    tasks: Vec<yh_core::memory::Memory>,
+    /// The task strip shows its steps.
+    task_open: bool,
+    /// Opens a task on the Memory page's Tasks tab: (project, task ID). Set by the root.
+    pub on_open_task: Option<Rc<dyn Fn(&str, &str, &mut Window, &mut App)>>,
     /// The menu under the caret: slash commands (at the start, or later to chain skills), files
     /// after an `@`.
     suggest: Option<Suggest>,
@@ -457,6 +464,9 @@ impl Composer {
             current: None,
             card: None,
             plan_open: false,
+            tasks: vec![],
+            task_open: false,
+            on_open_task: None,
             suggest: None,
             attached: HashMap::new(),
             withdrawing: HashSet::new(),
@@ -1124,6 +1134,9 @@ impl Render for Composer {
         if thread.read(cx).run.running && !plan.items.is_empty() && !plan.is_finished() {
             inner = inner.child(self.plan_strip(&plan, &theme, cx));
         }
+        if let Some(strip) = self.task_strip(&thread, &theme, cx) {
+            inner = inner.child(strip);
+        }
         if let Some(menu) = self.suggestions(&theme, cx) {
             inner = inner.child(menu);
         }
@@ -1265,6 +1278,111 @@ impl Composer {
 }
 
 impl Composer {
+    /// The open thread's tasks, as the root read them.
+    pub fn set_tasks(&mut self, tasks: Vec<yh_core::memory::Memory>, cx: &mut Context<Self>) {
+        if self.tasks != tasks {
+            self.tasks = tasks;
+            cx.notify();
+        }
+    }
+
+    /// The task this thread works on, from memory: its state, how far along (a thin bar, "3/9")
+    /// and the next step, opening into its steps. There until the task is done, between turns
+    /// too, so a blocked one stays in sight.
+    fn task_strip(&self, thread: &Entity<ThreadState>, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui_kit::Div> {
+        let open: Vec<&yh_core::memory::Memory> = self.tasks.iter().filter(|t| t.task_state.as_deref() != Some("done")).collect();
+        let task = (*open.first()?).clone();
+        let state = task.task_state.clone().unwrap_or_else(|| "active".into());
+        let color = match state.as_str() {
+            "blocked" => theme.warning,
+            "todo" => theme.secondary,
+            _ => theme.accent,
+        };
+        let (done, total) = (task.steps_done(), task.steps.len());
+        let next = task.next_step().map(|s| s.to_string());
+        let more = open.len() - 1;
+        let expanded = self.task_open;
+        let head = div()
+            .id("task-strip-head")
+            .flex()
+            .items_center()
+            .gap(px(space::S))
+            .cursor_pointer()
+            .child(crate::ui::page_icons::list_checks().size(px(14.)).text_color(color))
+            .child(div().flex_shrink(1.).min_w(px(60.)).max_w(px(280.)).overflow_hidden().whitespace_nowrap().text_ellipsis().font_weight(FontWeight::MEDIUM).child(task.title.clone()))
+            .when(total > 0, |d| {
+                d.child(div().flex_none().w(px(44.)).h(px(4.)).rounded(px(2.)).bg(theme.selected).child(div().h_full().rounded(px(2.)).w(gpui_kit::relative(done as f32 / total as f32)).bg(color))).child(div().flex_none().text_color(theme.secondary).child(format!("{done}/{total}")))
+            })
+            .when(state != "active", |d| d.child(div().flex_none().text_color(color).child(yh_core::memory::state_label(&state).to_string())))
+            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(theme.secondary).children(next.filter(|_| !expanded).map(|n| format!("Next: {n}"))))
+            .when(more > 0, |d| d.child(div().flex_none().text_color(theme.tertiary).child(format!("+{more}"))))
+            .child(Icon::new(if expanded { IconName::ChevronDown } else { IconName::ChevronRight }).size(px(13.)).text_color(theme.tertiary))
+            .tooltip(|window, cx| Tooltip::new("The task this thread is working on, kept in memory").build(window, cx))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.task_open = !this.task_open;
+                cx.notify();
+            }));
+        let mut strip = div()
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .mb(px(space::S))
+            .px(px(space::M))
+            .py(px(space::XS + 2.))
+            .rounded(px(radius::LARGE))
+            .border_1()
+            .border_color(theme.separator)
+            .bg(theme.card)
+            .text_size(px(text::FOOTNOTE))
+            .child(head);
+        if expanded {
+            let mut list = div().flex().flex_col().gap(px(3.)).pt(px(space::XS)).pb(px(2.));
+            let current = task.steps.iter().position(|s| !s.done);
+            for (i, step) in task.steps.iter().enumerate() {
+                let mark = if step.done {
+                    Icon::new(IconName::CircleCheck).text_color(theme.success)
+                } else if Some(i) == current {
+                    Icon::new(IconName::LoaderCircle).text_color(color)
+                } else {
+                    icons::circle_dashed().text_color(theme.tertiary)
+                };
+                list = list.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(space::S))
+                        .pl(px(1.))
+                        .child(mark.size(px(13.)))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .when(step.done, |d| d.text_color(theme.secondary).line_through())
+                                .when(Some(i) == current, |d| d.font_weight(FontWeight::MEDIUM))
+                                .child(step.text.clone()),
+                        ),
+                );
+            }
+            let project = thread.read(cx).meta.project_id.clone();
+            let id = task.id.clone();
+            list = list.child(
+                div().flex().pt(px(space::XS)).child(
+                    div()
+                        .id("task-strip-memory")
+                        .text_color(theme.accent)
+                        .cursor_pointer()
+                        .child(if more > 0 { format!("Show in Memory · {more} more open") } else { "Show in Memory".to_string() })
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            if let Some(open) = this.on_open_task.clone() {
+                                open(&project, &id, window, cx);
+                            }
+                        })),
+                ),
+            );
+            strip = strip.child(list);
+        }
+        Some(strip)
+    }
+
     /// Claude's checklist: progress and what it's on, opening into the whole list.
     fn plan_strip(&self, plan: &yh_core::plan::Plan, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         use yh_core::plan::Status;
