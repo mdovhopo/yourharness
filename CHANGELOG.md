@@ -11,9 +11,11 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 - Usage's limits are now one card with a row per limit: how much is used, a bar with a line where even spending would put you, whether you're ahead of or under that pace, and when it resets. Refresh them right there. Fable's weekly limit is called Weekly · Fable (Fable in the sidebar) instead of "seven day overage included", and it no longer disappears after a request to another model: it stays until it resets.
 - While Claude works, a message can now wait for the turn to end and then go as a turn of its own: press ⌥↩ or the clock button next to Steer. ↩ still steers (Claude reads it after its current step) and ⌘↩ still stops Claude and sends now. Queued and steering messages are labelled above the message box, and the thread tells you it's finished only once the queued turn is done too.
 
+- Phone: dictation can be written out by your Mac's voice model (Whisper or Parakeet, as picked in Settings → Voice on the Mac): set Settings → Voice Input → Transcribe On to Mac in the phone app. It's better with code words and mixed languages, and the words come once you stop.
 ### Changed
 
 - The browser's keyboard follows your clicks: click in the page to type into it, click anywhere else to type in the app. The Typing in Page button is gone.
+- Phone: dictation uses iOS 26's new on-device speech model, which is much more accurate than the old recognizer and doesn't need Speech Recognition permission. Pick its language in Settings → Voice Input (the phone's own by default); iOS downloads each language the first time.
 - Tasks stay on the Memory page's Tasks tab: the memories list, Insights, Activity and Graph leave them out, so a board of rarely-read tasks no longer drags the figures down. Settings → General → Memory has **Show tasks in stats and graph** (off) to bring them back, and **Track tasks in memory** (on) to stop agents tracking tasks at all.
 - A task opened from the board shows on the Tasks tab, with All Tasks to go back.
 - Above the message box, a strip shows the task the thread is working on: its progress, the next step, and its steps when you click it, with Show in Memory. It stays until the task is done.

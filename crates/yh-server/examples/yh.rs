@@ -91,6 +91,7 @@ fn print(m: &ToApp, began: &mut bool) -> bool {
         ToApp::Subagent { seq, run, .. } => println!("SUBAGENT #{seq} {:?} {} steps={} report={}", run.info.description, run.info.status, run.steps.len(), run.report.is_some()),
         ToApp::Media { seq, index, media_type, data, error, .. } => println!("MEDIA #{seq}.{index} {} {} {}", media_type.as_deref().unwrap_or("-"), data.as_ref().map_or(0, |d| d.len()), error.as_deref().unwrap_or("")),
         ToApp::Diagram { key, drawing, error } => println!("DIAGRAM {key} {}", drawing.as_ref().map(|d| format!("{} {}x{} paths={} labels={}", d.kind, d.width, d.height, d.paths.len(), d.labels.len())).unwrap_or_else(|| error.clone().unwrap_or_default())),
+        ToApp::Transcript { key, text, error } => println!("TRANSCRIPT {key} {}", text.clone().or_else(|| error.clone()).unwrap_or_default()),
         ToApp::ToolResult { seq, input, result, .. } => println!("TOOL #{seq} input={} result={}", input.as_ref().map_or(0, |s| s.chars().count()), result.as_ref().map_or(0, |s| s.chars().count())),
         ToApp::Error { message } => println!("ERROR {message}"),
         ToApp::Pulls { project, pulls, errors, .. } => println!("PULLS {project} {} PRs{}{}", pulls.len(), pulls.iter().take(4).map(|p| format!(" | {}#{} {} [{} d{}]", p.repo, p.number, p.title, p.section, p.depth)).collect::<String>(), errors.iter().map(|e| format!(" ! {e}")).collect::<String>()),

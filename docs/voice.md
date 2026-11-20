@@ -1,7 +1,10 @@
 # Voice input
 
-The composer's mic writes what you say into the message; it never sends. Mac only (the phone
-has its own, Apple's recognizer: docs/mobile.md).
+The composer's mic writes what you say into the message; it never sends. The phone has its own
+(iOS 26's speech model, docs/mobile.md), and can borrow the Mac's: with its Transcribe On set to
+Mac it sends the recording (16 kHz mono, protocol 9's `transcribe`), which `voice::ForPhones`
+writes out with the model picked here, on the same worker thread, the project's name as the
+glossary.
 
 ```mermaid
 flowchart LR

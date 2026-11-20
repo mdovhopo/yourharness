@@ -122,7 +122,7 @@ fn streams_what_claude_writes_and_takes_actions() {
             a.reply.send(answer).unwrap();
         }
     });
-    let url = start_with(&dir, None, Some(yh_server::Links { engine: engine.clone(), actions, browser: None }));
+    let url = start_with(&dir, None, Some(yh_server::Links { engine: engine.clone(), actions, browser: None, voice: Some(std::sync::Arc::new(Ears)) }));
     let mut c = Client::connect(&url).unwrap();
     c.expect("hello", |m| matches!(m, ToApp::Hello { .. }));
     c.send(FromApp::SubscribeApp);
@@ -200,11 +200,28 @@ fn streams_what_claude_writes_and_takes_actions() {
     engine.send(Command::Events { thread: t(), events: vec![yh_core::claude::Event::Done { is_error: false, text: String::new() }] });
     c.expect("over", |m| matches!(m, ToApp::Live { live, .. } if !live.running));
 
-    // Read-only without links: an action is refused.
+    // Protocol 9: a recording written out by the Mac's voice model; samples as -1…1.
+    c.send(FromApp::Transcribe { key: "v1".into(), thread: Some(t()), audio: "AEAAwA==".into() });
+    c.expect("transcript", |m| matches!(m, ToApp::Transcript { key, text: Some(text), error: None } if key == "v1" && text == "0.5 -0.5"));
+    c.send(FromApp::Transcribe { key: "v2".into(), thread: None, audio: "a$b".into() });
+    c.expect("unreadable", |m| matches!(m, ToApp::Transcript { key, text: None, error: Some(_) } if key == "v2"));
+
+    // Read-only without links: an action is refused, and so is writing out speech.
     let mut r = Client::connect(&start_with(&dir, None, None)).unwrap();
     r.expect("hello", |m| matches!(m, ToApp::Hello { .. }));
     r.send(FromApp::Stop { id: Some("a3".into()), thread: t() });
     r.expect("refused", |m| matches!(m, ToApp::Done { id, error: Some(_), .. } if id == "a3"));
+    r.send(FromApp::Transcribe { key: "v3".into(), thread: None, audio: "AEAAwA==".into() });
+    r.expect("no voice", |m| matches!(m, ToApp::Transcript { key, error: Some(_), .. } if key == "v3"));
+}
+
+/// A voice model that says the samples it heard.
+struct Ears;
+
+impl yh_server::Voice for Ears {
+    fn transcribe(&self, audio: Vec<f32>, _glossary: String) -> Result<String, String> {
+        Ok(audio.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(" "))
+    }
 }
 
 #[test]

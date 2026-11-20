@@ -74,6 +74,7 @@ impl Voice {
         let models = std::env::var("YH_VOICE_MODELS").map(PathBuf::from).unwrap_or_else(|_| yh_core::library::data_directory().join("voice-models"));
         let installed = yh_voice::MODELS.iter().filter(|m| yh_voice::download::installed(&models, m)).map(|m| m.id).collect();
         let worker = yh_voice::Worker::start(models.clone());
+        let _ = SHARED.set((library.clone(), models.clone(), worker.clone()));
         Voice { library, models, worker, installed, downloads: HashMap::new(), errors: HashMap::new(), phase: Phase::Idle }
     }
 
@@ -344,6 +345,24 @@ impl Voice {
     /// Why the last recording failed, until the next starts.
     pub fn recording_error(&self) -> Option<&str> {
         self.errors.get("").map(String::as_str)
+    }
+}
+
+/// The voice thread, for phones: set when `Voice` starts.
+static SHARED: std::sync::OnceLock<(Arc<Library>, PathBuf, yh_voice::Worker)> = std::sync::OnceLock::new();
+
+/// What's said on a paired phone, written out by the model picked in Settings → Voice (the
+/// phone's own setting, Transcribe on Mac), on the same thread as the Mac's own mic.
+pub struct ForPhones;
+
+impl yh_server::Voice for ForPhones {
+    fn transcribe(&self, audio: Vec<f32>, glossary: String) -> Result<String, String> {
+        let (library, models, worker) = SHARED.get().ok_or("Voice input hasn't started on this Mac.")?;
+        let id = library.setting("voice").and_then(|v| v["model"].as_str().map(str::to_string));
+        let model = id.and_then(|id| yh_voice::find(&id)).filter(|m| yh_voice::download::installed(models, m)).ok_or("No voice model on this Mac: pick one in Settings → Voice.")?;
+        let t = worker.transcribe(model, audio, yh_voice::Hints { glossary, language: None }).recv().map_err(|_| "The voice thread stopped.".to_string())??;
+        log(format!("phone: heard {:.1} s with {} (load {:.2} s, took {:.2} s): {}", t.audio_s, model.id, t.load_s, t.took_s, t.text));
+        Ok(t.text)
     }
 }
 

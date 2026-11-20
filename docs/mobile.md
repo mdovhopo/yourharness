@@ -512,15 +512,26 @@ Recorded here so the MVP stays small. Roughly in order; Tailscale last.
    `YH_OPEN_PICTURE=1`, `YH_OPEN_DIAGRAM=1`. Links in replies open in Safari on a tap, written
    out web addresses too (the labels don't follow links themselves: `RowCell` finds the one under
    the tap); `YH_OPEN_LINK=1` opens the last one on screen, printing `OPEN link <url>`.
-5c. **Voice input** (built 2026-11-09, not yet heard): a mic in the message field, always there;
-   tap to dictate (Apple's speech recognition, on the device where it can be), the words written
-   into the field after what's there as you speak, tap again (or Send) to stop. Asks for the
-   microphone and Speech Recognition the first time. Checked so far: the mic shows and the
-   permission is asked with the app's wording. Not checked: words coming in. `simctl` can't grant
-   Speech Recognition, so a test can't get past the alert, and a live mic in the Simulator would
-   use the Mac's microphone (a macOS prompt). Check it by hand: open the Simulator window, Allow,
-   dictate; or on a real iPhone. `YH_PHONE_DICTATE_FILE=<audio>` transcribes a file into the field
-   once allowed (`say -o x.aiff "…"` makes one).
+5c. **Voice input** (built 2026-11-09; new engines 2026-11-20): a mic in the message field, always
+   there; tap to dictate, tap again (or Send) to stop. Two engines, Settings → Voice Input →
+   Transcribe On (`dictation.engine`, `Dictation.swift`):
+   - **iPhone** (the default): iOS 26's `SpeechAnalyzer` with `SpeechTranscriber`, on the device,
+     words written into the field as you speak (volatile results replaced as they settle). Its
+     language (`dictation.language`, the phone's own by default; a picker over
+     `SpeechTranscriber.supportedLocales`) is downloaded by iOS the first time (`AssetInventory`;
+     the mic shows a spinner, "Getting dictation ready…"). Only the microphone is asked for. Where
+     `SpeechTranscriber.isAvailable` is false (older phones, the Simulator) the old
+     `SFSpeechRecognizer`, which also asks for Speech Recognition.
+   - **Mac** (protocol 9): the recording, converted to 16 kHz mono 16-bit, sent when you stop as
+     `transcribe` and written out by the Mac's voice model (docs/voice.md); `transcript` comes
+     back under the same key ("Writing out on your Mac…"). Send while dictating only stops: the
+     words land in the field to send. A Mac older than protocol 9 falls back to the iPhone's.
+   Checked: the Mac path end to end in the Simulator (`YH_PHONE_DICTATION=mac` with
+   `YH_PHONE_DICTATE_FILE`: 5.4 s of speech, Parakeet on the Mac, the sentence word for word).
+   Not checked: the iPhone engine, which the Simulator doesn't offer and the old recognizer's
+   permission `simctl` can't grant; check it on a real iPhone. `YH_PHONE_DICTATE_FILE=<audio>`
+   writes a file's words into the field through the engine in use (`YH_PHONE_DICTATION=mac|phone`
+   over the setting), printing `PHONE dictated (<engine>): …` (`say -o x.aiff "…"` makes one).
 6. **Richer transcript:** ✅ a tool row opens in a sheet (an edit as a line diff, a write's
    content, a command and its output, other inputs pretty-printed, the result's first 2000
    characters), thinking opens in full, your messages and replies copy with a long press, or open

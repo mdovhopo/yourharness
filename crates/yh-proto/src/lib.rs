@@ -23,7 +23,9 @@ use serde::{Deserialize, Serialize};
 /// 8: a thread's folder, read only: its tree (`list_dir`), a file a page of lines at a time,
 /// coloured (`read_file`), what's changed in it since the last commit (`changes`) and each one's
 /// diff (`change_patch`); the files a reply names, on its row (`files`), for links.
-pub const PROTOCOL: u32 = 8;
+/// 9: what you said on the phone, written out by the Mac's voice model (`transcribe`,
+/// `transcript`).
+pub const PROTOCOL: u32 = 9;
 
 /// A slash command the composer offers: `/name hint`, and what it does.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -688,6 +690,8 @@ pub enum ToApp {
     Subagent { thread: String, seq: i64, run: SubagentRun },
     /// A row's picture (`index`: which of its pictures), asked for with `media`: base64, or why not.
     Media { thread: String, seq: i64, index: usize, #[serde(default, skip_serializing_if = "Option::is_none")] media_type: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] data: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] error: Option<String> },
+    /// Protocol 9: what `transcribe` heard, under its `key` (`error`: why it couldn't).
+    Transcript { key: String, #[serde(default, skip_serializing_if = "Option::is_none")] text: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] error: Option<String> },
     /// A Mermaid diagram laid out and drawn, asked for with `diagram` (`error`: why it can't be).
     Diagram { key: String, #[serde(default, skip_serializing_if = "Option::is_none")] drawing: Option<Drawing>, #[serde(default, skip_serializing_if = "Option::is_none")] error: Option<String> },
     /// A row's whole tool input and result, asked for with `tool_result`.
@@ -834,6 +838,10 @@ pub enum FromApp {
     Changes { thread: String },
     /// Protocol 8: one changed file's diff: answered with `change_patch`.
     ChangePatch { thread: String, path: String },
+    /// Protocol 9: a recording written out by the Mac's voice model (Settings → Voice): `audio`
+    /// is base64 of 16 kHz mono 16-bit little-endian samples; `thread`, where it goes (its
+    /// project's name helps the model spell it). Answered with `transcript` under the same `key`.
+    Transcribe { key: String, #[serde(default)] thread: Option<String>, audio: String },
     #[serde(other)]
     Unknown,
 }

@@ -18,6 +18,8 @@ struct ComposerBar: View {
     @State private var dictation = Dictation()
     /// What was in the field when dictation started: what's heard goes after it.
     @State private var beforeDictation = ""
+    /// Settings → Voice Input: the iPhone's own model, or the Mac's.
+    @AppStorage("dictation.engine") private var dictationEngine = Dictation.Engine.phone
 
     private var live: Live? { store.live }
     private var running: Bool { live?.running ?? store.threads[threadID]?.isRunning ?? false }
@@ -117,7 +119,7 @@ struct ComposerBar: View {
                 .accessibilityLabel("Attach pictures")
             }
             HStack(alignment: .bottom, spacing: 4) {
-                TextField(listening ? "Listening…" : running ? "Message (waits for Claude's step)" : "Message", text: $draft, axis: .vertical)
+                TextField(listening ? "Listening…" : dictation.state == .transcribing ? "Writing out on your Mac…" : dictation.state == .preparing ? "Getting dictation ready…" : running ? "Message (waits for Claude's step)" : "Message", text: $draft, axis: .vertical)
                     .lineLimit(1...6)
                     .focused($focused)
                     .submitLabel(.send)
@@ -125,17 +127,24 @@ struct ComposerBar: View {
                 // Voice input, always here: tap to dictate into the field, tap again to stop.
                 Button {
                     if !listening { beforeDictation = draft.trimmingCharacters(in: .whitespacesAndNewlines) }
-                    dictation.toggle()
+                    dictation.toggle(mac: mac)
                 } label: {
-                    Image(systemName: listening ? "waveform" : "mic")
-                        .font(.system(size: 16, weight: .medium))
-                        .foregroundStyle(listening ? Color.red : Color.secondary)
-                        .symbolEffect(.variableColor.iterative, isActive: listening)
-                        .frame(width: 32, height: 36)
-                        .contentShape(.rect)
+                    Group {
+                        if busyDictating {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Image(systemName: listening ? "waveform" : "mic")
+                                .font(.system(size: 16, weight: .medium))
+                                .foregroundStyle(listening ? Color.red : Color.secondary)
+                                .symbolEffect(.variableColor.iterative, isActive: listening)
+                        }
+                    }
+                    .frame(width: 32, height: 36)
+                    .contentShape(.rect)
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel(listening ? "Stop dictating" : "Dictate")
+                .disabled(busyDictating)
+                .accessibilityLabel(listening ? "Stop dictating" : busyDictating ? "Writing out" : "Dictate")
             }
             .padding(.leading, 14)
             .padding(.trailing, 6)
@@ -153,6 +162,11 @@ struct ComposerBar: View {
                 .accessibilityLabel("Stop")
             } else {
                 Button {
+                    // Dictating to the Mac: stopping writes it out; the words land in the field to send.
+                    if listening, dictation.toMac {
+                        dictation.stop()
+                        return
+                    }
                     dictation.stop()
                     send()
                 } label: {
@@ -186,13 +200,29 @@ struct ComposerBar: View {
         .task {
             guard let path = ProcessInfo.processInfo.environment["YH_PHONE_DICTATE_FILE"] else { return }
             try? await Task.sleep(for: .seconds(2))
-            let heard = await dictation.transcribe(file: URL(fileURLWithPath: path))
-            Perf.shared.log("PHONE dictated: \(heard ?? "(nothing)")")
-            if let heard { draft = heard }
+            try? await Task.sleep(for: .seconds(3))
+            let (engine, heard) = await dictation.transcribe(file: URL(fileURLWithPath: path), mac: mac)
+            switch heard {
+            case .success(let text):
+                Perf.shared.log("PHONE dictated (\(engine)): \(text)")
+                draft = text
+            case .failure(let why):
+                Perf.shared.log("PHONE dictation failed (\(engine)): \(why.message)")
+            }
         }
     }
 
     private var listening: Bool { dictation.state == .listening }
+    private var busyDictating: Bool { dictation.state == .preparing || dictation.state == .transcribing }
+
+    /// Where the Mac writes what's said out, when Settings says so and this Mac can.
+    private var mac: Dictation.Mac? {
+        // `YH_PHONE_DICTATION=mac|phone` (test runs) over Settings.
+        let engine = ProcessInfo.processInfo.environment["YH_PHONE_DICTATION"].flatMap(Dictation.Engine.init(rawValue:)) ?? dictationEngine
+        guard engine == .mac, store.transcribesOnMac else { return nil }
+        let (store, thread) = (store, threadID)
+        return { await store.transcribe($0, thread: thread) }
+    }
 
     /// `/btw <question>` goes to the side chat, which opens; the rest to the Mac as typed.
     private func send() {

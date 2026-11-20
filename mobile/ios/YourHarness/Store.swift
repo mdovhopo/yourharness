@@ -148,6 +148,9 @@ final class Store: Identifiable {
                 Perf.shared.log("ROUTE \(displayName) via \(route ?? "?")\(viaTailscale ? " (Tailscale)" : "")")
             } else {
                 route = nil
+                // Recordings the Mac was writing out won't be answered on this connection.
+                for done in transcribing.values { done.resume(returning: .failure(.init(message: "The connection to your Mac dropped."))) }
+                transcribing.removeAll()
             }
             // A pairing code the Mac refused won't work on a retry: stop, and say what to do.
             if pairing, case .waiting(let reason, _) = $0, reason.contains("refused") {
@@ -158,6 +161,28 @@ final class Store: Identifiable {
         connection.onMessages = { [weak self] in self?.apply($0) }
         restoreCache()
         connection.connect()
+    }
+
+    // MARK: Voice input on the Mac (protocol 9)
+
+    /// Recordings the Mac is writing out, by key.
+    @ObservationIgnored private var transcribing: [String: CheckedContinuation<Result<String, Dictation.Failed>, Never>] = [:]
+
+    var transcribesOnMac: Bool { serverProtocol >= 9 }
+
+    /// A recording (16 kHz mono 16-bit samples) written out by the Mac's voice model.
+    func transcribe(_ audio: Data, thread: String?) async -> Result<String, Dictation.Failed> {
+        guard canAct, transcribesOnMac else { return .failure(.init(message: "Your Mac isn't connected, or is too old to write out speech: update YourHarness there.")) }
+        let key = UUID().uuidString
+        Perf.shared.log("DICTATION sent \(audio.count / 32_000) s to the Mac")
+        return await withCheckedContinuation { done in
+            transcribing[key] = done
+            connection.send(.transcribe(key: key, thread: thread, audio: audio))
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(120))
+                self?.transcribing.removeValue(forKey: key)?.resume(returning: .failure(.init(message: "Your Mac didn't answer.")))
+            }
+        }
     }
 
     /// Shown now: pictures and diagrams in rows are asked of this Mac as they're shown.
@@ -841,6 +866,8 @@ final class Store: Identifiable {
                 MediaCache.shared.deliver(thread: thread, seq: seq, index: index, image: image, error: error)
             case .diagram(let key, let drawing, let error):
                 DiagramCache.shared.deliver(key: key, drawing: drawing, error: error)
+            case .transcript(let key, let text, let error):
+                transcribing.removeValue(forKey: key)?.resume(returning: text.map { .success($0) } ?? .failure(.init(message: error ?? "Nothing was heard.")))
             case .done(let id, let error, let made):
                 let action = pending.removeValue(forKey: id)
                 // A merge says how it went on its PR's page, not over the thread.

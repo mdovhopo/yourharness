@@ -627,6 +627,8 @@ enum ToApp: Sendable {
     case file(thread: String, path: String, page: FilePage?, error: String?)
     case changes(thread: String, files: [PullFile], branch: String?, error: String?)
     case changePatch(thread: String, path: String, lines: [DiffLine]?, error: String?)
+    /// Protocol 9: what the Mac's voice model heard in a recording sent with `transcribe`.
+    case transcript(key: String, text: String?, error: String?)
     case unknown
 
     /// Changes what the phone keeps of this Mac between launches (`Store`'s cache).
@@ -642,6 +644,7 @@ enum ToApp: Sendable {
     private struct File: Decodable { let thread: String; let path: String; let page: FilePage.Raw?; let error: String? }
     private struct Changes: Decodable { let thread: String; let files: [PullFile]?; let branch: String?; let error: String? }
     private struct ChangePatch: Decodable { let thread: String; let path: String; let patch: String?; let error: String? }
+    private struct Transcript: Decodable { let key: String; let text: String?; let error: String? }
     private struct Pulls: Decodable { let project: String; let pulls: [PullInfo]; let errors: [String]?; let accounts: [String]? }
     private struct Paired: Decodable { let device: String; let token: String }
     private struct Pull: Decodable { let url: String; let pull: PullDetail?; let error: String? }
@@ -770,6 +773,9 @@ enum ToApp: Sendable {
             case "change_patch":
                 let m = try d.decode(ChangePatch.self, from: data)
                 return .changePatch(thread: m.thread, path: m.path, lines: m.patch.map(DiffLine.parse), error: m.error)
+            case "transcript":
+                let m = try d.decode(Transcript.self, from: data)
+                return .transcript(key: m.key, text: m.text, error: m.error)
             case "paired":
                 let m = try d.decode(Paired.self, from: data)
                 return .paired(device: m.device, token: m.token)
@@ -837,6 +843,8 @@ enum FromApp {
     case readFile(thread: String, path: String, from: Int, count: Int, known: Double?)
     case changes(thread: String)
     case changePatch(thread: String, path: String)
+    // Protocol 9: a recording (16 kHz mono 16-bit samples) for the Mac's voice model.
+    case transcribe(key: String, thread: String?, audio: Data)
 
     var actionID: String? {
         switch self {
@@ -923,6 +931,7 @@ enum FromApp {
             ["type": "read_file", "thread": t, "path": path, "from": from, "count": count, "known": known.map { $0 as Any } ?? NSNull()]
         case .changes(let t): ["type": "changes", "thread": t]
         case .changePatch(let t, let path): ["type": "change_patch", "thread": t, "path": path]
+        case .transcribe(let key, let t, let audio): ["type": "transcribe", "key": key, "thread": t.map { $0 as Any } ?? NSNull(), "audio": audio.base64EncodedString()]
         case .watchBrowser(let t, let width): ["type": "watch_browser", "thread": t, "width": width]
         case .unwatchBrowser: ["type": "unwatch_browser"]
         case .browserAck(let seq): ["type": "browser_ack", "seq": seq]

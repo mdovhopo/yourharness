@@ -142,7 +142,19 @@ pub struct Links {
     pub actions: flume::Sender<Asked>,
     /// Where threads' browsers are streamed from (protocol 7); None: they aren't.
     pub browser: Option<Arc<browser::Hub>>,
+    /// The Mac's voice model, for what's said on the phone (protocol 9); None: there's none.
+    pub voice: Option<Arc<dyn Voice>>,
 }
+
+/// The Mac's voice input, as the phone borrows it.
+pub trait Voice: Send + Sync {
+    /// The text of `audio` (16 kHz mono), `glossary` the words to expect; blocks until it's
+    /// written out (a second or two), or says why it can't be (no model picked on the Mac).
+    fn transcribe(&self, audio: Vec<f32>, glossary: String) -> Result<String, String>;
+}
+
+/// The longest recording a phone may send: ten minutes, as on the Mac.
+const MAX_AUDIO_SAMPLES: usize = 16_000 * 600;
 
 /// A row as the wire carries it, its text and tool output trimmed.
 pub fn wire_row(r: &yh_core::thread_run::TranscriptRow, rev: i64) -> wire::Row {
@@ -342,6 +354,7 @@ struct Shared {
     /// keys start among the hub's.
     hub: Option<Arc<browser::Hub>>,
     hub_base: u64,
+    voice: Option<Arc<dyn Voice>>,
 }
 
 impl Shared {
@@ -375,15 +388,15 @@ impl Shared {
 
 /// Serves `directory` on `listener` until the process ends.
 pub fn serve(listener: TcpListener, directory: PathBuf, options: Options, links: Option<Links>) -> Result<(), String> {
-    let (engine, actions, hub) = match links {
-        Some(l) => (Some(l.engine), Some(l.actions), l.browser),
-        None => (None, None, None),
+    let (engine, actions, hub, voice) = match links {
+        Some(l) => (Some(l.engine), Some(l.actions), l.browser, l.voice),
+        None => (None, None, None, None),
     };
     // Subscribed before anyone connects, so no change is missed.
     let told = engine.as_ref().map(|e| e.subscribe());
     let browsers = hub.as_ref().map(|h| h.subscribe());
     let hub_base = hub.as_ref().map_or(0, |h| h.base());
-    let shared = Arc::new(Shared { actions, engine, data_dir: directory.clone(), hub, hub_base, ..Default::default() });
+    let shared = Arc::new(Shared { actions, engine, data_dir: directory.clone(), hub, hub_base, voice, ..Default::default() });
     let source = Source::open(&directory)?;
     shared.rev.store(source.max_rev().unwrap_or(0), std::sync::atomic::Ordering::SeqCst);
     // The list is read before anyone connects, so the first `threads` is never empty.
@@ -1111,6 +1124,25 @@ fn answer(id: u64, message: FromApp, shared: &Arc<Shared>, source: &Source) -> V
             });
             vec![]
         }
+        // Written out aside (a second or two on the Mac's model), then sent to this client alone.
+        FromApp::Transcribe { key, thread, audio } => {
+            let Some(voice) = shared.voice.clone() else { return vec![ToApp::Transcript { key, text: None, error: Some("This Mac can't write out speech.".into()) }] };
+            let Some(audio) = decode_base64(&audio).map(|b| pcm16(&b)) else { return vec![ToApp::Transcript { key, text: None, error: Some("The recording couldn't be read.".into()) }] };
+            if audio.len() > MAX_AUDIO_SAMPLES {
+                return vec![ToApp::Transcript { key, text: None, error: Some("The recording is longer than ten minutes.".into()) }];
+            }
+            // Words to expect: the project's name, as the Mac's own mic gives it.
+            let glossary = thread.and_then(|t| source.folder_of(&t).ok().flatten()).and_then(|f| Path::new(&f).file_name().map(|n| format!("{}, Claude.", n.to_string_lossy()))).unwrap_or_default();
+            let shared = shared.clone();
+            std::thread::spawn(move || {
+                let reply = match voice.transcribe(audio, glossary) {
+                    Ok(text) => ToApp::Transcript { key, text: Some(text), error: None },
+                    Err(error) => ToApp::Transcript { key, text: None, error: Some(error) },
+                };
+                shared.send_to(id, &[reply], |_| {});
+            });
+            vec![]
+        }
         FromApp::Diagram { key, source } => match diagram::draw(&source) {
             Ok(drawing) => vec![ToApp::Diagram { key, drawing: Some(drawing), error: None }],
             Err(error) => vec![ToApp::Diagram { key, drawing: None, error: Some(error) }],
@@ -1255,8 +1287,13 @@ fn to_action(m: FromApp) -> Result<Action, String> {
         F::Settle { thread, on, .. } => Action::Settle { thread, on },
         F::Delete { thread, .. } => Action::Delete { thread },
         F::BrowserInput { thread, input, .. } => Action::Browser { thread, input },
-        F::WatchBrowser { .. } | F::UnwatchBrowser | F::BrowserAck { .. } | F::SubscribeApp | F::SubscribeThread { .. } | F::UnsubscribeThread { .. } | F::Page { .. } | F::ToolResult { .. } | F::Subagent { .. } | F::Media { .. } | F::Diagram { .. } | F::Search { .. } | F::Files { .. } | F::Pulls { .. } | F::Pull { .. } | F::MergePull { .. } | F::PullFiles { .. } | F::PullPatch { .. } | F::ListDir { .. } | F::ReadFile { .. } | F::Changes { .. } | F::ChangePatch { .. } | F::Unknown => return Err("Not an action.".into()),
+        F::WatchBrowser { .. } | F::UnwatchBrowser | F::BrowserAck { .. } | F::SubscribeApp | F::SubscribeThread { .. } | F::UnsubscribeThread { .. } | F::Page { .. } | F::ToolResult { .. } | F::Subagent { .. } | F::Media { .. } | F::Diagram { .. } | F::Search { .. } | F::Files { .. } | F::Pulls { .. } | F::Pull { .. } | F::MergePull { .. } | F::PullFiles { .. } | F::PullPatch { .. } | F::ListDir { .. } | F::ReadFile { .. } | F::Changes { .. } | F::ChangePatch { .. } | F::Transcribe { .. } | F::Unknown => return Err("Not an action.".into()),
     })
+}
+
+/// 16-bit little-endian samples as -1…1.
+fn pcm16(bytes: &[u8]) -> Vec<f32> {
+    bytes.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0).collect()
 }
 
 /// Standard base64 (padding optional, whitespace skipped); None if it isn't.

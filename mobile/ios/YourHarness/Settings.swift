@@ -8,6 +8,9 @@ struct SettingsSheet: View {
     @Environment(\.dismiss) private var dismiss
     @AppStorage("diff.wrap") private var wrapDiffs = true
     @AppStorage("file.wrap") private var wrapFiles = false
+    @AppStorage("dictation.engine") private var dictationEngine = Dictation.Engine.phone
+    @AppStorage("dictation.language") private var dictationLanguage = ""
+    @State private var languages: [Locale] = []
 
     var body: some View {
         @Bindable var fleet = fleet
@@ -22,6 +25,26 @@ struct SettingsSheet: View {
                     Text(fleet.stores.count < 2
                         ? "With more than one Mac, list every Mac’s threads in one list."
                         : "Every Mac’s projects in one list, a project on several Macs once, each thread saying its Mac. Opening a thread shows its Mac.")
+                }
+                Section {
+                    Picker("Transcribe On", selection: $dictationEngine) {
+                        Text("iPhone").tag(Dictation.Engine.phone)
+                        Text("Mac").tag(Dictation.Engine.mac)
+                    }
+                    if dictationEngine == .phone, !languages.isEmpty {
+                        Picker("Language", selection: $dictationLanguage) {
+                            Text("Automatic").tag("")
+                            ForEach(languages, id: \.identifier) { locale in
+                                Text(Locale.current.localizedString(forIdentifier: locale.identifier) ?? locale.identifier).tag(locale.identifier)
+                            }
+                        }
+                    }
+                } header: {
+                    Text("Voice Input")
+                } footer: {
+                    Text(dictationEngine == .phone
+                        ? "The iPhone’s own speech model: private, works offline, words appear as you speak. iOS downloads each language the first time."
+                        : "What you say is sent to your Mac when you stop, and written out by the voice model picked there (YourHarness → Settings → Voice). Better with code words and mixed languages; needs your Mac connected.")
                 }
                 Section("Code") {
                     Toggle("Wrap Lines in Diffs", isOn: $wrapDiffs)
@@ -44,6 +67,7 @@ struct SettingsSheet: View {
                     LabeledContent("Version", value: Self.version)
                 }
             }
+            .task { languages = await Dictation.languages() }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

@@ -3725,7 +3725,7 @@ fn start_server(engine: &yh_engine::EngineHandle, actions: flume::Sender<yh_serv
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600));
     }
-    let links = yh_server::Links { engine: engine.clone(), actions, browser: Some(browser) };
+    let links = yh_server::Links { engine: engine.clone(), actions, browser: Some(browser), voice: Some(Arc::new(crate::state::voice::ForPhones)) };
     let name = mac_name();
     std::thread::Builder::new()
         .name("server".into())
@@ -3835,7 +3835,7 @@ impl Workspace {
     }
 
     fn start_phones_now(&mut self) {
-        let links = yh_server::Links { engine: self.engine.clone(), actions: self.remote_actions.clone(), browser: Some(self.browser_hub.clone()) };
+        let links = yh_server::Links { engine: self.engine.clone(), actions: self.remote_actions.clone(), browser: Some(self.browser_hub.clone()), voice: Some(Arc::new(crate::state::voice::ForPhones)) };
         self.phones.start(self.data_dir.clone(), mac_name(), mac_id(&self.library), links);
         // The port it got is kept, so paired phones find it there next time.
         if self.phones.running() && std::env::var("YH_PHONES_PORT").is_err() {
