@@ -1,0 +1,15 @@
+[package]
+name = "yh-cli"
+version = "0.0.1"
+edition.workspace = true
+publish.workspace = true
+description = "yh: YourHarness from the command line (docs/cli.md), over the app's local socket."
+
+[[bin]]
+name = "yh"
+path = "src/main.rs"
+
+[dependencies]
+yh-proto.workspace = true
+serde_json.workspace = true
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }

@@ -23,7 +23,7 @@ export CEF_PATH=${CEF_PATH:-$HOME/.cache/yourharness-cef}
 "$ROOT/scripts/vendor.sh"
 # A failed build stops here, so a binary left by an earlier build never gets bundled.
 LOG="$(mktemp)"
-if ! (cd "$ROOT" && cargo build --release -p yh-app -p yh-cef-helper ${FEATURES:+--features=$FEATURES}) >"$LOG" 2>&1; then
+if ! (cd "$ROOT" && cargo build --release -p yh-app -p yh-cef-helper -p yh-cli ${FEATURES:+--features=$FEATURES}) >"$LOG" 2>&1; then
     cat "$LOG" >&2; rm -f "$LOG"
     echo "build failed" >&2; exit 1
 fi
@@ -44,6 +44,8 @@ COMMIT="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)$([[
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/YourHarness"
+# The command line (docs/cli.md): Settings → General links it onto your PATH.
+cp "$ROOT/target/release/yh" "$APP/Contents/MacOS/yh"
 # Voice input's sherpa-onnx (crates/yh-voice/Cargo.toml says why it's shared): its two dylibs in
 # Frameworks, where the binary's @executable_path/../Frameworks rpath finds them; the build's
 # own path to them taken out of the binary (crates/yh-app/build.rs puts it there for target/ runs).
@@ -95,11 +97,11 @@ fi
 # before the bundle around it.
 SKIP_OUTER_SIGN=1 "$ROOT/scripts/cef-helpers.sh" "$APP" "${IDENTITY:-}" "${KEYCHAIN:-}" 2>/dev/null
 if [[ -n "${IDENTITY:-}" ]]; then
-    codesign --force --sign "$IDENTITY" --keychain "$KEYCHAIN" "$APP"/Contents/Frameworks/*.dylib >/dev/null
+    codesign --force --sign "$IDENTITY" --keychain "$KEYCHAIN" "$APP"/Contents/Frameworks/*.dylib "$APP/Contents/MacOS/yh" >/dev/null
     codesign --force --sign "$IDENTITY" --keychain "$KEYCHAIN" "$APP" >/dev/null
     SIGNED="signed as $(security find-certificate -a -Z "$KEYCHAIN" | awk -F'"' '/"labl"/ { print $4; exit }')"
 else
-    codesign --force --sign - "$APP"/Contents/Frameworks/*.dylib >/dev/null 2>&1
+    codesign --force --sign - "$APP"/Contents/Frameworks/*.dylib "$APP/Contents/MacOS/yh" >/dev/null 2>&1
     codesign --force --sign - "$APP" >/dev/null 2>&1
 fi
 echo "Built $NAME $VERSION (build $BUILD, $COMMIT, $SIGNED)" >&2

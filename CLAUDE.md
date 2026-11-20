@@ -25,6 +25,9 @@ app serves, storage, the browser, and what keeps it fast. The other docs cover o
   - `browser/` and `webview.rs` (the agents' browser: pages over the window in one of two engines,
     `webview/webkit.rs` (WKWebView, the default) or `webview/chrome.rs` (CEF, a preview behind the setting), placed by `webview/page.rs`),
     `platform.rs` (AppKit), `probe.rs` (the perf run), `theme.rs`.
+- `crates/yh-cli`: `yh`, the command line (docs/cli.md): it drives the running app over `yh.sock`
+  in the data folder (`yh-server`'s `serve_local`, the phone's protocol), and starts the app when
+  it isn't running. It's bundled as `Contents/MacOS/yh`; Settings → General links it onto the PATH.
 - `patches/`, `scripts/vendor.sh`: GPUI crates we patch, unpacked into `vendor/` (not
   committed). `gpui-pre-macos`: `GPUI_KEEP_DRAWING=1` draws a window parked off screen;
   `gpui-pre`: cached views draw anew while VoiceOver listens (a reused one dropped out of its
@@ -57,7 +60,7 @@ run must never put a macOS privacy prompt on screen: never run `screencapture`. 
 `FEATURES=snapshots` build and `YH_SNAPSHOT=<png>` (`Window::render_to_image`). Use Haiku and a
 throwaway folder for real turns.
 
-Launch options: `YH_DATA_DIR`, `YH_CLAUDE_HISTORY=1` (also list Claude Code's own sessions,
+Launch options: `YH_CLI=0` (no command line socket), `YH_DATA_DIR`, `YH_CLAUDE_HISTORY=1` (also list Claude Code's own sessions,
 `YH_CLAUDE_CONFIG`, `YH_CLAUDE_LIMIT`), `YH_PROJECT=<folder>` (a project of its own, its mode
 `YH_MODE`: `ask` shows permission cards, `plan` plan cards), `YH_SELECT=<title or id>`, and
 `YH_SEND` / `YH_MODEL` / `YH_EFFORT` / `YH_WORKFLOW` (`ultracode`: the Workflow picker's default) / `YH_ANSWER=allow|deny` (one real turn, prompts answered by

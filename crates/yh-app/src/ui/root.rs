@@ -164,6 +164,7 @@ impl RootView {
                 WorkspaceEvent::OpenMcp => this.mcp.update(cx, |m, cx| m.show(cx)),
                 WorkspaceEvent::AppendToComposer(text) => this.composer.update(cx, |c, cx| c.append_draft(text, window, cx)),
                 WorkspaceEvent::AttachImages(images) => this.composer.update(cx, |c, cx| c.add_images(images.clone(), cx)),
+                WorkspaceEvent::AttachFiles(files) => this.composer.update(cx, |c, cx| c.add_files(files, cx)),
             }),
             cx.observe_in(&workspace, window, |this, _, window, cx| {
                 this.refresh_tasks(cx);

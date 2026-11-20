@@ -25,7 +25,23 @@ use serde::{Deserialize, Serialize};
 /// diff (`change_patch`); the files a reply names, on its row (`files`), for links.
 /// 9: what you said on the phone, written out by the Mac's voice model (`transcribe`,
 /// `transcript`).
-pub const PROTOCOL: u32 = 9;
+/// 10: the command line (`yh`, over the app's local socket only): a project's folder, files by
+/// path with `send` and `new_thread`, `add_project`, `show` (the Mac's window), the app's
+/// `version` in `hello`.
+pub const PROTOCOL: u32 = 10;
+
+/// Where the app listens for the command line (`yh`): `yh.sock` in its data folder, or, when
+/// that path is too long for a socket, one in the temporary folder named after it.
+pub fn local_socket(data_dir: &std::path::Path) -> std::path::PathBuf {
+    let path = data_dir.join("yh.sock");
+    // A socket's path holds at most 104 bytes on macOS.
+    if path.as_os_str().len() < 100 {
+        return path;
+    }
+    // FNV-1a: the same name in every process, unlike `DefaultHasher`'s.
+    let hash = data_dir.as_os_str().as_encoded_bytes().iter().fold(0xcbf29ce484222325u64, |h, b| (h ^ *b as u64).wrapping_mul(0x100000001b3));
+    std::env::temp_dir().join(format!("yh-{hash:016x}.sock"))
+}
 
 /// A slash command the composer offers: `/name hint`, and what it does.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -230,6 +246,9 @@ pub struct Project {
     /// Its permission mode: `auto`, `ask`, `acceptEdits`, `plan`, `bypass`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
+    /// Protocol 10: its folder on the Mac (Home has none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -657,7 +676,9 @@ pub enum ToApp {
     Hello { protocol: u32, server: String, data: String, #[serde(default, skip_serializing_if = "Option::is_none")] mac: Option<String>,
         /// Every address the Mac can be reached at (local network, tailnet), the likeliest first:
         /// a phone tries them all and keeps the one that answers.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")] hosts: Vec<String> },
+        #[serde(default, skip_serializing_if = "Vec::is_empty")] hosts: Vec<String>,
+        /// Protocol 10: the app's version.
+        #[serde(default, skip_serializing_if = "Option::is_none")] version: Option<String> },
     /// Every project and thread, in sidebar order.
     Threads { projects: Vec<Project>, threads: Vec<Thread> },
     ThreadUpserted { thread: Thread },
@@ -671,8 +692,9 @@ pub enum ToApp {
     /// The subscribed thread's live state: after `snapshot`, and whenever it changes.
     Live { thread: String, live: Live },
     /// An action was taken (`error`: why not), for the action that carried this `id`; `thread`:
-    /// the one it made (`new_thread`).
-    Done { id: String, #[serde(skip_serializing_if = "Option::is_none")] error: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] thread: Option<String> },
+    /// the one it made (`new_thread`); `project` (protocol 10): the one it added or found
+    /// (`add_project`).
+    Done { id: String, #[serde(skip_serializing_if = "Option::is_none")] error: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] thread: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] project: Option<String> },
     /// The models and permission modes to choose from, and each project's slash commands: after
     /// `threads`, and when they change.
     Options { models: Vec<ModelOption>, modes: Vec<String>, #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")] commands: std::collections::BTreeMap<String, Vec<SlashCommand>> },
@@ -746,7 +768,9 @@ pub enum FromApp {
     Page { thread: String, before_seq: i64, #[serde(default)] limit: Option<i64> },
     /// Your message, as typed in the app's composer: it starts a turn, or steers into the one
     /// under way (`now`: stops it for this message). Commands the app answers (`/model`…) work.
-    Send { #[serde(default)] id: Option<String>, thread: String, text: String, #[serde(default)] now: bool, #[serde(default, skip_serializing_if = "Vec::is_empty")] images: Vec<Image> },
+    /// `files` (protocol 10, the command line only): paths on the Mac, attached as the composer
+    /// attaches them (pictures inline, the rest by path).
+    Send { #[serde(default)] id: Option<String>, thread: String, text: String, #[serde(default)] now: bool, #[serde(default, skip_serializing_if = "Vec::is_empty")] images: Vec<Image>, #[serde(default, skip_serializing_if = "Vec::is_empty")] files: Vec<String> },
     /// Stop, as ⌘. does: queued messages go back to the Mac's composer.
     Stop { #[serde(default)] id: Option<String>, thread: String },
     /// Allows or denies a request waiting on you, by its id.
@@ -781,6 +805,27 @@ pub enum FromApp {
         effort: Option<String>,
         #[serde(default)]
         mode: Option<String>,
+        /// Protocol 10, the command line only: paths on the Mac attached to the first message.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        files: Vec<String>,
+    },
+    /// Protocol 10, the command line only: a folder as a project (the one it already is, or
+    /// added); `done` names it in `project`.
+    AddProject { #[serde(default)] id: Option<String>, path: String },
+    /// Protocol 10, the command line only: the Mac's window brought forward, on `thread`, or on
+    /// a new thread in `project` (nothing sent: `draft` typed in its composer, `files`
+    /// attached); neither, as it was.
+    Show {
+        #[serde(default)]
+        id: Option<String>,
+        #[serde(default)]
+        thread: Option<String>,
+        #[serde(default)]
+        project: Option<String>,
+        #[serde(default)]
+        draft: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        files: Vec<String>,
     },
     SetModel { #[serde(default)] id: Option<String>, thread: String, #[serde(default)] model: Option<String> },
     SetEffort { #[serde(default)] id: Option<String>, thread: String, #[serde(default)] effort: Option<String> },
@@ -851,7 +896,7 @@ impl FromApp {
     pub fn action_id(&self) -> Option<&str> {
         use FromApp::*;
         match self {
-            Send { id, .. } | Stop { id, .. } | Respond { id, .. } | Withdraw { id, .. } | SendNow { id, .. } | AskAside { id, .. } | Answer { id, .. } | SkipQuestion { id, .. } | ApprovePlan { id, .. } | KeepPlanning { id, .. } | AnswerQuestion { id, .. } | NewThread { id, .. } | SetModel { id, .. } | SetEffort { id, .. } | SetMode { id, .. } | Rename { id, .. } | Pin { id, .. } | Settle { id, .. } | Delete { id, .. } | MergePull { id, .. } | BrowserInput { id, .. } => id.as_deref(),
+            Send { id, .. } | Stop { id, .. } | Respond { id, .. } | Withdraw { id, .. } | SendNow { id, .. } | AskAside { id, .. } | Answer { id, .. } | SkipQuestion { id, .. } | ApprovePlan { id, .. } | KeepPlanning { id, .. } | AnswerQuestion { id, .. } | NewThread { id, .. } | AddProject { id, .. } | Show { id, .. } | SetModel { id, .. } | SetEffort { id, .. } | SetMode { id, .. } | Rename { id, .. } | Pin { id, .. } | Settle { id, .. } | Delete { id, .. } | MergePull { id, .. } | BrowserInput { id, .. } => id.as_deref(),
             _ => None,
         }
     }
@@ -886,18 +931,33 @@ mod tests {
     #[test]
     fn actions_as_a_client_writes_them() {
         let m: FromApp = serde_json::from_str(r#"{"type":"send","id":"a1","thread":"t","text":"hi"}"#).unwrap();
-        assert_eq!(m, FromApp::Send { id: Some("a1".into()), thread: "t".into(), text: "hi".into(), now: false, images: vec![] });
+        assert_eq!(m, FromApp::Send { id: Some("a1".into()), thread: "t".into(), text: "hi".into(), now: false, images: vec![], files: vec![] });
         assert_eq!(m.action_id(), Some("a1"));
         let m: FromApp = serde_json::from_str(r#"{"type":"respond","thread":"t","request_id":"r","allow":true}"#).unwrap();
         assert_eq!(m, FromApp::Respond { id: None, thread: "t".into(), request_id: "r".into(), allow: true });
-        let s = serde_json::to_string(&ToApp::Done { id: "a1".into(), error: None, thread: None }).unwrap();
+        let s = serde_json::to_string(&ToApp::Done { id: "a1".into(), error: None, thread: None, project: None }).unwrap();
         assert_eq!(s, r#"{"type":"done","id":"a1"}"#);
         let m: FromApp = serde_json::from_str(r#"{"type":"answer","id":"a2","thread":"t","request_id":"r","answers":{"Which?":"Rust"}}"#).unwrap();
         assert_eq!(m.action_id(), Some("a2"));
         let m: FromApp = serde_json::from_str(r#"{"type":"new_thread","project":"p","text":"hi"}"#).unwrap();
-        assert_eq!(m, FromApp::NewThread { id: None, project: "p".into(), text: Some("hi".into()), model: None, effort: None, mode: None });
+        assert_eq!(m, FromApp::NewThread { id: None, project: "p".into(), text: Some("hi".into()), model: None, effort: None, mode: None, files: vec![] });
         let m: FromApp = serde_json::from_str(r#"{"type":"new_thread","project":"p","text":"hi","model":"haiku","effort":"low","mode":"plan"}"#).unwrap();
         assert!(matches!(m, FromApp::NewThread { model: Some(ref m), effort: Some(ref e), mode: Some(ref p), .. } if m == "haiku" && e == "low" && p == "plan"));
+        // Protocol 10, the command line's.
+        let m: FromApp = serde_json::from_str(r#"{"type":"add_project","id":"a3","path":"/tmp/x"}"#).unwrap();
+        assert_eq!(m.action_id(), Some("a3"));
+        let m: FromApp = serde_json::from_str(r#"{"type":"show","id":"a4","project":"p","draft":"hi","files":["/tmp/a.png"]}"#).unwrap();
+        assert!(matches!(m, FromApp::Show { project: Some(ref p), ref files, .. } if p == "p" && files.len() == 1));
+    }
+
+    #[test]
+    fn the_local_socket_fits_a_sockets_path() {
+        let short = std::path::Path::new("/Users/me/Library/Application Support/YourHarness");
+        assert_eq!(local_socket(short), short.join("yh.sock"));
+        let long = std::path::PathBuf::from(format!("/Users/me/{}", "deep/".repeat(30)));
+        let s = local_socket(&long);
+        assert!(s.as_os_str().len() < 104 && s.to_string_lossy().ends_with(".sock"), "{}", s.display());
+        assert_eq!(s, local_socket(&long), "the same name every time");
     }
 
     #[test]

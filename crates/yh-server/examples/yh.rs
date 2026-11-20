@@ -61,7 +61,7 @@ fn live_line(l: &Live) -> String {
 /// Prints a message; true when it says the watched thread's turn is over (after it began).
 fn print(m: &ToApp, began: &mut bool) -> bool {
     match m {
-        ToApp::Hello { server, data, protocol, mac, hosts } => println!("HELLO {server} · {data} · protocol {protocol}{} · hosts [{}]", mac.as_deref().map(|m| format!(" · mac {m}")).unwrap_or_default(), hosts.join(",")),
+        ToApp::Hello { server, data, protocol, mac, hosts, .. } => println!("HELLO {server} · {data} · protocol {protocol}{} · hosts [{}]", mac.as_deref().map(|m| format!(" · mac {m}")).unwrap_or_default(), hosts.join(",")),
         ToApp::Threads { projects, threads } => println!("THREADS {} projects, {} threads", projects.len(), threads.len()),
         ToApp::ThreadUpserted { thread: t } => println!("THREAD {} {:?} running={} waiting={}", t.id, t.title, t.running, t.waiting),
         ToApp::ThreadRemoved { id } => println!("REMOVED {id}"),
@@ -82,7 +82,7 @@ fn print(m: &ToApp, began: &mut bool) -> bool {
                 return true;
             }
         }
-        ToApp::Done { id, error, thread } => println!("DONE {id} {}{}", error.as_deref().unwrap_or("ok"), thread.as_deref().map(|t| format!(" thread={t}")).unwrap_or_default()),
+        ToApp::Done { id, error, thread, .. } => println!("DONE {id} {}{}", error.as_deref().unwrap_or("ok"), thread.as_deref().map(|t| format!(" thread={t}")).unwrap_or_default()),
         ToApp::Limits { windows, subscription } => println!("LIMITS {}{}", subscription.as_ref().map(|s| format!("[{} {}] ", s.plan, s.email.as_deref().unwrap_or_default())).unwrap_or_default(), windows.iter().map(|w| format!("{} {:.0}%", w.name, w.used * 100.)).collect::<Vec<_>>().join(", ")),
         ToApp::Power { power } => println!("POWER {}%{}{}", power.percent, if power.charging { " charging" } else { "" }, if power.plugged_in { " plugged in" } else { "" }),
         ToApp::SearchResults { query, hits } => println!("SEARCH {query:?} {} hits{}", hits.len(), hits.first().map(|h| format!(": {}", h.snippet)).unwrap_or_default()),
@@ -166,7 +166,7 @@ fn main() {
             let now = rest.iter().any(|a| a == "--now");
             let text = rest[1..].iter().filter(|a| *a != "--now").cloned().collect::<Vec<_>>().join(" ");
             send(&mut ws, FromApp::SubscribeThread { thread: thread.clone(), limit: Some(3), known: None });
-            send(&mut ws, FromApp::Send { id: id(), thread, text, now, images: vec![] });
+            send(&mut ws, FromApp::Send { id: id(), thread, text, now, images: vec![], files: vec![] });
             let until = Instant::now() + Duration::from_secs(600);
             while Instant::now() < until {
                 if let Some(m) = next(&mut ws) {

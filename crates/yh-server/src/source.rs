@@ -42,7 +42,8 @@ impl Source {
                 let o = object(&json);
                 let name = o.get("name").and_then(Value::as_str).unwrap_or("Project").to_string();
                 let mode = Some(o.get("permissionMode").and_then(Value::as_str).unwrap_or("auto").to_string());
-                Project { id, name, mode }
+                let path = o.get("path").and_then(Value::as_str).filter(|p| !p.is_empty()).map(str::to_string);
+                Project { id, name, mode, path }
             })
         })
         .collect()

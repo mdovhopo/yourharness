@@ -85,6 +85,9 @@ pub struct SettingsView {
     copied: bool,
     /// "Copied" after an account's sign-in link is copied.
     link_copied: bool,
+    /// `yh` on your PATH (its link and the app it leads to), read when Settings opens and after
+    /// Install or Remove; and what the last of those said.
+    command_line: (Option<(std::path::PathBuf, std::path::PathBuf)>, Option<String>),
     _watch: Vec<gpui_kit::Subscription>,
 }
 
@@ -105,7 +108,7 @@ impl SettingsView {
                 }
             }));
         }
-        let mut view = SettingsView { workspace, tab, found: Found::default(), title_prompt, body_scroll: gpui_kit::ScrollHandle::new(), mcp: None, copied: false, link_copied: false, _watch: watch };
+        let mut view = SettingsView { workspace, tab, found: Found::default(), title_prompt, body_scroll: gpui_kit::ScrollHandle::new(), mcp: None, copied: false, link_copied: false, command_line: (crate::state::command_line::installed(), None), _watch: watch };
         view.detect(cx);
         view.tab_shown(window, cx);
         view
@@ -923,6 +926,7 @@ impl SettingsView {
                     .child(self.toggle("diagramInstructions", "Let agents draw diagrams", cx))
                     .footer("Mermaid flowcharts and sequence diagrams are always drawn. With this on, agents are also told they can use them (about 150 tokens per session)."),
             )
+            .child(self.command_line(theme, cx))
             .child(
                 section("Data")
                     .child(row(
@@ -943,6 +947,49 @@ impl SettingsView {
                     .footer("Export State writes every project, thread, memory and setting into one file: for another Mac, or for reproducing a bug exactly. Import State replaces everything you have with a file's, after asking."),
             )
             .into_any_element()
+    }
+
+    /// `yh` on your PATH: where it is, Install (or Reinstall, for this copy) and Remove.
+    fn command_line(&self, theme: &Theme, cx: &mut Context<Self>) -> Group {
+        use crate::state::command_line as cl;
+        let (installed, said) = &self.command_line;
+        let bundled = cl::bundled();
+        let here = bundled.as_ref().is_some_and(|b| installed.as_ref().is_some_and(|(_, t)| t == b));
+        let status = match (installed, said) {
+            (_, Some(said)) => said.clone(),
+            (Some((link, _)), None) if here => format!("Installed at {}", link.display()),
+            (Some((link, target)), None) => format!("{} leads to another copy: {}", link.display(), target.display()),
+            (None, None) if bundled.is_none() => "Comes with the app's bundle".into(),
+            (None, None) => "Not installed".into(),
+        };
+        let install = cx.listener(|this, _, _, cx| {
+            let said = match crate::state::command_line::install() {
+                Ok(link) => {
+                    let folder = link.parent().map(std::path::Path::to_path_buf).unwrap_or_default();
+                    if crate::state::command_line::on_path(&folder) { format!("Installed at {}", link.display()) } else { format!("Installed at {}: add {} to your PATH", link.display(), folder.display()) }
+                }
+                Err(e) => e,
+            };
+            this.command_line = (crate::state::command_line::installed(), Some(said));
+            cx.notify();
+        });
+        let remove = cx.listener(|this, _, _, cx| {
+            let said = crate::state::command_line::uninstall().err();
+            this.command_line = (crate::state::command_line::installed(), said);
+            cx.notify();
+        });
+        section("Command Line")
+            .child(row(
+                "yh",
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(space::XS + 2.))
+                    .child(div().min_w_0().truncate().text_color(theme.secondary).child(status))
+                    .when(installed.is_some(), |d| d.child(Button::new("cli-remove").small().ghost().label("Remove").on_click(remove)))
+                    .when(bundled.is_some() && !here, |d| d.child(Button::new("cli-install").small().outline().label(if installed.is_some() { "Use This Copy" } else { "Install" }).on_click(install))),
+            ))
+            .footer("Start threads, send to them, wait for Claude's reply and more from Terminal, scripts and other apps or agents: yh new \"fix the failing test\" in a project's folder, yh threads, yh --help. It starts the app when it isn't running.")
     }
 
     fn mcp(&self, theme: &Theme, _cx: &mut Context<Self>) -> AnyElement {

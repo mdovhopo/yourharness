@@ -31,6 +31,8 @@ pub enum WorkspaceEvent {
     /// Pictures attached to the open thread's composer (an element picked in the browser): JPEG
     /// or PNG bytes.
     AttachImages(Vec<Vec<u8>>),
+    /// Files and folders attached to the open thread's composer (`yh open … --file`).
+    AttachFiles(Vec<std::path::PathBuf>),
 }
 
 /// The sidebar's order within a project: pinned first, then by when it was made, newest first,
@@ -328,6 +330,7 @@ impl Workspace {
             crate::browser::remote::start(browser_hub.clone(), move |thread, cx| ws.upgrade().and_then(|w| w.read(cx).thread(thread)).map(|t| t.read(cx).meta.project_id.clone()), cx);
         }
         start_server(&engine, remote_actions.clone(), mac_id(&library), browser_hub.clone());
+        start_local_socket(&engine, remote_actions.clone(), mac_id(&library), browser_hub.clone());
         // Phones on this network (Settings → Phone): the paired list saved as it changes.
         let (devices_changed, devices) = flume::unbounded::<Vec<yh_server::pairing::Device>>();
         // Its port: `YH_PHONES_PORT` (tests, not kept), the one it got last time, 7878 for a Mac
@@ -2769,7 +2772,7 @@ impl Workspace {
             t.run.elicitations.iter().find(|e| e.id == request_id).map(|e| format!("{}'s question", e.server))
         };
         match action {
-            A::NewThread { project, text, model, effort, mode } => self.start_thread(&project, text.as_deref(), model, effort, mode.as_deref(), Some(caller), cx).map(Some),
+            A::NewThread { project, text, model, effort, mode, .. } => self.start_thread(&project, text.as_deref(), model, effort, mode.as_deref(), Some(caller), cx).map(Some),
             A::Send { .. } => {
                 self.agent_sender = Some(caller.to_string());
                 let result = self.take_remote_on(action, cx);
@@ -3775,6 +3778,51 @@ fn start_server(engine: &yh_engine::EngineHandle, actions: flume::Sender<yh_serv
     Some(())
 }
 
+/// The command line's socket (`yh`, docs/cli.md) in the data folder, always on: the server's
+/// protocol, for you alone (the folder is yours, the socket only you can open). Nothing runs
+/// behind it until `yh` first connects. `YH_CLI=0` leaves it off. A socket another copy of the
+/// app answers on (the same data folder) is left to it.
+fn start_local_socket(engine: &yh_engine::EngineHandle, actions: flume::Sender<yh_server::Asked>, mac_id: String, browser: Arc<yh_server::browser::Hub>) {
+    if std::env::var("YH_CLI").as_deref() == Ok("0") {
+        return;
+    }
+    let data = data_directory();
+    let path = yh_server::wire::local_socket(&data);
+    if std::os::unix::net::UnixStream::connect(&path).is_ok() {
+        eprintln!("CLI socket {} is another app's", path.display());
+        return;
+    }
+    let _ = std::fs::remove_file(&path);
+    let listener = match std::os::unix::net::UnixListener::bind(&path) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("CLI can't listen on {}: {e}", path.display());
+            return;
+        }
+    };
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    if std::env::var("YH_DATA_DIR").is_ok() {
+        eprintln!("CLI {}", path.display());
+    }
+    let links = yh_server::Links { engine: engine.clone(), actions, browser: Some(browser), voice: Some(Arc::new(crate::state::voice::ForPhones)) };
+    let _ = std::thread::Builder::new().name("cli socket".into()).spawn(move || {
+        // Read here: the name and version each start a process.
+        let options = yh_server::Options { name: mac_name(), mac_id: Some(mac_id), version: Some(app_version()), ..Default::default() };
+        if let Err(e) = yh_server::serve_local(listener, data, options, Some(links)) {
+            eprintln!("CLI socket stopped: {e}");
+        }
+    });
+}
+
+/// This copy's version, as its bundle says (a `-next` cut too), else the crate's.
+pub fn app_version() -> String {
+    let bundle = std::env::current_exe().ok().and_then(|p| p.ancestors().nth(3).map(|a| a.to_path_buf())).filter(|b| b.extension().is_some_and(|e| e == "app"));
+    bundle.as_deref().and_then(yh_core::updates::bundle_info).map(|(_, v)| v.to_string()).unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
+}
+
 /// This Mac's lasting ID for phones (`macID`, made the first time): the same at any address,
 /// so a phone pairing again, or reaching it another way later (Tailscale), knows it's this Mac.
 /// It lives with the data, so another data folder is another Mac to a phone.
@@ -3913,10 +3961,53 @@ impl Workspace {
 
     fn take_remote(&mut self, action: yh_server::Action, cx: &mut Context<Self>) -> Result<Option<String>, String> {
         use yh_server::Action as A;
-        if let A::NewThread { project, text, model, effort, mode } = &action {
-            return self.start_thread(project, text.as_deref(), model.clone(), effort.clone(), mode.as_deref(), None, cx).map(Some);
+        match action {
+            A::NewThread { project, text, model, effort, mode, images, files } => {
+                if images.is_empty() && files.is_empty() {
+                    return self.start_thread(&project, text.as_deref(), model, effort, mode.as_deref(), None, cx).map(Some);
+                }
+                // With files (the command line's): made first, then its first message with them.
+                let id = self.start_thread(&project, None, model, effort, mode.as_deref(), None, cx)?;
+                self.take_remote_on(A::Send { thread: id.clone(), text: text.unwrap_or_default(), now: false, images, files }, cx)?;
+                Ok(Some(id))
+            }
+            A::AddProject { path } => {
+                let id = self.add_project(&path, cx);
+                Ok(Some(id))
+            }
+            A::Show { thread, project, draft, files } => {
+                self.show_from_cli(thread.as_deref(), project.as_deref(), draft, files, cx)?;
+                Ok(None)
+            }
+            action => self.take_remote_on(action, cx),
         }
-        self.take_remote_on(action, cx)
+    }
+
+    /// `yh show` and `yh open`: the window forward, on a thread, or on a new thread in a project
+    /// with a draft and files waiting in its composer.
+    fn show_from_cli(&mut self, thread: Option<&str>, project: Option<&str>, draft: Option<String>, files: Vec<std::path::PathBuf>, cx: &mut Context<Self>) -> Result<(), String> {
+        if let Some(id) = thread {
+            let t = self.thread(id).ok_or("No such thread.")?;
+            if t.read(cx).meta.settled_at.is_some() {
+                self.set_settled(id, false, cx);
+            }
+            self.select(id, cx);
+        } else if let Some(project) = project {
+            if self.project(project).is_none() {
+                return Err("No such project.".into());
+            }
+            self.new_thread(project, cx);
+        }
+        if thread.is_some() || project.is_some() {
+            if let Some(text) = draft.filter(|d| !d.is_empty()) {
+                cx.emit(WorkspaceEvent::AppendToComposer(text));
+            }
+            if !files.is_empty() {
+                cx.emit(WorkspaceEvent::AttachFiles(files));
+            }
+        }
+        crate::platform::bring_to_front();
+        Ok(())
     }
 
     /// A new thread saved at once, its first message sent, the Mac staying on what you have
@@ -3959,20 +4050,21 @@ impl Workspace {
         use yh_server::Action as A;
         let thread_id = match &action {
             A::Browser { thread, .. } | A::AskAside { thread, .. } | A::Send { thread, .. } | A::Stop { thread } | A::Respond { thread, .. } | A::Withdraw { thread, .. } | A::SendNow { thread, .. } | A::Answer { thread, .. } | A::SkipQuestion { thread, .. } | A::ApprovePlan { thread, .. } | A::KeepPlanning { thread, .. } | A::AnswerQuestion { thread, .. } | A::SetModel { thread, .. } | A::SetEffort { thread, .. } | A::SetMode { thread, .. } | A::Rename { thread, .. } | A::Pin { thread, .. } | A::Settle { thread, .. } | A::Delete { thread } => thread.clone(),
-            A::NewThread { .. } => unreachable!("taken above"),
+            A::NewThread { .. } | A::AddProject { .. } | A::Show { .. } => unreachable!("taken above"),
         };
         let Some(thread) = self.thread(&thread_id) else { return Err("No such thread.".into()) };
         let request = |id: &str, cx: &App| thread.read(cx).run.permissions.iter().find(|p| p.id == id).cloned();
         match action {
-            A::Send { text, now, images, .. } => {
-                if images.is_empty() {
+            A::Send { text, now, images, files, .. } => {
+                if images.is_empty() && files.is_empty() {
                     self.send(&thread, &text, now, cx);
                 } else {
                     let names: Vec<String> = images.iter().filter_map(|(_, bytes)| yh_core::attachments::save(&self.data_dir, &thread_id, bytes)).collect();
                     if names.len() != images.len() {
                         return Err("A picture couldn't be read.".into());
                     }
-                    self.send_with_images(&thread, &text, names, now, cx);
+                    let files: Vec<yh_core::attachments::FileAttachment> = files.iter().filter_map(|p| yh_core::attachments::FileAttachment::from_path(p)).collect();
+                    self.send_message(&thread, &text, names, files, if now { Timing::Now } else { Timing::Steer }, cx);
                 }
             }
             A::Stop { .. } => self.stop(&thread, &Default::default(), cx),
@@ -4028,7 +4120,7 @@ impl Workspace {
             A::Pin { on, .. } => self.set_pinned(&thread_id, on, cx),
             A::Settle { on, .. } => self.set_settled(&thread_id, on, cx),
             A::Delete { .. } => self.delete(&thread_id, cx),
-            A::NewThread { .. } | A::Browser { .. } => unreachable!("taken above"),
+            A::NewThread { .. } | A::AddProject { .. } | A::Show { .. } | A::Browser { .. } => unreachable!("taken above"),
         }
         Ok(None)
     }

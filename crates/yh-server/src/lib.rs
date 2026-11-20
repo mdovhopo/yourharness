@@ -12,6 +12,10 @@
 //! takes a click. Each connection has a thread of its own, its own read-only connection to the
 //! database, and a bounded outbox: a client that falls behind is dropped, and reconnects for a
 //! fresh snapshot.
+//!
+//! The same protocol is served on a Unix socket in the data folder (`serve_local`), for the
+//! command line (`yh`, docs/cli.md): only you can open it, so it needs no token, and only its
+//! connections may name files on the Mac, add projects or bring the window forward.
 
 pub mod browser;
 pub mod diagram;
@@ -21,8 +25,9 @@ pub mod source;
 pub use yh_proto as wire;
 
 use std::collections::HashMap;
-use std::io::ErrorKind;
-use std::net::{TcpListener, TcpStream};
+use std::io::{ErrorKind, Read, Write};
+use std::net::{IpAddr, TcpListener, TcpStream};
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -72,6 +77,8 @@ pub struct Options {
     /// Only the tailnet (and this Mac itself) may connect, not the local network.
     pub tailscale_only: bool,
     pub hosts: Option<Hosts>,
+    /// The app's version, told in `hello`.
+    pub version: Option<String>,
 }
 
 impl Options {
@@ -83,8 +90,9 @@ impl Options {
 /// What a client asks of the app: taken on the app's main thread, as a click would be.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
-    /// `images`: (media type, bytes).
-    Send { thread: String, text: String, now: bool, images: Vec<(String, Vec<u8>)> },
+    /// `images`: (media type, bytes); `files`: other files and folders, by path (the command
+    /// line's).
+    Send { thread: String, text: String, now: bool, images: Vec<(String, Vec<u8>)>, files: Vec<PathBuf> },
     Stop { thread: String },
     Respond { thread: String, request_id: String, allow: bool },
     Withdraw { thread: String, message: String },
@@ -94,7 +102,12 @@ pub enum Action {
     ApprovePlan { thread: String, request_id: String, mode: String, feedback: Option<String> },
     KeepPlanning { thread: String, request_id: String, feedback: Option<String> },
     AnswerQuestion { thread: String, request_id: String, accept: bool },
-    NewThread { project: String, text: Option<String>, model: Option<String>, effort: Option<String>, mode: Option<String> },
+    NewThread { project: String, text: Option<String>, model: Option<String>, effort: Option<String>, mode: Option<String>, images: Vec<(String, Vec<u8>)>, files: Vec<PathBuf> },
+    /// A folder as a project: the one it is already, or added (the command line's).
+    AddProject { path: String },
+    /// The window brought forward, on a thread, or on a new thread in a project with a draft and
+    /// files waiting in its composer (the command line's).
+    Show { thread: Option<String>, project: Option<String>, draft: Option<String>, files: Vec<PathBuf> },
     SetModel { thread: String, model: Option<String> },
     SetEffort { thread: String, effort: Option<String> },
     SetMode { thread: String, mode: String },
@@ -386,8 +399,106 @@ impl Shared {
     }
 }
 
+/// A connection: over TCP (phones, the network) or the local socket (the command line).
+trait Stream: Read + Write + Send + 'static {
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()>;
+    /// Where it comes from; `None` for the local socket.
+    fn peer_ip(&self) -> Option<IpAddr>;
+    fn peer(&self) -> String;
+    fn tune(&self) {}
+}
+
+impl Stream for TcpStream {
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+        TcpStream::set_read_timeout(self, timeout)
+    }
+    fn peer_ip(&self) -> Option<IpAddr> {
+        self.peer_addr().ok().map(|a| a.ip())
+    }
+    fn peer(&self) -> String {
+        self.peer_addr().map(|a| a.to_string()).unwrap_or_default()
+    }
+    fn tune(&self) {
+        self.set_nodelay(true).ok();
+    }
+}
+
+impl Stream for UnixStream {
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+        UnixStream::set_read_timeout(self, timeout)
+    }
+    fn peer_ip(&self) -> Option<IpAddr> {
+        None
+    }
+    fn peer(&self) -> String {
+        "the local socket".into()
+    }
+}
+
 /// Serves `directory` on `listener` until the process ends.
 pub fn serve(listener: TcpListener, directory: PathBuf, options: Options, links: Option<Links>) -> Result<(), String> {
+    let (shared, options) = start(directory.clone(), options, links)?;
+    let mut next = 0u64;
+    // Not blocking, so a stop is seen within a moment.
+    listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+    loop {
+        if options.stopped() {
+            return Ok(());
+        }
+        let stream = match listener.accept() {
+            Ok((s, _)) => s,
+            Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+            Err(_) => continue,
+        };
+        if stream.set_nonblocking(false).is_err() {
+            continue;
+        }
+        next += 1;
+        spawn_connection(next, stream, &shared, &options, &directory, false);
+    }
+}
+
+/// Serves `directory` on the local socket `listener` (the command line) until the process
+/// ends. Nothing is read or followed until the first connection comes: an app nobody drives
+/// from the command line pays for none of it.
+pub fn serve_local(listener: UnixListener, directory: PathBuf, options: Options, links: Option<Links>) -> Result<(), String> {
+    let mut pending = Some((options, links));
+    let mut started: Option<(Arc<Shared>, Arc<Options>)> = None;
+    let mut next = 0u64;
+    for stream in listener.incoming() {
+        let Ok(stream) = stream else { continue };
+        if started.is_none() {
+            let (options, links) = pending.take().expect("started once");
+            started = Some(start(directory.clone(), options, links)?);
+        }
+        let (shared, options) = started.as_ref().expect("started");
+        if options.stopped() {
+            return Ok(());
+        }
+        next += 1;
+        spawn_connection(next, stream, shared, options, &directory, true);
+    }
+    Ok(())
+}
+
+fn spawn_connection<S: Stream>(id: u64, stream: S, shared: &Arc<Shared>, options: &Arc<Options>, directory: &Path, local: bool) {
+    let (shared, options, directory) = (shared.clone(), options.clone(), directory.to_path_buf());
+    let _ = std::thread::Builder::new().name(format!("client {id}")).spawn(move || {
+        if let Err(e) = connection(id, stream, &shared, &options, &directory, local) {
+            eprintln!("client {id}: {e}");
+        }
+        shared.clients.lock().unwrap().remove(&id);
+        if let Some(hub) = &shared.hub {
+            hub.unwatch(shared.hub_base + id);
+        }
+    });
+}
+
+/// What every connection shares, and the threads that keep it current.
+fn start(directory: PathBuf, options: Options, links: Option<Links>) -> Result<(Arc<Shared>, Arc<Options>), String> {
     let (engine, actions, hub, voice) = match links {
         Some(l) => (Some(l.engine), Some(l.actions), l.browser, l.voice),
         None => (None, None, None, None),
@@ -432,36 +543,7 @@ pub fn serve(listener: TcpListener, directory: PathBuf, options: Options, links:
             })
             .map_err(|e| e.to_string())?;
     }
-    let mut next = 0u64;
-    // Not blocking, so a stop is seen within a moment.
-    listener.set_nonblocking(true).map_err(|e| e.to_string())?;
-    loop {
-        if options.stopped() {
-            return Ok(());
-        }
-        let stream = match listener.accept() {
-            Ok((s, _)) => s,
-            Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(100));
-                continue;
-            }
-            Err(_) => continue,
-        };
-        if stream.set_nonblocking(false).is_err() {
-            continue;
-        }
-        next += 1;
-        let (id, shared, options, directory) = (next, shared.clone(), options.clone(), directory.clone());
-        let _ = std::thread::Builder::new().name(format!("client {id}")).spawn(move || {
-            if let Err(e) = connection(id, stream, &shared, &options, &directory) {
-                eprintln!("client {id}: {e}");
-            }
-            shared.clients.lock().unwrap().remove(&id);
-            if let Some(hub) = &shared.hub {
-                hub.unwatch(shared.hub_base + id);
-            }
-        });
-    }
+    Ok((shared, options))
 }
 
 /// Threads' browsers to the clients watching them, as the app hands in new pictures and tabs;
@@ -668,10 +750,21 @@ fn poll(source: Source, shared: &Shared, options: &Options) {
     let mut rev = source.max_rev().unwrap_or(0);
     let mut changed_at: HashMap<String, Instant> = HashMap::new();
     let mut tick = 0u32;
+    let mut idle = false;
     loop {
         std::thread::sleep(POLL);
         if options.stopped() {
             return;
+        }
+        // Nobody connected: nothing to tell, so nothing is read. Whoever comes next gets the
+        // list as it is then (`SubscribeApp`) and snapshots, not what changed meanwhile.
+        if shared.clients.lock().unwrap().is_empty() {
+            idle = true;
+            continue;
+        }
+        if std::mem::take(&mut idle) {
+            rev = source.max_rev().unwrap_or(rev);
+            changed_at.clear();
         }
         tick += 1;
         let changes = match source.changes_since(rev, 5000) {
@@ -800,9 +893,9 @@ fn refresh_listing(source: &Source, shared: &Shared, changed_at: &HashMap<String
     }
 }
 
-fn connection(id: u64, stream: TcpStream, shared: &Arc<Shared>, options: &Options, directory: &Path) -> Result<(), String> {
-    let peer_ip = stream.peer_addr().ok().map(|a| a.ip());
-    let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
+fn connection<S: Stream>(id: u64, stream: S, shared: &Arc<Shared>, options: &Options, directory: &Path, local: bool) -> Result<(), String> {
+    let peer_ip = stream.peer_ip();
+    let peer = stream.peer();
     // In: the server's own token, a paired phone's, or a pairing code (`?pair=…&device=<name>`),
     // which pairs this phone and answers with its token.
     let mut device: Option<String> = None;
@@ -824,7 +917,7 @@ fn connection(id: u64, stream: TcpStream, shared: &Arc<Shared>, options: &Option
                 }
             }
         }
-        if options.token.is_none() && options.pairing.is_none() {
+        if local || (options.token.is_none() && options.pairing.is_none()) {
             return Ok(response);
         }
         if let Some(given) = param("token") {
@@ -853,12 +946,12 @@ fn connection(id: u64, stream: TcpStream, shared: &Arc<Shared>, options: &Option
     };
     let mut ws = tungstenite::accept_hdr(stream, check).map_err(|e| format!("handshake from {peer}: {e}"))?;
     ws.get_ref().set_read_timeout(Some(Duration::from_millis(20))).map_err(|e| e.to_string())?;
-    ws.get_ref().set_nodelay(true).ok();
+    ws.get_ref().tune();
     eprintln!("client {id}: connected from {peer}");
     let source = Source::open(directory)?;
     let (outbox, inbox) = flume::bounded(OUTBOX);
     shared.clients.lock().unwrap().insert(id, Client { outbox, app: false, watching: vec![], browser: None, summaries: HashMap::new() });
-    let hello = ToApp::Hello { protocol: wire::PROTOCOL, server: options.name.clone(), data: name_of(directory), mac: options.mac_id.clone(), hosts: options.hosts.as_ref().map(|h| h()).unwrap_or_default() };
+    let hello = ToApp::Hello { protocol: wire::PROTOCOL, server: options.name.clone(), data: name_of(directory), mac: options.mac_id.clone(), hosts: options.hosts.as_ref().map(|h| h()).unwrap_or_default(), version: options.version.clone() };
     write(&mut ws, &hello)?;
     if let Some((device, token)) = paired {
         eprintln!("client {id}: paired as {device}");
@@ -875,7 +968,7 @@ fn connection(id: u64, stream: TcpStream, shared: &Arc<Shared>, options: &Option
         match ws.read() {
             Ok(Message::Text(text)) => {
                 let message = serde_json::from_str::<FromApp>(&text).unwrap_or(FromApp::Unknown);
-                for reply in answer(id, message, shared, &source) {
+                for reply in answer(id, message, shared, &source, local) {
                     write(&mut ws, &reply)?;
                 }
             }
@@ -908,7 +1001,7 @@ fn connection(id: u64, stream: TcpStream, shared: &Arc<Shared>, options: &Option
 
 /// What a client's message asks for: the replies to send it now. Subscribing also changes
 /// what the poller sends it.
-fn answer(id: u64, message: FromApp, shared: &Arc<Shared>, source: &Source) -> Vec<ToApp> {
+fn answer(id: u64, message: FromApp, shared: &Arc<Shared>, source: &Source, local: bool) -> Vec<ToApp> {
     let set = |f: &dyn Fn(&mut Client)| {
         if let Some(c) = shared.clients.lock().unwrap().get_mut(&id) {
             f(c);
@@ -917,6 +1010,12 @@ fn answer(id: u64, message: FromApp, shared: &Arc<Shared>, source: &Source) -> V
     let failed = |e: rusqlite::Error| vec![ToApp::Error { message: e.to_string() }];
     match message {
         FromApp::SubscribeApp => {
+            // The first to subscribe after a quiet spell, when the poller read nothing: the list
+            // as it is now.
+            let first = !shared.clients.lock().unwrap().values().any(|c| c.app);
+            if first {
+                refresh_listing(source, shared, &HashMap::new(), true);
+            }
             set(&|c| c.app = true);
             let (projects, threads) = shared.listing.lock().unwrap().clone();
             let mut first = vec![ToApp::Threads { projects, threads }, shared.options(), shared.limits()];
@@ -1038,7 +1137,7 @@ fn answer(id: u64, message: FromApp, shared: &Arc<Shared>, source: &Source) -> V
         FromApp::MergePull { id: action, url, method, auto } => {
             if shared.actions.is_none() {
                 return match action {
-                    Some(a) => vec![ToApp::Done { id: a, error: Some("This server only reads.".into()), thread: None }],
+                    Some(a) => vec![ToApp::Done { id: a, error: Some("This server only reads.".into()), thread: None, project: None }],
                     None => vec![ToApp::Error { message: "This server only reads.".into() }],
                 };
             }
@@ -1049,7 +1148,7 @@ fn answer(id: u64, message: FromApp, shared: &Arc<Shared>, source: &Source) -> V
                 // Its page is drawn again from what the forge says now: merged, or waiting to.
                 let mut replies = vec![];
                 if let Some(a) = action {
-                    replies.push(ToApp::Done { id: a, error: error.clone(), thread: None });
+                    replies.push(ToApp::Done { id: a, error: error.clone(), thread: None, project: None });
                 } else if let Some(message) = error {
                     replies.push(ToApp::Error { message });
                 }
@@ -1228,7 +1327,8 @@ fn answer(id: u64, message: FromApp, shared: &Arc<Shared>, source: &Source) -> V
                 hub.poke(thread);
             }
             let id = action.action_id().map(str::to_string);
-            let (error, made) = match to_action(action) {
+            let adds_project = matches!(action, FromApp::AddProject { .. });
+            let (error, made) = match to_action(action, local) {
                 Err(e) => (Some(e), None),
                 Ok(action) => match &shared.actions {
                     None => (Some("This server only reads.".to_string()), None),
@@ -1248,20 +1348,63 @@ fn answer(id: u64, message: FromApp, shared: &Arc<Shared>, source: &Source) -> V
                 },
             };
             match id {
-                Some(id) => vec![ToApp::Done { id, error, thread: made }],
+                Some(id) if adds_project => vec![ToApp::Done { id, error, thread: None, project: made }],
+                Some(id) => vec![ToApp::Done { id, error, thread: made, project: None }],
                 None => error.map(|message| vec![ToApp::Error { message }]).unwrap_or_default(),
             }
         }
     }
 }
 
-/// A client's action as the app takes it; its pictures decoded.
-fn to_action(m: FromApp) -> Result<Action, String> {
+/// Files named by path on the Mac (the command line's), as the composer attaches them: pictures
+/// read, to go inline, the rest by path. Only over the local socket.
+fn local_files(paths: Vec<String>, local: bool) -> Result<(Vec<(String, Vec<u8>)>, Vec<PathBuf>), String> {
+    let (mut images, mut files) = (vec![], vec![]);
+    if paths.is_empty() {
+        return Ok((images, files));
+    }
+    if !local {
+        return Err("Files on the Mac can be named only from its command line.".into());
+    }
+    for p in paths {
+        let path = PathBuf::from(&p);
+        if !path.is_absolute() {
+            return Err(format!("Give the whole path: {p}"));
+        }
+        let meta = std::fs::metadata(&path).map_err(|_| format!("No such file: {p}"))?;
+        match picture_type(&p) {
+            Some(media_type) if meta.is_file() && meta.len() <= MAX_PICTURE => {
+                let bytes = std::fs::read(&path).map_err(|e| format!("{p}: {e}"))?;
+                images.push((media_type.to_string(), bytes));
+            }
+            _ => files.push(path),
+        }
+    }
+    Ok((images, files))
+}
+
+/// A client's action as the app takes it; its pictures decoded, its files read.
+fn to_action(m: FromApp, local: bool) -> Result<Action, String> {
     use FromApp as F;
+    let only_local = |what: &str| if local { Ok(()) } else { Err(format!("{what} only from the Mac's command line.")) };
     Ok(match m {
-        F::Send { thread, text, now, images, .. } => {
-            let images = images.into_iter().map(|i| decode_base64(&i.data).map(|bytes| (i.media_type, bytes)).ok_or_else(|| "A picture couldn't be read.".to_string())).collect::<Result<_, _>>()?;
-            Action::Send { thread, text, now, images }
+        F::Send { thread, text, now, images, files, .. } => {
+            let mut images: Vec<(String, Vec<u8>)> = images.into_iter().map(|i| decode_base64(&i.data).map(|bytes| (i.media_type, bytes)).ok_or_else(|| "A picture couldn't be read.".to_string())).collect::<Result<_, _>>()?;
+            let (more, files) = local_files(files, local)?;
+            images.extend(more);
+            Action::Send { thread, text, now, images, files }
+        }
+        F::AddProject { path, .. } => {
+            only_local("Projects can be added")?;
+            if !Path::new(&path).is_dir() {
+                return Err(format!("No such folder: {path}"));
+            }
+            Action::AddProject { path }
+        }
+        F::Show { thread, project, draft, files, .. } => {
+            only_local("The window can be shown")?;
+            let files = files.into_iter().map(PathBuf::from).collect();
+            Action::Show { thread, project, draft, files }
         }
         F::Stop { thread, .. } => Action::Stop { thread },
         F::Respond { thread, request_id, allow, .. } => Action::Respond { thread, request_id, allow },
@@ -1272,7 +1415,10 @@ fn to_action(m: FromApp) -> Result<Action, String> {
         F::ApprovePlan { thread, request_id, mode, feedback, .. } => Action::ApprovePlan { thread, request_id, mode, feedback },
         F::KeepPlanning { thread, request_id, feedback, .. } => Action::KeepPlanning { thread, request_id, feedback },
         F::AnswerQuestion { thread, request_id, accept, .. } => Action::AnswerQuestion { thread, request_id, accept },
-        F::NewThread { project, text, model, effort, mode, .. } => Action::NewThread { project, text, model, effort, mode },
+        F::NewThread { project, text, model, effort, mode, files, .. } => {
+            let (images, files) = local_files(files, local)?;
+            Action::NewThread { project, text, model, effort, mode, images, files }
+        }
         F::SetModel { thread, model, .. } => Action::SetModel { thread, model },
         F::SetEffort { thread, effort, .. } => Action::SetEffort { thread, effort },
         F::AskAside { thread, text, .. } => Action::AskAside { thread, text },
@@ -1356,7 +1502,7 @@ mod tests {
     }
 }
 
-fn write(ws: &mut WebSocket<TcpStream>, message: &ToApp) -> Result<(), String> {
+fn write<S: Read + Write>(ws: &mut WebSocket<S>, message: &ToApp) -> Result<(), String> {
     let text = serde_json::to_string(message).expect("messages serialize");
     ws.send(Message::text(text)).map_err(|e| e.to_string())
 }

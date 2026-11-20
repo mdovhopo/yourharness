@@ -9544,6 +9544,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "yh-cli"
+version = "0.0.1"
+dependencies = [
+ "serde_json",
+ "tungstenite",
+ "yh-proto",
+]
+
+[[package]]
 name = "yh-core"
 version = "0.0.1"
 dependencies = [

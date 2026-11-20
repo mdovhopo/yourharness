@@ -185,12 +185,12 @@ fn streams_what_claude_writes_and_takes_actions() {
     c.send(FromApp::Answer { id: Some("a4".into()), thread: t(), request_id: "r2".into(), answers: answers.clone() });
     c.expect("answered", |m| matches!(m, ToApp::Done { id, error: None, .. } if id == "a4"));
     assert_eq!(app.recv_timeout(Duration::from_secs(1)).unwrap(), yh_server::Action::Answer { thread: t(), request_id: "r2".into(), answers });
-    c.send(FromApp::NewThread { id: Some("a5".into()), project: "p1".into(), text: Some("hi".into()), model: None, effort: None, mode: None });
-    c.expect("made", |m| matches!(m, ToApp::Done { id, error: None, thread: Some(t) } if id == "a5" && t == "t2"));
+    c.send(FromApp::NewThread { id: Some("a5".into()), project: "p1".into(), text: Some("hi".into()), model: None, effort: None, mode: None, files: vec![] });
+    c.expect("made", |m| matches!(m, ToApp::Done { id, error: None, thread: Some(t), .. } if id == "a5" && t == "t2"));
     app.recv_timeout(Duration::from_secs(1)).unwrap();
-    c.send(FromApp::Send { id: Some("a6".into()), thread: t(), text: "look".into(), now: false, images: vec![yh_server::wire::Image { media_type: "image/png".into(), data: "aGVsbG8=".into() }] });
+    c.send(FromApp::Send { id: Some("a6".into()), thread: t(), text: "look".into(), now: false, images: vec![yh_server::wire::Image { media_type: "image/png".into(), data: "aGVsbG8=".into() }], files: vec![] });
     c.expect("sent", |m| matches!(m, ToApp::Done { id, error: None, .. } if id == "a6"));
-    assert_eq!(app.recv_timeout(Duration::from_secs(1)).unwrap(), yh_server::Action::Send { thread: t(), text: "look".into(), now: false, images: vec![("image/png".into(), b"hello".to_vec())] });
+    assert_eq!(app.recv_timeout(Duration::from_secs(1)).unwrap(), yh_server::Action::Send { thread: t(), text: "look".into(), now: false, images: vec![("image/png".into(), b"hello".to_vec())], files: vec![] });
     c.send(FromApp::Delete { id: Some("a7".into()), thread: "nope".into() });
     c.expect("refused", |m| matches!(m, ToApp::Done { id, error: Some(e), .. } if id == "a7" && e == "No such thread."));
     app.recv_timeout(Duration::from_secs(1)).unwrap();
@@ -308,4 +308,76 @@ fn a_phone_pairs_with_a_code_and_is_cut_off_when_forgotten() {
     assert!(Client::connect(&format!("{url}?token={token}")).is_err(), "and its token no longer works");
     stop.store(true, Ordering::Relaxed);
     assert!(served.join().unwrap().is_ok(), "serving stops");
+}
+
+/// The command line's socket: no token, files on the Mac by path (pictures read, the rest by
+/// path), projects added, the window shown; a phone over the network may do none of those.
+#[test]
+fn the_local_socket_takes_the_command_lines_actions() {
+    use std::os::unix::net::{UnixListener, UnixStream};
+    let dir = temp_dir("local");
+    let db = std::sync::Arc::new(Database::open(&dir).unwrap());
+    db.save_state(state("Fix checkout"));
+    db.flush();
+    let engine = yh_engine::start(Some(db.clone()));
+    let (actions, asked) = flume::unbounded::<yh_server::Asked>();
+    let (seen, app) = flume::unbounded();
+    std::thread::spawn(move || {
+        for a in asked {
+            let made = matches!(a.action, yh_server::Action::AddProject { .. }).then(|| "p2".to_string());
+            seen.send(a.action).unwrap();
+            a.reply.send(Ok(made)).unwrap();
+        }
+    });
+    let socket = yh_server::wire::local_socket(&dir);
+    let listener = UnixListener::bind(&socket).unwrap();
+    let links = yh_server::Links { engine: engine.clone(), actions: actions.clone(), browser: None, voice: None };
+    let data = dir.clone();
+    std::thread::spawn(move || yh_server::serve_local(listener, data, yh_server::Options { name: "test".into(), version: Some("9.9.9".into()), ..Default::default() }, Some(links)).unwrap());
+    let (mut ws, _) = tungstenite::client("ws://localhost/", UnixStream::connect(&socket).unwrap()).unwrap();
+    ws.get_ref().set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+    let mut expect = |ws: &mut WebSocket<UnixStream>, what: &str, want: &dyn Fn(&ToApp) -> bool| {
+        let until = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < until {
+            if let Ok(Message::Text(t)) = ws.read() {
+                let m: ToApp = serde_json::from_str(&t).unwrap();
+                if want(&m) {
+                    return m;
+                }
+            }
+        }
+        panic!("no {what} within 5 s");
+    };
+    let send = |ws: &mut WebSocket<UnixStream>, m: FromApp| ws.send(Message::text(serde_json::to_string(&m).unwrap())).unwrap();
+    expect(&mut ws, "hello", &|m| matches!(m, ToApp::Hello { version: Some(v), .. } if v == "9.9.9"));
+    send(&mut ws, FromApp::SubscribeApp);
+    expect(&mut ws, "threads with folders", &|m| matches!(m, ToApp::Threads { projects, .. } if projects[0].path.as_deref() == Some("/tmp/shop")));
+
+    let (picture, notes) = (dir.join("shot.png"), dir.join("notes.txt"));
+    std::fs::write(&picture, b"png bytes").unwrap();
+    std::fs::write(&notes, b"notes").unwrap();
+    let files = vec![picture.to_string_lossy().into_owned(), notes.to_string_lossy().into_owned()];
+    send(&mut ws, FromApp::Send { id: Some("c1".into()), thread: "t1".into(), text: "look".into(), now: false, images: vec![], files: files.clone() });
+    expect(&mut ws, "sent", &|m| matches!(m, ToApp::Done { id, error: None, .. } if id == "c1"));
+    assert_eq!(app.recv_timeout(Duration::from_secs(1)).unwrap(), yh_server::Action::Send { thread: "t1".into(), text: "look".into(), now: false, images: vec![("image/png".into(), b"png bytes".to_vec())], files: vec![notes.clone()] });
+
+    send(&mut ws, FromApp::Send { id: Some("c2".into()), thread: "t1".into(), text: "x".into(), now: false, images: vec![], files: vec!["notes.txt".into()] });
+    expect(&mut ws, "a relative path refused", &|m| matches!(m, ToApp::Done { id, error: Some(_), .. } if id == "c2"));
+    send(&mut ws, FromApp::AddProject { id: Some("c3".into()), path: dir.to_string_lossy().into_owned() });
+    expect(&mut ws, "added", &|m| matches!(m, ToApp::Done { id, error: None, thread: None, project: Some(p) } if id == "c3" && p == "p2"));
+    assert_eq!(app.recv_timeout(Duration::from_secs(1)).unwrap(), yh_server::Action::AddProject { path: dir.to_string_lossy().into_owned() });
+    send(&mut ws, FromApp::Show { id: Some("c4".into()), thread: Some("t1".into()), project: None, draft: None, files: vec![] });
+    expect(&mut ws, "shown", &|m| matches!(m, ToApp::Done { id, error: None, .. } if id == "c4"));
+    assert!(matches!(app.recv_timeout(Duration::from_secs(1)).unwrap(), yh_server::Action::Show { thread: Some(t), .. } if t == "t1"));
+
+    // Over the network: none of it.
+    let url = start_with(&dir, None, Some(yh_server::Links { engine, actions, browser: None, voice: None }));
+    let mut c = Client::connect(&url).unwrap();
+    c.send(FromApp::Send { id: Some("n1".into()), thread: "t1".into(), text: "look".into(), now: false, images: vec![], files });
+    c.expect("files refused", |m| matches!(m, ToApp::Done { id, error: Some(_), .. } if id == "n1"));
+    c.send(FromApp::AddProject { id: Some("n2".into()), path: dir.to_string_lossy().into_owned() });
+    c.expect("adding refused", |m| matches!(m, ToApp::Done { id, error: Some(_), .. } if id == "n2"));
+    c.send(FromApp::Show { id: Some("n3".into()), thread: None, project: None, draft: None, files: vec![] });
+    c.expect("showing refused", |m| matches!(m, ToApp::Done { id, error: Some(_), .. } if id == "n3"));
+    assert!(app.try_recv().is_err(), "nothing refused reached the app");
 }

@@ -52,6 +52,9 @@ flowchart TB
   app sends it `Command`s (send, stop, allow…) and applies the `ThreadUpdate`s it gets back, at
   most once a frame. It asks the app how to start a `claude` when one is needed
   (`NeedsLaunch`), lets idle ones go, and saves rows (docs/remote.md).
+- **yh-cli** is `yh`, the command line (docs/cli.md). It talks to the running app over a Unix
+  socket in the data folder, in the phone's protocol (`yh-proto`, served by `yh-server`), and
+  starts the app when it isn't running.
 - **yh-voice** is voice input (docs/voice.md): the speech models Settings → Voice offers
   (`catalog.rs`), their downloads (`download.rs`), the microphone (`mic.rs`), and one thread
   that holds the model in use (`worker.rs`): whisper.cpp on the GPU, Parakeet through

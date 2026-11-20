@@ -129,7 +129,7 @@ impl Phones {
         // Read again for each phone that connects: Tailscale may have come up since.
         let only = self.tailscale_only;
         let hosts: yh_server::Hosts = Arc::new(move || hosts(&addresses(), tailscale::status().as_ref().and_then(tailnet_host), only));
-        let options = yh_server::Options { token: None, name, pairing: Some(self.pairing.clone()), stop: Some(stop), mac_id: Some(mac_id), tailscale: true, tailscale_only: only, hosts: Some(hosts) };
+        let options = yh_server::Options { token: None, name, pairing: Some(self.pairing.clone()), stop: Some(stop), mac_id: Some(mac_id), tailscale: true, tailscale_only: only, hosts: Some(hosts), version: Some(crate::state::workspace::app_version()) };
         eprintln!("PHONES listening on {bind}:{} ({})", self.port, self.hosts().join(", "));
         let _ = std::thread::Builder::new().name("phones".into()).spawn(move || {
             if let Err(e) = yh_server::serve(listener, data_dir, options, Some(links)) {

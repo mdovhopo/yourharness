@@ -6,6 +6,10 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+### Added
+
+- A command line, `yh`, to drive YourHarness from Terminal, scripts and other apps or agents. `yh new "fix the failing test" --wait` starts a thread in the current folder's project (the folder becomes a project if it isn't one) and prints Claude's reply. You can also attach files (`-f`), pick the project (`-p` takes a folder, name or ID), model, effort and mode, and follow the reply as it's written (`--follow`). `yh send`, `yh wait`, `yh read`, `yh threads`, `yh projects`, `yh allow` / `yh deny` and `yh stop` work with threads that already exist. `yh open <folder>` opens a new thread there with a draft and files waiting. Add `--json` to any command for scripts. `yh` starts the app when it isn't running. Install it from Settings → General → Command Line.
+
 ## [0.2.0] - 2026-11-20
 
 ### Added

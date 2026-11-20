@@ -485,7 +485,7 @@ impl ThreadTools {
             }
         }
         let id = self
-            .control(yh_server::Action::NewThread { project: project.id.clone(), text: Some(message), model, effort, mode: None })?
+            .control(yh_server::Action::NewThread { project: project.id.clone(), text: Some(message), model, effort, mode: None, images: vec![], files: vec![] })?
             .ok_or_else(|| ToolResult::error("Couldn't start a thread."))?;
         if let Some(title) = &title {
             self.ask(|reply| ToolRequest::Rename { id: id.clone(), title: title.clone(), reply });
@@ -507,7 +507,7 @@ impl ThreadTools {
         let s = self.snapshot()?;
         let t = self.other(&s, a)?;
         let now = a["now"].as_bool().unwrap_or(false);
-        self.control(yh_server::Action::Send { thread: t.id.clone(), text: message, now, images: vec![] })?;
+        self.control(yh_server::Action::Send { thread: t.id.clone(), text: message, now, images: vec![], files: vec![] })?;
         Ok(ToolResult::text(if !t.running {
             format!("Sent to “{}”; it's working on it.", t.title)
         } else if now {
