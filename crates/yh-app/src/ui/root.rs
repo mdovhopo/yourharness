@@ -113,6 +113,16 @@ impl RootView {
         let updater = cx.new(|cx| crate::state::updater::Updater::new(&library, cx));
         let sidebar = cx.new(|cx| Sidebar::new(workspace.clone(), updater.clone(), window, cx));
         let composer = cx.new(|cx| Composer::new(workspace.clone(), window, cx));
+        // The task strip over the composer opens its task on the Memory page's Tasks tab.
+        let root = cx.entity().downgrade();
+        let ws_task = workspace.clone();
+        composer.update(cx, |c, _| {
+            c.on_open_task = Some(std::rc::Rc::new(move |project: &str, task: &str, window: &mut Window, cx: &mut App| {
+                ws_task.update(cx, |ws, cx| ws.open_memory(project, cx));
+                let task = task.to_string();
+                let _ = root.update(cx, |root, cx| root.after_memory_opens(Some(task), true, window, cx));
+            }));
+        });
         let root = cx.entity().downgrade().into();
         composer.update(cx, |c, _| c.on_height = Some(root));
         let find = cx.new(|cx| FindBar::new(workspace.clone(), window, cx));
@@ -319,6 +329,7 @@ impl RootView {
         self.tasks_for = key.clone();
         let (Some((id, _)), Some(store)) = (key, ws.memory_store()) else {
             self.tasks.clear();
+            self.composer.update(cx, |c, cx| c.set_tasks(vec![], cx));
             return;
         };
         cx.spawn(async move |this, cx| {
@@ -333,6 +344,7 @@ impl RootView {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                this.composer.update(cx, |c, cx| c.set_tasks(tasks.clone(), cx));
                 if this.tasks != tasks {
                     this.tasks = tasks;
                     cx.notify();

@@ -20,7 +20,9 @@ with dark mode" lands where the last thread stopped. A step ticked or a note add
 progress (`progressed`), not a rewrite; every change is a version, so restoring one brings its
 progress back. The Memory view's **Tasks** tab shows them by state with a progress bar and next
 step; you can tick steps, add them or change the state in a task's detail; a thread's toolbar
-shows the tasks it's working on (state and steps done), with a popover of their steps.
+shows the tasks it's working on (state and steps done), with a popover of their steps, and a strip
+over the composer shows the first one not done (title, progress bar, next step; a click lists its
+steps and Show in Memory), between turns too, until it's done.
 
 Tasks record work, not knowledge, and are rarely read, so outside the Tasks tab the Memory view
 leaves them out: the memories list, Insights (and the reconciler's `stats`), Activity and Graph.
