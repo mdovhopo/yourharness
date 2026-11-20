@@ -594,6 +594,10 @@ impl RootView {
                     }
                     menu
                 })
+                .on_open_change(|open, _, cx| {
+                    crate::browser::Browsers::set_covered(*open);
+                    cx.refresh_windows();
+                })
                 .into_any_element(),
         )
     }
@@ -624,6 +628,11 @@ impl RootView {
             Popover::new("thread-tasks")
                 // `YH_OPEN_TASKS=1` opens it, for checking it without a click.
                 .default_open(std::env::var("YH_OPEN_TASKS").is_ok())
+                // Drawn by the window, under the browser's page laid over it: the page steps aside.
+                .on_open_change(|open, _, cx| {
+                    crate::browser::Browsers::set_covered(*open);
+                    cx.refresh_windows();
+                })
                 .trigger(
                     gpui_kit::component::button::Button::new("thread-tasks-button")
                         .small()
@@ -1122,8 +1131,12 @@ impl Render for RootView {
                         // Files dropped anywhere on the thread go with the next message. The
                         // overlay shows only while files are dragged over it (a style GPUI works
                         // out at paint, so nothing re-renders and the cached transcript stays).
+                        // The keyboard then goes to the composer, to type what goes with them.
                         .relative()
-                        .on_drop(cx.listener(|this, paths: &gpui_kit::ExternalPaths, _, cx| this.composer.update(cx, |c, cx| c.add_files(paths.paths(), cx))))
+                        .on_drop(cx.listener(|this, paths: &gpui_kit::ExternalPaths, window, cx| {
+                            this.composer.update(cx, |c, cx| c.add_files(paths.paths(), cx));
+                            this.refocus(window, cx);
+                        }))
                         .child(drop_overlay(&theme))
                     })
                     .when(selected.is_none() && self.workspace.read(cx).page.is_none(), |d| d.child(self.empty_state(&theme, cx))),
