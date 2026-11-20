@@ -139,7 +139,7 @@ impl MemoryTools {
             }
         }
         merged.links = links;
-        self.store.save(merged, &self.actor, Some("merged"), Some(others.join(",")));
+        let _ = self.store.save(merged, &self.actor, Some("merged"), Some(others.join(",")));
         for mut other in existing.into_iter().filter(|m| m.id != target) {
             // Links into the old one now point at the merged memory.
             let (t, o) = (target.clone(), other.id.clone());
@@ -155,7 +155,7 @@ impl MemoryTools {
             other.merged_into = Some(target.clone());
             other.updated_at = now;
             other.links = vec![];
-            self.store.save(other, &self.actor, Some("archived"), Some(format!("merged into {target}")));
+            let _ = self.store.save(other, &self.actor, Some("archived"), Some(format!("merged into {target}")));
         }
         (self.on_change)();
         ToolResult::text(format!("Merged into {} {title}; {} archived.", target.chars().take(8).collect::<String>().to_lowercase(), ids.len() - 1))
@@ -299,7 +299,9 @@ impl MemoryTools {
             m.sources.push((thread.clone(), entry.to_string()));
         }
         m.links = id_list(&a["links"]).iter().filter_map(|l| self.store.resolve(l, &self.scope)).map(|to| (to, None)).collect();
-        self.store.save(m.clone(), &self.actor, None, None);
+        if let Err(e) = self.store.save(m.clone(), &self.actor, None, None) {
+            return ToolResult::error(format!("Couldn't save it: {e}"));
+        }
         (self.on_change)();
         let mut text = format!("Saved as {}.", m.short_id());
         let similar: Vec<String> =
@@ -377,7 +379,9 @@ impl MemoryTools {
         if task.status == "archived" {
             task.status = "active".into();
         }
-        self.store.save(task.clone(), &self.actor, None, None);
+        if let Err(e) = self.store.save(task.clone(), &self.actor, None, None) {
+            return ToolResult::error(format!("Couldn't save the task: {e}"));
+        }
         (self.on_change)();
         let state = task.task_state.as_deref().unwrap_or("active");
         let mut text = format!("Tracked {} {}: {}", task.short_id(), task.title, crate::memory::state_label(state).to_lowercase());
@@ -421,7 +425,9 @@ impl MemoryTools {
             return ToolResult::error(p);
         }
         m.updated_at = crate::library::now_ms() / 1000.0;
-        self.store.save(m.clone(), &self.actor, None, None);
+        if let Err(e) = self.store.save(m.clone(), &self.actor, None, None) {
+            return ToolResult::error(format!("Couldn't save it: {e}"));
+        }
         (self.on_change)();
         ToolResult::text(format!("Updated {}.", m.short_id()))
     }

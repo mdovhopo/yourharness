@@ -304,9 +304,12 @@ impl Store {
 
     /// Saves a memory: a new version when what it says (or a task's progress) changed, and an
     /// event in the log.
-    pub fn save(&self, memory: Memory, actor: &Actor, event: Option<&'static str>, detail: Option<String>) {
-        let actor = actor.clone();
-        let _ = self.db.write(move |c, rev| save_memory(c, rev, &memory, &actor, event, detail));
+    pub fn save(&self, memory: Memory, actor: &Actor, event: Option<&'static str>, detail: Option<String>) -> Result<(), String> {
+        let (actor, id) = (actor.clone(), memory.id.clone());
+        self.db.write(move |c, rev| save_memory(c, rev, &memory, &actor, event, detail)).map_err(|e| {
+            eprintln!("MEMORY couldn't save {id}: {e}");
+            e.to_string()
+        })
     }
 
     /// Saves several memories in one transaction: every memory first, then their links, so
@@ -344,7 +347,7 @@ impl Store {
         let event = if status == "archived" { "archived" } else if m.status == "archived" { "restored" } else { "updated" };
         m.status = status.into();
         m.updated_at = now();
-        self.save(m, actor, Some(event), reason);
+        let _ = self.save(m, actor, Some(event), reason);
     }
 
     pub fn set_pinned(&self, id: &str, pinned: bool, actor: &Actor) {
@@ -852,12 +855,12 @@ mod tests {
         let actor = Actor { kind: "agent".into(), thread: Some("T1".into()) };
         let mut m = Memory::new("project:P", "feedback", "Release only on request", "When to cut releases", "Never release unless asked.", "agent");
         m.sources.push(("T1".into(), "toolu_1".into()));
-        s.save(m.clone(), &actor, None, None);
+        s.save(m.clone(), &actor, None, None).unwrap();
         let found = s.find("release", Some("project:P"), false, 10);
         assert_eq!(found.len(), 1);
         assert_eq!(s.resolve(&m.short_id(), "project:P").as_deref(), Some(m.id.as_str()));
         m.body = "Never release unless the user asks.".into();
-        s.save(m.clone(), &actor, None, None);
+        s.save(m.clone(), &actor, None, None).unwrap();
         assert_eq!(s.versions(&m.id).len(), 2);
         s.set_status(&m.id, "archived", &actor, Some("wrong".into()));
         assert!(s.find("release", Some("project:P"), false, 10).is_empty());
@@ -870,10 +873,10 @@ mod tests {
         let s = store("restore");
         let actor = Actor { kind: "agent".into(), thread: Some("T9".into()) };
         let mut m = Memory::new("project:P", "project", "First", "one", "First body.", "agent");
-        s.save(m.clone(), &actor, None, None);
+        s.save(m.clone(), &actor, None, None).unwrap();
         m.title = "Second".into();
         m.body = "Second body.".into();
-        s.save(m.clone(), &actor, None, None);
+        s.save(m.clone(), &actor, None, None).unwrap();
         s.restore_version(&m.id, 1, &Actor { kind: "user".into(), thread: None });
         s.db.flush();
         let back = s.memory(&m.id).unwrap();
@@ -907,3 +910,4 @@ mod tests {
         assert!(problem("t", "d", "a normal body").is_none());
     }
 }
+

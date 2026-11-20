@@ -173,6 +173,8 @@ pub struct MemoryPage {
     graph_hover: Option<usize>,
     /// The task board's Done column shows every task, not just the recent ones.
     show_all_done: bool,
+    /// The Tasks tab shows the selected task rather than the board.
+    task_open: bool,
     /// Add a step, under a task's steps.
     new_step: Entity<InputState>,
     /// The page's own width, measured where it's painted.
@@ -247,6 +249,7 @@ impl MemoryPage {
             editing_body: false,
             loaded_revision: None,
             tasks_shown: false,
+            task_open: false,
             claude: None,
             pressed_one_memory: false,
             loaded: false,
@@ -362,7 +365,7 @@ impl MemoryPage {
                     if let Some(store) = page.store.clone() {
                         let mut renamed = a.clone();
                         renamed.title = format!("{} (renamed)", a.title);
-                        store.save(renamed, &user(), None, None);
+                        let _ = store.save(renamed, &user(), None, None);
                         page.link(&a.id, &b, cx);
                         // Restoring keeps its links: they aren't part of a version.
                         store.restore_version(&a.id, 1, &user());
@@ -377,8 +380,7 @@ impl MemoryPage {
                 if let Ok(text) = std::env::var("YH_MEMORY_ADD_STEP") {
                     if let Some(id) = page.memories.iter().find(|m| m.is_task() && m.status == "active").map(|m| m.id.clone()) {
                         if !ADDED_STEP.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                            page.tab = Tab::Memories;
-                            page.select(&id, cx);
+                            page.open_memory(&id, cx);
                             page.add_step(&id, text, cx);
                         }
                     }
@@ -422,6 +424,22 @@ impl MemoryPage {
                 words.iter().all(|w| text.contains(w))
             })
             .collect()
+    }
+
+    /// Shows a memory where it's listed: a task on the Tasks tab while the other tabs leave
+    /// tasks out, anything else on Memories, archived or in use as it is.
+    pub fn open_memory(&mut self, id: &str, cx: &mut Context<Self>) {
+        match self.memories.iter().find(|m| m.id == id) {
+            Some(m) => {
+                self.archived = m.status == "archived";
+                self.task_open = m.is_task() && !self.tasks_shown;
+                self.tab = if self.task_open { Tab::Tasks } else { Tab::Memories };
+            }
+            // Not read yet (the page just opened): the tab it was opened on, the task shown once it is.
+            None => self.task_open = self.tab == Tab::Tasks,
+        }
+        self.narrow_list = false;
+        self.select(id, cx);
     }
 
     pub fn select(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -472,7 +490,7 @@ impl MemoryPage {
         }
         m.updated_at = yh_core::library::now_ms() / 1000.0;
         let created = !self.memories.iter().any(|x| x.id == m.id);
-        store.save(m.clone(), &user(), Some(if created { "created" } else { "updated" }), None);
+        let _ = store.save(m.clone(), &user(), Some(if created { "created" } else { "updated" }), None);
         self.editing = Some(m);
         self.written(cx);
     }
@@ -665,7 +683,7 @@ impl MemoryPage {
         let Some(mut m) = self.memories.iter().find(|m| m.id == id).cloned() else { return };
         m.task_state = Some(state.into());
         m.updated_at = yh_core::library::now_ms() / 1000.0;
-        store.save(m, &user(), Some("updated"), None);
+        let _ = store.save(m, &user(), Some("updated"), None);
         self.written(cx);
     }
 
@@ -680,7 +698,7 @@ impl MemoryPage {
             m.task_state = Some("active".into());
         }
         m.updated_at = yh_core::library::now_ms() / 1000.0;
-        store.save(m, &user(), Some("updated"), None);
+        let _ = store.save(m, &user(), Some("updated"), None);
         self.written(cx);
     }
 
@@ -696,7 +714,7 @@ impl MemoryPage {
         if std::env::var("YH_DATA_DIR").is_ok() {
             eprintln!("MEMORY step added to {}: {} steps", m.title, m.steps.len());
         }
-        store.save(m, &user(), Some("updated"), None);
+        let _ = store.save(m, &user(), Some("updated"), None);
         self.written(cx);
     }
 
@@ -780,6 +798,7 @@ impl MemoryPage {
             Segment::new(id, label, self.tab == t, move |_, _, cx| {
                 let _ = page.update(cx, |p, cx| {
                     p.tab = t;
+                    p.task_open = false;
                     cx.notify();
                 });
             })
@@ -1565,12 +1584,7 @@ impl MemoryPage {
                 }
                 row.when(!wide, |r| r.child(div().flex_none().text_color(theme.tertiary).child(ago(m.updated_at))))
             }))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.tab = Tab::Memories;
-                this.archived = false;
-                this.narrow_list = false;
-                this.select(&id, cx);
-            }))
+            .on_click(cx.listener(move |this, _, _, cx| this.open_memory(&id, cx)))
     }
 
     /// How memory is doing, in sentences first and figures after.
@@ -1933,11 +1947,9 @@ impl MemoryPage {
                 gpui_kit::MouseButton::Left,
                 cx.listener(move |this, e: &gpui_kit::MouseDownEvent, _, cx| {
                     if let Some(i) = graph_dot_at(cell.get(), &pts, &radii_click, e.position) {
-                        this.tab = Tab::Memories;
-                        this.archived = false;
                         this.graph_hover = None;
                         let id = ids[i].clone();
-                        this.select(&id, cx);
+                        this.open_memory(&id, cx);
                     }
                 }),
             )
@@ -2068,11 +2080,7 @@ impl MemoryPage {
                     })
                     .child(div().flex_none().text_size(px(text::CAPTION)).text_color(theme.tertiary).child(ago(e.at)))
                     .when_some(opens, |d, id| {
-                        d.on_click(cx.listener(move |this, _, _, cx| {
-                            this.archived = this.memories.iter().find(|m| m.id == id).is_some_and(|m| m.status != "active");
-                            this.tab = Tab::Memories;
-                            this.select(&id, cx);
-                        }))
+                        d.on_click(cx.listener(move |this, _, _, cx| this.open_memory(&id, cx)))
                     }),
             );
         }
@@ -2233,6 +2241,19 @@ impl Render for MemoryPage {
                 };
                 div().flex_1().min_h_0().flex().flex_col().children(self.claude_nudge(&theme, cx)).child(columns).into_any_element()
             }
+            Tab::Tasks if self.task_open && self.selected().is_some_and(|m| m.is_task()) => div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .child(
+                    div().flex_none().flex().px(px(space::L)).pt(px(space::S)).child(Button::new("tasks-back").small().ghost().icon(IconName::ChevronLeft).label("All Tasks").on_click(cx.listener(|this, _, _, cx| {
+                        this.task_open = false;
+                        cx.notify();
+                    }))),
+                )
+                .child(div().flex_1().min_h_0().flex().child(self.detail(&theme, cx)))
+                .into_any_element(),
             Tab::Tasks => div().flex_1().min_h_0().child(self.tasks(&theme, cx)).into_any_element(),
             Tab::Activity => div().flex_1().min_h_0().child(self.activity(&theme, cx)).into_any_element(),
             Tab::Insights => div().flex_1().min_h_0().child(self.insights(&theme, cx)).into_any_element(),
