@@ -106,11 +106,11 @@ pub(super) fn post(event: WebEvent) {
 }
 
 thread_local! {
-    /// The pages you may type into (`set_keyboard`), by key: a click of yours in one gives it the
-    /// keyboard, as a field on a web page takes focus.
+    /// The pages that may take the keyboard now, by key: the one you last clicked in, until you
+    /// click anywhere else.
     pub(super) static TYPING: std::cell::RefCell<std::collections::HashSet<usize>> = Default::default();
-    /// Pages given the keyboard for now (`grant_keyboard`): a field you clicked into, text you
-    /// selected. Your next press anywhere else takes it back.
+    /// Pages given the keyboard for now (a press in one, `grant_keyboard`). Your next press
+    /// anywhere else takes it back.
     pub(super) static GRANTED: std::cell::RefCell<std::collections::HashSet<usize>> = Default::default();
     /// Your last press in a page: which, and when.
     static LAST_PRESS: std::cell::Cell<Option<(usize, std::time::Instant)>> = const { std::cell::Cell::new(None) };
@@ -179,10 +179,10 @@ pub(super) fn web_view_of(mut view: id) -> id {
 }
 
 /// Keyboard focus as on a web page, watched in every mouse press the app gets before its window
-/// handles it: a press in a page you may type into gives it the keyboard, and a press anywhere
-/// else (the composer, the transcript, the page's own toolbar) takes it back for the app. Pages
-/// never take it by themselves (WebKit's first-responder changes stay suppressed, Chromium's
-/// view accepts it only while typing is on).
+/// handles it: a press in a page gives it the keyboard, and a press anywhere else (the composer,
+/// the transcript, the page's own toolbar) takes it back for the app. Pages never take it by
+/// themselves (WebKit's first-responder changes stay suppressed, Chromium's view accepts it only
+/// after your press), nor do the agent's clicks, which never pass through here.
 pub(super) fn watch_focus() {
     install_send_event();
     static ONCE: std::sync::Once = std::sync::Once::new();
@@ -333,15 +333,17 @@ pub fn focus_for_press(event: id) {
         let first: id = msg_send![window, firstResponder];
         let is_view: bool = first != nil && msg_send![first, isKindOfClass: class!(NSView)];
         let focused = if is_view { web_view_of(first) } else { nil };
-        if pressed != nil && TYPING.with(|t| t.borrow().contains(&(pressed as usize))) {
-            // Chromium's page takes it itself, on the press: it accepts the keyboard while typing is on.
+        if pressed != nil {
+            GRANTED.with(|g| g.borrow_mut().insert(pressed as usize));
+            TYPING.with(|t| t.borrow_mut().insert(pressed as usize));
+            // Chromium's page takes it itself, on the press: it accepts the keyboard now.
             if focused != pressed && !chrome::is_page_view(pressed) {
                 webkit::take_keyboard(window, pressed);
             }
         } else if focused != nil && focused != pressed {
             let _: bool = msg_send![window, makeFirstResponder: app_view(window)];
         }
-        // A page given the keyboard for a field or a selection keeps it only until you press elsewhere.
+        // A page given the keyboard keeps it only until you press elsewhere.
         let back: Vec<usize> = GRANTED.with(|g| g.borrow().iter().copied().filter(|k| *k != pressed as usize).collect());
         for k in back {
             GRANTED.with(|g| g.borrow_mut().remove(&k));
@@ -529,8 +531,6 @@ impl WebView {
     /// Runs `body` (a function body; `await` works) in the helpers' world, or the page's, and
     /// replies with what it returned as JSON (`null` for nothing), or the error.
     pub fn call(&self, body: &str, in_page: bool, reply: flume::Sender<Result<String, String>>) { both!(self, w => w.call(body, in_page, reply)) }
-    /// Whether you may type into the page (Typing in Page).
-    pub fn set_keyboard(&self, allowed: bool) { both!(self, w => w.set_keyboard(allowed)) }
     /// The keyboard to the page for now: you clicked into a field or selected text in it.
     pub fn grant_keyboard(&self) {
         let key = self.key();

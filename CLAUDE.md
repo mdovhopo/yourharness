@@ -87,8 +87,8 @@ as the agent makes them, a new thread in the first project if none is selected, 
 result printed, screenshots next to the file as `<steps>.<n>.jpg`, then `== place …` and `== done`;
 `YH_BROWSER_PROBE_QUIT=1` quits after; `YH_BROWSER_AUTO_SHOW=0` keeps the page parked, the sidebar closed;
 `YH_BROWSER_PROBE_THREAD=<id>` runs it on that thread while `YH_SELECT` opens another; steps may also be
-`{"control": true|false}`, Take Control and Give Back as the panel's button does, `{"keyboard": true|false}`, the
-Typing in Page toggle (`YH_TYPE_KEYS_CLICKS` then shows where your clicks put the keyboard), `{"crash": true}`, the tab's web
+`{"control": true|false}`, Take Control and Give Back as the panel's button does (`YH_TYPE_KEYS_CLICKS` shows where your
+clicks put the keyboard), `{"crash": true}`, the tab's web
 content process ended as a crash would, `{"engine": "webkit"}`, the engine switched as Settings does, `{"retry_engine": true}`,
 the panel's Try Again after the Chrome engine's download failed, and `{"cursor": true}`, whether the cursor shown is the page's;
 `YH_CHROME_MENU=log` lists Chrome's right-click menus instead of showing them). Browser panel checks: `YH_BROWSER_ACTIVITY_LOG=1` prints each time the page
