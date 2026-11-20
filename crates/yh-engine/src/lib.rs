@@ -75,6 +75,9 @@ pub enum Command {
     /// The effort it should run with: an idle `claude` with another ends now, a busy one once
     /// its turn is over.
     SetEffort { thread: String, effort: Option<String> },
+    /// Session settings for a running `claude`, now (the workflow); one not running gets them
+    /// at its start, from its launch options.
+    ApplySettings { thread: String, settings: serde_json::Value },
     /// Its `claude` starts over with what the app says next (another Claude account): an idle
     /// one ends now, a busy one once its turn is over.
     Relaunch { thread: String },
@@ -112,7 +115,7 @@ impl Command {
     fn thread(&self) -> Option<&str> {
         use Command::*;
         match self {
-            Open { thread, .. } | Send { thread, .. } | Deliver { thread, .. } | Launch { thread, .. } | Interrupt { thread } | Stop { thread } | Respond { thread, .. } | AnswerElicitation { thread, .. } | Mcp { thread, .. } | End { thread, .. } | SetModel { thread, .. } | SetMode { thread, .. } | SetEffort { thread, .. } | Relaunch { thread } | Notice { thread, .. } | ChangedFiles { thread, .. } | CutOffJobs { thread, .. } | Withdraw { thread, .. } | SendNow { thread, .. } | StopJob { thread, .. } | TookRestored { thread, .. } | SetMcpServers { thread, .. } | SetSession { thread, .. } | Forget { thread } | Save { thread } | Events { thread, .. } => Some(thread),
+            Open { thread, .. } | Send { thread, .. } | Deliver { thread, .. } | Launch { thread, .. } | Interrupt { thread } | Stop { thread } | Respond { thread, .. } | AnswerElicitation { thread, .. } | Mcp { thread, .. } | End { thread, .. } | SetModel { thread, .. } | SetMode { thread, .. } | SetEffort { thread, .. } | ApplySettings { thread, .. } | Relaunch { thread } | Notice { thread, .. } | ChangedFiles { thread, .. } | CutOffJobs { thread, .. } | Withdraw { thread, .. } | SendNow { thread, .. } | StopJob { thread, .. } | TookRestored { thread, .. } | SetMcpServers { thread, .. } | SetSession { thread, .. } | Forget { thread } | Save { thread } | Events { thread, .. } => Some(thread),
             Snapshot { thread, .. } => Some(thread),
             Quit { .. } | Subscribe { .. } => None,
         }
@@ -540,11 +543,18 @@ impl Engine {
             Command::SetModel { thread, model } => {
                 if let Some(rt) = self.runtimes.get_mut(&thread) {
                     rt.process.set_model(&model);
+                    // Whether a workflow can run depends on the model.
+                    rt.process.query_settings();
                 }
             }
             Command::SetMode { thread, mode } => {
                 if let Some(rt) = self.runtimes.get_mut(&thread) {
                     rt.process.set_mode(&mode);
+                }
+            }
+            Command::ApplySettings { thread, settings } => {
+                if let Some(rt) = self.runtimes.get_mut(&thread) {
+                    rt.process.apply_settings(settings);
                 }
             }
             Command::SetEffort { thread, effort } => {

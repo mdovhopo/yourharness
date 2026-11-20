@@ -418,6 +418,9 @@ pub struct LiveState {
     pub total: Option<usize>,
     /// Goes up whenever a sub-agent's log changes, for the right sidebar.
     pub subagents_version: u64,
+    /// What the CLI says is in effect for the session (`Event::FlagSettings`): the workflow
+    /// and whether each can run. None until its `claude` has answered.
+    pub flag_settings: Option<serde_json::Value>,
 
 }
 
@@ -727,6 +730,11 @@ impl ThreadRun {
             }
             Event::TitleChanged(_) | Event::Skills(_) => Outcome::default(),
             Event::Catalog { .. } | Event::Limits(_) => Outcome::default(),
+            Event::FlagSettings(applied) => {
+                let changed = self.live.flag_settings.as_ref() != Some(&applied);
+                self.live.flag_settings = Some(applied);
+                Outcome::chrome(changed)
+            }
             Event::BlockStart { message, index, parent, kind } => {
                 if let Some(parent) = parent {
                     self.subagent_step(&parent, src);

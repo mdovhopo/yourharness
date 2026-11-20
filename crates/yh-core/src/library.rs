@@ -134,6 +134,9 @@ pub struct ThreadMeta {
     pub settled_at: Option<f64>,
     pub model: Option<String>,
     pub effort: Option<String>,
+    /// Its workflow (`claude::workflow`'s mode id), when chosen for it. 0.0.x doesn't know the
+    /// key and drops it on a save.
+    pub workflow: Option<String>,
     pub draft: Option<String>,
     /// Renamed by hand: generated titles leave it alone.
     pub title_chosen: bool,
@@ -168,6 +171,7 @@ impl ThreadMeta {
             settled_at: None,
             model: None,
             effort: None,
+            workflow: None,
             draft: None,
             title_chosen: false,
             turn_in_progress: false,
@@ -197,6 +201,7 @@ impl ThreadMeta {
             settled_at: ms("settledAt"),
             model: s("model").filter(|m| !m.is_empty()),
             effort: s("effort").filter(|m| !m.is_empty()),
+            workflow: s("workflow").filter(|m| !m.is_empty()),
             draft: s("draft").filter(|m| !m.is_empty()),
             title_chosen: o.get("titleChosen").and_then(Value::as_bool).unwrap_or(false),
             turn_in_progress: o.get("turnInProgress").and_then(Value::as_bool).unwrap_or(false),
@@ -451,6 +456,9 @@ impl Library {
         }
         if let Some(effort) = &meta.effort {
             object.insert("effort".into(), effort.clone().into());
+        }
+        if let Some(workflow) = &meta.workflow {
+            object.insert("workflow".into(), workflow.clone().into());
         }
         if meta.pinned {
             object.insert("isPinned".into(), true.into());

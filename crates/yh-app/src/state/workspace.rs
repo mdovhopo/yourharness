@@ -621,6 +621,32 @@ impl Workspace {
         thread.meta.effort.clone().or_else(|| self.default_setting("effort"))
     }
 
+    /// The workflow chosen for the thread, else for new threads; None leaves the CLI's own
+    /// (Claude Code's `ultracode` setting).
+    pub fn chosen_workflow(&self, thread: &ThreadState) -> Option<String> {
+        thread.meta.workflow.clone().or_else(|| self.default_setting("workflow"))
+    }
+
+    /// The workflow the thread runs: as chosen, else what its `claude` says is in effect.
+    pub fn workflow_of(&self, thread: &ThreadState) -> &'static str {
+        use yh_core::claude::workflow;
+        match self.chosen_workflow(thread) {
+            Some(id) => workflow::mode(&id).id,
+            None => thread.run.flag_settings.as_ref().map_or(workflow::DEFAULT, workflow::active),
+        }
+    }
+
+    /// Applies at once to a running `claude` (a session setting), else from its next start.
+    pub fn set_workflow(&mut self, id: &str, mode: &str, cx: &mut Context<Self>) {
+        let mode = yh_core::claude::workflow::mode(mode).id.to_string();
+        let value = mode.clone();
+        self.update_meta(id, cx, |m, r| {
+            m.workflow = Some(value.clone());
+            r.insert("workflow".into(), value.into());
+        });
+        self.command(id, Command::ApplySettings { thread: id.to_string(), settings: yh_core::claude::workflow::settings(&mode) }, cx);
+    }
+
     // MARK: Opening and reading
 
     /// The click is answered in the next frame (selection, title, a held transcript); reading a
@@ -1873,6 +1899,7 @@ impl Workspace {
                 allowed_tools: allowed,
                 servers,
                 extra_args: extra,
+                flag_settings: None,
             };
             return (Ok(options), None);
         }
@@ -1968,6 +1995,7 @@ impl Workspace {
                 allowed_tools: vec!["mcp__memory".into(), "Read".into(), "Glob".into(), "Grep".into()],
                 servers: vec![std::sync::Arc::new(server)],
                 extra_args: vec!["--tools".into(), "Read,Glob,Grep,AskUserQuestion".into(), "--strict-mcp-config".into(), "--no-session-persistence".into()],
+                flag_settings: None,
             };
             return (Ok(options), None);
         }
@@ -1999,6 +2027,7 @@ impl Workspace {
             allowed_tools: allowed,
             servers,
             extra_args: vec![],
+            flag_settings: self.chosen_workflow(t).map(|m| yh_core::claude::workflow::settings(&m)),
         };
         let stacks = options.append_system_prompt.as_deref().is_some_and(|p| p.contains(STACKS_PROMPT));
         (Ok(options), Some(format!(", gh stack instructions {}", if stacks { "in" } else { "not in" })))
@@ -3149,6 +3178,7 @@ fn read_catalog(folder: String) -> Option<(Value, Value)> {
         allowed_tools: vec![],
         servers: vec![],
         extra_args: vec!["--no-session-persistence".into()],
+        flag_settings: None,
     };
     let (tx, rx) = flume::unbounded();
     let mut process = yh_core::claude::ClaudeProcess::spawn(options, tx).ok()?;
@@ -3309,6 +3339,13 @@ impl Workspace {
                 let Some((value, label)) = found else { return CommandHandling::NotOurs };
                 self.set_model(&id, (value != "default").then_some(value), cx);
                 self.composer_notice(thread, &format!("Model set to {label}"), cx);
+                CommandHandling::Done
+            }
+            // The terminal's way to Ultracode: here it's the Workflow picker's, effort stays.
+            "effort" if args.eq_ignore_ascii_case("ultracode") || args.eq_ignore_ascii_case("ultracode off") => {
+                let on = args.eq_ignore_ascii_case("ultracode");
+                self.set_workflow(&id, if on { "ultracode" } else { yh_core::claude::workflow::DEFAULT }, cx);
+                self.composer_notice(thread, if on { "Workflow set to Ultracode" } else { "Workflow set to Default" }, cx);
                 CommandHandling::Done
             }
             "effort" if !args.is_empty() => {

@@ -728,6 +728,8 @@ impl Sidebar {
         let pinned = t.meta.pinned;
         let settled = t.meta.settled_at.is_some();
         let generating = ws.is_generating_title(&id);
+        // A workflow other than Default (Ultracode): it can start many agents.
+        let workflow = Some(ws.workflow_of(t)).filter(|w| *w != yh_core::claude::workflow::DEFAULT).map(|w| yh_core::claude::workflow::mode(w).name);
         let tracking = probe::enabled();
         let jobs = jobs_marker(t, running || waiting);
         // Selection is a soft fill: text keeps its colours, as in Finder's sidebar.
@@ -839,6 +841,9 @@ impl Sidebar {
         // VoiceOver: the title, then what it's doing.
         let spoken = {
             let mut parts = vec![t.title.clone()];
+            if let Some(name) = workflow {
+                parts.push(format!("Workflow {name}"));
+            }
             if generating {
                 parts.push("Generating title".into());
             }
@@ -927,6 +932,9 @@ impl Sidebar {
                     .child(t.title.clone()),
             )
             .when(pinned, |d| d.child(icons::pin().size(px(11.)).text_color(theme.tertiary).rotate(gpui_kit::radians(0.7))))
+            .when_some(workflow, |d, name| {
+                d.child(div().id(SharedString::from(format!("workflow-{id}"))).flex_none().child(crate::ui::icons::workflow().size(px(11.)).text_color(theme.accent)).tooltip(tooltip(SharedString::from(format!("Workflow: {name}")))))
+            })
             // Folded: how many it started, where they'd be.
             .when(nest.folded, |d| d.child(div().flex_none().text_size(px(text::CAPTION)).text_color(theme.tertiary).child(format!("+{}", nest.workers))))
             .child(div().flex_none().text_size(px(text::CAPTION)).text_color(if is_selected { theme.secondary } else { theme.tertiary }).child(age))

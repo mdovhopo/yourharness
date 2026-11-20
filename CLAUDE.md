@@ -60,7 +60,7 @@ throwaway folder for real turns.
 Launch options: `YH_DATA_DIR`, `YH_CLAUDE_HISTORY=1` (also list Claude Code's own sessions,
 `YH_CLAUDE_CONFIG`, `YH_CLAUDE_LIMIT`), `YH_PROJECT=<folder>` (a project of its own, its mode
 `YH_MODE`: `ask` shows permission cards, `plan` plan cards), `YH_SELECT=<title or id>`, and
-`YH_SEND` / `YH_MODEL` / `YH_EFFORT` / `YH_ANSWER=allow|deny` (one real turn, prompts answered by
+`YH_SEND` / `YH_MODEL` / `YH_EFFORT` / `YH_WORKFLOW` (`ultracode`: the Workflow picker's default) / `YH_ANSWER=allow|deny` (one real turn, prompts answered by
 themselves, every waiting one by its own id; `YH_ANSWER_DELAY=<s>` answers that much later, so the cards
 show and pile up: parallel sub-agents print `PERMISSIONS waiting: 2`). Also `YH_CLICK=<x,y>[;<x,y>…]` (clicks
 in window points through the window, a second apart, after `YH_DRAFT_DELAY` + 0.5 s: the composer's pickers,

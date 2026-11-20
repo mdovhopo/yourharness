@@ -539,7 +539,7 @@ impl RootView {
         });
     }
 
-    /// "Project · worktree · model", under the title.
+    /// "Project · worktree · model · workflow", under the title.
     fn subtitle(&self, thread: &Entity<crate::state::thread::ThreadState>, cx: &App) -> String {
         let ws = self.workspace.read(cx);
         let t = thread.read(cx);
@@ -550,6 +550,11 @@ impl RootView {
         }
         if let Some(model) = ws.model_of(t) {
             parts.push(ws.models.iter().find(|m| m.value == model).map(|m| m.display_name.clone()).unwrap_or(model));
+        }
+        // A workflow other than Default: it can start many agents.
+        let workflow = ws.workflow_of(t);
+        if workflow != yh_core::claude::workflow::DEFAULT {
+            parts.push(yh_core::claude::workflow::mode(workflow).name.to_string());
         }
         parts.retain(|p| !p.is_empty());
         parts.join(" · ")

@@ -585,6 +585,9 @@ impl SettingsView {
         let efforts: Vec<(String, String)> = std::iter::once(("".into(), "Auto".into()))
             .chain(["low", "medium", "high", "xhigh", "max"].iter().map(|e| (e.to_string(), e[..1].to_uppercase() + &e[1..])))
             .collect();
+        // Unset follows Claude Code's own `ultracode` setting.
+        let workflows: Vec<(String, String)> =
+            std::iter::once(("".into(), "As in Claude Code".into())).chain(yh_core::claude::workflow::MODES.iter().map(|m| (m.id.to_string(), m.name.to_string()))).collect();
         let modes: Vec<(String, String)> = [("auto", "Auto"), ("ask", "Ask"), ("acceptEdits", "Accept Edits"), ("plan", "Plan"), ("bypass", "Bypass Permissions")].iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
         let set_default = |key: &'static str| {
             let lib = lib.clone();
@@ -701,6 +704,7 @@ impl SettingsView {
                 section("New Thread Defaults")
                     .child(row("Model", picker("settings-model", s("model"), models, set_default("model"))))
                     .child(row("Reasoning effort", picker("settings-effort", s("effort"), efforts.clone(), set_default("effort"))))
+                    .child(row("Workflow", picker("settings-workflow", s("workflow"), workflows, set_default("workflow"))))
                     .child(row("Permissions for new projects", picker("settings-mode", if s("permissionMode").is_empty() { "auto".into() } else { s("permissionMode") }, modes, set_default("permissionMode"))))
                     .footer("Each thread can override these from the composer. Threads that haven't overridden them follow these defaults."),
             )

@@ -782,7 +782,7 @@ impl Composer {
         }
     }
 
-    /// Model, effort and permissions, as chips: each menu says what its choices
+    /// Model, effort, workflow and permissions, as chips: each menu says what its choices
     /// mean, with a footnote on when they apply.
     fn pickers(&self, thread: &Entity<ThreadState>, compact: bool, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let ws = self.workspace.read(cx);
@@ -793,6 +793,8 @@ impl Composer {
         let mode = ws.project(&project).map_or("auto".to_string(), |p| p.mode.clone());
         let model = ws.model_of(t);
         let effort = ws.effort_of(t);
+        let workflow = ws.workflow_of(t);
+        let applied = t.run.flag_settings.clone();
         let model_name = ws.model_name(t);
         let auto_ok = ws.supports_auto_mode(t);
         let models: Vec<PickerModel> = if ws.models.is_empty() {
@@ -808,7 +810,7 @@ impl Composer {
         let mode_label = MODES.iter().find(|(v, _)| *v == mode).map_or("Auto", |(_, l)| l);
         let models = Rc::new(models);
         let w = self.workspace.downgrade();
-        let (secondary, error) = (theme.secondary, theme.error);
+        let (secondary, error, accent) = (theme.secondary, theme.error, theme.accent);
         let model_menu = {
             let (w, id, models, current) = (w.clone(), id.clone(), models.clone(), current_model.clone());
             Button::new("model").ghost().small().flex_none().icon(icons::sparkles().size(px(13.)).text_color(secondary)).child(picker_label(model_name.clone(), secondary)).accessibility_label(format!("Model: {model_name}")).tooltip("Model").dropdown_caret(true).dropdown_menu(move |mut menu, window, cx| {
@@ -867,6 +869,41 @@ impl Composer {
                 menu.separator().item(crate::ui::page_kit::menu_note("Applies from your next message."))
             })
         });
+        // Workflow: an icon alone on Default, named and tinted otherwise. Modes the session can't
+        // run are greyed with why; the chip is hidden when none can and Default is in use.
+        let workflow_menu = {
+            use yh_core::claude::workflow;
+            let can = |m: &workflow::Mode| applied.as_ref().map_or(Some(true), |a| workflow::available(m.id, a)) != Some(false);
+            let any = workflow::MODES.iter().any(|m| m.setting.is_some() && can(m));
+            (any || workflow != workflow::DEFAULT).then(|| {
+                let (w, id, current) = (w.clone(), id.clone(), workflow);
+                let mode = workflow::mode(workflow);
+                let on = workflow != workflow::DEFAULT;
+                let unavailable: Vec<&'static str> = workflow::MODES.iter().filter(|m| !can(m)).map(|m| m.id).collect();
+                let model_name = model_name.clone();
+                Button::new("workflow")
+                    .ghost()
+                    .small()
+                    .flex_none()
+                    .icon(icons::workflow().size(px(13.)).text_color(if on { accent } else { secondary }))
+                    .accessibility_label(format!("Workflow: {}", mode.name))
+                    .when(on && !compact, |b| b.child(picker_label(mode.name.to_string(), accent)))
+                    .tooltip(format!("Workflow: {}", mode.name))
+                    .dropdown_caret(on && !compact)
+                    .dropdown_menu(move |mut menu, _, _| {
+                        menu = menu.min_w(px(260.)).label("Workflow");
+                        for m in workflow::MODES {
+                            let (w, id) = (w.clone(), id.clone());
+                            let off = unavailable.contains(&m.id);
+                            let detail = if off { format!("Not available with {model_name}, or workflows are turned off in Claude Code.") } else { m.description.to_string() };
+                            menu = menu.item(picker_row(m.name.to_string(), Some(detail), secondary, None).checked(current == m.id).disabled(off).on_click(move |_, _, cx| {
+                                let _ = w.update(cx, |ws, cx| ws.set_workflow(&id, m.id, cx));
+                            }));
+                        }
+                        menu.separator().item(crate::ui::page_kit::menu_note("Switches instantly, even mid-turn. Set the default in Settings."))
+                    })
+            })
+        };
         let mode_menu = {
             let (w, project, current) = (w.clone(), project.clone(), mode.clone());
             let help = if mode == "auto" && !auto_ok { format!("{model_name} doesn't support Auto, so Claude asks before changes") } else { format!("Permissions for {project_name}") };
@@ -894,6 +931,7 @@ impl Composer {
             .text_color(theme.secondary)
             .child(model_menu)
             .children(effort_menu)
+            .children(workflow_menu)
             .child(mode_menu)
     }
 }

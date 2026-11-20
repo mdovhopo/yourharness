@@ -326,6 +326,9 @@ pub enum Event {
     /// Where your message is: `queued` (waiting for the current step), `started`,
     /// `completed`, `cancelled`.
     Lifecycle { id: String, state: String },
+    /// What's in effect for the session (`get_settings`' `applied`: model, effort, `ultracode`,
+    /// `ultracodeAvailable`…), after it starts and after each change asked of it.
+    FlagSettings(Value),
     /// Usage limits as the CLI reported them (`rate_limit_info`).
     Limits(Value),
     Session { id: String },
@@ -421,13 +424,77 @@ pub struct LaunchOptions {
     pub servers: Vec<std::sync::Arc<dyn crate::mcp::ToolServer>>,
     /// More arguments for `claude` (a side chat's `--fork-session`, `--tools`…).
     pub extra_args: Vec<String>,
+    /// Session settings applied right after it starts (`apply_flag_settings`): the thread's
+    /// workflow (`workflow::settings`). None leaves the CLI's own.
+    pub flag_settings: Option<Value>,
 }
+
+/// How Claude organises its work in a thread, chosen in the composer's Workflow picker: each
+/// mode but Default turns on one boolean session setting of the CLI, which says whether it can
+/// take effect (`<key>Available` in `get_settings`' `applied`).
+pub mod workflow {
+    use serde_json::{json, Map, Value};
+
+    pub struct Mode {
+        pub id: &'static str,
+        pub name: &'static str,
+        pub description: &'static str,
+        /// The CLI's session setting it turns on; none for Default.
+        pub setting: Option<&'static str>,
+    }
+
+    pub const DEFAULT: &str = "default";
+
+    pub const MODES: &[Mode] = &[
+        Mode { id: DEFAULT, name: "Default", description: "Claude does the work itself, with sub-agents when they help", setting: None },
+        Mode {
+            id: "ultracode",
+            name: "Ultracode",
+            description: "Claude runs each task as a workflow of many agents. Uses much more of your limits",
+            setting: Some("ultracode"),
+        },
+    ];
+
+    pub fn mode(id: &str) -> &'static Mode {
+        MODES.iter().find(|m| m.id == id).unwrap_or(&MODES[0])
+    }
+
+    /// The session settings for a mode: its own on, every other mode's off.
+    pub fn settings(id: &str) -> Value {
+        let mut o = Map::new();
+        for m in MODES {
+            if let Some(key) = m.setting {
+                o.insert(key.into(), json!(m.id == id));
+            }
+        }
+        Value::Object(o)
+    }
+
+    /// Whether the session can run a mode, from `get_settings`' `applied`: None when it doesn't
+    /// say (an older CLI, or not asked yet).
+    pub fn available(id: &str, applied: &Value) -> Option<bool> {
+        match mode(id).setting {
+            None => Some(true),
+            Some(key) => applied[format!("{key}Available")].as_bool(),
+        }
+    }
+
+    /// The mode in effect, from `get_settings`' `applied`.
+    pub fn active(applied: &Value) -> &'static str {
+        MODES.iter().find(|m| m.setting.is_some_and(|k| applied[k] == true)).map_or(DEFAULT, |m| m.id)
+    }
+}
+
+/// `get_settings` requests' IDs start so: their reply becomes `Event::FlagSettings`.
+const SETTINGS_REQUEST: &str = "yh-settings-";
 
 type Waiting = Arc<Mutex<std::collections::HashMap<String, flume::Sender<Result<Value, String>>>>>;
 
 pub struct ClaudeProcess {
     /// Control requests waiting for their reply, by `request_id`.
     waiting: Waiting,
+    /// Applied after `initialize` (`LaunchOptions::flag_settings`).
+    flag_settings: Option<Value>,
     child: Arc<Mutex<Child>>,
     writer: flume::Sender<Value>,
     counter: u64,
@@ -495,6 +562,7 @@ impl ClaudeProcess {
             args.extend(["--resume".into(), session]);
         }
         args.extend(options.extra_args);
+        let flag_settings = options.flag_settings;
         let mut command = Command::new(&executable);
         command.args(&args).current_dir(&options.cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         // The login shell's environment (`YH_PATH`'s in test runs), never an outer Claude Code
@@ -581,6 +649,12 @@ impl ClaudeProcess {
                     // The reply to a request someone waits on (`request`).
                     if object["type"] == "control_response" {
                         let response = &object["response"];
+                        // `get_settings`, asked by `query_settings`: what's in effect.
+                        if response["request_id"].as_str().is_some_and(|id| id.starts_with(SETTINGS_REQUEST)) && response["subtype"] == "success" {
+                            if events.send(Event::FlagSettings(response["response"]["applied"].clone())).is_err() {
+                                return;
+                            }
+                        }
                         if let Some(id) = response["request_id"].as_str() {
                             if let Some(reply) = waiting.lock().unwrap().remove(id) {
                                 let _ = reply.send(if response["subtype"] == "error" {
@@ -602,7 +676,7 @@ impl ClaudeProcess {
                 let _ = events.send(Event::Exit { code, tail });
             });
         }
-        Ok(ClaudeProcess { waiting, child, writer, counter: 0, pid, server_names })
+        Ok(ClaudeProcess { waiting, flag_settings, child, writer, counter: 0, pid, server_names })
     }
 
     /// Your message. `id` comes back in the CLI's message lifecycle; `priority` `now`
@@ -635,6 +709,23 @@ impl ClaudeProcess {
             request["sdkMcpServers"] = json!(self.server_names);
         }
         self.control(request);
+        match self.flag_settings.take() {
+            Some(settings) => self.apply_settings(settings),
+            None => self.query_settings(),
+        }
+    }
+
+    /// Session settings, now (`apply_flag_settings`: the workflow); what's in effect comes back
+    /// as `Event::FlagSettings`. One the session can't take is refused, and the answer says so.
+    pub fn apply_settings(&mut self, settings: Value) {
+        self.control(json!({ "subtype": "apply_flag_settings", "settings": settings }));
+        self.query_settings();
+    }
+
+    /// Asks what's in effect (`get_settings`): answered with `Event::FlagSettings`.
+    pub fn query_settings(&mut self) {
+        self.counter += 1;
+        let _ = self.writer.send(json!({ "type": "control_request", "request_id": format!("{SETTINGS_REQUEST}{}", self.counter), "request": { "subtype": "get_settings" } }));
     }
 
     /// A control request whose reply is waited for: `mcp_status`, `mcp_toggle`…
@@ -1399,6 +1490,20 @@ mod tests {
         assert!(matches!(&parse(r#"{"type":"system","subtype":"status","status":"compacting"}"#)[..], [Event::Status(s)] if s == "compacting"));
         assert!(parse(r#"{"type":"system","subtype":"status","status":null}"#).is_empty());
         assert!(parse(r#"{"type":"system","subtype":"task_progress","description":"x"}"#).is_empty());
+    }
+
+    #[test]
+    fn workflow_modes_turn_their_setting_on_and_the_others_off() {
+        assert_eq!(workflow::settings("ultracode"), json!({ "ultracode": true }));
+        assert_eq!(workflow::settings("default"), json!({ "ultracode": false }));
+        assert_eq!(workflow::mode("nope").id, workflow::DEFAULT);
+        let applied = json!({ "model": "claude-haiku-5-5", "ultracode": true, "ultracodeAvailable": true });
+        assert_eq!(workflow::active(&applied), "ultracode");
+        assert_eq!(workflow::available("ultracode", &applied), Some(true));
+        assert_eq!(workflow::available("ultracode", &json!({ "ultracodeAvailable": false })), Some(false));
+        assert_eq!(workflow::available("ultracode", &json!({})), None);
+        assert_eq!(workflow::available("default", &json!({})), Some(true));
+        assert_eq!(workflow::active(&json!({ "ultracode": false })), "default");
     }
 
     #[test]
