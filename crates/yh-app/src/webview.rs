@@ -55,7 +55,8 @@ impl Engine {
     }
 }
 
-static ENGINE: AtomicU8 = AtomicU8::new(0);
+/// 1 for WebKit, the default while Chrome is tried out behind the setting; 0 for Chrome.
+static ENGINE: AtomicU8 = AtomicU8::new(1);
 
 /// The engine new pages use: Settings → Browser's (`set_engine`), `YH_BROWSER_ENGINE` over it.
 pub fn engine() -> Engine {

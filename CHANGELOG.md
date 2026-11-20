@@ -8,8 +8,8 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ### Changed
 
-- The built-in browser runs on Chrome: Chromium, embedded in the app, so pages look and behave as they do in Chrome, and the agent drives them through Chrome's own DevTools. It downloads its engine (about 150 MB) the first time a page opens; its pages are sandboxed as in Chrome. Each project keeps its own sign-ins, and the ones you had in the browser come along. WebKit (Safari's engine) is still there: Settings → Browser → Engine.
-- The browser's More menu opens Chrome's DevTools for the page.
+- The built-in browser can run on Chrome, as a preview: Settings → Browser → Engine → Chrome (preview). Pages look and behave as they do in Chrome, and the agent drives them through Chrome's own DevTools. It downloads its engine (about 150 MB) the first time a page opens; its pages are sandboxed as in Chrome. Each project keeps its own sign-ins, and the ones you had in the browser come along. WebKit (Safari's engine) stays the default.
+- With Chrome, the browser's More menu opens Chrome's DevTools for the page.
 - Pages you open in the browser fit the sidebar (or its window), readable and easy to click; pages Claude opens keep a laptop-sized layout to test.
 - Clicking into a text field in a page, or selecting text there, lets you type into it (and copy with ⌘C) without turning on Typing in Page; clicking anywhere else hands the keyboard back.
 - In the browser, ⌘A, ⌘C, ⌘V, ⌘X and ⌘Z act on the page while it has the keyboard, and right-clicking offers Open Link in New Tab, Copy Link, editing, Back, Forward, Reload and Inspect.

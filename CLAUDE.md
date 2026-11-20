@@ -23,7 +23,7 @@ app serves, storage, the browser, and what keeps it fast. The other docs cover o
     sidebar), the pages (`project.rs`, `memory.rs`, `usage.rs`), `settings.rs`, sheets.
   - `state/voice.rs` and `crates/yh-voice` (voice input: speech models, the mic; docs/voice.md).
   - `browser/` and `webview.rs` (the agents' browser: pages over the window in one of two engines,
-    `webview/chrome.rs` (CEF, the default) or `webview/webkit.rs` (WKWebView), placed by `webview/page.rs`),
+    `webview/webkit.rs` (WKWebView, the default) or `webview/chrome.rs` (CEF, a preview behind the setting), placed by `webview/page.rs`),
     `platform.rs` (AppKit), `probe.rs` (the perf run), `theme.rs`.
 - `patches/`, `scripts/vendor.sh`: GPUI crates we patch, unpacked into `vendor/` (not
   committed). `gpui-pre-macos`: `GPUI_KEEP_DRAWING=1` draws a window parked off screen;
@@ -105,7 +105,7 @@ the out dir, `RUNS=panel` for one): it renders test pages in a plain, unscaled p
 plain Chrome window: `YH_CEF_REFERENCE`) at every page size and checks the built-in browser against it, what the page measures and how screenshots look (full page too), over the right sidebar, parked and in its own
 window, and its input against a real mouse (hover, exact clicks, pointer drags, HTML drag and drop, sliders,
 scrolling). The browser is how Claude sees the UI it builds, so this must pass. The engine:
-`YH_BROWSER_ENGINE=chrome|webkit` over Settings → Browser → Engine; the Chrome engine's framework is downloaded on
+`YH_BROWSER_ENGINE=chrome|webkit` over Settings → Browser → Engine (WebKit unless Chrome was picked, so Chrome test runs pass `YH_BROWSER_ENGINE=chrome`); the Chrome engine's framework is downloaded on
 first use into the data folder, so test runs pass `YH_CEF_FRAMEWORK=$HOME/.cache/yourharness-cef/<version>/cef_macos_aarch64`
 (the build's copy) instead, or `YH_CEF_DOWNLOAD_URL`/`YH_CEF_DOWNLOAD_SHA256` to test the download from a local server;
 `YH_CHROME_LOG=1` prints CEF starting and DevTools calls that failed. The framework zip is made by

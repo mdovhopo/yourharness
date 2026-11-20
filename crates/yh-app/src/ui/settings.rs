@@ -897,7 +897,7 @@ impl SettingsView {
                         picker(
                             "browser-engine",
                             crate::webview::engine().name().to_string(),
-                            vec![("chrome".into(), "Chrome".into()), ("webkit".into(), "WebKit (Safari's)".into())],
+                            vec![("webkit".into(), "WebKit (Safari's)".into()), ("chrome".into(), "Chrome (preview)".into())],
                             {
                                 let lib = self.workspace.read(cx).library.clone();
                                 move |v, _, cx| {
@@ -909,7 +909,7 @@ impl SettingsView {
                             },
                         ),
                     ))
-                    .footer("Claude opens, reads, clicks and types in a browser built into the app, to test what it builds; you watch in the sidebar and can take control. Each project keeps its own cookies. Chrome downloads its engine (about 150 MB) the first time it's used; switching engines reopens open pages in the other one."),
+                    .footer("Claude opens, reads, clicks and types in a browser built into the app, to test what it builds; you watch in the sidebar and can take control. Each project keeps its own cookies. Chrome is a preview: pages look as they do in Chrome and Claude gets Chrome's DevTools; it downloads its engine (about 150 MB) the first time it's used and brings your sign-ins along. Switching engines reopens open pages in the other one."),
             )
             .child(
                 section("Diagrams")

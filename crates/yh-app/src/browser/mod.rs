@@ -704,7 +704,7 @@ pub fn start(
     changed: impl Fn(&mut App) + 'static,
     cx: &mut App,
 ) {
-    // The engine from Settings → Browser (Chrome unless WebKit was picked).
+    // The engine from Settings → Browser (WebKit unless Chrome was picked).
     if let Some(e) = library.as_ref().and_then(|l| l.setting("browserEngine")).and_then(|v| v.as_str().and_then(crate::webview::Engine::from_name)) {
         crate::webview::set_engine(e);
     }
