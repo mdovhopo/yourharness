@@ -6,6 +6,8 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+## [0.1.16] - 2026-11-20
+
 ### Changed
 
 - The built-in browser can run on Chrome, as a preview: Settings → Browser → Engine → Chrome (preview). Pages look and behave as they do in Chrome, and the agent drives them through Chrome's own DevTools. It downloads its engine (about 150 MB) the first time a page opens; its pages are sandboxed as in Chrome. Each project keeps its own sign-ins, and the ones you had in the browser come along. WebKit (Safari's engine) stays the default.
