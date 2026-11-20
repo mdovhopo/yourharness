@@ -91,6 +91,11 @@ pub fn checkouts(workspace: &Entity<Workspace>, theme: &Theme, cx: &App) -> Opti
         Popover::new("thread-checkouts")
             // `YH_OPEN_CHECKOUTS=1` opens it, for checking it without a click.
             .default_open(std::env::var("YH_OPEN_CHECKOUTS").is_ok())
+            // Drawn by the window, under the browser's page laid over it: the page steps aside.
+            .on_open_change(|open, _, cx| {
+                crate::browser::Browsers::set_covered(*open);
+                cx.refresh_windows();
+            })
             .trigger(
                 Button::new("thread-checkouts-button")
                     .small()

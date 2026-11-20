@@ -21,6 +21,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ### Fixed
 
+- The thread's tasks, checkouts and account menus in the header no longer open under the browser's page: the page steps aside while they're open, as it does for the browser's own menu.
 - When a memory or task can't be saved, the agent is told so instead of getting an ID that was never written.
 
 ## [0.1.16] - 2026-11-20
