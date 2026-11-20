@@ -6,6 +6,16 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+### Changed
+
+- Tasks stay on the Memory page's Tasks tab: the memories list, Insights, Activity and Graph leave them out, so a board of rarely-read tasks no longer drags the figures down. Settings → General → Memory has **Show tasks in stats and graph** (off) to bring them back, and **Track tasks in memory** (on) to stop agents tracking tasks at all.
+- A task opened from the board shows on the Tasks tab, with All Tasks to go back.
+- Above the message box, a strip shows the task the thread is working on: its progress, the next step, and its steps when you click it, with Show in Memory. It stays until the task is done.
+
+### Fixed
+
+- When a memory or task can't be saved, the agent is told so instead of getting an ID that was never written.
+
 ## [0.1.16] - 2026-11-20
 
 ### Changed
@@ -15,13 +25,9 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 - Pages you open in the browser fit the sidebar (or its window), readable and easy to click; pages Claude opens keep a laptop-sized layout to test.
 - Clicking into a text field in a page, or selecting text there, lets you type into it (and copy with ⌘C) without turning on Typing in Page; clicking anywhere else hands the keyboard back.
 - In the browser, ⌘A, ⌘C, ⌘V, ⌘X and ⌘Z act on the page while it has the keyboard, and right-clicking offers Open Link in New Tab, Copy Link, editing, Back, Forward, Reload and Inspect.
-- Tasks stay on the Memory page's Tasks tab: the memories list, Insights, Activity and Graph leave them out, so a board of rarely-read tasks no longer drags the figures down. Settings → General → Memory has **Show tasks in stats and graph** (off) to bring them back, and **Track tasks in memory** (on) to stop agents tracking tasks at all.
-- A task opened from the board shows on the Tasks tab, with All Tasks to go back.
-- Above the message box, a strip shows the task the thread is working on: its progress, the next step, and its steps when you click it, with Show in Memory. It stays until the task is done.
 
 ### Fixed
 
-- When a memory or task can't be saved, the agent is told so instead of getting an ID that was never written.
 
 ## [0.1.15] - 2026-11-15
 
