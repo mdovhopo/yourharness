@@ -323,6 +323,9 @@ impl SubagentUsage {
 pub enum Event {
     /// The CLI's catalog, as JSON: `models` (see `ModelInfo`) and `commands`.
     Catalog { models: Value, commands: Value },
+    /// Another agent's catalog (an ACP agent's models and commands, in the same shapes), and its
+    /// model in effect: kept apart from Claude's.
+    AgentCatalog { agent: crate::agents::Agent, models: Value, commands: Value, current_model: Option<String> },
     /// Where your message is: `queued` (waiting for the current step), `started`,
     /// `completed`, `cancelled`.
     Lifecycle { id: String, state: String },
@@ -404,6 +407,8 @@ impl Event {
 }
 
 pub struct LaunchOptions {
+    /// What runs: `claude`, or `agy acp` (`agent_process::AgentProcess::spawn`).
+    pub agent: crate::agents::Agent,
     pub cwd: String,
     pub session_id: Option<String>,
     pub model: Option<String>,

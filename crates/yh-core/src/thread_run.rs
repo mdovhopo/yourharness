@@ -729,7 +729,7 @@ impl ThreadRun {
                 Outcome::chrome(changed)
             }
             Event::TitleChanged(_) | Event::Skills(_) => Outcome::default(),
-            Event::Catalog { .. } | Event::Limits(_) => Outcome::default(),
+            Event::Catalog { .. } | Event::AgentCatalog { .. } | Event::Limits(_) => Outcome::default(),
             Event::FlagSettings(applied) => {
                 let changed = self.live.flag_settings.as_ref() != Some(&applied);
                 self.live.flag_settings = Some(applied);

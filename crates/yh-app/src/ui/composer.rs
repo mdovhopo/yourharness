@@ -56,6 +56,8 @@ pub struct Composer {
     pub withdrawing: HashSet<String>,
     /// The placeholder says how to steer (Claude works in the open thread).
     steering: bool,
+    /// The agent the placeholder names.
+    placeholder_agent: yh_core::agents::Agent,
     /// The "/" menu's scroll, kept on the item picked with the arrows.
     suggest_scroll: gpui_kit::ScrollHandle,
     _mentions: Option<gpui_kit::Task<()>>,
@@ -476,6 +478,7 @@ impl Composer {
             empty: true,
             voice_seen,
             steering: false,
+            placeholder_agent: yh_core::agents::Agent::Claude,
             suggest_scroll: gpui_kit::ScrollHandle::new(),
             _subscriptions: subscriptions,
         }
@@ -806,21 +809,52 @@ impl Composer {
                 .collect()
         };
         let current_model = model.clone().unwrap_or_else(|| "default".into());
-        let efforts = models.iter().find(|m| m.value == current_model).map(|m| m.efforts.clone()).unwrap_or_default();
+        let agy = ws.agent_of(t) == yh_core::agents::Agent::Antigravity;
+        // Before its first message a thread can go onto either agent; after, it stays on its own.
+        let can_switch = ws.can_switch_agent(t);
+        let agent_models: Rc<Vec<PickerModel>> = Rc::new(
+            ws.agent_models.iter().map(|m| PickerModel { value: m.value.clone(), name: m.display_name.clone(), description: m.description.clone(), efforts: vec![], alias: true }).collect(),
+        );
+        let offers_agy = agy || (can_switch && ws.agy_found);
+        let efforts = if agy { vec![] } else { models.iter().find(|m| m.value == current_model).map(|m| m.efforts.clone()).unwrap_or_default() };
         let mode_label = MODES.iter().find(|(v, _)| *v == mode).map_or("Auto", |(_, l)| l);
         let models = Rc::new(models);
         let w = self.workspace.downgrade();
         let (secondary, error, accent) = (theme.secondary, theme.error, theme.accent);
         let model_menu = {
             let (w, id, models, current) = (w.clone(), id.clone(), models.clone(), current_model.clone());
+            let agent_models = agent_models.clone();
             Button::new("model").ghost().small().flex_none().icon(icons::sparkles().size(px(13.)).text_color(secondary)).child(picker_label(model_name.clone(), secondary)).accessibility_label(format!("Model: {model_name}")).tooltip("Model").dropdown_caret(true).dropdown_menu(move |mut menu, window, cx| {
-                menu = menu.min_w(px(260.)).label("Claude Code");
-                let pick = |value: Option<String>| {
+                menu = menu.min_w(px(260.));
+                // A model of the agent it isn't on moves it there (only before its first message).
+                let pick_on = |agent: yh_core::agents::Agent, value: Option<String>| {
                     let (w, id) = (w.clone(), id.clone());
                     move |_: &gpui_kit::ClickEvent, _: &mut Window, cx: &mut App| {
-                        let _ = w.update(cx, |ws, cx| ws.set_model(&id, value.clone(), cx));
+                        let _ = w.update(cx, |ws, cx| {
+                            let on = ws.thread(&id).map(|t| ws.agent_of(t.read(cx)));
+                            if on == Some(agent) {
+                                ws.set_model(&id, value.clone(), cx)
+                            } else {
+                                ws.set_agent(&id, agent, value.clone(), cx)
+                            }
+                        });
                     }
                 };
+                if offers_agy {
+                    menu = menu.label("Antigravity");
+                    let pick = |value: Option<String>| pick_on(yh_core::agents::Agent::Antigravity, value);
+                    menu = menu.item(picker_row("Default".into(), Some("Antigravity's own choice".into()), secondary, None).checked(agy && current == "default").on_click(pick(None)));
+                    for m in agent_models.iter() {
+                        menu = menu.item(picker_row(m.name.clone(), m.description.clone(), secondary, None).checked(agy && current == m.value).on_click(pick(Some(m.value.clone()))));
+                    }
+                    if agy && !can_switch {
+                        return menu.separator().item(crate::ui::page_kit::menu_note("Switches instantly. Antigravity runs Google's own agy, signed in as you."));
+                    }
+                    menu = menu.separator();
+                }
+                menu = menu.label("Claude Code");
+                let pick = |value: Option<String>| pick_on(yh_core::agents::Agent::Claude, value);
+                let current = if agy { String::new() } else { current.clone() };
                 // The catalog lists "default" itself; without it, Default comes first.
                 if !models.iter().any(|m| m.value == "default") {
                     menu = menu.item(picker_row("Default".into(), None, secondary, None).checked(current == "default").on_click(pick(None)));
@@ -838,7 +872,14 @@ impl Composer {
                         for m in &pinned {
                             let (w, id, value) = (w.clone(), id.clone(), m.value.clone());
                             sub = sub.item(picker_row(m.name.clone(), m.description.clone(), secondary, None).checked(current == m.value).on_click(move |_, _, cx| {
-                                let _ = w.update(cx, |ws, cx| ws.set_model(&id, Some(value.clone()), cx));
+                                let _ = w.update(cx, |ws, cx| {
+                                    let claude = ws.thread(&id).is_some_and(|t| ws.agent_of(t.read(cx)) == yh_core::agents::Agent::Claude);
+                                    if claude {
+                                        ws.set_model(&id, Some(value.clone()), cx)
+                                    } else {
+                                        ws.set_agent(&id, yh_core::agents::Agent::Claude, Some(value.clone()), cx)
+                                    }
+                                });
                             }));
                         }
                         sub
@@ -875,7 +916,7 @@ impl Composer {
             use yh_core::claude::workflow;
             let can = |m: &workflow::Mode| applied.as_ref().map_or(Some(true), |a| workflow::available(m.id, a)) != Some(false);
             let any = workflow::MODES.iter().any(|m| m.setting.is_some() && can(m));
-            (any || workflow != workflow::DEFAULT).then(|| {
+            (!agy && (any || workflow != workflow::DEFAULT)).then(|| {
                 let (w, id, current) = (w.clone(), id.clone(), workflow);
                 let mode = workflow::mode(workflow);
                 let on = workflow != workflow::DEFAULT;
@@ -1097,16 +1138,23 @@ impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::get(cx);
         let Some(thread) = self.thread(cx) else { return div() };
-        let (running, permission, waiting) = {
+        let (running, permission, waiting, agent) = {
             let t = thread.read(cx);
-            (t.run.running, t.permission().cloned(), t.run.permissions.len())
+            (t.run.running, t.permission().cloned(), t.run.permissions.len(), self.workspace.read(cx).agent_of(t))
         };
-        // While Claude works, what typing does: it steers, or with ⌘↩ goes now.
-        if running != self.steering {
+        // While Claude works, what typing does: it steers, or with ⌘↩ goes now. Antigravity
+        // can't be steered: a message waits for its turn's end.
+        if running != self.steering || agent != self.placeholder_agent {
             self.steering = running;
+            self.placeholder_agent = agent;
             let input = self.input.clone();
             cx.defer_in(window, move |_, window, cx| {
-                let text = if running { "Steer Claude… ↩ after its current step, ⌥↩ once it's done, ⌘↩ right now" } else { "Ask Claude…" };
+                let text = match (agent, running) {
+                    (yh_core::agents::Agent::Claude, true) => "Steer Claude… ↩ after its current step, ⌥↩ once it's done, ⌘↩ right now",
+                    (yh_core::agents::Agent::Claude, false) => "Ask Claude…",
+                    (_, true) => "Message Antigravity… ↩ once it's done, ⌘↩ right now",
+                    (_, false) => "Ask Antigravity…",
+                };
                 input.update(cx, |i, cx| i.set_placeholder(text, window, cx));
             });
         }

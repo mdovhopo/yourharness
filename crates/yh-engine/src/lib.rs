@@ -11,7 +11,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use yh_core::claude::{Block, ClaudeProcess, Decision, Event, LaunchOptions, Timing};
+use yh_core::agent_process::AgentProcess;
+use yh_core::claude::{Block, Decision, Event, LaunchOptions, Timing};
 use yh_core::db::{Database, Row, RowQuery};
 use yh_core::library::EntryData;
 use yh_core::thread_run::{LiveState, RowChange, RowSource, ThreadRun, TranscriptRow};
@@ -230,7 +231,7 @@ pub fn start(db: Option<Arc<Database>>) -> EngineHandle {
 
 /// One thread's `claude`, between turns too.
 struct Runtime {
-    process: ClaudeProcess,
+    process: AgentProcess,
     /// Events from an older process are ignored.
     generation: u64,
     /// Effort is a launch option: a different one starts a new process.
@@ -667,7 +668,7 @@ impl Engine {
                     let _ = to.send(Output::Thread(ThreadUpdate::new(thread, run.live.clone())));
                 }
                 for (thread, rt) in &self.runtimes {
-                    let _ = to.send(Output::Runtime { thread: thread.clone(), pid: Some(rt.process.pid) });
+                    let _ = to.send(Output::Runtime { thread: thread.clone(), pid: Some(rt.process.pid()) });
                 }
                 self.subscribers.push(to);
             }
@@ -762,7 +763,7 @@ impl Engine {
         let Some(waiting) = self.launching.remove(thread) else { return };
         let effort = if effort.is_some() { effort } else { waiting.effort };
         let (tx, rx) = flume::unbounded();
-        let spawned = options.and_then(|options| ClaudeProcess::spawn(options, tx));
+        let spawned = options.and_then(|options| AgentProcess::spawn(options, tx));
         let mut process = match spawned {
             Ok(p) => p,
             Err(error) => {
@@ -784,7 +785,7 @@ impl Engine {
         self.run_of(thread).live.received_init = false;
         self.generation += 1;
         let generation = self.generation;
-        let pid = process.pid;
+        let pid = process.pid();
         if let Some(note) = note {
             runtime_log(format!("{thread}: claude started, pid {pid}, effort {effort:?}{note}"));
         }
@@ -874,7 +875,7 @@ impl Engine {
         let db = self.db.clone();
         for e in batch {
             match &e {
-                Event::Catalog { .. } | Event::Limits(_) | Event::Session { .. } | Event::TitleChanged(_) | Event::Skills(_) | Event::ContextWindows(_) => kept.push(e.clone()),
+                Event::Catalog { .. } | Event::AgentCatalog { .. } | Event::Limits(_) | Event::Session { .. } | Event::TitleChanged(_) | Event::Skills(_) | Event::ContextWindows(_) => kept.push(e.clone()),
                 Event::Assistant { message, parent, blocks } => {
                     let tools: Vec<Block> = blocks.iter().filter(|b| matches!(b, Block::Tool { .. })).cloned().collect();
                     if !tools.is_empty() {

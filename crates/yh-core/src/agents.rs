@@ -16,13 +16,50 @@ pub struct Cli {
     pub install_url: &'static str,
 }
 
-pub const ALL: [Cli; 5] = [
+pub const ALL: [Cli; 6] = [
     Cli { id: "claude", name: "Claude Code", executable: "claude", supported: true, install_url: "https://docs.claude.com/en/docs/claude-code/setup" },
+    Cli { id: "antigravity", name: "Antigravity", executable: "agy", supported: true, install_url: "https://antigravity.google/docs/cli/install" },
     Cli { id: "codex", name: "Codex", executable: "codex", supported: false, install_url: "https://github.com/openai/codex" },
     Cli { id: "cursor", name: "Cursor Agent", executable: "cursor-agent", supported: false, install_url: "https://cursor.com/cli" },
     Cli { id: "gemini", name: "Gemini CLI", executable: "gemini", supported: false, install_url: "https://github.com/google-gemini/gemini-cli" },
     Cli { id: "opencode", name: "OpenCode", executable: "opencode", supported: false, install_url: "https://opencode.ai" },
 ];
+
+/// The agent a thread runs on: Claude Code (stream-json, `claude.rs`), or Google's Antigravity
+/// through its official ACP server, `agy acp` (`acp.rs`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Agent {
+    #[default]
+    Claude,
+    Antigravity,
+}
+
+impl Agent {
+    pub const ALL: [Agent; 2] = [Agent::Claude, Agent::Antigravity];
+
+    /// As saved with a thread (`agent`) and in `cliPathOverrides`.
+    pub fn id(self) -> &'static str {
+        match self {
+            Agent::Claude => "claude",
+            Agent::Antigravity => "antigravity",
+        }
+    }
+
+    /// Anything else, or nothing (every thread before Antigravity), is Claude.
+    pub fn from_id(id: Option<&str>) -> Agent {
+        match id {
+            Some("antigravity") => Agent::Antigravity,
+            _ => Agent::Claude,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Agent::Claude => "Claude",
+            Agent::Antigravity => "Antigravity",
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum State {

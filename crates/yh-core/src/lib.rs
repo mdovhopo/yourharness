@@ -3,6 +3,8 @@
 //! markdown parsing. No GPUI here, so it's testable on its own and the app stays thin over it.
 
 pub mod accounts;
+pub mod acp;
+pub mod agent_process;
 pub mod attachments;
 pub mod agents;
 pub mod claude;

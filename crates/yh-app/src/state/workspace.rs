@@ -171,6 +171,10 @@ pub struct Workspace {
     pids: HashMap<String, u32>,
     /// The CLI's models, as it last listed them (saved as `claudeModels`).
     pub models: Vec<ModelInfo>,
+    /// Antigravity's models, as its last session listed them (saved as `antigravityModels`).
+    pub agent_models: Vec<ModelInfo>,
+    /// Whether Antigravity's `agy` is here: its models are offered in the picker.
+    pub agy_found: bool,
     /// The Claude accounts, the main one first, each with its usage limits and who it's signed
     /// in as (`state/limits.rs`, `state/accounts.rs`). Never empty.
     pub accounts: Vec<crate::state::limits::AccountState>,
@@ -280,6 +284,10 @@ impl Workspace {
             .setting("claudeModels")
             .and_then(|v| v.as_array().map(|a| a.iter().filter_map(ModelInfo::from_json).collect()))
             .unwrap_or_default();
+        let agent_models = library
+            .setting("antigravityModels")
+            .and_then(|v| v.as_array().map(|a| a.iter().filter_map(ModelInfo::from_json).collect()))
+            .unwrap_or_default();
         let (tool_requests, requests) = flume::unbounded();
         cx.spawn(async move |this, cx| {
             while let Ok(request) = requests.recv_async().await {
@@ -368,6 +376,8 @@ impl Workspace {
             remote_actions,
             browser_hub,
             models,
+            agent_models,
+            agy_found: false,
             accounts: vec![crate::state::limits::AccountState::new(yh_core::accounts::Account::main())],
             active_account: yh_core::accounts::MAIN.into(),
             thread_accounts: HashMap::new(),
@@ -430,6 +440,17 @@ impl Workspace {
         workspace.keep_awake.configure(crate::keep_awake::Settings::from(workspace.library.setting("keepAwake")));
         let chosen = workspace.library.setting("cliPathOverrides").and_then(|o| o["claude"].as_str().map(std::path::PathBuf::from));
         yh_core::claude::set_chosen_claude(chosen);
+        let chosen = workspace.library.setting("cliPathOverrides").and_then(|o| o["antigravity"].as_str().map(std::path::PathBuf::from));
+        yh_core::acp::set_chosen_agy(chosen);
+        // Whether `agy` is here, looked for aside (the login shell's PATH may still be loading).
+        cx.spawn(async move |this, cx| {
+            let found = cx.background_executor().spawn(async move { yh_core::acp::find_agy().is_some() }).await;
+            let _ = this.update(cx, |ws, cx| {
+                ws.agy_found = found;
+                cx.notify();
+            });
+        })
+        .detach();
         // Threads whose PRs merged settle: 20 s after launch, then every five minutes (not in
         // perf runs, which measure the transcript).
         if std::env::var("YH_PERF").is_err() {
@@ -601,7 +622,16 @@ impl Workspace {
 
     /// The thread's model: its own, else the default.
     pub fn model_of(&self, thread: &ThreadState) -> Option<String> {
-        thread.meta.model.clone().or_else(|| self.default_setting("model"))
+        match self.agent_of(thread) {
+            yh_core::agents::Agent::Claude => thread.meta.model.clone().or_else(|| self.default_setting("model")),
+            // Claude's default means nothing to another agent: its own default, else the agent's.
+            agent => thread.meta.model.clone().or_else(|| self.library.setting(&format!("{}Model", agent.id())).and_then(|v| v.as_str().map(str::to_string))),
+        }
+    }
+
+    /// The agent the thread runs on: as saved with it, Claude when nothing is.
+    pub fn agent_of(&self, thread: &ThreadState) -> yh_core::agents::Agent {
+        yh_core::agents::Agent::from_id(thread.meta.agent.as_deref())
     }
 
     /// Whether the thread's model can run in Auto (unknown models are given the benefit of the
@@ -614,9 +644,13 @@ impl Workspace {
     /// The model's name as the catalog has it ("Haiku"), else as set.
     /// "Default" when none is chosen (the catalog's "Default (recommended)" is long for a chip).
     pub fn model_name(&self, thread: &ThreadState) -> String {
+        let (models, default) = match self.agent_of(thread) {
+            yh_core::agents::Agent::Claude => (&self.models, "Default".to_string()),
+            agent => (&self.agent_models, agent.name().to_string()),
+        };
         match self.model_of(thread).filter(|m| m != "default") {
-            Some(model) => self.models.iter().find(|m| m.value == model).map(|m| m.display_name.clone()).unwrap_or(model),
-            None => "Default".into(),
+            Some(model) => models.iter().find(|m| m.value == model).map(|m| m.display_name.clone()).unwrap_or(model),
+            None => default,
         }
     }
 
@@ -833,7 +867,8 @@ impl Workspace {
             self.select(&id, cx);
             return id;
         }
-        let meta = ThreadMeta::new(yh_core::library::new_uuid(), project_id.into(), "New thread".into());
+        let mut meta = ThreadMeta::new(yh_core::library::new_uuid(), project_id.into(), "New thread".into());
+        meta.agent = self.new_thread_agent();
         let thread = make_thread(meta, cx.entity().downgrade(), cx);
         let id = thread.read(cx).id().to_string();
         thread.update(cx, |t, _| {
@@ -844,6 +879,48 @@ impl Workspace {
         self.by_id.insert(id.clone(), thread);
         self.select(&id, cx);
         id
+    }
+
+    /// The agent new threads start on: the last one picked for a new thread (`YH_AGENT` in test
+    /// runs); none is Claude.
+    fn new_thread_agent(&self) -> Option<String> {
+        let id = std::env::var("YH_AGENT").ok().or_else(|| self.library.setting("newThreadAgent").and_then(|v| v.as_str().map(str::to_string)))?;
+        Some(id).filter(|a| a != "claude" && yh_core::agents::Agent::from_id(Some(a)) != yh_core::agents::Agent::Claude)
+    }
+
+    /// Whether the thread can still change agent: nothing's been sent to one yet.
+    pub fn can_switch_agent(&self, thread: &ThreadState) -> bool {
+        thread.run.session_id.is_none() && thread.meta.session_id.is_none() && !thread.run.running && self.pids.get(thread.id()).is_none()
+    }
+
+    /// A thread not started yet onto another agent, with a model of that agent's (None: its
+    /// default); new threads start on it from now on.
+    pub fn set_agent(&mut self, id: &str, agent: yh_core::agents::Agent, model: Option<String>, cx: &mut Context<Self>) {
+        let Some(thread) = self.thread(id) else { return };
+        if !self.can_switch_agent(thread.read(cx)) {
+            return;
+        }
+        let saved = (agent != yh_core::agents::Agent::Claude).then(|| agent.id().to_string());
+        let value = model.clone();
+        self.update_meta(id, cx, |m, r| {
+            m.agent = saved.clone();
+            m.model = value.clone();
+            r.insert("agent".into(), saved.clone().map(Value::from).unwrap_or(Value::Null));
+            r.insert("model".into(), value.map(Value::from).unwrap_or(Value::Null));
+        });
+        self.library.set_setting("newThreadAgent", &Value::from(agent.id()));
+        cx.notify();
+    }
+
+    /// An agent's models, as its sessions list them (kept apart from Claude's).
+    fn note_agent_catalog(&mut self, models: &Value, cx: &mut Context<Self>) {
+        let parsed: Vec<ModelInfo> = models.as_array().map(|a| a.iter().filter_map(ModelInfo::from_json).collect()).unwrap_or_default();
+        if parsed.is_empty() || parsed == self.agent_models {
+            return;
+        }
+        self.agent_models = parsed;
+        self.library.set_setting("antigravityModels", models);
+        cx.notify();
     }
 
     /// A new thread not saved yet.
@@ -1856,9 +1933,10 @@ impl Workspace {
         // its thread's browser and the memory, read-only.
         if let Some(parent) = t.id().strip_prefix(SIDE).map(str::to_string) {
             let parent_thread = self.thread(&parent);
+            // Only a Claude session can be forked; an Antigravity thread's side chat starts fresh.
             let fork = parent_thread.as_ref().and_then(|p| {
                 let p = p.read(cx);
-                p.run.session_id.clone().or_else(|| p.meta.session_id.clone())
+                (self.agent_of(p) == yh_core::agents::Agent::Claude).then(|| p.run.session_id.clone().or_else(|| p.meta.session_id.clone())).flatten()
             });
             let mut extra = vec!["--tools".to_string(), "Read,Glob,Grep,Bash,WebFetch,WebSearch".into(), "--strict-mcp-config".into(), "--no-session-persistence".into()];
             if fork.is_some() {
@@ -1890,6 +1968,7 @@ impl Workspace {
                 }));
             }
             let options = LaunchOptions {
+                agent: yh_core::agents::Agent::Claude,
                 cwd,
                 session_id: fork,
                 model: self.model_of(t),
@@ -1986,6 +2065,7 @@ impl Workspace {
             };
             let t = thread.read(cx);
             let options = LaunchOptions {
+                agent: yh_core::agents::Agent::Claude,
                 cwd,
                 session_id: None,
                 model: self.model_of(t),
@@ -2018,6 +2098,7 @@ impl Workspace {
             prompt.push(STACKS_PROMPT.to_string());
         }
         let options = LaunchOptions {
+            agent: self.agent_of(t),
             cwd,
             session_id: t.run.session_id.clone(),
             model: self.model_of(t),
@@ -3169,6 +3250,7 @@ const EFFORTS: &[(&str, &str)] = &[("low", "Low"), ("medium", "Medium"), ("high"
 /// at most.
 fn read_catalog(folder: String) -> Option<(Value, Value)> {
     let options = LaunchOptions {
+        agent: yh_core::agents::Agent::Claude,
         cwd: folder,
         session_id: None,
         model: None,
@@ -3686,6 +3768,7 @@ impl Workspace {
                     let project = thread.read(cx).meta.project_id.clone();
                     self.note_catalog(models, commands, &project, cx);
                 }
+                Event::AgentCatalog { models, .. } => self.note_agent_catalog(models, cx),
                 Event::Limits(info) => {
                     // The account its `claude` runs on.
                     let account = self.runtime_accounts.get(&id).cloned().unwrap_or_else(|| self.active_account.clone());

@@ -310,6 +310,32 @@ impl SettingsView {
                 Some(how) => format!("Pull requests come from `gh` and `glab`, signed in as you. YourHarness never sees their tokens. Environment: {how}"),
                 None => "Pull requests come from `gh` and `glab`, signed in as you. YourHarness never sees their tokens.".to_string(),
             });
+        // Antigravity: Google's agent, through its official ACP server (`agy acp`), signed in as you.
+        let agy = self.status("antigravity").cloned();
+        let agy_missing = agy.as_ref().is_some_and(|s| s.path.is_none() && !s.is_ready());
+        let antigravity = section("Antigravity")
+            .child(row(
+                "Status",
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(div().text_color(theme.secondary).child(agy.as_ref().map_or_else(checking, Status::describe)))
+                    .when(agy_missing, |d| d.child(Button::new("antigravity-get").small().ghost().label("Get…").on_click(|_, _, cx| cx.open_url("https://antigravity.google/docs/cli/install")))),
+            ))
+            .when_some(agy.as_ref().and_then(|s| s.path.clone()), |d, path| {
+                d.child(row(
+                    "Location",
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .min_w_0()
+                        .child(div().text_color(theme.secondary).font_family(MONO).text_size(px(text::FOOTNOTE)).truncate().child(path.display().to_string()))
+                        .child(Button::new("antigravity-reveal").small().ghost().label("Show in Finder").on_click(move |_, _, cx| cx.reveal_path(&path))),
+                ))
+            })
+            .footer("Pick an Antigravity model in a new thread's model picker. It runs Google's own `agy acp`, signed in as you: sign in once by running `agy` in Terminal.");
         let mut others = section("Other Agents");
         for cli in yh_core::agents::ALL.iter().filter(|c| !c.supported) {
             let url = cli.install_url;
@@ -332,6 +358,7 @@ impl SettingsView {
             .gap(px(space::L + 4.))
             .child(claude_section)
             .when_some(account, |d, a| d.child(a))
+            .child(antigravity)
             .child(git)
             .child(others)
             .child(Group::untitled().child(row(
