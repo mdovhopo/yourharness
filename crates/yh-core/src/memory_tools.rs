@@ -16,6 +16,8 @@ pub struct MemoryTools {
     pub specialist: bool,
     /// Search and read only (a side chat: it can look, never change).
     pub read_only: bool,
+    /// Offers `track` (Settings → Memory → "Track tasks in memory").
+    pub tasks: bool,
 }
 
 /// What a read-only memory offers.
@@ -86,7 +88,7 @@ impl MemoryTools {
     }
 
     fn stats(&self) -> ToolResult {
-        ToolResult::text(crate::memory_stats::describe(&crate::memory_stats::compute(&self.store, &self.scope, 30), day))
+        ToolResult::text(crate::memory_stats::describe(&crate::memory_stats::compute(&self.store, &self.scope, 30, false), day))
     }
 
     /// Memories that say the same thing as one: the first ID kept with every link, source and
@@ -505,6 +507,9 @@ impl ToolServer for MemoryTools {
                     schema(json!({ "id": { "type": "string" }, "pinned": { "type": "boolean" } }), &["id", "pinned"]), false, false),
             ]);
         }
+        if !self.tasks {
+            all.retain(|t| t["name"] != "track");
+        }
         if self.read_only {
             all.retain(|t| t["name"].as_str().is_some_and(|n| READ_ONLY_TOOLS.contains(&n)));
         }
@@ -512,7 +517,7 @@ impl ToolServer for MemoryTools {
     }
 
     fn call(&self, tool: &str, a: &Value, tool_use_id: Option<&str>) -> ToolResult {
-        if (!self.specialist && ["list", "stats", "merge", "unlink", "restore", "pin"].contains(&tool)) || (self.read_only && !READ_ONLY_TOOLS.contains(&tool)) {
+        if (!self.specialist && ["list", "stats", "merge", "unlink", "restore", "pin"].contains(&tool)) || (!self.tasks && tool == "track") || (self.read_only && !READ_ONLY_TOOLS.contains(&tool)) {
             return ToolResult::error(format!("No tool named {tool}."));
         }
         match tool {
@@ -531,5 +536,24 @@ impl ToolServer for MemoryTools {
             "pin" => self.pin(a),
             other => ToolResult::error(format!("No tool named {other}.")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn track_follows_the_setting() {
+        let dir = std::env::temp_dir().join(format!("yh-memory-tools-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Store { db: std::sync::Arc::new(crate::db::Database::open(&dir).unwrap()) };
+        let tools = |tasks| MemoryTools { store: store.clone(), scope: "project:P".into(), actor: Actor { kind: "agent".into(), thread: None }, on_change: Box::new(|| {}), specialist: false, read_only: false, tasks };
+        let names = |t: &MemoryTools| t.tools().iter().filter_map(|t| t["name"].as_str().map(str::to_string)).collect::<Vec<_>>();
+        assert!(names(&tools(true)).contains(&"track".to_string()));
+        let off = tools(false);
+        assert!(!names(&off).contains(&"track".to_string()));
+        assert!(off.call("track", &json!({ "title": "Move billing" }), None).is_error);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

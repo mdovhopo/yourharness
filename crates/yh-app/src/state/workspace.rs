@@ -1819,6 +1819,7 @@ impl Workspace {
         let attachments = self.data_dir.join("attachments");
         let memory_on = self.library.setting("memoryEnabled").and_then(|v| v.as_bool()).unwrap_or(true);
         let memory_off_for_claude = self.library.setting("claudeCodeMemoryOff").and_then(|v| v.as_bool()).unwrap_or(true);
+        let track_tasks = self.library.setting("memoryTrackTasks").and_then(|v| v.as_bool()).unwrap_or(true);
         // A side chat: a copy of its thread's conversation that can look but not edit and
         // leaves nothing behind. It reads freely; commands and web requests ask first. It sees
         // its thread's browser and the memory, read-only.
@@ -1854,6 +1855,7 @@ impl Workspace {
                     on_change: Box::new(|| {}),
                     specialist: false,
                     read_only: true,
+                    tasks: false,
                 }));
             }
             let options = LaunchOptions {
@@ -1889,7 +1891,7 @@ impl Workspace {
             let store = yh_core::memory::Store { db };
             let scope = yh_core::memory::scope_of(&project.id);
             let actor = yh_core::memory::Actor { kind: "agent".into(), thread: Some(t.id().to_string()) };
-            let (text, listed) = yh_core::memory::prompt(&store.memories(Some(&scope), Some("active")), &project.name);
+            let (text, listed) = yh_core::memory::prompt(&store.memories(Some(&scope), Some("active")), &project.name, track_tasks);
             store.note_injection(&scope, listed, text.len(), &actor);
             prompt.push(text);
             allowed.push("mcp__memory".to_string());
@@ -1903,6 +1905,7 @@ impl Workspace {
                 }),
                 specialist: false,
                 read_only: false,
+                tasks: track_tasks,
             }));
         }
         // Claude asks you to sign in to an MCP server, from a card in the thread.
@@ -1947,6 +1950,7 @@ impl Workspace {
                 }),
                 specialist: true,
                 read_only: false,
+                tasks: track_tasks,
             };
             let t = thread.read(cx);
             let options = LaunchOptions {

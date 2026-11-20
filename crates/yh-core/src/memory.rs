@@ -589,10 +589,11 @@ pub const INDEX_BUDGET: usize = 8_000;
 pub const PINNED_BUDGET: usize = 4_000;
 
 /// What every agent in the workspace is told: how to use memory and tasks, then the index.
-/// Returns the text and how many memories it lists.
-pub fn prompt(memories: &[Memory], workspace: &str) -> (String, usize) {
-    let active: Vec<&Memory> = memories.iter().filter(|m| m.status == "active").collect();
-    let mut text = instructions(workspace);
+/// Returns the text and how many memories it lists. Without `tasks` (Settings → Memory →
+/// "Track tasks in memory" off), nothing about tasks: no instructions, no task list.
+pub fn prompt(memories: &[Memory], workspace: &str, tasks: bool) -> (String, usize) {
+    let active: Vec<&Memory> = memories.iter().filter(|m| m.status == "active" && (tasks || !m.is_task())).collect();
+    let mut text = instructions(workspace, tasks);
     if active.is_empty() {
         text += "\n\nThe memory is empty so far.";
         return (text, 0);
@@ -705,8 +706,8 @@ pub fn day(t: f64) -> String {
     crate::library::iso(t as i64)[..10].to_string()
 }
 
-pub fn instructions(workspace: &str) -> String {
-    format!(
+pub fn instructions(workspace: &str, tasks: bool) -> String {
+    let text = format!(
         r#"# Memory
 YourHarness keeps a persistent memory for this workspace ({workspace}), shared by every thread here and kept by the app. It replaces Claude Code's own memory files: use the mcp__memory__ tools, never write memory files yourself.
 - Recall: when an index entry below looks relevant to the task, `read` it before you start (several IDs at once is fine). When the user refers to something you should know and it isn't listed, `search` first.
@@ -722,7 +723,8 @@ The user's asks are kept as tasks in this memory, so every later session knows w
 - Waiting on an answer, an approval or something outside your control: state `blocked`, with why in the note. Stopping for now with steps left (the rest is for later) keeps it `active`. All finished: `done`.
 - When the user carries on with a task listed below, read it and continue from its next step.
 A quick one-step question needs no task. TaskCreate and TodoWrite stay this session's own checklist."#
-    )
+    );
+    if tasks { text } else { text.split("\n# Tasks\n").next().unwrap_or_default().to_string() }
 }
 
 /// Why a memory can't be saved as written, if it can't.
@@ -887,10 +889,15 @@ mod tests {
         task.task_state = Some("active".into());
         task.steps = vec![Step { text: "Plan".into(), done: true }, Step { text: "Build".into(), done: false }];
         let memory = Memory::new("project:P", "user", "Senior Rust dev", "Who the user is", "Knows Rust well.", "agent");
-        let (text, listed) = prompt(&[task, memory], "app");
+        let (text, listed) = prompt(&[task.clone(), memory.clone()], "app", true);
         assert!(text.contains("1 of 2 steps done; next: Build"));
         assert!(text.contains("About You:"));
         assert_eq!(listed, 2);
+        // Tasks not tracked: neither how to track them nor the ones there are.
+        let (text, listed) = prompt(&[task, memory], "app", false);
+        assert!(!text.contains("track") && !text.contains("Move billing") && !text.contains("# Tasks"));
+        assert!(text.contains("About You:") && text.contains("Memory index (1 memory)"));
+        assert_eq!(listed, 1);
     }
 
     #[test]

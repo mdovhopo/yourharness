@@ -22,6 +22,12 @@ progress back. The Memory view's **Tasks** tab shows them by state with a progre
 step; you can tick steps, add them or change the state in a task's detail; a thread's toolbar
 shows the tasks it's working on (state and steps done), with a popover of their steps.
 
+Tasks record work, not knowledge, and are rarely read, so outside the Tasks tab the Memory view
+leaves them out: the memories list, Insights (and the reconciler's `stats`), Activity and Graph.
+Settings → General → Memory → "Show tasks in stats and graph" (off by default) puts them back,
+counted like any memory. "Track tasks in memory" (on by default) turned off, agents get neither
+the `track` tool nor the tasks part of the prompt; the tasks there are stay on the Tasks tab.
+
 ## What a memory is
 
 One fact, preference, decision or pointer: a title, a one-line description (what the index
