@@ -6,6 +6,10 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+### Fixed
+
+- Antigravity threads now show a command in the jobs strip when Antigravity moves it to the background mid-turn and keeps working, not only when the turn ends while it runs.
+
 ## [0.6.1] - 2026-11-21
 
 ### Added

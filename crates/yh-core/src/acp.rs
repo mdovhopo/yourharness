@@ -857,6 +857,8 @@ struct Call {
     /// What it was last shown as: (name, input), so an unchanged update shows nothing new.
     shown: Option<(String, String)>,
     finished: bool,
+    /// Running now (`in_progress`), not waiting on a permission (`pending`).
+    running: bool,
     /// Insertion order, so parallel calls to the same in-app MCP tool are matched oldest first.
     seq: u64,
     /// Claimed by an in-flight `HttpBridge` call (`claim_mcp_call`).
@@ -914,9 +916,7 @@ impl Translator {
         let mut started = false;
         for (id, mut call) in std::mem::take(&mut self.calls).into_iter().filter(|(_, c)| !c.finished) {
             if !cancelled && call.kind == "execute" {
-                out.push(Event::ToolResults { parent: None, results: vec![ToolResult { id: id.clone(), text: "Running in the background…".into(), len: 26, is_error: false, full: None }] });
-                out.push(Event::JobStarted { task_id: id.clone(), tool_id: Some(id.clone()), description: call.title.clone(), background: true, parent_task: None });
-                self.jobs.insert(id, call);
+                self.to_background(id, call, &mut out);
                 started = true;
             } else {
                 call.finished = true;
@@ -928,6 +928,28 @@ impl Translator {
         }
         self.mcp_results.clear();
         out
+    }
+
+    /// The agent writing or thinking again while a command it ran is still running: Antigravity
+    /// moved it aside mid-turn (it says so to the model only, not over ACP), so it's a job now.
+    fn background_running(&mut self) -> Vec<Event> {
+        let ids: Vec<String> = self.calls.iter().filter(|(_, c)| !c.finished && c.running && c.kind == "execute").map(|(id, _)| id.clone()).collect();
+        let mut out = vec![];
+        for id in &ids {
+            if let Some(call) = self.calls.remove(id) {
+                self.to_background(id.clone(), call, &mut out);
+            }
+        }
+        if !ids.is_empty() {
+            out.push(Event::JobsRunning(self.jobs.keys().cloned().collect()));
+        }
+        out
+    }
+
+    fn to_background(&mut self, id: String, call: Call, out: &mut Vec<Event>) {
+        out.push(Event::ToolResults { parent: None, results: vec![ToolResult { id: id.clone(), text: "Running in the background…".into(), len: 26, is_error: false, full: None }] });
+        out.push(Event::JobStarted { task_id: id.clone(), tool_id: Some(id.clone()), description: call.title.clone(), background: true, parent_task: None });
+        self.jobs.insert(id, call);
     }
 
     /// Whether an update is the agent at work (writing, thinking, calling a tool), rather than a
@@ -1070,6 +1092,7 @@ impl Translator {
             kind @ ("agent_message_chunk" | "agent_thought_chunk") => {
                 let Some(text) = u["content"]["text"].as_str().filter(|_| u["content"]["type"] == "text") else { return vec![] };
                 let kind = if kind == "agent_thought_chunk" { DeltaKind::Thinking } else { DeltaKind::Text };
+                let jobs = self.background_running();
                 let mut out = vec![];
                 if self.open.as_ref().is_some_and(|(_, k, _)| *k != kind) {
                     out.extend(self.close());
@@ -1084,7 +1107,7 @@ impl Translator {
                     out.push(Event::BlockStart { message: message.clone(), index: 0, parent: None, kind: if kind == DeltaKind::Thinking { BlockKind::Thinking } else { BlockKind::Text } });
                 }
                 out.push(Event::Delta { message, index: 0, parent: None, kind, text: text.to_string() });
-                out
+                if jobs.is_empty() { out } else { jobs.into_iter().chain(out).collect() }
             }
             "tool_call" | "tool_call_update" => {
                 let Some(id) = u["toolCallId"].as_str().map(str::to_string) else { return vec![] };
@@ -1154,6 +1177,9 @@ impl Translator {
                     out.push(Event::Assistant { message: format!("acp-tool-{id}"), parent: None, blocks: vec![Block::Tool { id: id.clone(), name: shown.0, input: shown.1 }] });
                 }
                 let status = u["status"].as_str().unwrap_or("");
+                if !status.is_empty() {
+                    call.running = status == "in_progress";
+                }
                 if (status == "completed" || status == "failed") && !call.finished {
                     call.finished = true;
                     let mut full = result_text(call);
@@ -1569,6 +1595,30 @@ mod tests {
         let end = s.end_woken_turn();
         assert!(matches!(end.last(), Some(Event::Done { is_error: false, .. })));
         assert!(s.woke.is_none());
+    }
+
+    /// A command Antigravity moves aside mid-turn (the agent thinks on while it runs, then polls
+    /// it): a job from then, finished by its last update while the same prompt is still open.
+    #[test]
+    fn commands_moved_aside_mid_turn_are_jobs() {
+        let mut t = Translator::default();
+        t.start_turn();
+        let call = |status: &str| json!({ "sessionUpdate": "tool_call_update", "toolCallId": "c1", "name": "run_command", "kind": "execute", "title": "perf-run.sh", "status": status });
+        t.update(&call("in_progress"));
+        t.update(&call("pending"));
+        // Waiting on a permission isn't running: thinking then moves nothing aside.
+        let out = t.update(&json!({ "sessionUpdate": "agent_thought_chunk", "content": { "type": "text", "text": "asking" } }));
+        assert!(!out.iter().any(|e| matches!(e, Event::JobStarted { .. })));
+        t.update(&call("in_progress"));
+        let out = t.update(&json!({ "sessionUpdate": "agent_thought_chunk", "content": { "type": "text", "text": "while it runs" } }));
+        assert!(out.iter().any(|e| matches!(e, Event::JobStarted { task_id, background: true, .. } if task_id == "c1")));
+        assert!(out.iter().any(|e| matches!(e, Event::BlockStart { .. })));
+        assert!(!t.calls_open());
+        let mut done = call("completed");
+        done["rawOutput"] = json!({ "output": "captured", "exit_code": 0 });
+        let out = t.update(&done);
+        assert!(out.iter().any(|e| matches!(e, Event::JobFinished { task_id, .. } if task_id == "c1")));
+        assert!(!t.end_turn(false).iter().any(|e| matches!(e, Event::JobStarted { .. } | Event::ToolResults { .. })));
     }
 
     #[test]
