@@ -293,12 +293,17 @@ fn question_outcome(options: &[Value], decision: &Decision) -> Value {
     }
 }
 
-/// The agent's mode for our permission mode. Antigravity offers `default` and, for some
-/// accounts, `auto` (its own review); it refuses the rest, so Accept Edits and Bypass run in
-/// `default` with the app answering for you (`answers_itself`).
+/// The agent's mode for our permission mode, when it offers one (Antigravity 1.5: `default`,
+/// `accept-edits`, and for some accounts `auto`, its own review); else `default`, Accept Edits
+/// and Bypass then answered by the app (`answers_itself`).
 fn agent_mode(mode: &str, offered: &[String]) -> &'static str {
-    if mode == "auto" && offered.iter().any(|m| m == "auto") {
-        "auto"
+    let wanted = match mode {
+        "auto" => "auto",
+        "acceptEdits" => "accept-edits",
+        _ => "default",
+    };
+    if offered.iter().any(|m| m == wanted) {
+        wanted
     } else {
         "default"
     }
@@ -809,6 +814,10 @@ fn shown_tool(call: &Call) -> (String, String) {
         },
         "edit" => {
             let diff = call.content.iter().find(|c| c["type"] == "diff");
+            // Antigravity's `edit_file` names the exact text it replaced; its diff is the whole file.
+            if let (Some(path), Some(old), Some(new)) = (first_path(call), input_str(input, &["Target", "TargetContent"]), input["Replacement"].as_str().or(input["ReplacementContent"].as_str())) {
+                return ("Edit".into(), json!({ "file_path": path, "old_string": old, "new_string": new }).to_string());
+            }
             match (diff, first_path(call)) {
                 (Some(d), Some(path)) if d["oldText"].as_str().is_none_or(str::is_empty) => {
                     ("Write".into(), json!({ "file_path": path, "content": d["newText"].as_str().unwrap_or("") }).to_string())
@@ -918,6 +927,84 @@ mod tests {
         assert!(matches!(&edit[0], Event::Assistant { blocks, .. } if matches!(&blocks[0], Block::Tool { name, input, .. } if name == "Edit" && input.contains("old_string"))));
         // Never finished: the turn's end settles both as stopped.
         assert_eq!(t.end_turn().len(), 2);
+    }
+
+    #[test]
+    fn antigravity_edits_show_only_what_changed() {
+        let mut t = Translator::default();
+        t.start_turn();
+        // As agy 1.5.14 sends it: the exact text replaced in rawInput, the whole file in the diff.
+        let out = t.update(&json!({ "sessionUpdate": "tool_call", "toolCallId": "e", "kind": "edit", "title": "File main.rs", "locations": [{ "path": "/p/main.rs" }],
+            "rawInput": { "Path": "/p/main.rs", "Target": "    println!(\"hello\");", "Replacement": "    println!(\"hello world\");" },
+            "content": [{ "type": "diff", "path": "/p/main.rs", "oldText": "fn main() {\n    println!(\"hello\");\n}\n", "newText": "fn main() {\n    println!(\"hello world\");\n}\n" }] }));
+        match &out[0] {
+            Event::Assistant { blocks, .. } => match &blocks[0] {
+                Block::Tool { name, input, .. } => {
+                    let v: Value = serde_json::from_str(input).unwrap();
+                    assert_eq!(name, "Edit");
+                    assert_eq!(v["old_string"], "    println!(\"hello\");");
+                }
+                b => panic!("{b:?}"),
+            },
+            e => panic!("{e:?}"),
+        }
+        assert_eq!(agent_mode("acceptEdits", &["default".into(), "accept-edits".into()]), "accept-edits");
+        assert_eq!(agent_mode("acceptEdits", &["default".into()]), "default");
+    }
+
+    /// A real session with Antigravity 1.5.14 in Accept Edits (sanitized): the agent's side
+    /// replayed, ours checked as we'd send it.
+    #[test]
+    fn replays_a_real_antigravity_session() {
+        let recorded = include_str!("../fixtures/antigravity-acp-1.5.14.jsonl");
+        let (w, sent) = flume::unbounded();
+        let mut s = Shared {
+            next_id: 0,
+            asked: HashMap::new(),
+            session: None,
+            ready: false,
+            busy: false,
+            replaying: false,
+            queue: VecDeque::new(),
+            permissions: HashMap::new(),
+            translator: Translator::default(),
+            model: None,
+            mode: Some("acceptEdits".into()),
+            cwd: "/work/rproj".into(),
+            resume: None,
+            capabilities: Value::Null,
+            auth_methods: vec![],
+        };
+        s.request("initialize", json!({}), Asked::Initialize, &w);
+        s.queue.push_back(Waiting { id: "m1".into(), text: "Change main.rs so it prints hi instead of hello.".into(), images: vec![] });
+        let mut events = vec![];
+        for line in recorded.lines() {
+            let (dir, body) = line.split_at(2);
+            let message: Value = serde_json::from_str(body).unwrap();
+            if dir.starts_with('>') {
+                events.extend(s.receive(&message, &w));
+            }
+        }
+        let ours: Vec<String> = sent.try_iter().map(|m| m["method"].as_str().unwrap_or("").to_string()).collect();
+        assert_eq!(ours, ["initialize", "session/new", "session/set_config_option", "session/prompt"]);
+        assert!(matches!(&events[0], Event::Session { .. }));
+        // Its models come from the model setting's choices; the one in effect with them.
+        assert!(events.iter().any(|e| matches!(e, Event::AgentCatalog { models, current_model: Some(c), .. } if c == "gemini-4-neon" && models.as_array().is_some_and(|m| m.len() > 3))));
+        let edit = events.iter().find_map(|e| match e {
+            Event::Assistant { blocks, .. } => blocks.iter().find_map(|b| match b {
+                Block::Tool { name, input, .. } if name == "Edit" => Some(input.clone()),
+                _ => None,
+            }),
+            _ => None,
+        });
+        assert!(edit.is_some_and(|i| i.contains("old_string") && i.contains("hi")));
+        let reply: String = events.iter().filter_map(|e| match e {
+            Event::Delta { kind: DeltaKind::Text, text, .. } => Some(text.as_str()),
+            _ => None,
+        }).collect();
+        assert!(reply.contains("hi"), "{reply}");
+        assert!(matches!(events.iter().rev().find(|e| matches!(e, Event::Done { .. })), Some(Event::Done { is_error: false, .. })));
+        assert!(s.permissions.is_empty() && !s.busy);
     }
 
     #[test]

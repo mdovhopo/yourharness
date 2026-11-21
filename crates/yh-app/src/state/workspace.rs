@@ -173,6 +173,8 @@ pub struct Workspace {
     pub models: Vec<ModelInfo>,
     /// Antigravity's models, as its last session listed them (saved as `antigravityModels`).
     pub agent_models: Vec<ModelInfo>,
+    /// The model Antigravity's last session said it was on (its default, when none is chosen).
+    agent_current_model: Option<String>,
     /// Whether Antigravity's `agy` is here: its models are offered in the picker.
     pub agy_found: bool,
     /// The Claude accounts, the main one first, each with its usage limits and who it's signed
@@ -379,6 +381,7 @@ impl Workspace {
             browser_hub,
             models,
             agent_models,
+            agent_current_model: None,
             agy_found: false,
             accounts: vec![crate::state::limits::AccountState::new(yh_core::accounts::Account::main())],
             active_account: yh_core::accounts::MAIN.into(),
@@ -651,7 +654,11 @@ impl Workspace {
     pub fn model_name(&self, thread: &ThreadState) -> String {
         let (models, default) = match self.agent_of(thread) {
             yh_core::agents::Agent::Claude => (&self.models, "Default".to_string()),
-            agent => (&self.agent_models, agent.name().to_string()),
+            // Its own default: the model its last session was on, by name, when known.
+            agent => (
+                &self.agent_models,
+                self.agent_current_model.as_ref().and_then(|c| self.agent_models.iter().find(|m| &m.value == c)).map_or_else(|| agent.name().to_string(), |m| m.display_name.clone()),
+            ),
         };
         match self.model_of(thread).filter(|m| m != "default") {
             Some(model) => models.iter().find(|m| m.value == model).map(|m| m.display_name.clone()).unwrap_or(model),
@@ -3799,7 +3806,13 @@ impl Workspace {
                     let project = thread.read(cx).meta.project_id.clone();
                     self.note_catalog(models, commands, &project, cx);
                 }
-                Event::AgentCatalog { models, .. } => self.note_agent_catalog(models, cx),
+                Event::AgentCatalog { models, current_model, .. } => {
+                    if current_model.is_some() && *current_model != self.agent_current_model {
+                        self.agent_current_model = current_model.clone();
+                        cx.notify();
+                    }
+                    self.note_agent_catalog(models, cx)
+                }
                 Event::Limits(info) => {
                     // The account its `claude` runs on.
                     let account = self.runtime_accounts.get(&id).cloned().unwrap_or_else(|| self.active_account.clone());
