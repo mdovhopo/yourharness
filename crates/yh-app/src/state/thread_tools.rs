@@ -489,7 +489,7 @@ impl ThreadTools {
             }
         }
         let id = self
-            .control(yh_server::Action::NewThread { project: project.id.clone(), text: Some(message), model, effort, mode: None, images: vec![], files: vec![] })?
+            .control(yh_server::Action::NewThread { project: project.id.clone(), text: Some(message), model, effort, mode: None, agent: None, images: vec![], files: vec![] })?
             .ok_or_else(|| ToolResult::error("Couldn't start a thread."))?;
         if let Some(title) = &title {
             self.ask(|reply| ToolRequest::Rename { id: id.clone(), title: title.clone(), reply });

@@ -102,7 +102,8 @@ pub enum Action {
     ApprovePlan { thread: String, request_id: String, mode: String, feedback: Option<String> },
     KeepPlanning { thread: String, request_id: String, feedback: Option<String> },
     AnswerQuestion { thread: String, request_id: String, accept: bool },
-    NewThread { project: String, text: Option<String>, model: Option<String>, effort: Option<String>, mode: Option<String>, images: Vec<(String, Vec<u8>)>, files: Vec<PathBuf> },
+    /// `agent`: the one it runs on (`antigravity`); none is Claude.
+    NewThread { project: String, text: Option<String>, model: Option<String>, effort: Option<String>, mode: Option<String>, agent: Option<String>, images: Vec<(String, Vec<u8>)>, files: Vec<PathBuf> },
     /// A folder as a project: the one it is already, or added (the command line's).
     AddProject { path: String },
     /// The window brought forward, on a thread, or on a new thread in a project with a draft and
@@ -136,11 +137,11 @@ impl Shared {
     }
 
     fn limits(&self) -> ToApp {
-        ToApp::Limits { windows: self.limits.lock().unwrap().clone(), subscription: self.subscription.lock().unwrap().clone() }
+        ToApp::Limits { windows: self.limits.lock().unwrap().clone(), subscription: self.subscription.lock().unwrap().clone(), agents: self.agent_limits.lock().unwrap().clone() }
     }
 
     fn options(&self) -> ToApp {
-        ToApp::Options { models: self.models.lock().unwrap().clone(), modes: MODES.iter().map(|m| m.to_string()).collect(), commands: self.commands.lock().unwrap().clone() }
+        ToApp::Options { models: self.models.lock().unwrap().clone(), modes: MODES.iter().map(|m| m.to_string()).collect(), commands: self.commands.lock().unwrap().clone(), agents: self.agents.lock().unwrap().clone() }
     }
 }
 
@@ -341,8 +342,12 @@ struct Shared {
     /// The models to choose from and each project's slash commands, as last read.
     models: Mutex<Vec<wire::ModelOption>>,
     commands: Mutex<std::collections::BTreeMap<String, Vec<wire::SlashCommand>>>,
+    /// The other agents new threads can run on, with their models (protocol 11).
+    agents: Mutex<Vec<wire::AgentOption>>,
     /// Usage limits as last heard (from the engine, or as saved).
     limits: Mutex<Vec<wire::LimitWindow>>,
+    /// Other agents' limits, as saved (protocol 11).
+    agent_limits: Mutex<Vec<wire::AgentLimits>>,
     /// The subscription they belong to, as the Mac last checked.
     subscription: Mutex<Option<wire::Subscription>>,
     /// The Mac's battery as last read (every 30 seconds); `None` without one.
@@ -837,6 +842,21 @@ fn refresh_listing(source: &Source, shared: &Shared, changed_at: &HashMap<String
         let mut held = shared.commands.lock().unwrap();
         options_changed |= *held != commands;
         *held = commands;
+    }
+    if let Ok(agents) = source.agents() {
+        let mut held = shared.agents.lock().unwrap();
+        options_changed |= *held != agents;
+        *held = agents;
+    }
+    if let Ok(agent_limits) = source.agent_limits() {
+        let mut held = shared.agent_limits.lock().unwrap();
+        if *held != agent_limits {
+            *held = agent_limits;
+            drop(held);
+            if !first {
+                shared.send(&shared.limits(), |c| c.app);
+            }
+        }
     }
     if options_changed && !first {
         shared.send(&shared.options(), |c| c.app);
@@ -1415,9 +1435,17 @@ fn to_action(m: FromApp, local: bool) -> Result<Action, String> {
         F::ApprovePlan { thread, request_id, mode, feedback, .. } => Action::ApprovePlan { thread, request_id, mode, feedback },
         F::KeepPlanning { thread, request_id, feedback, .. } => Action::KeepPlanning { thread, request_id, feedback },
         F::AnswerQuestion { thread, request_id, accept, .. } => Action::AnswerQuestion { thread, request_id, accept },
-        F::NewThread { project, text, model, effort, mode, files, .. } => {
-            let (images, files) = local_files(files, local)?;
-            Action::NewThread { project, text, model, effort, mode, images, files }
+        F::NewThread { project, text, model, effort, mode, files, agent, images, .. } => {
+            let mut images: Vec<(String, Vec<u8>)> = images.into_iter().map(|i| decode_base64(&i.data).map(|bytes| (i.media_type, bytes)).ok_or_else(|| "A picture couldn't be read.".to_string())).collect::<Result<_, _>>()?;
+            let (more, files) = local_files(files, local)?;
+            images.extend(more);
+            let agent = agent.filter(|a| !a.is_empty() && a != "claude");
+            if let Some(a) = &agent
+                && yh_core::agents::Agent::from_id(Some(a)) == yh_core::agents::Agent::Claude
+            {
+                return Err(format!("No agent named {a}."));
+            }
+            Action::NewThread { project, text, model, effort, mode, agent, images, files }
         }
         F::SetModel { thread, model, .. } => Action::SetModel { thread, model },
         F::SetEffort { thread, effort, .. } => Action::SetEffort { thread, effort },

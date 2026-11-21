@@ -28,7 +28,9 @@ use serde::{Deserialize, Serialize};
 /// 10: the command line (`yh`, over the app's local socket only): a project's folder, files by
 /// path with `send` and `new_thread`, `add_project`, `show` (the Mac's window), the app's
 /// `version` in `hello`.
-pub const PROTOCOL: u32 = 10;
+/// 11: other agents (Antigravity): a thread's `agent`, each agent's models in `options`
+/// (`agents`) and its limits in `limits`, and `new_thread` on an agent, with pictures.
+pub const PROTOCOL: u32 = 11;
 
 /// Where the app listens for the command line (`yh`): `yh.sock` in its data folder, or, when
 /// that path is too long for a socket, one in the temporary folder named after it.
@@ -277,6 +279,9 @@ pub struct Thread {
     /// Commands and sub-agents running in the background: what goes on after its turn.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub jobs: u32,
+    /// Protocol 11: the agent it runs on (`antigravity`); none is Claude.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -514,6 +519,40 @@ pub struct ModelOption {
     pub auto: bool,
 }
 
+/// Protocol 11: an agent other than Claude a new thread can run on, with its own models.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AgentOption {
+    /// As threads carry it (`antigravity`).
+    pub id: String,
+    pub name: String,
+    pub models: Vec<ModelOption>,
+    /// The model it runs when none is chosen, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_model: Option<String>,
+}
+
+/// Protocol 11: an agent's usage limits: each group of models that shares them, and the plan.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AgentLimits {
+    pub agent: String,
+    /// "Google AI Pro".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+    pub groups: Vec<LimitGroup>,
+    /// When they were read (seconds since 1970).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<f64>,
+}
+
+/// Models that share limits ("Gemini Models"), and their windows.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct LimitGroup {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    pub windows: Vec<LimitWindow>,
+}
+
 /// A picture sent with a message: JPEG or PNG, base64.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Image {
@@ -696,11 +735,13 @@ pub enum ToApp {
     /// (`add_project`).
     Done { id: String, #[serde(skip_serializing_if = "Option::is_none")] error: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] thread: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] project: Option<String> },
     /// The models and permission modes to choose from, and each project's slash commands: after
-    /// `threads`, and when they change.
-    Options { models: Vec<ModelOption>, modes: Vec<String>, #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")] commands: std::collections::BTreeMap<String, Vec<SlashCommand>> },
+    /// `threads`, and when they change. `models` are Claude's; `agents` (protocol 11) the other
+    /// agents a new thread can run on, with theirs.
+    Options { models: Vec<ModelOption>, modes: Vec<String>, #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")] commands: std::collections::BTreeMap<String, Vec<SlashCommand>>, #[serde(default, skip_serializing_if = "Vec::is_empty")] agents: Vec<AgentOption> },
     /// Usage limits as Claude last reported them: after `options`, and when they change. With
-    /// the subscription they belong to (one per Mac for now), from Macs that know it.
-    Limits { windows: Vec<LimitWindow>, #[serde(default, skip_serializing_if = "Option::is_none")] subscription: Option<Subscription> },
+    /// the subscription they belong to (one per Mac for now), from Macs that know it; `agents`
+    /// (protocol 11): other agents' limits.
+    Limits { windows: Vec<LimitWindow>, #[serde(default, skip_serializing_if = "Option::is_none")] subscription: Option<Subscription>, #[serde(default, skip_serializing_if = "Vec::is_empty")] agents: Vec<AgentLimits> },
     /// The Mac's battery: after `limits`, and when it changes (a point, charging or not). Never
     /// sent by a Mac without one.
     Power { power: Power },
@@ -808,6 +849,12 @@ pub enum FromApp {
         /// Protocol 10, the command line only: paths on the Mac attached to the first message.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         files: Vec<String>,
+        /// Protocol 11: the agent it runs on (an `options` agent's `id`); none is Claude.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<String>,
+        /// Protocol 11: pictures with the first message.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<Image>,
     },
     /// Protocol 10, the command line only: a folder as a project (the one it already is, or
     /// added); `done` names it in `project`.
@@ -940,9 +987,17 @@ mod tests {
         let m: FromApp = serde_json::from_str(r#"{"type":"answer","id":"a2","thread":"t","request_id":"r","answers":{"Which?":"Rust"}}"#).unwrap();
         assert_eq!(m.action_id(), Some("a2"));
         let m: FromApp = serde_json::from_str(r#"{"type":"new_thread","project":"p","text":"hi"}"#).unwrap();
-        assert_eq!(m, FromApp::NewThread { id: None, project: "p".into(), text: Some("hi".into()), model: None, effort: None, mode: None, files: vec![] });
+        assert_eq!(m, FromApp::NewThread { id: None, project: "p".into(), text: Some("hi".into()), model: None, effort: None, mode: None, files: vec![], agent: None, images: vec![] });
         let m: FromApp = serde_json::from_str(r#"{"type":"new_thread","project":"p","text":"hi","model":"haiku","effort":"low","mode":"plan"}"#).unwrap();
         assert!(matches!(m, FromApp::NewThread { model: Some(ref m), effort: Some(ref e), mode: Some(ref p), .. } if m == "haiku" && e == "low" && p == "plan"));
+        // Protocol 11: on another agent, with a picture.
+        let m: FromApp = serde_json::from_str(r#"{"type":"new_thread","project":"p","text":"hi","agent":"antigravity","images":[{"media_type":"image/jpeg","data":"AA=="}]}"#).unwrap();
+        assert!(matches!(m, FromApp::NewThread { agent: Some(ref a), ref images, .. } if a == "antigravity" && images.len() == 1));
+        // An older Mac's options and limits read as before; a newer one's carry the agents.
+        let m: ToApp = serde_json::from_str(r#"{"type":"options","models":[],"modes":["auto"]}"#).unwrap();
+        assert!(matches!(m, ToApp::Options { ref agents, .. } if agents.is_empty()));
+        let m: ToApp = serde_json::from_str(r#"{"type":"limits","windows":[],"agents":[{"agent":"antigravity","groups":[{"name":"Gemini Models","windows":[{"name":"five_hour","used":0.25}]}]}]}"#).unwrap();
+        assert!(matches!(m, ToApp::Limits { ref agents, .. } if agents[0].groups[0].windows[0].used == 0.25));
         // Protocol 10, the command line's.
         let m: FromApp = serde_json::from_str(r#"{"type":"add_project","id":"a3","path":"/tmp/x"}"#).unwrap();
         assert_eq!(m.action_id(), Some("a3"));

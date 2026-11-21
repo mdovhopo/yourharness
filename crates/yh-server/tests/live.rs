@@ -185,9 +185,19 @@ fn streams_what_claude_writes_and_takes_actions() {
     c.send(FromApp::Answer { id: Some("a4".into()), thread: t(), request_id: "r2".into(), answers: answers.clone() });
     c.expect("answered", |m| matches!(m, ToApp::Done { id, error: None, .. } if id == "a4"));
     assert_eq!(app.recv_timeout(Duration::from_secs(1)).unwrap(), yh_server::Action::Answer { thread: t(), request_id: "r2".into(), answers });
-    c.send(FromApp::NewThread { id: Some("a5".into()), project: "p1".into(), text: Some("hi".into()), model: None, effort: None, mode: None, files: vec![] });
+    c.send(FromApp::NewThread { id: Some("a5".into()), project: "p1".into(), text: Some("hi".into()), model: None, effort: None, mode: None, files: vec![], agent: None, images: vec![] });
     c.expect("made", |m| matches!(m, ToApp::Done { id, error: None, thread: Some(t), .. } if id == "a5" && t == "t2"));
     app.recv_timeout(Duration::from_secs(1)).unwrap();
+    // Protocol 11: on Antigravity, with a picture; an agent nobody knows is refused.
+    let image = yh_server::wire::Image { media_type: "image/png".into(), data: "aGVsbG8=".into() };
+    c.send(FromApp::NewThread { id: Some("a5b".into()), project: "p1".into(), text: Some("hi".into()), model: None, effort: None, mode: None, files: vec![], agent: Some("antigravity".into()), images: vec![image.clone()] });
+    c.expect("made on Antigravity", |m| matches!(m, ToApp::Done { id, error: None, .. } if id == "a5b"));
+    assert_eq!(
+        app.recv_timeout(Duration::from_secs(1)).unwrap(),
+        yh_server::Action::NewThread { project: "p1".into(), text: Some("hi".into()), model: None, effort: None, mode: None, agent: Some("antigravity".into()), images: vec![("image/png".into(), b"hello".to_vec())], files: vec![] }
+    );
+    c.send(FromApp::NewThread { id: Some("a5c".into()), project: "p1".into(), text: Some("hi".into()), model: None, effort: None, mode: None, files: vec![], agent: Some("nope".into()), images: vec![] });
+    c.expect("unknown agent refused", |m| matches!(m, ToApp::Done { id, error: Some(e), .. } if id == "a5c" && e == "No agent named nope."));
     c.send(FromApp::Send { id: Some("a6".into()), thread: t(), text: "look".into(), now: false, images: vec![yh_server::wire::Image { media_type: "image/png".into(), data: "aGVsbG8=".into() }], files: vec![] });
     c.expect("sent", |m| matches!(m, ToApp::Done { id, error: None, .. } if id == "a6"));
     assert_eq!(app.recv_timeout(Duration::from_secs(1)).unwrap(), yh_server::Action::Send { thread: t(), text: "look".into(), now: false, images: vec![("image/png".into(), b"hello".to_vec())], files: vec![] });
@@ -380,4 +390,38 @@ fn the_local_socket_takes_the_command_lines_actions() {
     c.send(FromApp::Show { id: Some("n3".into()), thread: None, project: None, draft: None, files: vec![] });
     c.expect("showing refused", |m| matches!(m, ToApp::Done { id, error: Some(_), .. } if id == "n3"));
     assert!(app.try_recv().is_err(), "nothing refused reached the app");
+}
+
+/// Protocol 11: a thread on Antigravity says so, and Antigravity's models and limits, as the app
+/// saved them, go out with Claude's.
+#[test]
+fn antigravity_threads_models_and_limits_reach_the_phone() {
+    let dir = temp_dir("agents");
+    let db = Database::open(&dir).unwrap();
+    let mut s = state("On Gemini");
+    s.threads[0].json = br#"{"title":"On Gemini","createdAt":"2026-11-09T10:00:00Z","agent":"antigravity","model":"gemini-3-pro"}"#.to_vec();
+    let models = br#"[{"value":"gemini-3-pro","displayName":"Gemini 3 Pro"},{"value":"claude-sonnet","displayName":"Claude Sonnet (Antigravity)"}]"#;
+    s.values.insert("antigravityModels".into(), models.to_vec());
+    s.values.insert("antigravityDefaultModel".into(), br#""gemini-3-pro""#.to_vec());
+    let usage = br#"{"groups":[{"name":"Gemini Models","buckets":[{"window":"5h","remaining_fraction":0.75},{"window":"weekly","remaining_fraction":0.5}]}]}"#;
+    s.values.insert("antigravityUsage".into(), usage.to_vec());
+    s.values.insert("antigravityPlan".into(), br#""Google AI Pro""#.to_vec());
+    db.save_state(s);
+    db.flush();
+    let url = start(&dir, None);
+    let mut c = Client::connect(&url).unwrap();
+    c.expect("hello", |m| matches!(m, ToApp::Hello { protocol: 11, .. }));
+    c.send(FromApp::SubscribeApp);
+    c.expect("the thread's agent", |m| matches!(m, ToApp::Threads { threads, .. } if threads[0].agent.as_deref() == Some("antigravity")));
+    let m = c.expect("options", |m| matches!(m, ToApp::Options { .. }));
+    let ToApp::Options { agents, .. } = m else { unreachable!() };
+    assert_eq!(agents.len(), 1, "{agents:?}");
+    assert_eq!((agents[0].id.as_str(), agents[0].name.as_str(), agents[0].default_model.as_deref()), ("antigravity", "Antigravity", Some("gemini-3-pro")));
+    assert_eq!(agents[0].models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["gemini-3-pro", "claude-sonnet"]);
+    assert!(agents[0].models.iter().all(|m| m.efforts.is_empty()), "no effort for another agent");
+    let m = c.expect("limits", |m| matches!(m, ToApp::Limits { .. }));
+    let ToApp::Limits { agents, .. } = m else { unreachable!() };
+    assert_eq!(agents[0].plan.as_deref(), Some("Google AI Pro"));
+    let windows: Vec<(&str, f64)> = agents[0].groups[0].windows.iter().map(|w| (w.name.as_str(), w.used)).collect();
+    assert_eq!(windows, [("five_hour", 0.25), ("seven_day", 0.5)]);
 }

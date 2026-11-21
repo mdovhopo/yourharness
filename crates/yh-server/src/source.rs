@@ -7,7 +7,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde_json::{Map, Value};
 use yh_core::library::ThreadMeta;
 
-use yh_proto::{INPUT_LIMIT, LimitWindow, ModelOption, Project, RESULT_LIMIT, Row, SearchHit, SlashCommand, SubagentInfo, Thread, trim};
+use yh_proto::{AgentLimits, AgentOption, INPUT_LIMIT, LimitGroup, LimitWindow, ModelOption, Project, RESULT_LIMIT, Row, SearchHit, SlashCommand, SubagentInfo, Thread, trim};
 
 pub struct Source {
     c: Connection,
@@ -72,6 +72,7 @@ impl Source {
                     running: false,
                     waiting: false,
                     jobs: 0,
+                    agent: m.agent,
                 }
             })
         })
@@ -99,6 +100,42 @@ impl Source {
             .filter_map(yh_core::claude::ModelInfo::from_json)
             .map(|m| ModelOption { id: m.value, name: m.display_name, efforts: m.efforts, auto: m.supports_auto_mode })
             .collect())
+    }
+
+    /// The other agents new threads can run on, with their models as their sessions last listed
+    /// them (Antigravity's `antigravityModels`): only one whose models are known.
+    pub fn agents(&self) -> rusqlite::Result<Vec<AgentOption>> {
+        let list: Value = self.setting("antigravityModels")?.unwrap_or_default();
+        // Its effort isn't Claude's: none is offered (the Mac sends none to it).
+        let models: Vec<ModelOption> = list
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(yh_core::claude::ModelInfo::from_json)
+            .map(|m| ModelOption { id: m.value, name: m.display_name, efforts: vec![], auto: true })
+            .collect();
+        if models.is_empty() {
+            return Ok(vec![]);
+        }
+        let default_model = self.setting("antigravityDefaultModel")?.and_then(|v| v.as_str().map(str::to_string));
+        let agent = yh_core::agents::Agent::Antigravity;
+        Ok(vec![AgentOption { id: agent.id().into(), name: agent.name().into(), models, default_model }])
+    }
+
+    /// Other agents' limits as last read (Antigravity's `/usage`: `antigravityUsage`).
+    pub fn agent_limits(&self) -> rusqlite::Result<Vec<AgentLimits>> {
+        let Some(usage) = self.setting("antigravityUsage")? else { return Ok(vec![]) };
+        let groups: Vec<LimitGroup> = yh_core::acp::usage_groups(&usage)
+            .into_iter()
+            .map(|g| LimitGroup { name: g.name, description: g.description, windows: g.windows.into_iter().map(|w| LimitWindow { name: w.name, used: w.utilization, resets_at: w.resets_at }).collect() })
+            .filter(|g| !g.windows.is_empty())
+            .collect();
+        if groups.is_empty() {
+            return Ok(vec![]);
+        }
+        let plan = self.setting("antigravityPlan")?.and_then(|v| v.as_str().map(str::to_string));
+        let updated_at = self.setting("antigravityUsageAt")?.and_then(|v| v.as_f64());
+        Ok(vec![AgentLimits { agent: yh_core::agents::Agent::Antigravity.id().into(), plan, groups, updated_at }])
     }
 
     /// Each project's slash commands as the CLI last listed them (`slashCommands`), the app's own

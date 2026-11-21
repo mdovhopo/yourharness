@@ -83,11 +83,22 @@ fn print(m: &ToApp, began: &mut bool) -> bool {
             }
         }
         ToApp::Done { id, error, thread, .. } => println!("DONE {id} {}{}", error.as_deref().unwrap_or("ok"), thread.as_deref().map(|t| format!(" thread={t}")).unwrap_or_default()),
-        ToApp::Limits { windows, subscription } => println!("LIMITS {}{}", subscription.as_ref().map(|s| format!("[{} {}] ", s.plan, s.email.as_deref().unwrap_or_default())).unwrap_or_default(), windows.iter().map(|w| format!("{} {:.0}%", w.name, w.used * 100.)).collect::<Vec<_>>().join(", ")),
+        ToApp::Limits { windows, subscription, agents } => {
+            println!("LIMITS {}{}", subscription.as_ref().map(|s| format!("[{} {}] ", s.plan, s.email.as_deref().unwrap_or_default())).unwrap_or_default(), windows.iter().map(|w| format!("{} {:.0}%", w.name, w.used * 100.)).collect::<Vec<_>>().join(", "));
+            for a in agents {
+                let groups = a.groups.iter().map(|g| format!("{}: {}", g.name, g.windows.iter().map(|w| format!("{} {:.0}%", w.name, w.used * 100.)).collect::<Vec<_>>().join(", ")));
+                println!("LIMITS {} [{}] {}", a.agent, a.plan.as_deref().unwrap_or_default(), groups.collect::<Vec<_>>().join(" · "));
+            }
+        }
         ToApp::Power { power } => println!("POWER {}%{}{}", power.percent, if power.charging { " charging" } else { "" }, if power.plugged_in { " plugged in" } else { "" }),
         ToApp::SearchResults { query, hits } => println!("SEARCH {query:?} {} hits{}", hits.len(), hits.first().map(|h| format!(": {}", h.snippet)).unwrap_or_default()),
         ToApp::Files { query, files, .. } => println!("FILES {query:?} {}", files.join(", ")),
-        ToApp::Options { models, modes, .. } => println!("OPTIONS models=[{}] modes=[{}]", models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>().join(","), modes.join(",")),
+        ToApp::Options { models, modes, agents, .. } => {
+            println!("OPTIONS models=[{}] modes=[{}]", models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>().join(","), modes.join(","));
+            for a in agents {
+                println!("OPTIONS agent {} default={} models=[{}]", a.id, a.default_model.as_deref().unwrap_or("?"), a.models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>().join(","));
+            }
+        }
         ToApp::Subagent { seq, run, .. } => println!("SUBAGENT #{seq} {:?} {} steps={} report={}", run.info.description, run.info.status, run.steps.len(), run.report.is_some()),
         ToApp::Media { seq, index, media_type, data, error, .. } => println!("MEDIA #{seq}.{index} {} {} {}", media_type.as_deref().unwrap_or("-"), data.as_ref().map_or(0, |d| d.len()), error.as_deref().unwrap_or("")),
         ToApp::Diagram { key, drawing, error } => println!("DIAGRAM {key} {}", drawing.as_ref().map(|d| format!("{} {}x{} paths={} labels={}", d.kind, d.width, d.height, d.paths.len(), d.labels.len())).unwrap_or_else(|| error.clone().unwrap_or_default())),

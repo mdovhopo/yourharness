@@ -10,6 +10,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ### Added
 
+- Phone: Antigravity works from the phone. New Thread has an Agent picker with Antigravity's own models (its default named), and the same controls as a thread's message box: attach pictures, dictate, send. It shows the chosen agent's limits under the choices. Antigravity threads say so in the list and under their title, and their settings list Antigravity's models. The Usage page shows Antigravity's limits too, per model group. `yh new --agent antigravity` starts one from the command line.
 - Files tab: Markdown files open drawn (headings, lists, tables, code), with links to other files opening in the tab; HTML files open as the page, its styles and pictures loaded from beside it. Preview and Source in the file's bar switch between that and the text; ⌘F, or a link to lines, shows the text.
 
 ## [0.5.1] - 2026-11-21

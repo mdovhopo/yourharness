@@ -275,7 +275,7 @@ struct TranscriptScreen: View {
         }
         .navigationTitle(store.threads[threadID]?.title ?? "Thread")
         // The project, then the model and effort it runs with.
-        .navigationSubtitle([store.threads[threadID].flatMap(store.projectName), store.offersControl ? ThreadSettings.summary(store.threads[threadID], models: store.models) : nil].compactMap { $0 }.joined(separator: " · "))
+        .navigationSubtitle([store.threads[threadID].flatMap(store.projectName), store.offersControl ? ThreadSettings.summary(store.threads[threadID], store: store) : nil].compactMap { $0 }.joined(separator: " · "))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             if store.offersBrowser {

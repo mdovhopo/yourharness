@@ -21,9 +21,10 @@ Usage:
                          Bring the app forward; with FOLDER, a new thread there (the folder
                          becomes a project if it isn't one), DRAFT typed and FILEs attached
   yh new PROMPT [-p PROJECT] [-f FILE]... [-m MODEL] [-e EFFORT] [--mode MODE]
-         [--title TITLE] [--show] [--wait | --follow]
+         [--agent AGENT] [--title TITLE] [--show] [--wait | --follow]
                          Start a thread with PROMPT (\"-\": read from stdin). PROJECT is a
-                         folder, a project's name or ID; without it, the current folder's
+                         folder, a project's name or ID; without it, the current folder's.
+                         AGENT: claude (the default) or antigravity
   yh send THREAD PROMPT [-f FILE]... [--now] [--wait | --follow]
                          Send to a thread: it steers into a running turn (--now: interrupts)
   yh wait THREAD [--timeout SECONDS]
@@ -58,7 +59,7 @@ Environment: YH_DATA_DIR (another data folder), YH_APP (the app to start).
 ";
 
 /// Flags that take a value, and their short forms.
-const VALUED: &[(&str, &str)] = &[("project", "p"), ("file", "f"), ("model", "m"), ("effort", "e"), ("mode", ""), ("title", ""), ("draft", ""), ("rows", "n"), ("timeout", ""), ("request", "")];
+const VALUED: &[(&str, &str)] = &[("project", "p"), ("file", "f"), ("model", "m"), ("effort", "e"), ("mode", ""), ("agent", ""), ("title", ""), ("draft", ""), ("rows", "n"), ("timeout", ""), ("request", "")];
 const SWITCHES: &[(&str, &str)] = &[("json", ""), ("wait", "w"), ("follow", ""), ("now", ""), ("show", ""), ("all", "a"), ("no-launch", ""), ("help", "h"), ("version", "")];
 const MODES: &[&str] = &["auto", "ask", "acceptEdits", "plan", "bypass"];
 const EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
@@ -537,7 +538,8 @@ fn new(args: &Args) -> Result<(), Fail> {
     let mut app = connect(args, args.on("show"))?;
     let project = find_project(&mut app, args.value("project"))?;
     let model = args.value("model").map(str::to_string);
-    let (made, _) = app.act(|id| FromApp::NewThread { id, project: project.id.clone(), text: Some(text), model, effort, mode, files })?;
+    let agent = args.value("agent").map(str::to_string);
+    let (made, _) = app.act(|id| FromApp::NewThread { id, project: project.id.clone(), text: Some(text), model, effort, mode, files, agent, images: vec![] })?;
     let thread = made.ok_or("The app didn't say which thread it made.")?;
     if let Some(title) = args.value("title") {
         app.act(|id| FromApp::Rename { id, thread: thread.clone(), title: title.to_string() })?;

@@ -388,6 +388,31 @@ Changed listed both (+1 −1, +2) with the edit's diff, All Files dimmed `target
 line 6 coloured, a 2,600-line file paged in and found `line 2500:`, and `notes.txt` edited on the
 Mac while open showed its new line on the phone.
 
+### Other agents (Antigravity)
+
+Protocol 11. A thread says which agent it runs on (`agent`, none for Claude). `options` carries
+`agents`: each other agent a new thread can run on, with its own models and its default model
+(`yh_server::Source::agents`, from `antigravityModels` and `antigravityDefaultModel`, so only once
+the Mac has listed them). `limits` carries `agents`: each agent's limits by model group, with its
+plan (`antigravityUsage`, `antigravityPlan`). `new_thread` takes `agent` and `images` (pictures
+with the first message). An unknown agent is refused.
+
+On the phone, New Thread is a form of choices (Project, Agent, Model, Effort for Claude only,
+Permissions) and the chosen agent's limits, with the thread composer's `MessageField` at the
+bottom: Attach Pictures, the field with voice input, and Send. What's typed, its pictures and the
+choices wait per project when the sheet closes unsent. A thread on Antigravity shows the agent in
+the list row and the subtitle; its settings list Antigravity's models and no effort. The Usage page
+lists each Mac's Antigravity groups after Claude's subscriptions.
+
+Hooks: `YH_PHONE_NEW_AGENT=antigravity|claude` (the sheet's agent, and `YH_PHONE_NEW_THREAD`'s),
+`YH_PHONE_NEW_IMAGE=<picture>` (attached in the sheet, sent with `YH_PHONE_NEW_THREAD`), and a
+`NEW THREAD sheet:` line with what the Mac offered. `yh <url> watch` prints `OPTIONS agent …` and
+`LIMITS antigravity …`. Checked 2026-11-21 in the Simulator against a test copy on a clone of a
+data folder that had Antigravity's settings saved. The sheet offered Antigravity with Gemini 4 Neon as its
+default and its Gemini limits. A Haiku thread started from the phone with a picture described the
+picture. An Antigravity thread started from the phone was saved with `agent: antigravity` and its
+reply streamed back.
+
 ### On your own iPhone or iPad
 
 `scripts/mobile-device.sh [device]` builds the app signed with your Apple team, installs it on a

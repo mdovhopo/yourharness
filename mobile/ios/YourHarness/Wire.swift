@@ -31,6 +31,35 @@ struct ModelOption: Codable, Sendable, Hashable, Identifiable {
     }
 }
 
+/// Protocol 11: an agent other than Claude a new thread can run on, with its own models.
+struct AgentOption: Codable, Sendable, Hashable, Identifiable {
+    /// As threads carry it (`antigravity`).
+    let id: String
+    let name: String
+    let models: [ModelOption]
+    /// The model it runs when none is chosen, when the Mac knows.
+    let defaultModel: String?
+}
+
+/// Protocol 11: an agent's usage limits, each group of models that shares them.
+struct AgentLimits: Decodable, Sendable, Hashable, Identifiable {
+    let agent: String
+    /// "Google AI Pro".
+    let plan: String?
+    let groups: [LimitGroup]
+    /// When they were read (seconds since 1970).
+    let updatedAt: Double?
+    var id: String { agent }
+}
+
+/// Models that share limits ("Gemini Models"), and their windows.
+struct LimitGroup: Decodable, Sendable, Hashable, Identifiable {
+    let name: String
+    let description: String?
+    let windows: [LimitWindow]
+    var id: String { name }
+}
+
 struct ThreadInfo: Codable, Sendable, Hashable, Identifiable {
     let id: String
     let projectId: String
@@ -50,6 +79,8 @@ struct ThreadInfo: Codable, Sendable, Hashable, Identifiable {
     let waiting: Bool?
     /// Commands and sub-agents running in the background, after its turn.
     let jobs: Int?
+    /// Protocol 11: the agent it runs on (`antigravity`); nil is Claude.
+    var agent: String? = nil
 
     var isRunning: Bool { running ?? active }
     var isWaiting: Bool { waiting ?? false }
@@ -594,9 +625,11 @@ enum ToApp: Sendable {
     /// An action carrying this id was taken, or why not; `thread`: the one it made.
     case done(id: String, error: String?, thread: String?)
     /// Protocol 3: the models and permission modes to choose from; 5: each project's slash commands.
-    case options(models: [ModelOption], modes: [String], commands: [String: [SlashCommand]])
-    /// Protocol 5: usage limits; what a search found; a thread's files for `@`.
-    case limits([LimitWindow], Subscription?)
+    /// Protocol 11: other agents and their models.
+    case options(models: [ModelOption], modes: [String], commands: [String: [SlashCommand]], agents: [AgentOption])
+    /// Protocol 5: usage limits; what a search found; a thread's files for `@`. Protocol 11:
+    /// other agents' limits.
+    case limits([LimitWindow], Subscription?, agents: [AgentLimits])
     /// The Mac's battery (0.1.11; Macs with one).
     case power(Power)
     case searchResults(query: String, hits: [SearchHit])
@@ -656,8 +689,8 @@ enum ToApp: Sendable {
     private struct Hello: Decodable { let `protocol`: Int?; let server: String; let data: String; let mac: String?; let hosts: [String]? }
     private struct LiveMessage: Decodable { let thread: String; let live: Live }
     private struct Done: Decodable { let id: String; let error: String?; let thread: String? }
-    private struct Options: Decodable { let models: [ModelOption]; let modes: [String]; let commands: [String: [SlashCommand]]? }
-    private struct Limits: Decodable { let windows: [LimitWindow]; let subscription: Subscription? }
+    private struct Options: Decodable { let models: [ModelOption]; let modes: [String]; let commands: [String: [SlashCommand]]?; let agents: [AgentOption]? }
+    private struct Limits: Decodable { let windows: [LimitWindow]; let subscription: Subscription?; let agents: [AgentLimits]? }
     private struct PowerMessage: Decodable { let power: Power }
     private struct Found: Decodable { let query: String; let hits: [SearchHit] }
     private struct Files: Decodable { let thread: String; let query: String; let files: [String] }
@@ -712,10 +745,10 @@ enum ToApp: Sendable {
                 return .done(id: m.id, error: m.error, thread: m.thread)
             case "options":
                 let m = try d.decode(Options.self, from: data)
-                return .options(models: m.models, modes: m.modes, commands: m.commands ?? [:])
+                return .options(models: m.models, modes: m.modes, commands: m.commands ?? [:], agents: m.agents ?? [])
             case "limits":
                 let m = try d.decode(Limits.self, from: data)
-                return .limits(m.windows, m.subscription)
+                return .limits(m.windows, m.subscription, agents: m.agents ?? [])
             case "power": return .power(try d.decode(PowerMessage.self, from: data).power)
             case "search_results":
                 let m = try d.decode(Found.self, from: data)
@@ -816,7 +849,8 @@ enum FromApp {
     case approvePlan(id: String, thread: String, requestID: String, mode: String, feedback: String?)
     case keepPlanning(id: String, thread: String, requestID: String, feedback: String?)
     case answerQuestion(id: String, thread: String, requestID: String, accept: Bool)
-    case newThread(id: String, project: String, text: String?, model: String? = nil, effort: String? = nil, mode: String? = nil)
+    /// Protocol 11: `agent` (nil: Claude) and pictures with the first message.
+    case newThread(id: String, project: String, text: String?, model: String? = nil, effort: String? = nil, mode: String? = nil, agent: String? = nil, images: [OutgoingImage] = [])
     case setModel(id: String, thread: String, model: String?)
     case setEffort(id: String, thread: String, effort: String?)
     case setMode(id: String, thread: String, mode: String)
@@ -850,7 +884,7 @@ enum FromApp {
         switch self {
         case .send(let id, _, _, _, _), .stop(let id, _), .respond(let id, _, _, _), .withdraw(let id, _, _), .sendNow(let id, _, _),
              .answer(let id, _, _, _), .skipQuestion(let id, _, _), .approvePlan(let id, _, _, _, _), .keepPlanning(let id, _, _, _),
-             .answerQuestion(let id, _, _, _), .newThread(let id, _, _, _, _, _), .setModel(let id, _, _), .setEffort(let id, _, _),
+             .answerQuestion(let id, _, _, _), .newThread(let id, _, _, _, _, _, _, _), .setModel(let id, _, _), .setEffort(let id, _, _),
              .setMode(let id, _, _), .rename(let id, _, _), .pin(let id, _, _), .settle(let id, _, _), .delete(let id, _), .askAside(let id, _, _), .mergePull(let id, _, _, _), .browserInput(let id, _, _): id
         default: nil
         }
@@ -904,9 +938,11 @@ enum FromApp {
             ["type": "approve_plan", "id": id, "thread": t, "request_id": request, "mode": mode, "feedback": feedback ?? ""]
         case .keepPlanning(let id, let t, let request, let feedback): ["type": "keep_planning", "id": id, "thread": t, "request_id": request, "feedback": feedback ?? ""]
         case .answerQuestion(let id, let t, let request, let accept): ["type": "answer_question", "id": id, "thread": t, "request_id": request, "accept": accept]
-        case .newThread(let id, let project, let text, let model, let effort, let mode):
+        case .newThread(let id, let project, let text, let model, let effort, let mode, let agent, let images):
             ["type": "new_thread", "id": id, "project": project, "text": text ?? "", "model": model.map { $0 as Any } ?? NSNull(),
-             "effort": effort.map { $0 as Any } ?? NSNull(), "mode": mode.map { $0 as Any } ?? NSNull()]
+             "effort": effort.map { $0 as Any } ?? NSNull(), "mode": mode.map { $0 as Any } ?? NSNull(),
+             "agent": agent.map { $0 as Any } ?? NSNull(),
+             "images": images.map { ["media_type": $0.mediaType, "data": $0.data.base64EncodedString()] }]
         case .setModel(let id, let t, let model): ["type": "set_model", "id": id, "thread": t, "model": model.map { $0 as Any } ?? NSNull()]
         case .setEffort(let id, let t, let effort): ["type": "set_effort", "id": id, "thread": t, "effort": effort.map { $0 as Any } ?? NSNull()]
         case .setMode(let id, let t, let mode): ["type": "set_mode", "id": id, "thread": t, "mode": mode]

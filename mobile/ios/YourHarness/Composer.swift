@@ -13,17 +13,9 @@ struct ComposerBar: View {
     @Binding var images: [OutgoingImage]
     /// The side chat's sheet, which `/btw` opens.
     @Binding var showsAside: Bool
-    @FocusState private var focused: Bool
-    @State private var picked: [PhotosPickerItem] = []
-    @State private var dictation = Dictation()
-    /// What was in the field when dictation started: what's heard goes after it.
-    @State private var beforeDictation = ""
-    /// Settings → Voice Input: the iPhone's own model, or the Mac's.
-    @AppStorage("dictation.engine") private var dictationEngine = Dictation.Engine.phone
 
     private var live: Live? { store.live }
     private var running: Bool { live?.running ?? store.threads[threadID]?.isRunning ?? false }
-    private var empty: Bool { draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && images.isEmpty }
 
     var body: some View {
         VStack(spacing: 8) {
@@ -48,9 +40,9 @@ struct ComposerBar: View {
             }
             // The field stays while reconnecting (send shows a spinner): a reconnect moves nothing.
             if store.serverProtocol != 1 {
-                if !images.isEmpty { attachments }
                 if let typing { Suggestions(typing: typing, threadID: threadID, draft: $draft) }
-                field
+                MessageField(draft: $draft, images: $images, prompt: running ? "Message (waits for Claude's step)" : "Message",
+                             running: running, thread: threadID, send: send, stop: { store.stop(threadID) })
             } else {
                 Text(store.serverProtocol == 1 ? "Read-only: this server doesn't take actions." : "Connecting to your Mac…")
                     .font(.footnote)
@@ -63,12 +55,74 @@ struct ComposerBar: View {
         .padding(.bottom, 6)
         .animation(.snappy(duration: 0.25), value: live?.requests.first?.id)
         .animation(.snappy(duration: 0.25), value: live?.questions.first?.id)
+        .sensoryFeedback(.impact(weight: .light), trigger: running)
         .onChange(of: store.returnedDraft?.text) { _, text in
             if let returned = store.returnedDraft, returned.thread == threadID, let text, draft.isEmpty {
                 draft = text
                 store.returnedDraft = nil
             }
         }
+        // A demo recording pressing Send (Demo.swift).
+        .onChange(of: Demo.shared.sendTick) { if !draft.isEmpty || !images.isEmpty { send() } }
+    }
+
+    /// `/btw <question>` goes to the side chat, which opens; the rest to the Mac as typed.
+    private func send() {
+        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        if images.isEmpty, store.serverProtocol >= 5, text == "/btw" || text.hasPrefix("/btw ") {
+            let question = String(text.dropFirst(4)).trimmingCharacters(in: .whitespaces)
+            if !question.isEmpty { store.askAside(question, in: threadID) }
+            showsAside = true
+        } else {
+            store.send(draft, to: threadID, images: images)
+        }
+        draft = ""
+        images = []
+    }
+
+    /// What's being typed that the composer can finish: a command at the start, or a file
+    /// after `@`.
+    private var typing: Suggestions.Typing? {
+        guard store.serverProtocol >= 5 else { return nil }
+        if draft.hasPrefix("/"), !draft.contains(where: \.isWhitespace) { return .command(String(draft.dropFirst())) }
+        guard let last = draft.split(separator: " ", omittingEmptySubsequences: false).last, last.hasPrefix("@"), !last.contains("\n") else { return nil }
+        return .file(String(last.dropFirst()))
+    }
+}
+
+/// Where a message is written, in a thread and in New Thread alike: the pictures waiting to go
+/// with it, Attach Pictures, the field with voice input, and Send (Stop while Claude works and
+/// nothing's typed).
+struct MessageField: View {
+    @Binding var draft: String
+    @Binding var images: [OutgoingImage]
+    /// What the empty field says when nobody's dictating.
+    let prompt: String
+    var running = false
+    /// The thread it's for (its project's words help the Mac's voice model); nil in New Thread.
+    var thread: String?
+    var lines: ClosedRange<Int> = 1...6
+    /// The keyboard up on it as it shows (New Thread).
+    var autofocus = false
+    let send: () -> Void
+    var stop: () -> Void = {}
+    @Environment(Store.self) private var store
+    @FocusState private var focused: Bool
+    @State private var picked: [PhotosPickerItem] = []
+    @State private var dictation = Dictation()
+    /// What was in the field when dictation started: what's heard goes after it.
+    @State private var beforeDictation = ""
+    /// Settings → Voice Input: the iPhone's own model, or the Mac's.
+    @AppStorage("dictation.engine") private var dictationEngine = Dictation.Engine.phone
+
+    private var empty: Bool { draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && images.isEmpty }
+
+    var body: some View {
+        VStack(spacing: 8) {
+            if !images.isEmpty { attachments }
+            field
+        }
+        .onAppear { if autofocus { focused = true } }
         .onChange(of: picked) { _, items in
             guard !items.isEmpty else { return }
             picked = []
@@ -119,8 +173,8 @@ struct ComposerBar: View {
                 .accessibilityLabel("Attach pictures")
             }
             HStack(alignment: .bottom, spacing: 4) {
-                TextField(listening ? "Listening…" : dictation.state == .transcribing ? "Writing out on your Mac…" : dictation.state == .preparing ? "Getting dictation ready…" : running ? "Message (waits for Claude's step)" : "Message", text: $draft, axis: .vertical)
-                    .lineLimit(1...6)
+                TextField(listening ? "Listening…" : dictation.state == .transcribing ? "Writing out on your Mac…" : dictation.state == .preparing ? "Getting dictation ready…" : prompt, text: $draft, axis: .vertical)
+                    .lineLimit(lines)
                     .focused($focused)
                     .submitLabel(.send)
                     .padding(.vertical, 9)
@@ -151,7 +205,7 @@ struct ComposerBar: View {
             .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 20))
             if empty, running {
                 Button {
-                    store.stop(threadID)
+                    stop()
                 } label: {
                     Image(systemName: "stop.fill")
                         .font(.system(size: 15, weight: .semibold))
@@ -185,7 +239,6 @@ struct ComposerBar: View {
                 .accessibilityLabel(store.canAct ? "Send" : "Connecting to your Mac")
             }
         }
-        .sensoryFeedback(.impact(weight: .light), trigger: running)
         .sensoryFeedback(.start, trigger: listening)
         .onChange(of: dictation.transcript) { _, heard in
             guard !heard.isEmpty else { return }
@@ -194,8 +247,6 @@ struct ComposerBar: View {
         .onChange(of: dictation.state) { _, state in
             if case .unavailable(let why) = state { store.actionError = why }
         }
-        // A demo recording pressing Send (Demo.swift).
-        .onChange(of: Demo.shared.sendTick) { if !empty { send() } }
         // `YH_PHONE_DICTATE_FILE=<audio>`: a recording's words written into the field, as dictating them would.
         .task {
             guard let path = ProcessInfo.processInfo.environment["YH_PHONE_DICTATE_FILE"] else { return }
@@ -220,31 +271,8 @@ struct ComposerBar: View {
         // `YH_PHONE_DICTATION=mac|phone` (test runs) over Settings.
         let engine = ProcessInfo.processInfo.environment["YH_PHONE_DICTATION"].flatMap(Dictation.Engine.init(rawValue:)) ?? dictationEngine
         guard engine == .mac, store.transcribesOnMac else { return nil }
-        let (store, thread) = (store, threadID)
+        let (store, thread) = (store, thread)
         return { await store.transcribe($0, thread: thread) }
-    }
-
-    /// `/btw <question>` goes to the side chat, which opens; the rest to the Mac as typed.
-    private func send() {
-        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        if images.isEmpty, store.serverProtocol >= 5, text == "/btw" || text.hasPrefix("/btw ") {
-            let question = String(text.dropFirst(4)).trimmingCharacters(in: .whitespaces)
-            if !question.isEmpty { store.askAside(question, in: threadID) }
-            showsAside = true
-        } else {
-            store.send(draft, to: threadID, images: images)
-        }
-        draft = ""
-        images = []
-    }
-
-    /// What's being typed that the composer can finish: a command at the start, or a file
-    /// after `@`.
-    private var typing: Suggestions.Typing? {
-        guard store.serverProtocol >= 5 else { return nil }
-        if draft.hasPrefix("/"), !draft.contains(where: \.isWhitespace) { return .command(String(draft.dropFirst())) }
-        guard let last = draft.split(separator: " ", omittingEmptySubsequences: false).last, last.hasPrefix("@"), !last.contains("\n") else { return nil }
-        return .file(String(last.dropFirst()))
     }
 }
 
@@ -363,44 +391,52 @@ extension OutgoingImage {
 }
 
 /// The thread's model and effort, and its project's permission mode, as the Mac's pickers set
-/// them: a menu in the navigation bar, each setting a submenu showing what it is now.
+/// them: a menu in the navigation bar, each setting a submenu showing what it is now. A thread on
+/// another agent (Antigravity) lists that agent's models, and has no effort.
 struct ThreadSettings: View {
     let threadID: String
     @Environment(Store.self) private var store
 
     private var thread: ThreadInfo? { store.threads[threadID] }
-    private var model: ModelOption? { store.models.first { $0.id == thread?.model } }
+    private var models: [ModelOption] { store.models(for: thread?.agent) }
+    private var model: ModelOption? { models.first { $0.id == thread?.model } }
 
-    /// What shows under the title: the model, and the effort when one is chosen.
-    static func summary(_ thread: ThreadInfo?, models: [ModelOption]) -> String? {
+    /// What shows under the title: the agent when it isn't Claude, the model, and the effort when
+    /// one is chosen.
+    @MainActor static func summary(_ thread: ThreadInfo?, store: Store) -> String? {
         guard let thread else { return nil }
-        let model = models.first { $0.id == thread.model }?.name ?? thread.model.map(short)
-        return [model, thread.effort.map(effortName)].compactMap { $0 }.joined(separator: " · ").nilIfEmpty
+        let model = store.models(for: thread.agent).first { $0.id == thread.model }?.name ?? thread.model.map(short)
+        let agent = thread.agent.map { store.agentName($0) }
+        return [agent, model, thread.agent == nil ? thread.effort.map(effortName) : nil].compactMap { $0 }.joined(separator: " · ").nilIfEmpty
+    }
+
+    /// The agent's default model by name ("Default (Gemini 3 Pro)"), or "Default".
+    @MainActor static func defaultName(agent: String?, store: Store) -> String {
+        guard let agent, let option = store.agents.first(where: { $0.id == agent }), let id = option.defaultModel else { return "Default" }
+        return "Default (\(option.models.first { $0.id == id }?.name ?? id))"
     }
 
     var body: some View {
         Menu {
             Menu {
                 Picker("Model", selection: Binding(get: { thread?.model ?? "" }, set: { store.setModel($0.isEmpty ? nil : $0, of: threadID) })) {
-                    Text("Default").tag("")
-                    ForEach(store.models.filter { !$0.id.hasPrefix("claude-") }) { m in Text(m.name).tag(m.id) }
-                    Section("Versions") {
-                        ForEach(store.models.filter { $0.id.hasPrefix("claude-") }) { m in Text(m.name).tag(m.id) }
-                    }
+                    ModelChoices(models: models, defaultName: Self.defaultName(agent: thread?.agent, store: store))
                 }
             } label: {
                 Label("Model", systemImage: "sparkles")
-                Text(model?.name ?? thread?.model.map(Self.short) ?? "Default")
+                Text(model?.name ?? thread?.model.map(Self.short) ?? Self.defaultName(agent: thread?.agent, store: store))
             }
-            let efforts = model?.efforts ?? ["low", "medium", "high", "xhigh", "max"]
-            Menu {
-                Picker("Effort", selection: Binding(get: { thread?.effort ?? "" }, set: { store.setEffort($0.isEmpty ? nil : $0, of: threadID) })) {
-                    Text("Default").tag("")
-                    ForEach(efforts, id: \.self) { e in Text(Self.effortName(e)).tag(e) }
+            if thread?.agent == nil {
+                let efforts = model?.efforts ?? ["low", "medium", "high", "xhigh", "max"]
+                Menu {
+                    Picker("Effort", selection: Binding(get: { thread?.effort ?? "" }, set: { store.setEffort($0.isEmpty ? nil : $0, of: threadID) })) {
+                        Text("Default").tag("")
+                        ForEach(efforts, id: \.self) { e in Text(Self.effortName(e)).tag(e) }
+                    }
+                } label: {
+                    Label("Effort", systemImage: "gauge.with.dots.needle.33percent")
+                    Text(thread?.effort.map(Self.effortName) ?? "Default")
                 }
-            } label: {
-                Label("Effort", systemImage: "gauge.with.dots.needle.33percent")
-                Text(thread?.effort.map(Self.effortName) ?? "Default")
             }
             let mode = store.project(of: threadID)?.mode ?? "auto"
             Menu {
@@ -420,6 +456,25 @@ struct ThreadSettings: View {
     }
 
     static func short(_ model: String) -> String { model.replacingOccurrences(of: "claude-", with: "").capitalized }
+}
+
+/// A model picker's choices: Default, the models by alias, then Claude's full versions apart.
+struct ModelChoices: View {
+    let models: [ModelOption]
+    var defaultName = "Default"
+
+    var body: some View {
+        Text(defaultName).tag("")
+        ForEach(models.filter { !$0.id.hasPrefix("claude-") && $0.id != "default" }) { m in Text(m.name).tag(m.id) }
+        if models.contains(where: { $0.id.hasPrefix("claude-") }) {
+            Section("Versions") {
+                ForEach(models.filter { $0.id.hasPrefix("claude-") }) { m in Text(m.name).tag(m.id) }
+            }
+        }
+    }
+}
+
+extension ThreadSettings {
 
     static func effortName(_ e: String) -> String {
         switch e {
@@ -828,7 +883,7 @@ private struct PlanCard: View {
 
     /// Auto when the thread's model can use it, else Accept Edits.
     private var recommended: String {
-        let model = store.models.first { $0.id == store.threads[threadID]?.model }
+        let model = store.models(for: store.threads[threadID]?.agent).first { $0.id == store.threads[threadID]?.model }
         return (model?.auto ?? true) ? "auto" : "acceptEdits"
     }
 

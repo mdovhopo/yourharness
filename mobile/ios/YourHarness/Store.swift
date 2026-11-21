@@ -94,6 +94,23 @@ final class Store: Identifiable {
     /// The models and permission modes the Mac offers (protocol 3).
     var models: [ModelOption] = []
     var modes: [String] = []
+    /// Protocol 11: the other agents a new thread can run on (Antigravity), with their models.
+    var agents: [AgentOption] = []
+    /// Protocol 11: their usage limits.
+    var agentLimits: [AgentLimits] = []
+    var offersAgents: Bool { serverProtocol >= 11 }
+
+    /// The models a thread on `agent` can use (nil: Claude's).
+    func models(for agent: String?) -> [ModelOption] {
+        guard let agent else { return models }
+        return agents.first { $0.id == agent }?.models ?? []
+    }
+
+    /// "Claude", "Antigravity".
+    func agentName(_ agent: String?) -> String {
+        guard let agent else { return "Claude" }
+        return agents.first { $0.id == agent }?.name ?? agent.capitalized
+    }
     /// Rows' whole tool input and result, asked for from a row's sheet, by "thread#seq".
     var whole: [String: WholeOutput] = [:]
     /// Sub-agents' whole runs, asked for from their sheet, by "thread#seq".
@@ -433,10 +450,13 @@ final class Store: Identifiable {
     /// A new thread in `project` with its first message; opened once the Mac has made it. Until
     /// it's sent nothing exists on the Mac: what's typed waits here (`newThreadDrafts`).
     /// `model`, `effort` and `mode` (the project's) as its sheet chose them; nil leaves the Mac's.
-    func newThread(in project: String, text: String? = nil, model: String? = nil, effort: String? = nil, mode: String? = nil) {
+    /// `agent`: the one it runs on (nil: Claude); `images` go with the first message.
+    func newThread(in project: String, text: String? = nil, model: String? = nil, effort: String? = nil, mode: String? = nil,
+                   agent: String? = nil, images: [OutgoingImage] = []) {
         newThreadDrafts[project] = nil
         usedProject(project)
-        act(.newThread(id: Self.newID(), project: project, text: text, model: model, effort: effort, mode: mode))
+        act(.newThread(id: Self.newID(), project: project, text: text, model: model, effort: effort, mode: mode,
+                       agent: offersAgents ? agent : nil, images: images))
     }
 
     /// The project New Thread starts in: the last one used on this Mac from here (a thread opened
@@ -452,8 +472,10 @@ final class Store: Identifiable {
 
     /// What's typed in each project's new thread, not sent yet: kept while the app runs.
     var newThreadDrafts: [String: String] = [:]
-    /// The model and effort last chosen in each project's New Thread ("" for Default).
-    var newThreadChoices: [String: (model: String, effort: String)] = [:]
+    /// The agent, model and effort last chosen in each project's New Thread ("" for Claude and
+    /// for Default), and the pictures waiting with its draft.
+    var newThreadChoices: [String: (agent: String, model: String, effort: String)] = [:]
+    var newThreadImages: [String: [OutgoingImage]] = [:]
 
     func setModel(_ model: String?, of thread: String) { act(.setModel(id: Self.newID(), thread: thread, model: model)) }
     func setEffort(_ effort: String?, of thread: String) { act(.setEffort(id: Self.newID(), thread: thread, effort: effort)) }
@@ -845,13 +867,15 @@ final class Store: Identifiable {
             case .live(let thread, let state):
                 if transcript?.threadID == thread, live != state { live = state }
                 if aside?.threadID == thread, asideLive != state { asideLive = state }
-            case .options(let models, let modes, let commands):
+            case .options(let models, let modes, let commands, let agents):
                 if self.models != models { self.models = models }
                 if self.modes != modes { self.modes = modes }
                 if self.commands != commands { self.commands = commands }
-            case .limits(let windows, let subscription):
+                if self.agents != agents { self.agents = agents }
+            case .limits(let windows, let subscription, let agents):
                 if limits != windows { limits = windows }
                 if self.subscription != subscription { self.subscription = subscription }
+                if agentLimits != agents { agentLimits = agents }
             case .power(let power):
                 if self.power != power { self.power = power }
             case .searchResults(let query, let hits):
@@ -958,6 +982,7 @@ final class Store: Identifiable {
         var models: [ModelOption]
         var modes: [String]
         var commands: [String: [SlashCommand]]
+        var agents: [AgentOption]?
     }
 
     /// Kept by the Mac's lasting ID and by its address (host and port, never the token): a Mac
@@ -987,6 +1012,7 @@ final class Store: Identifiable {
         models = c.models
         modes = c.modes
         commands = c.commands
+        agents = c.agents ?? []
         Perf.shared.log("CACHE \(displayName): \(c.threads.count) threads")
         selectIfAsked()
     }
@@ -1000,7 +1026,7 @@ final class Store: Identifiable {
             try? await Task.sleep(for: .seconds(1))
             guard let self, !Task.isCancelled else { return }
             let c = Cached(serverProtocol: serverProtocol, serverName: serverName, projects: projects,
-                           threads: order.compactMap { self.threads[$0] }, models: models, modes: modes, commands: commands)
+                           threads: order.compactMap { self.threads[$0] }, models: models, modes: modes, commands: commands, agents: agents)
             Task.detached(priority: .utility) {
                 let e = JSONEncoder()
                 e.keyEncodingStrategy = .convertToSnakeCase

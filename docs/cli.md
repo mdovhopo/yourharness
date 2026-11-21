@@ -7,6 +7,7 @@ wait on, and open things in the window. It starts the app when it isn't running.
 ```sh
 yh new "fix the failing test" --wait          # in the current folder's project (added if new)
 yh new "review this" -p ~/dev/api -f diff.patch -f shot.png -m sonnet --follow
+yh new "tidy the README" --agent antigravity --wait   # on Antigravity (agy), its default model
 yh send last "now add a test" --wait
 yh threads                                    # ID, state (working, waiting, idle), project, title
 yh read 6e53 -n 20

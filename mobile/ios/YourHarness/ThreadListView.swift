@@ -263,9 +263,11 @@ struct ThreadListView: View {
             guard let project = store.projects.first(where: { wanted == nil || $0.name == wanted }) else { return }
             madeThread = true
             try? await Task.sleep(for: .seconds(1))
-            let (model, effort) = (Self.env["YH_PHONE_NEW_MODEL"], Self.env["YH_PHONE_NEW_EFFORT"])
-            Perf.shared.log("PHONE new thread in \(project.name): \(text) · \(model ?? "default") · \(effort ?? "default")")
-            store.newThread(in: project.id, text: text, model: model, effort: effort)
+            let (model, effort, agent) = (Self.env["YH_PHONE_NEW_MODEL"], Self.env["YH_PHONE_NEW_EFFORT"], Self.env["YH_PHONE_NEW_AGENT"])
+            Perf.shared.log("PHONE new thread in \(project.name): \(text) · \(agent ?? "claude") · \(model ?? "default") · \(effort ?? "default")")
+            // `YH_PHONE_NEW_IMAGE=<picture>`: sent with it, as attached in the sheet.
+            let images = Self.env["YH_PHONE_NEW_IMAGE"].flatMap { FileManager.default.contents(atPath: $0) }.flatMap(OutgoingImage.prepared).map { [$0] } ?? []
+            store.newThread(in: project.id, text: text, model: model, effort: effort, agent: agent, images: images)
         }
     }
 
@@ -524,8 +526,9 @@ struct ThreadRow: View {
     static func subtitle(_ t: ThreadInfo) -> String {
         let date = Date(timeIntervalSince1970: t.updatedAt / 1000)
         let when = Date().timeIntervalSince(date) < 60 ? "now" : relative.localizedString(for: date, relativeTo: Date())
-        guard let model = t.model else { return when }
-        return "\(when) · \(model.replacingOccurrences(of: "claude-", with: ""))"
+        // A thread on another agent says which: "2h · Antigravity · gemini-3-pro".
+        let parts = [when, t.agent?.capitalized, t.model?.replacingOccurrences(of: "claude-", with: "")]
+        return parts.compactMap { $0 }.joined(separator: " · ")
     }
 }
 
@@ -767,8 +770,14 @@ struct UsageView: View {
         return out.filter { !$0.windows.isEmpty }
     }
 
+    /// Other agents' limits (Antigravity's), each Mac's: (Mac, its reading).
+    private var agentGroups: [(mac: Store, limits: AgentLimits)] {
+        ([store] + fleet.stores.filter { $0 !== store }).flatMap { mac in mac.agentLimits.map { (mac, $0) } }
+    }
+
     var body: some View {
         let groups = groups
+        let agentGroups = agentGroups
         List {
             ForEach(groups) { group in
                 Section {
@@ -777,7 +786,16 @@ struct UsageView: View {
                     SubscriptionHeader(subscription: group.subscription, macs: group.macs.map { $0.displayName })
                 }
             }
-            if !groups.isEmpty {
+            ForEach(agentGroups, id: \.mac.id) { mac, limits in
+                ForEach(limits.groups) { group in
+                    Section {
+                        ForEach(group.windows) { LimitRow(window: $0) }
+                    } header: {
+                        AgentLimitsHeader(agent: mac.agentName(limits.agent), group: group.name, plan: limits.plan, mac: mac.displayName)
+                    }
+                }
+            }
+            if !groups.isEmpty || !agentGroups.isEmpty {
                 Section {} footer: {
                     Text("As your Macs last heard from Claude. They hear again with each turn.")
                 }
@@ -785,11 +803,37 @@ struct UsageView: View {
         }
         .listStyle(.insetGrouped)
         .overlay {
-            if groups.isEmpty {
+            if groups.isEmpty && agentGroups.isEmpty {
                 ContentUnavailableView("No Usage Yet", systemImage: "gauge.with.dots.needle.33percent", description: Text(store.state == .connected ? "Your Mac hasn't heard Claude's limits yet. They come with its next turn." : "Connect to your Mac to see Claude's limits."))
             }
         }
         .navigationTitle("Usage")
+    }
+}
+
+/// "Antigravity · Gemini Models", its plan, and the Mac that read it.
+private struct AgentLimitsHeader: View {
+    let agent: String
+    let group: String
+    let plan: String?
+    let mac: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Image(systemName: "cpu")
+                Text(agent).fontWeight(.semibold)
+                Text(group).foregroundStyle(.secondary).lineLimit(1)
+            }
+            .font(.subheadline)
+            .foregroundStyle(.primary)
+            Text([plan, mac].compactMap { $0 }.joined(separator: " · "))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+        .textCase(nil)
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -862,9 +906,10 @@ private struct ThreadActions: ViewModifier {
     }
 }
 
-/// A new thread's first message, and the project, model, effort and permissions it starts with.
-/// Nothing is made on the Mac until it's sent; closed unsent, what's typed waits for that
-/// project's next New Thread.
+/// A new thread's first message, and the project, agent, model, effort and permissions it starts
+/// with, written as in a thread's composer: pictures, voice input, Send. The limits of the agent
+/// chosen show under the choices. Nothing is made on the Mac until it's sent; closed unsent,
+/// what's typed (and its pictures) waits for that project's next New Thread.
 struct NewThreadSheet: View {
     /// The project it starts in; the sheet's picker can choose another.
     @State private var projectID: String
@@ -877,46 +922,52 @@ struct NewThreadSheet: View {
     @Environment(Store.self) private var store
     @Environment(\.dismiss) private var dismiss
     @State private var text = ""
-    /// "" for the Mac's default.
+    @State private var images: [OutgoingImage] = []
+    /// "" for Claude.
+    @State private var agent = ""
+    /// "" for the agent's default.
     @State private var model = ""
     @State private var effort = ""
     @State private var mode = "auto"
-    @FocusState private var focused: Bool
 
     private var project: Project? { store.projects.first { $0.id == projectID } }
-    private var empty: Bool { text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-    private var chosen: ModelOption? { store.models.first { $0.id == model } }
+    private var agentID: String? { agent.isEmpty ? nil : agent }
+    private var models: [ModelOption] { store.models(for: agentID) }
+    private var chosen: ModelOption? { models.first { $0.id == model } }
     private var efforts: [String] { chosen?.efforts ?? ["low", "medium", "high", "xhigh", "max"] }
     private var modes: [String] { store.modes.isEmpty ? ["auto", "ask", "acceptEdits", "plan", "bypass"] : store.modes }
+    private var offersAgents: Bool { store.offersAgents && !store.agents.isEmpty }
 
     var body: some View {
         NavigationStack {
             Form {
-                TextField("What are we working on?", text: $text, axis: .vertical)
-                    .lineLimit(4...16)
-                    .focused($focused)
                 Section {
                     Picker(selection: $projectID) {
                         ForEach(store.projects) { p in Text(p.name).tag(p.id) }
                     } label: {
                         Label("Project", systemImage: "folder")
                     }
-                    Picker(selection: $model) {
-                        Text("Default").tag("")
-                        ForEach(store.models.filter { !$0.id.hasPrefix("claude-") && $0.id != "default" }) { m in Text(m.name).tag(m.id) }
-                        if store.models.contains(where: { $0.id.hasPrefix("claude-") }) {
-                            Section("Versions") {
-                                ForEach(store.models.filter { $0.id.hasPrefix("claude-") }) { m in Text(m.name).tag(m.id) }
-                            }
+                    if offersAgents {
+                        Picker(selection: $agent) {
+                            Text("Claude").tag("")
+                            ForEach(store.agents) { a in Text(a.name).tag(a.id) }
+                        } label: {
+                            Label("Agent", systemImage: "cpu")
                         }
+                    }
+                    Picker(selection: $model) {
+                        ModelChoices(models: models, defaultName: ThreadSettings.defaultName(agent: agentID, store: store))
                     } label: {
                         Label("Model", systemImage: "sparkles")
                     }
-                    Picker(selection: $effort) {
-                        Text("Default").tag("")
-                        ForEach(efforts, id: \.self) { e in Text(ThreadSettings.effortName(e)).tag(e) }
-                    } label: {
-                        Label("Effort", systemImage: "gauge.with.dots.needle.33percent")
+                    // Effort is Claude Code's: another agent has none.
+                    if agentID == nil {
+                        Picker(selection: $effort) {
+                            Text("Default").tag("")
+                            ForEach(efforts, id: \.self) { e in Text(ThreadSettings.effortName(e)).tag(e) }
+                        } label: {
+                            Label("Effort", systemImage: "gauge.with.dots.needle.33percent")
+                        }
                     }
                     Picker(selection: $mode) {
                         ForEach(modes, id: \.self) { m in Text(ThreadSettings.modeName(m)).tag(m) }
@@ -927,6 +978,7 @@ struct NewThreadSheet: View {
                     Text("Permissions apply to every thread in \(project?.name ?? "the project").")
                 }
                 .pickerStyle(.menu)
+                AgentLimitsSection(agent: agentID)
             }
             .navigationTitle("New Thread")
             .navigationSubtitle([project?.name, mac].compactMap { $0 }.joined(separator: " · "))
@@ -935,42 +987,104 @@ struct NewThreadSheet: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Close", systemImage: "xmark") { dismiss() }
                 }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Send", systemImage: "arrow.up") {
-                        store.newThread(
-                            in: projectID, text: text.trimmingCharacters(in: .whitespacesAndNewlines),
-                            model: model.isEmpty ? nil : model, effort: effort.isEmpty ? nil : effort,
-                            mode: mode == (project?.mode ?? "auto") ? nil : mode)
-                        text = ""
-                        dismiss()
-                    }
-                    .disabled(empty || !store.canAct || project == nil)
-                }
+            }
+            .safeAreaInset(edge: .bottom) {
+                MessageField(draft: $text, images: $images, prompt: "What are we working on?", lines: 1...10, autofocus: true, send: send)
+                    .disabled(project == nil)
+                    .padding(.horizontal, 12)
+                    .padding(.top, 8)
+                    .padding(.bottom, 6)
             }
         }
         .presentationDetents([.medium, .large])
         // An effort the new model doesn't offer goes back to Default.
         .onChange(of: model) { if !effort.isEmpty && !efforts.contains(effort) { effort = "" } }
-        // Another project: what's typed goes with it; its permissions, and its model and effort
-        // if New Thread chose them there before.
+        // Another agent: its own models, so its default; and no effort.
+        .onChange(of: agent) {
+            if !models.contains(where: { $0.id == model }) { model = "" }
+            if agentID != nil { effort = "" }
+        }
+        // Another project: what's typed goes with it; its permissions, and its agent, model and
+        // effort if New Thread chose them there before.
         .onChange(of: projectID) { old, new in
             store.newThreadDrafts[old] = nil
-            if let c = store.newThreadChoices[new] { (model, effort) = c }
+            store.newThreadImages[old] = nil
+            if let c = store.newThreadChoices[new] { choose(c) }
             mode = project?.mode ?? "auto"
         }
         .onAppear {
             text = store.newThreadDrafts[projectID] ?? ""
-            if let c = store.newThreadChoices[projectID] { (model, effort) = c }
+            images = store.newThreadImages[projectID] ?? []
+            if let c = store.newThreadChoices[projectID] ?? store.newThreadChoices.values.first { choose(c) }
             mode = project?.mode ?? "auto"
+            if let a = Self.env["YH_PHONE_NEW_AGENT"] { agent = a == "claude" ? "" : a }
             if let m = Self.env["YH_PHONE_NEW_MODEL"] { model = m }
             if let e = Self.env["YH_PHONE_NEW_EFFORT"] { effort = e }
-            focused = true
+            if let path = Self.env["YH_PHONE_NEW_IMAGE"], let data = FileManager.default.contents(atPath: path), let image = OutgoingImage.prepared(data), images.isEmpty {
+                images = [image]
+            }
+            Perf.shared.log("NEW THREAD sheet: agents \(store.agents.map(\.id)) · agent \(agentID ?? "claude") · \(models.count) models · limits \(store.agentLimits.map(\.agent))")
         }
         .onDisappear {
+            let empty = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             store.newThreadDrafts[projectID] = empty ? nil : text
-            store.newThreadChoices[projectID] = (model, effort)
+            store.newThreadImages[projectID] = images.isEmpty ? nil : images
+            store.newThreadChoices[projectID] = (agent, model, effort)
         }
     }
 
+    /// Choices made before, as far as this Mac still offers them.
+    private func choose(_ c: (agent: String, model: String, effort: String)) {
+        agent = c.agent.isEmpty || store.agents.contains(where: { $0.id == c.agent }) ? c.agent : ""
+        model = c.model
+        effort = c.effort
+    }
+
+    private func send() {
+        let words = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !words.isEmpty || !images.isEmpty else { return }
+        Perf.shared.log("PHONE new thread in \(project?.name ?? projectID): \(words) · \(agentID ?? "claude") · \(model.isEmpty ? "default" : model) · \(images.count) pictures")
+        store.newThread(
+            in: projectID, text: words,
+            model: model.isEmpty ? nil : model, effort: effort.isEmpty || agentID != nil ? nil : effort,
+            mode: mode == (project?.mode ?? "auto") ? nil : mode, agent: agentID, images: images)
+        store.newThreadChoices[projectID] = (agent, model, effort)
+        text = ""
+        images = []
+        dismiss()
+    }
+
     private static let env = ProcessInfo.processInfo.environment
+}
+
+/// The usage limits of the agent a new thread starts on, as the Mac last heard them: Claude's
+/// windows, or each of another agent's groups (Antigravity's Gemini models, its Claude and GPT
+/// models…).
+struct AgentLimitsSection: View {
+    let agent: String?
+    @Environment(Store.self) private var store
+
+    var body: some View {
+        if let agent {
+            if let limits = store.agentLimits.first(where: { $0.agent == agent }) {
+                ForEach(limits.groups) { group in
+                    Section {
+                        ForEach(group.windows) { LimitRow(window: $0) }
+                    } header: {
+                        Text(group.name)
+                    } footer: {
+                        if group.id == limits.groups.last?.id, let plan = limits.plan { Text(plan) }
+                    }
+                }
+            }
+        } else if !store.limits.isEmpty {
+            Section {
+                ForEach(store.limits) { LimitRow(window: $0) }
+            } header: {
+                Text("Claude's Limits")
+            } footer: {
+                if let plan = store.subscription?.plan { Text(plan) }
+            }
+        }
+    }
 }

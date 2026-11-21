@@ -116,7 +116,7 @@ impl Workspace {
         if running.count() >= MAX_RUNNING {
             return Err(format!("{MAX_RUNNING} threads were already working in the project."));
         }
-        let id = self.start_thread(&auto.project_id, Some(&auto.prompt), auto.model.clone(), auto.effort.clone(), None, None, cx)?;
+        let id = self.start_thread(&auto.project_id, Some(&auto.prompt), auto.model.clone(), auto.effort.clone(), None, None, None, cx)?;
         self.rename(&id, &auto.name, cx);
         let automation = auto.id.clone();
         self.update_meta(&id, cx, |_, record| {

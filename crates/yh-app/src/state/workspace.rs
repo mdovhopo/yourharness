@@ -2999,7 +2999,7 @@ impl Workspace {
             t.run.elicitations.iter().find(|e| e.id == request_id).map(|e| format!("{}'s question", e.server))
         };
         match action {
-            A::NewThread { project, text, model, effort, mode, .. } => self.start_thread(&project, text.as_deref(), model, effort, mode.as_deref(), Some(caller), cx).map(Some),
+            A::NewThread { project, text, model, effort, mode, agent, .. } => self.start_thread(&project, text.as_deref(), model, effort, mode.as_deref(), agent.as_deref(), Some(caller), cx).map(Some),
             A::Send { .. } => {
                 self.agent_sender = Some(caller.to_string());
                 let result = self.take_remote_on(action, cx);
@@ -4274,12 +4274,13 @@ impl Workspace {
     fn take_remote(&mut self, action: yh_server::Action, cx: &mut Context<Self>) -> Result<Option<String>, String> {
         use yh_server::Action as A;
         match action {
-            A::NewThread { project, text, model, effort, mode, images, files } => {
+            A::NewThread { project, text, model, effort, mode, agent, images, files } => {
                 if images.is_empty() && files.is_empty() {
-                    return self.start_thread(&project, text.as_deref(), model, effort, mode.as_deref(), None, cx).map(Some);
+                    return self.start_thread(&project, text.as_deref(), model, effort, mode.as_deref(), agent.as_deref(), None, cx).map(Some);
                 }
-                // With files (the command line's): made first, then its first message with them.
-                let id = self.start_thread(&project, None, model, effort, mode.as_deref(), None, cx)?;
+                // With pictures (the phone's) or files (the command line's): made first, then its
+                // first message with them.
+                let id = self.start_thread(&project, None, model, effort, mode.as_deref(), agent.as_deref(), None, cx)?;
                 self.take_remote_on(A::Send { thread: id.clone(), text: text.unwrap_or_default(), now: false, images, files }, cx)?;
                 Ok(Some(id))
             }
@@ -4324,12 +4325,21 @@ impl Workspace {
 
     /// A new thread saved at once, its first message sent, the Mac staying on what you have
     /// open: the phone's New Thread, and an agent's `start_thread` (`parent`: its thread).
-    pub fn start_thread(&mut self, project: &str, text: Option<&str>, model: Option<String>, effort: Option<String>, mode: Option<&str>, parent: Option<&str>, cx: &mut Context<Self>) -> Result<String, String> {
+    /// `agent`: the one it runs on (`antigravity`); none is Claude.
+    pub fn start_thread(&mut self, project: &str, text: Option<&str>, model: Option<String>, effort: Option<String>, mode: Option<&str>, agent: Option<&str>, parent: Option<&str>, cx: &mut Context<Self>) -> Result<String, String> {
         {
             if self.project(project).is_none() {
                 return Err("No such project.".into());
             }
+            let agent = yh_core::agents::Agent::from_id(agent);
             let id = self.make_thread(project, cx);
+            if agent != yh_core::agents::Agent::Claude {
+                let saved = agent.id().to_string();
+                self.update_meta(&id, cx, |m, r| {
+                    m.agent = Some(saved.clone());
+                    r.insert("agent".into(), saved.into());
+                });
+            }
             if let Some(parent) = parent {
                 let parent = parent.to_string();
                 self.update_meta(&id, cx, |m, r| {
