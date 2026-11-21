@@ -8,6 +8,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ### Added
 
+- Antigravity threads now get YourHarness's memory (the workspace's memory index and tasks in the prompt, plus the memory tools), built-in browser, thread and automation tools, and inline media (`show_media`), served over a local per-session bridge and pre-approved without permission prompts.
 - Phone: Antigravity works from the phone. New Thread has an Agent picker with Antigravity's own models (its default named), and the same controls as a thread's message box: attach pictures, dictate, send. It shows the chosen agent's limits under the choices. Antigravity threads say so in the list and under their title, and their settings list Antigravity's models. The Usage page shows Antigravity's limits too, per model group. `yh new --agent antigravity` starts one from the command line.
 
 ## [0.6.0] - 2026-11-21

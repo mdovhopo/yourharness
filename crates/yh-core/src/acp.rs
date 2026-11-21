@@ -84,6 +84,12 @@ struct Shared {
     woke: Option<std::time::Instant>,
     /// Its sign-in methods, from `initialize`.
     auth_methods: Vec<Value>,
+    /// What to append to the agent's system prompt when it supports it (`_meta.antigravity.systemPrompt.append`).
+    append_system_prompt: Option<String>,
+    /// In-app MCP servers (`HttpBridge::acp_configs`), passed to `session/new`, `resume` and `load`.
+    mcp_servers: Vec<Value>,
+    /// Pre-approved tools (`mcp__memory`, …), answered without asking you.
+    allowed_tools: Vec<String>,
 }
 
 pub struct AcpProcess {
@@ -91,15 +97,19 @@ pub struct AcpProcess {
     writer: flume::Sender<Value>,
     events: flume::Sender<Event>,
     child: Arc<Mutex<Child>>,
+    bridge: Option<Arc<crate::mcp::HttpBridge>>,
     pub pid: u32,
 }
 
 impl AcpProcess {
     pub fn spawn(options: LaunchOptions, events: flume::Sender<Event>) -> Result<AcpProcess, String> {
-        let (executable, args) = match options.agent {
+        let (executable, mut args) = match options.agent {
             Agent::Antigravity => (find_agy().ok_or(AGY_NOT_FOUND)?, vec!["acp".to_string()]),
             Agent::Claude => return Err("Claude runs as `claude`, not over ACP.".into()),
         };
+        for dir in &options.add_dirs {
+            args.extend(["--add-dir".into(), dir.clone()]);
+        }
         let mut command = Command::new(&executable);
         command.args(&args).current_dir(&options.cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         crate::shell_env::apply(&mut command);
@@ -108,6 +118,45 @@ impl AcpProcess {
         for (k, v) in &options.env {
             command.env(k, v);
         }
+        let mut server_names: Vec<String> = options.servers.iter().map(|s| s.name().to_string()).collect();
+        server_names.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+        let shared = Arc::new(Mutex::new(Shared {
+            next_id: 0,
+            asked: HashMap::new(),
+            session: None,
+            ready: false,
+            busy: false,
+            replaying: false,
+            queue: VecDeque::new(),
+            permissions: HashMap::new(),
+            translator: Translator {
+                nonce: format!("{:x}-", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis())),
+                server_names,
+                ..Translator::default()
+            },
+            model: options.model.filter(|m| !m.is_empty()),
+            mode: options.mode,
+            cwd: options.cwd.clone(),
+            resume: options.session_id,
+            capabilities: Value::Null,
+            dead: false,
+            woke: None,
+            auth_methods: vec![],
+            append_system_prompt: options.append_system_prompt.filter(|p| !p.is_empty()),
+            mcp_servers: vec![],
+            allowed_tools: options.allowed_tools,
+        }));
+        let bridge = if options.servers.is_empty() {
+            None
+        } else {
+            let for_call = shared.clone();
+            let on_call: crate::mcp::CallHook = Arc::new(move |server, tool, args| for_call.lock().unwrap().translator.claim_mcp_call(server, tool, args));
+            let for_result = shared.clone();
+            let on_result: crate::mcp::ResultHook = Arc::new(move |id, result| for_result.lock().unwrap().translator.record_mcp_result(id, result));
+            let b = Arc::new(crate::mcp::HttpBridge::start(options.servers, Some(on_call), Some(on_result)).map_err(|e| format!("Couldn't start the local tools bridge: {e}"))?);
+            shared.lock().unwrap().mcp_servers = b.acp_configs();
+            Some(b)
+        };
         let mut child = command.spawn().map_err(|e| format!("{AGY_NOT_FOUND} ({e})"))?;
         let pid = child.id();
         let stdout = child.stdout.take().unwrap();
@@ -145,30 +194,12 @@ impl AcpProcess {
             });
         }
 
-        let shared = Arc::new(Mutex::new(Shared {
-            next_id: 0,
-            asked: HashMap::new(),
-            session: None,
-            ready: false,
-            busy: false,
-            replaying: false,
-            queue: VecDeque::new(),
-            permissions: HashMap::new(),
-            translator: Translator { nonce: format!("{:x}-", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis())), ..Translator::default() },
-            model: options.model.filter(|m| !m.is_empty()),
-            mode: options.mode,
-            cwd: options.cwd.clone(),
-            resume: options.session_id,
-            capabilities: Value::Null,
-            dead: false,
-            woke: None,
-            auth_methods: vec![],
-        }));
         {
             let shared = shared.clone();
             let writer = writer.clone();
             let events = events.clone();
             let child = child.clone();
+            let bridge = bridge.clone();
             std::thread::spawn(move || {
                 let mut reader = BufReader::with_capacity(1 << 20, stdout);
                 let mut line = Vec::new();
@@ -189,6 +220,9 @@ impl AcpProcess {
                         let _ = child.lock().unwrap().kill();
                         break;
                     }
+                }
+                if let Some(b) = bridge {
+                    b.shutdown();
                 }
                 // Ended for a failure already told: a quiet exit, not a crash. Either way it's
                 // gone, and so is the woken-turn watch.
@@ -219,7 +253,7 @@ impl AcpProcess {
                 }
             });
         }
-        Ok(AcpProcess { shared, writer, events, child, pid })
+        Ok(AcpProcess { shared, writer, events, child, bridge, pid })
     }
 
     pub fn initialize(&mut self) {
@@ -303,6 +337,9 @@ impl AcpProcess {
     }
 
     pub fn terminate(&self) {
+        if let Some(b) = &self.bridge {
+            b.shutdown();
+        }
         unsafe { libc::kill(self.pid as i32, libc::SIGTERM) };
         let _ = self.child.lock().map(|mut c| c.try_wait());
     }
@@ -601,21 +638,60 @@ impl Shared {
         }
     }
 
+    /// Extra session metadata: Antigravity's appended system prompt when it advertises support.
+    fn session_meta(&self) -> Option<Value> {
+        let prompt = self.append_system_prompt.as_deref().filter(|p| !p.is_empty())?;
+        if self.capabilities["_meta"]["antigravity"]["systemPrompt"]["append"] != true {
+            return None;
+        }
+        let text = if self.translator.server_names.is_empty() {
+            prompt.to_string()
+        } else {
+            format!("{prompt}\n\nNote: In this runtime, tools referred to as mcp__<server>__<tool> above are named mcp_<server>_<tool> (single underscores).")
+        };
+        Some(json!({ "antigravity": { "systemPrompt": { "append": text } } }))
+    }
+
+    /// Whether a tool call is pre-approved (`LaunchOptions::allowed_tools`), e.g. `mcp__memory`
+    /// matching Antigravity's `mcp_memory_save`.
+    fn is_allowed_tool(&self, name: &str) -> bool {
+        if name.is_empty() {
+            return false;
+        }
+        self.allowed_tools.iter().any(|allowed| {
+            if allowed == name {
+                return true;
+            }
+            if let Some(rest) = allowed.strip_prefix("mcp__") {
+                if let Some((server, tool)) = rest.split_once("__") {
+                    return name == format!("mcp_{server}_{tool}");
+                }
+                return name.starts_with(&format!("mcp_{rest}_")) || name.starts_with(&format!("mcp__{rest}__"));
+            }
+            false
+        })
+    }
+
     /// `session/new`, or the thread's session brought back (`session/resume`: `session/load`
     /// would replay every tool call the saved rows already show).
     fn open_session(&mut self, retried: bool, writer: &flume::Sender<Value>) {
-        let mcp: Vec<Value> = vec![];
+        let mut params = json!({ "cwd": self.cwd, "mcpServers": self.mcp_servers });
+        if let Some(meta) = self.session_meta() {
+            params["_meta"] = meta;
+        }
         match self.resume.clone() {
             Some(session) if !self.capabilities["sessionCapabilities"]["resume"].is_null() => {
                 self.session = Some(session.clone());
-                self.request("session/resume", json!({ "sessionId": session, "cwd": self.cwd, "mcpServers": mcp }), Asked::Session { replaying: false, retried }, writer);
+                params["sessionId"] = json!(session);
+                self.request("session/resume", params, Asked::Session { replaying: false, retried }, writer);
             }
             Some(session) if self.capabilities["loadSession"] == true => {
                 self.session = Some(session.clone());
                 self.replaying = true;
-                self.request("session/load", json!({ "sessionId": session, "cwd": self.cwd, "mcpServers": mcp }), Asked::Session { replaying: true, retried }, writer);
+                params["sessionId"] = json!(session);
+                self.request("session/load", params, Asked::Session { replaying: true, retried }, writer);
             }
-            _ => self.request("session/new", json!({ "cwd": self.cwd, "mcpServers": mcp }), Asked::Session { replaying: false, retried }, writer),
+            _ => self.request("session/new", params, Asked::Session { replaying: false, retried }, writer),
         }
     }
 
@@ -654,6 +730,17 @@ impl Shared {
                     let input = question_input(call, &options);
                     self.permissions.insert(request_id.clone(), (id.clone(), options, true));
                     return vec![Event::Permission { request_id, tool: "AskUserQuestion".into(), description, input }];
+                }
+                let tool_name = call["name"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .or_else(|| call["toolCallId"].as_str().and_then(|c| self.translator.name_of(c)))
+                    .or_else(|| call["title"].as_str().and_then(|t| t.strip_prefix("Run ")).map(str::to_string))
+                    .unwrap_or_default();
+                if self.is_allowed_tool(&tool_name) {
+                    let _ = writer.send(json!({ "jsonrpc": "2.0", "id": id, "result": { "outcome": permission_outcome(&options, true) } }));
+                    return vec![];
                 }
                 let kind = call["kind"].as_str().map(str::to_string).or_else(|| call["toolCallId"].as_str().and_then(|c| self.translator.kind_of(c))).unwrap_or_default();
                 if let Some(allow) = answers_itself(self.mode.as_deref(), &kind) {
@@ -760,6 +847,7 @@ impl Shared {
 /// A tool call as it's known so far: ACP sends it, then updates with only what changed.
 #[derive(Clone, Debug, Default)]
 struct Call {
+    name: String,
     title: String,
     kind: String,
     raw_input: Value,
@@ -769,6 +857,10 @@ struct Call {
     /// What it was last shown as: (name, input), so an unchanged update shows nothing new.
     shown: Option<(String, String)>,
     finished: bool,
+    /// Insertion order, so parallel calls to the same in-app MCP tool are matched oldest first.
+    seq: u64,
+    /// Claimed by an in-flight `HttpBridge` call (`claim_mcp_call`).
+    claimed: bool,
 }
 
 /// `session/update`s into the transcript's events, one turn at a time. Pure: tested on its own.
@@ -779,12 +871,19 @@ pub struct Translator {
     nonce: String,
     turn: u64,
     blocks: u64,
+    next_call: u64,
     /// The text or thinking being written: (its message id, kind, what it says so far).
     open: Option<(String, DeltaKind, String)>,
     calls: HashMap<String, Call>,
     /// Commands still running when their turn ended: background jobs, finished by a later
     /// update (Antigravity reports them done outside any prompt, then wakes the agent).
     jobs: HashMap<String, Call>,
+    /// Names of in-app MCP servers (`memory`, `browser`, …), longest first, for normalizing
+    /// Antigravity's `mcp_<server>_<tool>` calls into `mcp__<server>__<tool>`.
+    server_names: Vec<String>,
+    /// Results returned by our own `HttpBridge`, keyed by `toolCallId`: `agy acp` leaves MCP
+    /// tool output out of `tool_call_update`, so we fill the transcript row from here.
+    mcp_results: HashMap<String, (String, bool)>,
     /// What the session offers: its modes' ids and the one in effect, its models.
     pub modes: Vec<String>,
     pub current_mode: Option<String>,
@@ -827,6 +926,7 @@ impl Translator {
         if started {
             out.push(Event::JobsRunning(self.jobs.keys().cloned().collect()));
         }
+        self.mcp_results.clear();
         out
     }
 
@@ -862,6 +962,42 @@ impl Translator {
 
     pub fn kind_of(&self, call: &str) -> Option<String> {
         self.calls.get(call).map(|c| c.kind.clone()).filter(|k| !k.is_empty())
+    }
+
+    pub fn name_of(&self, call: &str) -> Option<String> {
+        self.calls.get(call).map(|c| c.name.clone()).filter(|n| !n.is_empty())
+    }
+
+    /// Matches an incoming `HttpBridge` `tools/call` to its open ACP `toolCallId`, preferring an
+    /// argument match and otherwise the oldest unclaimed call for `(server, tool)`.
+    pub fn claim_mcp_call(&mut self, server: &str, tool: &str, args: &Value) -> Option<String> {
+        let target = format!("mcp__{server}__{tool}");
+        let mut exact: Option<(u64, String)> = None;
+        let mut oldest: Option<(u64, String)> = None;
+        for (id, call) in &self.calls {
+            if call.finished || call.claimed {
+                continue;
+            }
+            if normalize_mcp_name(&call.name, &self.server_names).as_deref() != Some(target.as_str()) {
+                continue;
+            }
+            if clean_mcp_input(&call.raw_input) == *args && exact.as_ref().is_none_or(|(seq, _)| call.seq < *seq) {
+                exact = Some((call.seq, id.clone()));
+            }
+            if oldest.as_ref().is_none_or(|(seq, _)| call.seq < *seq) {
+                oldest = Some((call.seq, id.clone()));
+            }
+        }
+        let (_, id) = exact.or(oldest)?;
+        if let Some(call) = self.calls.get_mut(&id) {
+            call.claimed = true;
+        }
+        Some(id)
+    }
+
+    /// Saves the output of an in-app MCP tool call so `tool_call_update` can show it.
+    pub fn record_mcp_result(&mut self, id: &str, result: &crate::mcp::ToolResult) {
+        self.mcp_results.insert(id.to_string(), (result.text.clone(), result.is_error));
     }
 
     /// Settings as the session lists them: the model setting's choices become its models
@@ -986,7 +1122,14 @@ impl Translator {
                     ];
                 }
                 let mut out = self.close();
-                let call = self.calls.entry(id.clone()).or_default();
+                let next_call = &mut self.next_call;
+                let call = self.calls.entry(id.clone()).or_insert_with(|| {
+                    *next_call += 1;
+                    Call { seq: *next_call, ..Call::default() }
+                });
+                if let Some(n) = u["name"].as_str().filter(|s| !s.is_empty()) {
+                    call.name = n.to_string();
+                }
                 if let Some(t) = u["title"].as_str() {
                     call.title = t.to_string();
                 }
@@ -1005,7 +1148,7 @@ impl Translator {
                 if !u["rawOutput"].is_null() {
                     call.raw_output = u["rawOutput"].clone();
                 }
-                let shown = shown_tool(call);
+                let shown = shown_tool(call, &self.server_names);
                 if call.shown.as_ref() != Some(&shown) {
                     call.shown = Some(shown.clone());
                     out.push(Event::Assistant { message: format!("acp-tool-{id}"), parent: None, blocks: vec![Block::Tool { id: id.clone(), name: shown.0, input: shown.1 }] });
@@ -1013,7 +1156,14 @@ impl Translator {
                 let status = u["status"].as_str().unwrap_or("");
                 if (status == "completed" || status == "failed") && !call.finished {
                     call.finished = true;
-                    let full = result_text(call);
+                    let mut full = result_text(call);
+                    let mut is_error = status == "failed";
+                    if let Some((text, err)) = self.mcp_results.remove(&id) {
+                        if full.is_empty() {
+                            full = text;
+                        }
+                        is_error = is_error || err;
+                    }
                     let len = full.len();
                     let (text, full) = if len > RESULT_HEAD {
                         let cut = (0..=RESULT_HEAD).rev().find(|i| full.is_char_boundary(*i)).unwrap_or(0);
@@ -1021,7 +1171,7 @@ impl Translator {
                     } else {
                         (full, None)
                     };
-                    out.push(Event::ToolResults { parent: None, results: vec![ToolResult { id, text, len, is_error: status == "failed", full }] });
+                    out.push(Event::ToolResults { parent: None, results: vec![ToolResult { id, text, len, is_error, full }] });
                 }
                 out
             }
@@ -1072,6 +1222,9 @@ impl Translator {
     pub fn permission_tool(&mut self, tool_call: &Value) -> (String, String) {
         let id = tool_call["toolCallId"].as_str().unwrap_or("");
         let mut call = self.calls.get(id).cloned().unwrap_or_default();
+        if let Some(n) = tool_call["name"].as_str().filter(|s| !s.is_empty()) {
+            call.name = n.to_string();
+        }
         if let Some(t) = tool_call["title"].as_str() {
             call.title = t.to_string();
         }
@@ -1087,7 +1240,39 @@ impl Translator {
         if let Some(l) = tool_call["locations"].as_array() {
             call.locations = l.clone();
         }
-        shown_tool(&call)
+        shown_tool(&call, &self.server_names)
+    }
+}
+
+/// `mcp_<server>_<tool>` (as Antigravity names MCP tools) → `mcp__<server>__<tool>` (as the app
+/// presents memory, browser, thread, automation and media steps).
+fn normalize_mcp_name(name: &str, servers: &[String]) -> Option<String> {
+    if let Some(rest) = name.strip_prefix("mcp__") {
+        if rest.contains("__") {
+            return Some(name.to_string());
+        }
+    }
+    let rest = name.strip_prefix("mcp_")?;
+    for server in servers {
+        if let Some(tool) = rest.strip_prefix(server.as_str()).and_then(|r| r.strip_prefix('_')) {
+            if !tool.is_empty() {
+                return Some(format!("mcp__{server}__{tool}"));
+            }
+        }
+    }
+    None
+}
+
+/// Removes Antigravity's synthetic `toolSummary` field from an MCP tool's input object.
+fn clean_mcp_input(input: &Value) -> Value {
+    match input {
+        Value::Object(map) => {
+            let mut clean = map.clone();
+            clean.remove("toolSummary");
+            Value::Object(clean)
+        }
+        Value::Null => json!({}),
+        other => other.clone(),
     }
 }
 
@@ -1105,8 +1290,11 @@ fn first_path(call: &Call) -> Option<String> {
 }
 
 /// How a call shows: as the Claude Code tool it is when it is one (so its row reads as Claude's
-/// do: a command, a file read, an edit's diff), else under its own title with its input.
-fn shown_tool(call: &Call) -> (String, String) {
+/// do: a command, a file read, an edit's diff, or an in-app MCP tool), else under its own title.
+fn shown_tool(call: &Call, servers: &[String]) -> (String, String) {
+    if let Some(name) = normalize_mcp_name(&call.name, servers) {
+        return (name, clean_mcp_input(&call.raw_input).to_string());
+    }
     let input = &call.raw_input;
     match call.kind.as_str() {
         "execute" => {
@@ -1281,6 +1469,9 @@ mod tests {
             dead: false,
             woke: None,
             auth_methods: vec![],
+            append_system_prompt: None,
+            mcp_servers: vec![],
+            allowed_tools: vec![],
         };
         s.request("initialize", json!({}), Asked::Initialize, &w);
         s.queue.push_back(Waiting { id: "m1".into(), text: "Change main.rs so it prints hi instead of hello.".into(), images: vec![] });
@@ -1354,6 +1545,9 @@ mod tests {
             dead: false,
             woke: None,
             auth_methods: vec![],
+            append_system_prompt: None,
+            mcp_servers: vec![],
+            allowed_tools: vec![],
         };
         s.request("initialize", json!({}), Asked::Initialize, &w);
         s.queue.push_back(Waiting { id: "m1".into(), text: "run it in the background".into(), images: vec![] });
@@ -1427,6 +1621,9 @@ mod tests {
             dead: false,
             woke: None,
             auth_methods: vec![],
+            append_system_prompt: None,
+            mcp_servers: vec![],
+            allowed_tools: vec![],
         };
         s.request("initialize", json!({}), Asked::Initialize, &w);
         let _ = sent.try_recv();
@@ -1445,5 +1642,118 @@ mod tests {
         let end = s.receive(&json!({ "jsonrpc": "2.0", "id": 4, "result": { "stopReason": "end_turn" } }), &w);
         assert!(matches!(end.last(), Some(Event::Done { is_error: false, .. })));
         assert!(!s.busy);
+    }
+
+    #[test]
+    fn passes_system_prompt_and_mcp_servers_and_auto_approves_allowed_tools() {
+        let (w, sent) = flume::unbounded();
+        let mut s = Shared {
+            next_id: 0,
+            asked: HashMap::new(),
+            session: None,
+            ready: false,
+            busy: false,
+            replaying: false,
+            queue: VecDeque::new(),
+            permissions: HashMap::new(),
+            translator: Translator { server_names: vec!["memory".into(), "harness".into()], ..Translator::default() },
+            model: None,
+            mode: Some("default".into()),
+            cwd: "/p".into(),
+            resume: None,
+            capabilities: Value::Null,
+            dead: false,
+            woke: None,
+            auth_methods: vec![],
+            append_system_prompt: Some("# Memory\nUse mcp__memory__save.".into()),
+            mcp_servers: vec![json!({ "type": "http", "name": "memory", "url": "http://127.0.0.1:9999/mcp/memory", "headers": [] })],
+            allowed_tools: vec!["mcp__memory".into()],
+        };
+        s.request("initialize", json!({}), Asked::Initialize, &w);
+        let _ = sent.try_recv();
+        s.receive(
+            &json!({ "jsonrpc": "2.0", "id": 1, "result": { "protocolVersion": 1, "agentCapabilities": { "_meta": { "antigravity": { "systemPrompt": { "append": true } } } } } }),
+            &w,
+        );
+        let new_req = sent.try_recv().unwrap();
+        assert_eq!(new_req["method"], "session/new");
+        assert_eq!(new_req["params"]["mcpServers"][0]["name"], "memory");
+        let appended = new_req["params"]["_meta"]["antigravity"]["systemPrompt"]["append"].as_str().unwrap();
+        assert!(appended.contains("# Memory"));
+        assert!(appended.contains("mcp_<server>_<tool>"));
+
+        // Pre-approved in-app MCP tool is auto-approved without emitting Event::Permission.
+        let perm_events = s.receive(
+            &json!({
+                "jsonrpc": "2.0",
+                "id": "perm-1",
+                "method": "session/request_permission",
+                "params": {
+                    "toolCall": { "toolCallId": "c1", "name": "mcp_memory_save", "kind": "other", "title": "Run mcp_memory_save" },
+                    "options": [{ "optionId": "allow", "kind": "allow_once", "name": "Allow" }, { "optionId": "deny", "kind": "reject_once", "name": "Deny" }]
+                }
+            }),
+            &w,
+        );
+        assert!(perm_events.is_empty());
+        let reply = sent.try_recv().unwrap();
+        assert_eq!(reply["id"], "perm-1");
+        assert_eq!(reply["result"]["outcome"]["optionId"], "allow");
+
+        // An unapproved tool still asks the user.
+        let asked = s.receive(
+            &json!({
+                "jsonrpc": "2.0",
+                "id": "perm-2",
+                "method": "session/request_permission",
+                "params": {
+                    "toolCall": { "toolCallId": "c2", "name": "mcp_other_tool", "kind": "other", "title": "Run mcp_other_tool" },
+                    "options": [{ "optionId": "allow", "kind": "allow_once", "name": "Allow" }]
+                }
+            }),
+            &w,
+        );
+        assert!(matches!(&asked[..], [Event::Permission { .. }]));
+    }
+
+    #[test]
+    fn normalizes_in_app_mcp_calls_and_backfills_output() {
+        let mut t = Translator { server_names: vec!["harness".into(), "memory".into()], ..Translator::default() };
+        t.start_turn();
+        let a = t.update(&json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "call_1",
+            "name": "mcp_memory_save",
+            "kind": "other",
+            "title": "Run mcp_memory_save",
+            "status": "in_progress",
+            "rawInput": { "title": "Use pnpm", "toolSummary": "Save memory" }
+        }));
+        match &a[0] {
+            Event::Assistant { blocks, .. } => match &blocks[0] {
+                Block::Tool { id, name, input } => {
+                    assert_eq!((id.as_str(), name.as_str()), ("call_1", "mcp__memory__save"));
+                    let v: Value = serde_json::from_str(input).unwrap();
+                    assert_eq!(v["title"], "Use pnpm");
+                    assert!(v.get("toolSummary").is_none());
+                }
+                b => panic!("{b:?}"),
+            },
+            e => panic!("{e:?}"),
+        }
+        assert_eq!(t.claim_mcp_call("memory", "save", &json!({ "title": "Use pnpm" })).as_deref(), Some("call_1"));
+        assert!(t.claim_mcp_call("memory", "save", &json!({ "title": "Use pnpm" })).is_none());
+        t.record_mcp_result("call_1", &crate::mcp::ToolResult::text("Saved 1a2b3c4d Use pnpm."));
+        // agy acp sends completed with no content/rawOutput: our recorded result fills it in.
+        let done = t.update(&json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "call_1",
+            "name": "mcp_memory_save",
+            "kind": "other",
+            "title": "Run mcp_memory_save",
+            "status": "completed",
+            "rawInput": { "title": "Use pnpm", "toolSummary": "Save memory" }
+        }));
+        assert!(matches!(&done[0], Event::ToolResults { results, .. } if results[0].text == "Saved 1a2b3c4d Use pnpm." && !results[0].is_error));
     }
 }

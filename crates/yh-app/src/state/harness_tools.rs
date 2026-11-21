@@ -65,10 +65,12 @@ const BROWSER_TIMEOUT: Duration = Duration::from_secs(300);
 pub struct HarnessTools {
     pub caller: String,
     pub requests: flume::Sender<ToolRequest>,
-    /// Where the thread's `claude` runs: relative paths are from here.
+    /// Where the thread's agent runs: relative paths are from here.
     pub folder: String,
     /// The data folder's `attachments/`, where shown media is copied.
     pub attachments: std::path::PathBuf,
+    /// Offer `sign_in_to_mcp_server` (Claude Code's `/mcp` OAuth flow).
+    pub sign_in: bool,
 }
 
 /// A server's name as in tool names: anything but letters, digits, `_` and `-` as `_`.
@@ -234,41 +236,42 @@ impl ToolServer for HarnessTools {
     }
 
     fn tools(&self) -> Vec<Value> {
-        vec![
-            tool(
-                "show_media",
-                "Show the user images or videos right in the conversation: screenshots, screen recordings, simulator captures, charts or images you generated. Give file paths, absolute or relative to your working directory. The files are copied into the conversation, so they stay after the originals are deleted. Images: png, jpg, gif, heic, webp, tiff, bmp. Videos: mp4, mov, m4v.",
-                schema(
-                    json!({
-                        "paths": { "type": "array", "items": { "type": "string" }, "minItems": 1, "maxItems": MAX_MEDIA_FILES, "description": "The files to show, in order." },
-                        "path": { "type": "string", "description": "One file to show, instead of `paths`." },
-                        "caption": { "type": "string", "description": "Optional: a line about what they show." },
-                    }),
-                    &[],
-                ),
-                true,
-                true,
-            ),
-            tool(
-            "sign_in_to_mcp_server",
-            "Ask the user to sign in to an MCP server that needs authentication before its tools work (Claude Code reports it as needing auth, or says the session is non-interactive and to use /mcp or a terminal). A card in the conversation asks them; signing in opens the server's page in their browser. Returns once the server is connected, so you can use its tools right after (they may arrive as deferred tools to load), or says they declined. Use this instead of telling the user to run /mcp or open a terminal.",
+        let mut all = vec![tool(
+            "show_media",
+            "Show the user images or videos right in the conversation: screenshots, screen recordings, simulator captures, charts or images you generated. Give file paths, absolute or relative to your working directory. The files are copied into the conversation, so they stay after the originals are deleted. Images: png, jpg, gif, heic, webp, tiff, bmp. Videos: mp4, mov, m4v.",
             schema(
                 json!({
-                    "server": { "type": "string", "description": "The server's name, as in its tools' mcp__<server>__ prefix or as Claude Code lists it." },
-                    "reason": { "type": "string", "description": "A short line on what you need it for, shown to the user." },
+                    "paths": { "type": "array", "items": { "type": "string" }, "minItems": 1, "maxItems": MAX_MEDIA_FILES, "description": "The files to show, in order." },
+                    "path": { "type": "string", "description": "One file to show, instead of `paths`." },
+                    "caption": { "type": "string", "description": "Optional: a line about what they show." },
                 }),
-                &["server"],
+                &[],
             ),
-            false,
             true,
-        ),
-        ]
+            true,
+        )];
+        if self.sign_in {
+            all.push(tool(
+                "sign_in_to_mcp_server",
+                "Ask the user to sign in to an MCP server that needs authentication before its tools work (Claude Code reports it as needing auth, or says the session is non-interactive and to use /mcp or a terminal). A card in the conversation asks them; signing in opens the server's page in their browser. Returns once the server is connected, so you can use its tools right after (they may arrive as deferred tools to load), or says they declined. Use this instead of telling the user to run /mcp or open a terminal.",
+                schema(
+                    json!({
+                        "server": { "type": "string", "description": "The server's name, as in its tools' mcp__<server>__ prefix or as Claude Code lists it." },
+                        "reason": { "type": "string", "description": "A short line on what you need it for, shown to the user." },
+                    }),
+                    &["server"],
+                ),
+                false,
+                true,
+            ));
+        }
+        all
     }
 
     fn call(&self, name: &str, a: &Value, tool_use: Option<&str>) -> ToolResult {
         match name {
             "show_media" => self.show_media(a, tool_use),
-            "sign_in_to_mcp_server" => self.sign_in(a),
+            "sign_in_to_mcp_server" if self.sign_in => self.sign_in(a),
             other => ToolResult::error(format!("No tool named {other}.")),
         }
     }

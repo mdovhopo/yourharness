@@ -2111,10 +2111,7 @@ impl Workspace {
             let scope = yh_core::memory::scope_of(&project.id);
             let actor = yh_core::memory::Actor { kind: "agent".into(), thread: Some(t.id().to_string()) };
             let (text, listed) = yh_core::memory::prompt(&store.memories(Some(&scope), Some("active")), &project.name, track_tasks);
-            // Counted only where it's given: another agent's thread gets no prompt from us yet.
-            if self.agent_of(t) == yh_core::agents::Agent::Claude {
-                store.note_injection(&scope, listed, text.len(), &actor);
-            }
+            store.note_injection(&scope, listed, text.len(), &actor);
             prompt.push(text);
             allowed.push("mcp__memory".to_string());
             let changed = self.tool_requests.clone();
@@ -2130,11 +2127,20 @@ impl Workspace {
                 tasks: track_tasks,
             }));
         }
-        // Claude asks you to sign in to an MCP server, from a card in the thread.
-        prompt.push(crate::state::harness_tools::INSTRUCTIONS.to_string());
+        // Claude asks you to sign in to an MCP server, from a card in the thread; any agent
+        // shows images and videos (`show_media`).
+        let is_claude = self.agent_of(t) == yh_core::agents::Agent::Claude;
+        if is_claude {
+            prompt.push(crate::state::harness_tools::INSTRUCTIONS.to_string());
+        }
         allowed.push("mcp__harness".to_string());
-        servers.push(std::sync::Arc::new(crate::state::harness_tools::HarnessTools { caller: t.id().to_string(), requests: self.tool_requests.clone(), folder: cwd.clone(), attachments: attachments.clone() }));
-        // Claude shows you images and videos (`show_media`).
+        servers.push(std::sync::Arc::new(crate::state::harness_tools::HarnessTools {
+            caller: t.id().to_string(),
+            requests: self.tool_requests.clone(),
+            folder: cwd.clone(),
+            attachments: attachments.clone(),
+            sign_in: is_claude,
+        }));
         prompt.push(crate::state::harness_tools::MEDIA_INSTRUCTIONS.to_string());
         // The thread tools: list, read and tidy threads; this thread's title.
         if let Some(project) = project.as_ref() {
