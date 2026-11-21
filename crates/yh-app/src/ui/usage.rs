@@ -73,7 +73,7 @@ impl UsagePage {
             days,
             cost: std::env::var("YH_USAGE_METRIC").as_deref() == Ok("cost"),
             report: None,
-            reading: Some("Reading Claude Code's history…".into()),
+            reading: Some("Reading your history…".into()),
             hovered: std::env::var("YH_USAGE_HOVER").ok().and_then(|d| d.parse::<usize>().ok()).map(|ago| days.saturating_sub(ago + 1)),
             chart: Rc::new(Cell::new(Bounds::default())),
             probe_started: false,
@@ -87,15 +87,20 @@ impl UsagePage {
         page
     }
 
-    /// Reads what's new in the session files, then makes the report: both off the main thread.
+    /// Reads what's new in Claude Code's session files and Antigravity's conversations, then
+    /// makes the report: all off the main thread.
     fn refresh(&mut self, cx: &mut Context<Self>) {
         let (store, days) = (self.store.clone(), self.days);
         let config = yh_core::history::config_directory();
         cx.spawn(async move |this, cx| {
             let started = std::time::Instant::now();
-            let (read, report) = cx.background_executor().spawn(async move { (store.refresh(&config), store.report(days)) }).await;
+            let (read, agy, report) = cx
+                .background_executor()
+                .spawn(async move { (store.refresh(&config), store.refresh_antigravity(&yh_core::antigravity_usage::conversation_folders()), store.report(days)) })
+                .await;
             if std::env::var("YH_DATA_DIR").is_ok() {
                 eprintln!("USAGE read {} of {} files ({} replies) and reported {days} days in {} ms", read.files_read, read.files_total, read.records, started.elapsed().as_millis());
+                eprintln!("USAGE antigravity read {} of {} conversations ({} calls)", agy.files_read, agy.files_total, agy.records);
             }
             let _ = this.update(cx, |page, cx| {
                 page.report = Some(report);
@@ -454,14 +459,15 @@ impl Render for UsagePage {
             .child(div().flex_1())
             .child(page_kit::segmented(vec![metric("metric-tokens", "Tokens", false, icons::hash()), metric("metric-cost", "Cost", true, icons::coins())], &theme))
             .into_any_element();
-        // Claude Code's history, and the Antigravity turns this app ran (agy keeps no such files).
+        // Claude Code's history and Antigravity's (its conversation files, and this app's turns
+        // not in them yet).
         let agy = self.workspace.read(cx).agy_found;
         let subtitle = div()
             .truncate()
-            .child(self.reading.clone().unwrap_or_else(|| if agy { "Every Claude Code session, here or in a terminal · Antigravity threads in this app".into() } else { "Every Claude Code session, here or in a terminal".into() }))
+            .child(self.reading.clone().unwrap_or_else(|| if agy { "Every Claude Code and Antigravity session, here or in a terminal".into() } else { "Every Claude Code session, here or in a terminal".into() }))
             .into_any_element();
         let refreshing = self.refreshing;
-        let toolbar = crate::ui::thread_toolbar::icon_button("usage-refresh", gpui_kit::component::Icon::new(gpui_kit::component::IconName::RefreshCw), "Read Claude Code's history again", &theme)
+        let toolbar = crate::ui::thread_toolbar::icon_button("usage-refresh", gpui_kit::component::Icon::new(gpui_kit::component::IconName::RefreshCw), "Read the history again", &theme)
             .loading(refreshing)
             .disabled(refreshing)
             .on_click(cx.listener(|p, _, _, cx| {
@@ -485,7 +491,7 @@ impl Render for UsagePage {
                 .flex_col()
                 .child(header)
                 .child(self.width.probe(page.clone()))
-                .child(div().flex_1().child(page_kit::empty_state(icons::chart_column(), "Reading Claude Code's History", "Every session's replies, here or in a terminal, added up by day and by model.", None, &theme)))
+                .child(div().flex_1().child(page_kit::empty_state(icons::chart_column(), "Reading Your History", "Every session's replies, here or in a terminal, added up by day and by model.", None, &theme)))
                 .into_any_element();
         };
         // Colors follow the model, by when it was first used, never by this range's ranking.
@@ -862,7 +868,7 @@ impl Render for UsagePage {
             .gap(px(3.))
             .text_size(px(text::CAPTION))
             .text_color(theme.tertiary)
-            .child("Costs are what the same tokens would cost on Anthropic's API, not what your plan charges; models with no Anthropic price (Gemini…) count as unpriced tokens. From Claude Code's session files, this app's side chats and memory agents, and the Antigravity threads run here.")
+            .child("Costs are what the same tokens would cost on Anthropic's API, not what your plan charges; models with no Anthropic price (Gemini…) count as unpriced tokens. From Claude Code's session files, this app's side chats and memory agents, and Antigravity's conversations.")
             .child(
                 div()
                     .flex()

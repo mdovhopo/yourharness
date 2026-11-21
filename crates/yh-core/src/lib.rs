@@ -4,6 +4,7 @@
 
 pub mod accounts;
 pub mod acp;
+pub mod antigravity_usage;
 pub mod agent_process;
 pub mod attachments;
 pub mod automation_tools;

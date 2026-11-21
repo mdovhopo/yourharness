@@ -332,11 +332,35 @@ fn open(path: &Path) -> rusqlite::Result<Connection> {
             add_to_bucket("NEW")
         ))?;
     }
+    // Antigravity's turns: which conversation each live-counted one belongs to, and the
+    // conversations read from Antigravity's own files, whose calls replace those turns.
+    if version < 2 {
+        c.execute_batch(&format!(
+            "CREATE TABLE IF NOT EXISTS agent_turns (key INTEGER PRIMARY KEY, session TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS agent_turns_session ON agent_turns(session);
+            CREATE TABLE IF NOT EXISTS agent_files (session TEXT PRIMARY KEY);
+            CREATE TRIGGER IF NOT EXISTS messages_removed AFTER DELETE ON messages BEGIN
+                UPDATE buckets SET input = input - OLD.input, output = output - OLD.output, cache_read = cache_read - OLD.cache_read,
+                    cache_5m = cache_5m - OLD.cache_5m, cache_1h = cache_1h - OLD.cache_1h, messages = messages - 1
+                WHERE bucket = {} AND model = OLD.model AND fast = OLD.fast AND long = {};
+            END;
+            PRAGMA user_version = 2;",
+            BUCKET.replace("R.", "OLD."),
+            long("OLD")
+        ))?;
+    }
     Ok(c)
 }
 
 static TURNS_DIR: OnceLock<PathBuf> = OnceLock::new();
-static TURNS: OnceLock<flume::Sender<(MessageUsage, bool)>> = OnceLock::new();
+static TURNS: OnceLock<flume::Sender<Turn>> = OnceLock::new();
+
+/// A turn's count so far (`exact` false) or its result's (`exact` true), and its conversation.
+pub struct Turn {
+    pub usage: MessageUsage,
+    pub session: String,
+    pub exact: bool,
+}
 
 /// Where `note_turn` writes: the data folder, set by the app at launch. Tests leave it unset,
 /// so they never write.
@@ -347,25 +371,26 @@ pub fn record_turns_in(directory: PathBuf) {
 /// A turn run by an agent that keeps no session files of its own (Antigravity): one row per
 /// turn, by its key. While it runs, `exact` false: what it has used so far (`source` 2), so a
 /// crash mid-turn still leaves it counted; at its end, `exact` true: its result's numbers
-/// (`source` 1), which replace the estimate and are never replaced themselves. Written aside, at
-/// most once a second.
-pub fn note_turn(usage: MessageUsage, exact: bool) {
+/// (`source` 1), which replace the estimate and are never replaced themselves. Once its
+/// conversation is read from Antigravity's own files (`refresh`), those count instead: its
+/// turns are taken out and no more are written. Written aside, at most once a second.
+pub fn note_turn(turn: Turn) {
     let Some(dir) = TURNS_DIR.get() else { return };
     let sender = TURNS.get_or_init(|| {
-        let (tx, rx) = flume::unbounded::<(MessageUsage, bool)>();
+        let (tx, rx) = flume::unbounded::<Turn>();
         let path = dir.join("usage.sqlite");
         std::thread::Builder::new()
             .name("usage-turns".into())
             .spawn(move || {
                 let mut c = None;
                 while let Ok(first) = rx.recv() {
-                    let mut batch: HashMap<i64, (MessageUsage, bool)> = HashMap::new();
-                    let mut urgent = first.1;
+                    let mut batch: HashMap<i64, Turn> = HashMap::new();
+                    let mut urgent = first.exact;
                     merge_turn(&mut batch, first);
                     let until = std::time::Instant::now() + std::time::Duration::from_secs(1);
                     while !urgent {
                         let Ok(next) = rx.recv_deadline(until) else { break };
-                        urgent = next.1;
+                        urgent = next.exact;
                         merge_turn(&mut batch, next);
                     }
                     while let Ok(next) = rx.try_recv() {
@@ -387,22 +412,26 @@ pub fn note_turn(usage: MessageUsage, exact: bool) {
             .ok();
         tx
     });
-    let _ = sender.send((usage, exact));
+    let _ = sender.send(turn);
 }
 
 /// The newest word on a turn wins, but an estimate never takes an exact count's place.
-fn merge_turn(batch: &mut HashMap<i64, (MessageUsage, bool)>, (usage, exact): (MessageUsage, bool)) {
-    if batch.get(&usage.key).is_some_and(|(_, e)| *e && !exact) {
+fn merge_turn(batch: &mut HashMap<i64, Turn>, turn: Turn) {
+    if batch.get(&turn.usage.key).is_some_and(|t| t.exact && !turn.exact) {
         return;
     }
-    batch.insert(usage.key, (usage, exact));
+    batch.insert(turn.usage.key, turn);
 }
 
-fn write_turns(c: &mut Connection, turns: impl Iterator<Item = (MessageUsage, bool)>) -> rusqlite::Result<()> {
-    let tx = c.transaction()?;
-    for (u, exact) in turns {
-        let t = &u.tokens;
-        let sql = if exact {
+fn write_turns(c: &mut Connection, turns: impl Iterator<Item = Turn>) -> rusqlite::Result<()> {
+    let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    for turn in turns {
+        // Its conversation is counted from Antigravity's files now.
+        if tx.query_row("SELECT 1 FROM agent_files WHERE session = ?", [&turn.session], |_| Ok(())).is_ok() {
+            continue;
+        }
+        let (u, t) = (&turn.usage, &turn.usage.tokens);
+        let sql = if turn.exact {
             "INSERT INTO messages (key, at, model, input, output, cache_read, cache_5m, cache_1h, fast, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 1)
              ON CONFLICT(key) DO UPDATE SET model = excluded.model, input = excluded.input, output = excluded.output, cache_read = excluded.cache_read,
                 cache_5m = excluded.cache_5m, cache_1h = excluded.cache_1h, source = 1"
@@ -412,6 +441,30 @@ fn write_turns(c: &mut Connection, turns: impl Iterator<Item = (MessageUsage, bo
                 cache_5m = excluded.cache_5m, cache_1h = excluded.cache_1h WHERE source = 2"
         };
         tx.execute(sql, params![u.key, u.at, u.model, t.input, t.output, t.cache_read, t.cache_5m, t.cache_1h])?;
+        tx.execute("INSERT OR IGNORE INTO agent_turns (key, session) VALUES (?, ?)", params![u.key, turn.session])?;
+    }
+    tx.commit()
+}
+
+/// A conversation's calls, read from Antigravity's file, in place of the turns counted live:
+/// from now on only the file counts for it. Nothing changes if no call could be read.
+fn write_conversation(c: &mut Connection, session: &str, calls: &[crate::antigravity_usage::Call]) -> rusqlite::Result<()> {
+    if calls.is_empty() {
+        return Ok(());
+    }
+    let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    tx.execute("INSERT OR IGNORE INTO agent_files (session) VALUES (?)", [session])?;
+    tx.execute("DELETE FROM messages WHERE key IN (SELECT key FROM agent_turns WHERE session = ?)", [session])?;
+    tx.execute("DELETE FROM agent_turns WHERE session = ?", [session])?;
+    for call in calls {
+        let t = &call.tokens;
+        tx.execute(
+            "INSERT INTO messages (key, at, model, input, output, cache_read, cache_5m, cache_1h, fast, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 3)
+             ON CONFLICT(key) DO UPDATE SET model = excluded.model, input = excluded.input, output = excluded.output,
+                cache_read = excluded.cache_read, cache_5m = excluded.cache_5m, cache_1h = excluded.cache_1h
+             WHERE input != excluded.input OR output != excluded.output OR cache_read != excluded.cache_read OR model != excluded.model",
+            params![stable_hash(&format!("agy:{session}:{}", call.index)), call.at, call.model, t.input, t.output, t.cache_read, t.cache_5m, t.cache_1h],
+        )?;
     }
     tx.commit()
 }
@@ -509,6 +562,33 @@ impl UsageStore {
             }
         }
         let _ = c.execute_batch("PRAGMA cache_size = -2000; PRAGMA shrink_memory;");
+        result
+    }
+
+    /// Reads what changed in Antigravity's conversation files (`antigravity_usage`): its whole
+    /// history the first time, its command line's and its IDE's, then each conversation again as
+    /// it grows.
+    pub fn refresh_antigravity(&self, folders: &[PathBuf]) -> Refresh {
+        let files = crate::antigravity_usage::conversation_files(folders);
+        let mut result = Refresh { files_read: 0, files_total: 0, records: 0 };
+        let mut guard = self.writer.lock().unwrap();
+        let Some(c) = guard.as_mut() else { return result };
+        let _ = c.busy_timeout(std::time::Duration::from_secs(5));
+        for (path, session, size, modified) in files {
+            let key = path.to_string_lossy().into_owned();
+            let known: Option<(i64, f64)> = c.query_row("SELECT size, modified FROM files WHERE path = ?", [&key], |r| Ok((r.get(0)?, r.get(1)?))).ok();
+            if known == Some((size, modified)) {
+                continue;
+            }
+            result.files_total += 1;
+            let calls = crate::antigravity_usage::read_conversation(&path);
+            if write_conversation(c, &session, &calls).is_ok()
+                && c.execute("INSERT OR REPLACE INTO files (path, size, modified, offset) VALUES (?, ?, ?, 0)", params![key, size, modified]).is_ok()
+            {
+                result.files_read += 1;
+                result.records += calls.len();
+            }
+        }
         result
     }
 
@@ -728,26 +808,69 @@ mod tests {
         assert_eq!(civil(days_from_civil(2026, 11, 7)), (2026, 11, 7));
     }
 
+    fn turn(session: &str, key: i64, input: i64, output: i64, exact: bool) -> Turn {
+        let usage = MessageUsage { key, at: now(), model: "gemini-4-neon".into(), tokens: Tokens { input, output, ..Default::default() }, fast: false };
+        Turn { usage, session: session.into(), exact }
+    }
+
+    fn totals(path: &Path) -> (i64, i64, i64) {
+        let r = UsageStore { writer: Mutex::new(None), path: path.to_path_buf() }.report(1);
+        (r.total.tokens.total(), r.total.tokens.output, r.total.messages)
+    }
+
     #[test]
     fn a_turn_counts_once_and_exact_wins() {
         let dir = std::env::temp_dir().join(format!("yh-usage-turns-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("usage.sqlite");
+        let _ = std::fs::remove_file(&path);
         let mut c = open(&path).unwrap();
-        let at = now();
-        let turn = |input: i64, output: i64| MessageUsage { key: 7, at, model: "gemini-4-neon-high".into(), tokens: Tokens { input, output, ..Default::default() }, fast: false };
-        write_turns(&mut c, [(turn(9466, 0), false)].into_iter()).unwrap();
-        write_turns(&mut c, [(turn(19231, 0), false)].into_iter()).unwrap();
-        write_turns(&mut c, [(turn(28762, 438), true)].into_iter()).unwrap();
+        write_turns(&mut c, [turn("s", 7, 9466, 0, false)].into_iter()).unwrap();
+        write_turns(&mut c, [turn("s", 7, 19231, 0, false)].into_iter()).unwrap();
+        write_turns(&mut c, [turn("s", 7, 28762, 438, true)].into_iter()).unwrap();
         // A late estimate (queued before the end) doesn't undo the exact count.
-        write_turns(&mut c, [(turn(29200, 0), false)].into_iter()).unwrap();
-        let store = UsageStore { writer: Mutex::new(None), path: path.clone() };
-        let r = store.report(1);
-        assert_eq!((r.total.tokens.input, r.total.tokens.output, r.total.messages), (28762, 438, 1));
+        write_turns(&mut c, [turn("s", 7, 29200, 0, false)].into_iter()).unwrap();
+        assert_eq!(totals(&path), (29200, 438, 1));
         let mut batch = HashMap::new();
-        merge_turn(&mut batch, (turn(1, 1), true));
-        merge_turn(&mut batch, (turn(5, 0), false));
-        assert_eq!(batch[&7].0.tokens.input, 1);
+        merge_turn(&mut batch, turn("s", 7, 1, 1, true));
+        merge_turn(&mut batch, turn("s", 7, 5, 0, false));
+        assert_eq!(batch[&7].usage.tokens.input, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Antigravity's own files replace what was counted live for their conversation, once and
+    /// for good; other conversations' live counts stay.
+    #[test]
+    fn antigravity_files_replace_live_counts() {
+        let dir = std::env::temp_dir().join(format!("yh-usage-agy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let folder = dir.join("conversations");
+        std::fs::create_dir_all(&folder).unwrap();
+        let store = UsageStore::new(&dir);
+        let path = dir.join("usage.sqlite");
+        {
+            let mut c = open(&path).unwrap();
+            // Two turns of conversation A counted live (the second cut short), one of B.
+            write_turns(&mut c, [turn("A", 1, 33697 + 90544, 757, true), turn("A", 2, 24265, 0, false), turn("B", 3, 500, 0, true)].into_iter()).unwrap();
+        }
+        assert_eq!(totals(&path), (33697 + 90544 + 757 + 24265 + 500, 757, 3));
+        // A's file: the first turn's five calls and the cut-short turn's one finished call.
+        crate::antigravity_usage::tests::conversation(
+            &folder.join("A.db"),
+            &[("gemini-4-neon", 24041, 327, 0), ("gemini-4-neon", 2477, 174, 21984), ("gemini-4-neon", 2491, 181, 22412), ("gemini-4-neon", 2489, 56, 22854), ("gemini-4-neon", 2199, 19, 23294), ("gemini-4-neon", 7643, 238, 16384)],
+            now() as u64 - 60,
+        );
+        let read = store.refresh_antigravity(&[folder.clone()]);
+        assert_eq!((read.files_read, read.records), (1, 6));
+        // The same tokens: A's live turns gone, its calls in their place, B untouched.
+        assert_eq!(totals(&path), (33697 + 90544 + 757 + 24265 + 500, 757 + 238, 7));
+        // Read again unchanged: nothing new; A's live turns no longer written.
+        assert_eq!(store.refresh_antigravity(&[folder.clone()]).files_total, 0);
+        {
+            let mut c = open(&path).unwrap();
+            write_turns(&mut c, [turn("A", 4, 9999, 0, true), turn("B", 5, 100, 0, true)].into_iter()).unwrap();
+        }
+        assert_eq!(totals(&path), (33697 + 90544 + 757 + 24265 + 600, 757 + 238, 8));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

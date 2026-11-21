@@ -587,11 +587,12 @@ impl Shared {
     }
 
     /// The turn under way's row in the Usage page's index: one per turn, by session and turn.
-    fn turn_usage(&self, tokens: crate::usage::Tokens) -> crate::usage::MessageUsage {
+    fn turn_usage(&self, tokens: crate::usage::Tokens, exact: bool) -> crate::usage::Turn {
         let model = self.translator.current_model.clone().or_else(|| self.model.clone()).unwrap_or_else(|| "antigravity".into());
         let key = crate::usage::stable_hash(&format!("acp:{}:{}{}", self.session.as_deref().unwrap_or(""), self.translator.nonce, self.translator.turn));
         let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0., |d| d.as_secs_f64());
-        crate::usage::MessageUsage { key, at, model, tokens, fast: false }
+        let usage = crate::usage::MessageUsage { key, at, model, tokens, fast: false };
+        crate::usage::Turn { usage, session: self.session.clone().unwrap_or_default(), exact }
     }
 
     fn prompt(&mut self, w: Waiting, writer: &flume::Sender<Value>) -> Vec<Event> {
@@ -733,7 +734,7 @@ impl Shared {
                     if let Some(used) = update["used"].as_i64().filter(|u| *u > 0) {
                         self.translator.spent += used;
                         let tokens = crate::usage::Tokens { input: self.translator.spent, ..Default::default() };
-                        crate::usage::note_turn(self.turn_usage(tokens), false);
+                        crate::usage::note_turn(self.turn_usage(tokens, false));
                     }
                 }
                 out
@@ -842,7 +843,7 @@ impl Shared {
                 self.busy = false;
                 // What it used, for the Usage page: Antigravity keeps no files to read it from.
                 if result["usage"].is_object() {
-                    crate::usage::note_turn(self.turn_usage(crate::usage::acp_tokens(&result["usage"])), true);
+                    crate::usage::note_turn(self.turn_usage(crate::usage::acp_tokens(&result["usage"]), true));
                 }
                 let cancelled = result["stopReason"] == "cancelled";
                 let mut out = self.translator.end_turn(cancelled);
