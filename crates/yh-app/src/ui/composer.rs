@@ -822,12 +822,31 @@ impl Composer {
         let (secondary, error, accent) = (theme.secondary, theme.error, theme.accent);
         let agy_default = ws.agent_default_name();
         // The agent the thread runs on, its own chip: changeable until the first message, then
-        // only saying which; not there at all when Claude Code is the only agent here.
-        let agent_menu = (agy || ws.agy_found).then(|| {
+        // a quiet subtle badge saying which; not there at all when Claude Code is the only agent here.
+        let agent_menu: Option<gpui_kit::AnyElement> = (agy || ws.agy_found).then(|| {
             let (w, id) = (w.clone(), id.clone());
             let agent = if agy { yh_core::agents::Agent::Antigravity } else { yh_core::agents::Agent::Claude };
             let label = if agy { "Antigravity" } else { "Claude Code" };
             let tip = if can_switch { "Agent".to_string() } else { format!("This thread runs on {label}. New threads can use another.") };
+            if !can_switch {
+                return div()
+                    .id("agent")
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .h(px(22.))
+                    .px(px(6.))
+                    .rounded(px(radius::SMALL))
+                    .bg(theme.hover)
+                    .border_1()
+                    .border_color(theme.separator.opacity(0.8))
+                    .child(Icon::new(IconName::Bot).size(px(12.)).text_color(theme.tertiary))
+                    .when(!compact, |d| d.child(div().text_size(px(text::CAPTION)).text_color(theme.secondary).child(label)))
+                    .aria_label(format!("Agent: {label}"))
+                    .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                    .into_any_element();
+            }
             Button::new("agent")
                 .ghost()
                 .small()
@@ -836,8 +855,7 @@ impl Composer {
                 .when(!compact, |b| b.child(picker_label(label.to_string(), secondary)))
                 .accessibility_label(format!("Agent: {label}"))
                 .tooltip(tip)
-                .disabled(!can_switch)
-                .dropdown_caret(can_switch && !compact)
+                .dropdown_caret(!compact)
                 .dropdown_menu(move |mut menu, _, _| {
                     menu = menu.min_w(px(260.)).label("Agent");
                     for (a, name, detail) in [
@@ -851,6 +869,7 @@ impl Composer {
                     }
                     menu.separator().item(crate::ui::page_kit::menu_note("Until its first message. New threads start on the last one picked."))
                 })
+                .into_any_element()
         });
         let model_menu = {
             let (w, id, models, current) = (w.clone(), id.clone(), models.clone(), current_model.clone());
@@ -880,8 +899,21 @@ impl Composer {
         let effort_menu = (!efforts.is_empty()).then(|| {
             let (w, id, current) = (w.clone(), id.clone(), effort.clone());
             let efforts = efforts.clone();
+            let custom = effort.is_some();
             let label = effort.as_deref().map(effort_label).unwrap_or("Auto").to_string();
-            Button::new("effort").ghost().small().flex_none().icon(icons::gauge().size(px(13.)).text_color(secondary)).accessibility_label(format!("Reasoning effort: {label}")).when(!compact, |b| b.child(picker_label(label, secondary))).tooltip("Reasoning effort").dropdown_caret(!compact).dropdown_menu(move |mut menu, _, _| {
+            let tint = if custom { accent } else { secondary };
+            // Quiet icon-only on Auto (like Workflow on Default) so we never show two "Auto ⌄"
+            // labels side-by-side; named and tinted when explicitly overridden.
+            Button::new("effort")
+                .ghost()
+                .small()
+                .flex_none()
+                .icon(icons::gauge().size(px(13.)).text_color(tint))
+                .accessibility_label(format!("Reasoning effort: {label}"))
+                .when(custom && !compact, |b| b.child(picker_label(label.clone(), tint)))
+                .tooltip(format!("Reasoning effort: {label}"))
+                .dropdown_caret(custom && !compact)
+                .dropdown_menu(move |mut menu, _, _| {
                 menu = menu.min_w(px(240.)).label("Reasoning Effort");
                 {
                     let (w, id) = (w.clone(), id.clone());
@@ -1220,7 +1252,7 @@ impl Render for Composer {
             });
         }
         let w = self.workspace.downgrade();
-        let mut inner = div().w_full().max_w(px(828.)).flex().flex_col();
+        let mut inner = div().w_full().max_w(px(780.)).flex().flex_col();
         if let Some((_, card)) = &self.elicit {
             inner = inner.child(card.clone());
         }
@@ -1317,11 +1349,11 @@ impl Render for Composer {
             .rounded(px(radius::LARGE))
             .bg(theme.card)
             .px(px(space::S))
-            .pt(px(space::S))
-            .pb(px(space::S))
+            .pt(px(6.))
+            .pb(px(6.))
             .flex()
             .flex_col()
-            .gap(px(space::XS))
+            .gap(px(4.))
             .child(div().px(px(space::XS)).child(Textarea::new(&self.input).appearance(false).max_h(px(320.))))
             .when(crate::probe::enabled(), |d| d.child(crate::probe::tracker("composer".into())))
             .child(
@@ -1338,6 +1370,7 @@ impl Render for Composer {
                             .on_click(cx.listener(|this, _, _, cx| this.attach(cx))),
                     )
                     .child(self.mic_button(&theme, cx))
+                    .child(div().flex_none().w(px(1.)).h(px(14.)).mx(px(3.)).bg(theme.separator))
                     // The pickers give way first when the window is narrow: Send always shows.
                     .child(div().flex_1().min_w_0().overflow_hidden().flex().items_center().gap(px(2.)).child(self.pickers(&thread, compact, &theme, cx)).children(
                         (!mcp_chip.is_empty()).then(|| mcp_attention_chip(&mcp_chip, self.workspace.downgrade(), &theme)),
@@ -1409,8 +1442,8 @@ impl Render for Composer {
             .relative()
             .flex()
             .justify_center()
-            .px(px(space::XL - 4.))
-            .pb(px(space::L))
+            .px(px(space::L))
+            .pb(px(10.))
             .on_action(cx.listener(Self::on_enter))
             .capture_action(cx.listener(Self::on_delete_line))
             .child(inner.child(composer))
@@ -1496,9 +1529,9 @@ impl Composer {
             .flex()
             .flex_col()
             .gap(px(2.))
-            .mb(px(space::S))
-            .px(px(space::M))
-            .py(px(space::XS + 2.))
+            .mb(px(4.))
+            .px(px(10.))
+            .py(px(5.))
             .rounded(px(radius::LARGE))
             .border_1()
             .border_color(theme.separator)
@@ -1563,9 +1596,9 @@ impl Composer {
             .flex()
             .flex_col()
             .gap(px(2.))
-            .mb(px(space::S))
-            .px(px(space::M))
-            .py(px(space::XS + 2.))
+            .mb(px(4.))
+            .px(px(10.))
+            .py(px(5.))
             .rounded(px(radius::LARGE))
             .border_1()
             .border_color(theme.separator)
@@ -1941,7 +1974,7 @@ fn context_ring(tokens: u64, window: Option<u64>, theme: &Theme) -> impl IntoEle
         None => format!("{} tokens in context", grouped(tokens)),
     };
     let text = match window {
-        Some(w) => format!("{} / {}", compact_tokens(tokens), compact_tokens(w)),
+        Some(w) => format!("{}/{}", compact_tokens(tokens), compact_tokens(w)),
         None => compact_tokens(tokens),
     };
     div()
@@ -1949,7 +1982,7 @@ fn context_ring(tokens: u64, window: Option<u64>, theme: &Theme) -> impl IntoEle
         .flex_none()
         .flex()
         .items_center()
-        .gap(px(6.))
+        .gap(px(5.))
         .mr(px(4.))
         .when(window.is_some(), |d| {
             d.child(
@@ -1960,7 +1993,7 @@ fn context_ring(tokens: u64, window: Option<u64>, theme: &Theme) -> impl IntoEle
                         let (cx0, cy0) = (f32::from(bounds.origin.x) + side / 2., f32::from(bounds.origin.y) + side / 2.);
                         let r = side / 2. - 1.5;
                         let arc = |from: f32, to: f32| {
-                            let mut path = gpui_kit::PathBuilder::stroke(px(2.5));
+                            let mut path = gpui_kit::PathBuilder::stroke(px(2.2));
                             let steps = ((to - from) * 48.).ceil().max(1.) as usize;
                             for n in 0..=steps {
                                 let a = (from + (to - from) * n as f32 / steps as f32) * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
@@ -1983,11 +2016,11 @@ fn context_ring(tokens: u64, window: Option<u64>, theme: &Theme) -> impl IntoEle
                         }
                     },
                 )
-                .w(px(14.))
-                .h(px(14.)),
+                .w(px(13.))
+                .h(px(13.)),
             )
         })
-        .child(div().text_size(px(11.)).text_color(theme.secondary).child(text))
+        .child(div().font_family(MONO).text_size(px(10.5)).text_color(theme.secondary).child(text))
         .tooltip(move |window, cx| Tooltip::new(help.clone()).build(window, cx))
 }
 

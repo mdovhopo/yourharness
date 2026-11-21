@@ -1498,8 +1498,8 @@ impl Inspector {
             .flex()
             .items_center()
             .gap(px(space::XS))
-            .px(px(space::M))
-            .h(px(44.))
+            .px(px(10.))
+            .h(px(38.))
             .flex_none()
             .border_b_1()
             .border_color(theme.separator)
@@ -1544,7 +1544,7 @@ impl Inspector {
         }
         let mut column = div().size_full().flex().flex_col().child(panel_header("Sub-agents", Some(subtitle), theme));
         if runs.len() > 1 {
-            let mut list = div().id("subagent-runs").max_h(px(176.)).overflow_y_scroll().px(px(space::S)).pb(px(space::S)).flex().flex_col().gap(px(1.)).border_b_1().border_color(theme.separator);
+            let mut list = div().id("subagent-runs").max_h(px(152.)).overflow_y_scroll().px(px(space::S)).py(px(4.)).flex().flex_col().gap(px(1.)).border_b_1().border_color(theme.separator);
             for (id, e) in runs.iter().rev() {
                 let b = e.borrow();
                 let (description, status) = run_label(&b);
@@ -1555,10 +1555,11 @@ impl Inspector {
                         .id(SharedString::from(format!("run-{id}")))
                         .flex()
                         .items_center()
-                        .gap(px(space::S))
-                        .h(px(28.))
+                        .gap(px(6.))
+                        .h(px(24.))
                         .px(px(space::S))
                         .rounded(px(radius::MEDIUM))
+                        .text_size(px(text::FOOTNOTE))
                         .cursor_pointer()
                         .when(on, |d| d.bg(theme.selected).font_weight(FontWeight::MEDIUM))
                         .when(!on, |d| d.hover(|s| s.bg(theme.hover)))
@@ -1818,22 +1819,28 @@ impl Inspector {
         } else if let Some(report) = report.filter(|r| !r.trim().is_empty()) {
             detail = detail.child(
                 div()
-                    .p(px(space::M))
+                    .relative()
+                    .pl(px(14.))
+                    .pr(px(12.))
+                    .py(px(10.))
                     .rounded(px(radius::LARGE))
                     .border_1()
-                    .border_color(theme.accent.opacity(0.25))
-                    .bg(theme.accent_soft)
+                    .border_color(theme.separator)
+                    .bg(theme.card)
+                    .overflow_hidden()
                     .flex()
                     .flex_col()
                     .gap(px(space::S))
+                    .child(div().absolute().top_0().bottom_0().left_0().w(px(3.)).bg(theme.accent.opacity(0.85)))
                     .child(
                         div()
                             .flex()
                             .items_center()
                             .gap(px(space::XS + 2.))
-                            .text_size(px(text::HEADLINE))
+                            .text_size(px(text::FOOTNOTE))
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child(Icon::new(IconName::FileText).size(px(14.)).text_color(theme.secondary))
+                            .text_color(theme.secondary)
+                            .child(Icon::new(IconName::FileText).size(px(13.)).text_color(theme.accent))
                             .child("Report"),
                     )
                     .child(div().text_size(px(text::BODY)).line_height(px(text::BODY_LINE)).child(crate::ui::rows::markdown_view(&yh_core::markdown::parse(&report), theme))),
@@ -1907,8 +1914,8 @@ impl Inspector {
             });
         let top = div()
             .flex_none()
-            .px(px(space::M))
-            .pb(px(space::S))
+            .px(px(10.))
+            .py(px(6.))
             .child(Input::new(&self.goto).small().prefix(Icon::new(IconName::Search).size(px(13.)).text_color(theme.tertiary)).cleanable(true));
         let mut column = div().size_full().flex().flex_col().child(header).child(top);
         if query {
@@ -1965,14 +1972,14 @@ impl Inspector {
                         let (menu_this, menu_root, menu_path) = (this.clone(), root.clone(), path.clone());
                         div()
                             .id(i)
-                            .h(px(24.))
+                            .h(px(22.))
                             .mx(px(space::S - 2.))
                             .flex()
                             .items_center()
                             .gap(px(space::XS + 1.))
-                            .pl(px(4. + depth as f32 * 14.))
+                            .pl(px(4. + depth as f32 * 13.))
                             .pr(px(space::S))
-                            .rounded(px(radius::MEDIUM))
+                            .rounded(px(radius::SMALL + 1.))
                             .text_size(px(text::FOOTNOTE))
                             .cursor_pointer()
                             .when(on, |d| d.bg(theme2.selected).font_weight(FontWeight::MEDIUM))
@@ -2055,8 +2062,8 @@ impl Inspector {
                 .flex_none()
                 .flex()
                 .items_center()
-                .h(px(28.))
-                .px(px(space::M))
+                .h(px(24.))
+                .px(px(10.))
                 .text_size(px(text::CAPTION))
                 .overflow_hidden()
                 .whitespace_nowrap()
@@ -3081,25 +3088,27 @@ fn empty_panel(icon: Icon, title: &str, detail: &str, theme: &Theme) -> gpui_kit
     div().size_full().pb(px(space::XL * 2.)).flex().items_center().justify_center().child(empty_state(icon, title, detail, theme)).into_any_element()
 }
 
-/// A panel's header, as the thread's: its title, a secondary line, its actions after.
+/// A panel's header, compact and quiet under the 38 pt tab bar.
 fn panel_header(title: &str, subtitle: Option<String>, theme: &Theme) -> gpui_kit::Div {
     div()
         .flex_none()
-        .h(px(40.))
+        .h(px(30.))
         .flex()
         .items_center()
         .gap(px(2.))
-        .pl(px(space::L))
-        .pr(px(space::S + 2.))
+        .pl(px(12.))
+        .pr(px(8.))
+        .border_b_1()
+        .border_color(theme.separator)
         .child(
             div()
                 .flex_1()
                 .min_w_0()
                 .flex()
                 .items_baseline()
-                .gap(px(space::S))
-                .child(div().flex_none().text_size(px(text::HEADLINE)).font_weight(FontWeight::SEMIBOLD).child(title.to_string()))
-                .when_some(subtitle, |d, s| d.child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child(s))),
+                .gap(px(6.))
+                .child(div().flex_none().text_size(px(text::FOOTNOTE)).font_weight(FontWeight::SEMIBOLD).child(title.to_string()))
+                .when_some(subtitle, |d, s| d.child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(text::CAPTION)).text_color(theme.secondary).child(s))),
         )
 }
 
@@ -3115,7 +3124,7 @@ pub(crate) fn strip_tab(id: SharedString, icon: Option<Icon>, title: String, on:
         .id(id)
         .flex_none()
         .max_w(px(max_w))
-        .h(px(26.))
+        .h(px(24.))
         .flex()
         .items_center()
         .gap(px(space::XS + 2.))

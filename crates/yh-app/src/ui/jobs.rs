@@ -366,9 +366,9 @@ impl Render for JobsStrip {
             .collect();
         let mut strip = div()
             .w_full()
-            .max_w(px(828.))
-            .mb(px(6.))
-            .pb(px(space::XS))
+            .max_w(px(780.))
+            .mb(px(4.))
+            .pb(px(3.))
             .rounded(px(radius::LARGE))
             .bg(theme.card)
             .border_1()
@@ -376,14 +376,14 @@ impl Render for JobsStrip {
             .text_size(px(ts::FOOTNOTE))
             .flex()
             .flex_col()
-            .child(div().px(px(space::M)).pt(px(space::S)).pb(px(2.)).text_size(px(ts::CAPTION)).font_weight(FontWeight::MEDIUM).text_color(theme.secondary).child(header));
+            .child(div().px(px(10.)).pt(px(6.)).pb(px(2.)).text_size(px(ts::CAPTION)).font_weight(FontWeight::MEDIUM).text_color(theme.secondary).child(header));
         for (job, commands) in &agents {
             strip = strip.child(self.agent_row(job, *commands, &thread, &theme));
         }
         for job in &jobs {
             strip = strip.child(self.job_row(job, &thread, &theme, cx));
         }
-        div().w_full().flex().justify_center().px(px(20.)).child(strip)
+        div().w_full().flex().justify_center().px(px(space::L)).child(strip)
     }
 }
 

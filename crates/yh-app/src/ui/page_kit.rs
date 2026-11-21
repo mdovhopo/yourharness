@@ -73,18 +73,18 @@ pub fn page_header(icon: Icon, title: impl Into<SharedString>, subtitle: AnyElem
         .flex_none()
         .flex()
         .flex_col()
-        .gap(px(space::M))
-        .px(px(space::XL))
-        .pt(px(space::L + space::XS))
-        .pb(px(space::M))
+        .gap(px(space::S + 1.))
+        .px(px(space::L + space::XS))
+        .pt(px(space::M + 2.))
+        .pb(px(space::S + 2.))
         .border_b_1()
         .border_color(theme.separator)
         .child(
             div()
                 .flex()
                 .items_center()
-                .gap(px(space::M))
-                .child(icon_tile(icon, 38., theme))
+                .gap(px(space::S + 2.))
+                .child(icon_tile(icon, 32., theme))
                 .child(
                     div()
                         .flex_1()
@@ -92,7 +92,7 @@ pub fn page_header(icon: Icon, title: impl Into<SharedString>, subtitle: AnyElem
                         .flex()
                         .flex_col()
                         .gap(px(1.))
-                        .child(div().text_size(px(text::LARGE_TITLE)).line_height(px(28.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).truncate().child(title.into()))
+                        .child(div().text_size(px(text::LARGE_TITLE)).line_height(px(23.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).truncate().child(title.into()))
                         .child(div().min_w_0().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).child(subtitle)),
                 )
                 .child(div().flex_none().flex().items_center().gap(px(space::XS)).child(toolbar)),
@@ -163,14 +163,14 @@ pub fn segmented(segments: Vec<Segment>, theme: &Theme) -> gpui_kit::Div {
         let selected = s.selected;
         let mut seg = div()
             .id(s.id.clone())
-            .h(px(26.))
-            .px(px(space::M))
+            .h(px(24.))
+            .px(px(space::S + 2.))
             .flex()
             .items_center()
             .gap(px(5.))
             .rounded(px(radius::MEDIUM - 1.))
             .border_1()
-            .text_size(px(text::BODY))
+            .text_size(px(text::FOOTNOTE))
             .whitespace_nowrap()
             .cursor_pointer();
         seg = if selected {

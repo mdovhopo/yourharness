@@ -129,23 +129,20 @@ impl WorkingTimer {
     }
 }
 
-/// A small round button floating over the transcript: solid, a hairline edge, a soft shadow.
+/// A compact icon button inside the floating jump dock: sized to fit strictly inside the
+/// transcript's 30 pt right gutter so it never overlaps prose or tables.
 fn jump_button(id: &'static str, name: IconName, tip: &'static str, action: Box<dyn Action>, theme: &Theme) -> impl IntoElement {
     div()
         .id(id)
-        .w(px(30.))
-        .h(px(30.))
+        .w(px(20.))
+        .h(px(20.))
         .flex()
         .items_center()
         .justify_center()
         .rounded_full()
-        .bg(theme.canvas)
-        .border_1()
-        .border_color(theme.separator)
-        .shadow_sm()
         .cursor_pointer()
-        .hover(|s| s.bg(theme.card).border_color(theme.tertiary.opacity(0.5)))
-        .child(Icon::new(name).size(px(14.)).text_color(theme.secondary))
+        .hover(|s| s.bg(theme.hover))
+        .child(Icon::new(name).size(px(12.)).text_color(theme.secondary))
         .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip).build(window, cx))
         .on_click(move |_, window, cx| window.dispatch_action(action.boxed_clone(), cx))
 }
@@ -161,7 +158,7 @@ impl Render for WorkingTimer {
         // row: a still mark (an animation would draw every frame), what it's doing, the clock.
         // Laid over the list's bottom padding, so it never moves the rows.
         // Read back from the end, rows pass under it: then it's a pill of its own, as the jump
-        // buttons are, so its words never sit on top of theirs.
+        // dock is, so its words never sit on top of theirs.
         let floating = j.next;
         let indicator = self.shown.clone().map(|(label, elapsed)| {
             div()
@@ -170,23 +167,30 @@ impl Render for WorkingTimer {
                 .items_center()
                 .gap(px(space::S))
                 .h(px(22.))
-                .when(floating, |d| d.px(px(10.)).rounded_full().bg(theme.canvas).border_1().border_color(theme.separator).shadow_sm())
+                .when(floating, |d| d.px(px(10.)).rounded_full().bg(theme.card).border_1().border_color(theme.separator).shadow_sm())
                 .text_size(px(ts::FOOTNOTE))
-                .child(crate::ui::icons::sparkles().size(px(14.)).text_color(theme.accent))
+                .child(crate::ui::icons::sparkles().size(px(13.)).text_color(theme.accent))
                 .child(div().text_color(theme.secondary).child(label))
                 .when_some(elapsed, |d, e| d.child(div().text_color(theme.tertiary).child(e)))
         });
+        // Single compact floating pill dock tucked cleanly into the right gutter so it never
+        // collides with wide prose or tables.
         let buttons = div()
             .flex()
             .flex_col()
             .items_end()
-            .gap(px(8.))
             .when(j.top || j.previous || j.next, |d| {
                 d.child(
                     div()
                         .flex()
                         .flex_col()
-                        .gap(px(8.))
+                        .gap(px(1.))
+                        .p(px(2.))
+                        .rounded_full()
+                        .bg(theme.card)
+                        .border_1()
+                        .border_color(theme.separator)
+                        .shadow_sm()
                         .when(j.top, |d| d.child(jump_button("jump-top", IconName::ArrowUp, "The top of the thread (⇧⌘[)", Box::new(TopOfThread), &theme)))
                         .when(j.previous, |d| d.child(jump_button("jump-previous", IconName::ChevronUp, "Your previous message (⌘[)", Box::new(PreviousMessage), &theme)))
                         .when(j.next, |d| {
@@ -195,16 +199,16 @@ impl Render for WorkingTimer {
                         }),
                 )
             });
-        // The row spans the transcript: the indicator in the rows' column, the buttons at the
-        // right edge above it.
+        // The row spans the transcript: the indicator in the rows' column, the compact jump dock
+        // tucked strictly inside the 30 pt right gutter (3 pt edge + 24 pt dock = 27 pt).
         div()
             .w_full()
             .flex()
             .flex_col()
             .items_end()
-            .gap(px(8.))
-            .pr(px(28.))
+            .gap(px(4.))
+            .pr(px(3.))
             .child(buttons)
-            .child(div().w_full().h(px(22.)).flex().justify_center().pl(px(28.)).child(div().w_full().max_w(px(764.)).px(px(6.)).flex().children(indicator)))
+            .child(div().w_full().h(px(22.)).flex().justify_center().pl(px(30.)).pr(px(27.)).child(div().w_full().max_w(px(760.)).flex().children(indicator)))
     }
 }

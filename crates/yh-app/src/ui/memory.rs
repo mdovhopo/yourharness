@@ -1450,7 +1450,7 @@ impl MemoryPage {
                 .gap(px(6.))
                 .child(state_icon(state).size(px(14.)).text_color(color))
                 .child(page_kit::section_title(heading, Some(total), theme));
-            let mut cards = div().flex().flex_col().gap(px(space::S));
+            let mut cards = div().flex().flex_col().gap(px(6.));
             if group.is_empty() {
                 cards = cards.child(
                     div()
@@ -1499,49 +1499,74 @@ impl MemoryPage {
                 .id("memory-tasks")
                 .size_full()
                 .overflow_y_scroll()
-                .child(div().max_w(px(880.)).w_full().mx_auto().px(px(space::XL)).pt(px(space::L)).pb(px(space::XL)).flex().flex_col().gap(px(space::L)).children(columns))
+                .child(div().max_w(px(880.)).w_full().mx_auto().px(px(space::L)).pt(px(space::M)).pb(px(space::XL)).flex().flex_col().gap(px(space::M)).children(columns))
                 .into_any_element()
         } else {
-            div().id("memory-tasks").size_full().px(px(space::XL)).pt(px(space::L)).flex().gap(px(space::M)).children(columns).into_any_element()
+            div().id("memory-tasks").size_full().px(px(20.)).pt(px(space::M)).flex().gap(px(10.)).children(columns).into_any_element()
         }
     }
 
-    /// A task on the board: its title, how far along (a thin bar, "3 of 9"), the next step or
-    /// its note, the threads on it, when it last changed. Full width (`wide`), the time sits
-    /// beside the title, so the card doesn't spend a line on it.
+    /// A task on the board: its title, how far along (a thin bar, "3/9", or quiet checkmark for
+    /// Done), the next step or its note, the threads on it, when it last changed.
     fn task_card(&self, m: &Memory, state: &str, wide: bool, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let id = m.id.clone();
         let threads = self.threads_of(m, cx);
         let (done, total) = (m.steps_done(), m.steps.len());
         let color = state_color(state, theme);
-        let next = m.next_step().filter(|_| state != "done").map(|s| (true, s.to_string())).or_else(|| task_note(m).map(|n| (false, n)));
+        let is_done = state == "done";
+        let is_blocked = state == "blocked";
+        let next = m.next_step().filter(|_| !is_done).map(|s| (true, s.to_string())).or_else(|| task_note(m).map(|n| (false, n)));
         page_kit::card(theme)
             .id(SharedString::from(format!("task-{id}")))
-            .px(px(space::M))
-            .py(px(space::S + 2.))
+            .relative()
+            .overflow_hidden()
+            .when(is_blocked, |d| d.border_color(theme.warning.opacity(0.35)))
+            .pl(px(if is_blocked { 12. } else { 10. }))
+            .pr(px(10.))
+            .py(px(8.))
             .cursor_pointer()
             .hover(|s| s.bg(theme.hover))
             .flex()
             .flex_col()
-            .gap(px(6.))
+            .gap(px(5.))
+            .when(is_blocked, |d| {
+                d.child(div().absolute().top_0().bottom_0().left_0().w(px(3.)).bg(theme.warning.opacity(0.85)))
+            })
             .child(
                 div()
                     .flex()
                     .items_start()
-                    .gap(px(space::S))
-                    .child(div().flex_1().min_w_0().line_clamp(2).text_ellipsis().whitespace_normal().font_weight(FontWeight::MEDIUM).text_color(if state == "done" { theme.secondary } else { theme.text }).child(m.title.clone()))
+                    .gap(px(6.))
+                    .child(div().flex_1().min_w_0().line_clamp(2).text_ellipsis().whitespace_normal().text_size(px(text::BODY - 0.5)).line_height(px(17.5)).font_weight(FontWeight::MEDIUM).text_color(if is_done { theme.secondary } else { theme.text }).child(m.title.clone()))
+                    .when(is_done && total > 0, |d| {
+                        d.child(
+                            div()
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .gap(px(3.))
+                                .px(px(5.))
+                                .h(px(17.))
+                                .rounded(px(radius::SMALL))
+                                .bg(theme.selected)
+                                .text_size(px(text::CAPTION))
+                                .text_color(theme.tertiary)
+                                .child(icons::circle_check().size(px(10.)).text_color(theme.success.opacity(0.75)))
+                                .child(format!("{done}/{total}")),
+                        )
+                    })
                     .when(wide, |d| d.child(div().flex_none().mt(px(1.)).text_size(px(text::CAPTION)).text_color(theme.tertiary).child(ago(m.updated_at)))),
             )
-            .when(total > 0, |d| {
+            .when(total > 0 && !is_done, |d| {
                 let f = done as f32 / total as f32;
                 d.child(
                     div()
                         .flex()
                         .items_center()
-                        .gap(px(space::S))
+                        .gap(px(6.))
                         .when(wide, |d| d.max_w(px(360.)))
-                        .child(div().flex_1().h(px(4.)).rounded(px(2.)).bg(theme.selected).child(div().h_full().rounded(px(2.)).w(gpui_kit::relative(f)).bg(color)))
-                        .child(div().flex_none().text_size(px(text::CAPTION)).text_color(theme.secondary).child(format!("{done} of {total}"))),
+                        .child(div().flex_1().h(px(3.5)).rounded(px(2.)).bg(theme.selected).child(div().h_full().rounded(px(2.)).w(gpui_kit::relative(f)).bg(color)))
+                        .child(div().flex_none().text_size(px(text::CAPTION)).text_color(theme.secondary).child(format!("{done}/{total}"))),
                 )
             })
             .when_some(next, |d, (is_step, next)| {

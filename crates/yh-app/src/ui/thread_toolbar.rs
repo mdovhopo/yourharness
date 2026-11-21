@@ -275,11 +275,28 @@ fn specialist(workspace: &Entity<Workspace>, cx: &App) -> Option<AnyElement> {
     )
 }
 
-/// Pull requests and the right sidebar; for a memory specialist, its own buttons too.
+/// Sub-agents, pull requests and the right sidebar; for a memory specialist, its own buttons too.
 pub fn buttons(workspace: &Entity<Workspace>, theme: &Theme, cx: &App) -> AnyElement {
     let ws = workspace.read(cx);
     let shows = ws.shows_inspector;
-    let (w1, w2) = (workspace.clone(), workspace.clone());
+    let (w0, w1, w2) = (workspace.clone(), workspace.clone(), workspace.clone());
+    let (sub_total, sub_running) = ws.selected_thread().map_or((0, 0), |t| {
+        let st = t.read(cx);
+        let runs = st.subagents();
+        let running = st
+            .run
+            .jobs
+            .agents_running()
+            .max(runs.iter().filter(|(_, e)| e.borrow().sub.as_ref().is_some_and(|s| s.status == "running")).count());
+        (runs.len(), running)
+    });
+    let sub_tip = match (sub_total, sub_running) {
+        (t, r) if r > 0 => format!("{r} of {t} sub-agent{} currently running — click to inspect", if t == 1 { "" } else { "s" }),
+        (1, _) => "1 sub-agent run in this thread".to_string(),
+        (t, _) => format!("{t} sub-agent runs in this thread"),
+    };
+    let sub_label = if sub_running > 0 { format!("{sub_running}/{sub_total}") } else { sub_total.to_string() };
+    let sub_color = if sub_running > 0 { theme.accent } else { theme.secondary };
     // The count of PRs the thread worked on beside the icon; the icon alone
     // for ones only mentioned; hidden when it links none (shown until that's known).
     let counts = ws.selected.as_ref().and_then(|id| ws.pull_counts.get(id).copied());
@@ -297,6 +314,25 @@ pub fn buttons(workspace: &Entity<Workspace>, theme: &Theme, cx: &App) -> AnyEle
         .items_center()
         .gap(px(2.))
         .children(specialist(workspace, cx))
+        .when(sub_total > 0 || sub_running > 0, |d| {
+            d.child(
+                Button::new("thread-subagents")
+                    .small()
+                    .ghost()
+                    .icon(icons::bot().size(px(14.)).text_color(sub_color))
+                    .label(sub_label)
+                    .tooltip(sub_tip)
+                    .on_click(move |_, _, cx| {
+                        w0.update(cx, |ws, cx| {
+                            if ws.shows_inspector && ws.panel == Panel::Subagents {
+                                ws.set_shows_inspector(false, cx);
+                            } else {
+                                ws.show_panel(Panel::Subagents, cx);
+                            }
+                        });
+                    }),
+            )
+        })
         .when(counts.is_none_or(|(_, all)| all > 0), |d| {
             d.child(pulls.on_click(move |_, _, cx| {
                 // Open on the PRs tab already: it closes.

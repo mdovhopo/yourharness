@@ -154,15 +154,16 @@ pub fn render_item(thread: &Entity<ThreadState>, ix: usize, window: &mut Window,
     // from row to row.
     let in_box = matches!(fold, Fold::Open);
     let label = speaks().then(|| row_label(item, fold, state.linker.as_deref())).flatten();
-    // The column: centred, at most 820 wide, as the web transcript's.
+    // The column: centred, with a symmetric 30 pt gutter so the compact floating jump dock
+    // sits strictly in the right margin and never overlaps transcript text.
     div()
         .when(hit, |d| d.bg(theme.accent.opacity(0.10)))
         .w_full()
         .flex()
         .justify_center()
-        .px(px(28.))
+        .px(px(30.))
         .when(!in_box, |d| d.py(px(space::XS)))
-        .child(div().w_full().max_w(px(764.)).child(content))
+        .child(div().w_full().max_w(px(760.)).child(content))
         // Right-click on selected text: Copy and Look Up (nothing opens without a selection).
         .id(("row", item.pos as u64 as usize))
         // A row on screen is an item of the transcript's list for VoiceOver (the list makes
@@ -317,7 +318,7 @@ fn turn_summary(state: &ThreadState, work: &TurnWork, open: bool, pos: i64, thre
         .items_center()
         .gap(px(6.))
         .w_full()
-        .h(px(28.))
+        .h(px(24.))
         .px(px(6.))
         .rounded(px(radius::MEDIUM))
         .hover(|s| s.bg(theme.hover))
@@ -720,8 +721,8 @@ fn user_row(item: &Item, ctx: &RowContext, from: Option<String>, theme: &Theme, 
         .flex_col()
         .items_end()
         .gap(px(2.))
-        .pt(px(space::S))
-        .pb(px(space::XS))
+        .pt(px(6.))
+        .pb(px(2.))
         .group("user-message")
         .when_some(from, |d, from| {
             d.child(
@@ -810,8 +811,10 @@ fn user_row(item: &Item, ctx: &RowContext, from: Option<String>, theme: &Theme, 
                     .when(wide, |d| d.w(gpui_kit::relative(0.8)))
                     .when(!wide, |d| d.max_w(gpui_kit::relative(0.8)))
                     .bg(theme.bubble)
-                    .px(px(14.))
-                    .py(px(space::S))
+                    .border_1()
+                    .border_color(theme.separator.opacity(0.6))
+                    .px(px(12.))
+                    .py(px(6.))
                     .rounded(px(radius::LARGE))
                     .child(user_text(&item.entries[0], open, ctx, theme, window))
                     .children(toggle),
@@ -827,7 +830,7 @@ fn user_row(item: &Item, ctx: &RowContext, from: Option<String>, theme: &Theme, 
                 .flex()
                 .items_center()
                 .gap(px(space::XS))
-                .h(px(20.))
+                .h(px(16.))
                 .when(!text.is_empty(), |d| {
                     let key = (ctx.thread_id.as_str(), pos, text.len());
                     let shown = just_copied("copy-user", key);
@@ -876,7 +879,7 @@ fn text_row(e: &EntryRef, ctx: &RowContext, theme: &Theme, window: &Window) -> A
         .flex_col()
         .group("reply")
         .child(markdown_view_in(&md, theme, Some(ctx), Some(window)))
-        .child(div().h(px(20.)).mt(px(space::XS)).ml(px(-6.)).flex().when(!live, |d| {
+        .child(div().h(px(16.)).mt(px(2.)).ml(px(-6.)).flex().items_center().when(!live, |d| {
             let key = (ctx.thread_id.as_str(), ctx.pos, text.len());
             let shown = just_copied("copy-reply", key);
             d.child(copy_button("copy-reply", key, text.clone(), ctx, theme).when(!shown, |b| b.opacity(0.).group_hover("reply", |s| s.opacity(1.))))
@@ -1206,28 +1209,40 @@ fn agent_row(thread: &Entity<ThreadState>, item: &Item, theme: &Theme) -> AnyEle
     let (pos, open) = (item.pos, item.open || expand_all());
     let handle = thread.clone();
     let follow_thread = thread.clone();
+    let status_bar = if running {
+        theme.accent
+    } else if failed {
+        theme.error
+    } else if status == "completed" {
+        theme.success
+    } else {
+        theme.tertiary
+    };
     let mut card = div()
+        .relative()
         .flex()
         .flex_col()
         .border_1()
         .border_color(if running {
-            theme.accent.opacity(0.45)
+            theme.accent.opacity(0.42)
         } else if failed {
-            theme.error.opacity(0.45)
+            theme.error.opacity(0.42)
         } else {
             theme.separator
         })
         .rounded(px(radius::LARGE))
         .bg(theme.card)
         .overflow_hidden()
+        .child(div().absolute().top_0().bottom_0().left_0().w(px(3.)).bg(status_bar.opacity(0.85)))
         .child(
             div()
                 .id(("agent", pos as u64 as usize))
                 .flex()
                 .items_center()
-                .gap(px(10.))
-                .px(px(space::M))
-                .py(px(space::S))
+                .gap(px(8.))
+                .pl(px(12.))
+                .pr(px(10.))
+                .py(px(6.))
                 .cursor_pointer()
                 .hover(|s| s.bg(theme.hover))
                 .child(div().w(px(18.)).flex().justify_center().child(status_icon(&status, theme)))
@@ -1281,7 +1296,7 @@ fn agent_row(thread: &Entity<ThreadState>, item: &Item, theme: &Theme) -> AnyEle
                 }),
         );
     if !recent.is_empty() {
-        let mut list = div().flex().flex_col().gap(px(6.)).px(px(space::M)).py(px(space::S)).border_t_1().border_color(theme.separator).bg(theme.canvas).text_size(px(ts::FOOTNOTE));
+        let mut list = div().flex().flex_col().gap(px(4.)).pl(px(14.)).pr(px(space::M)).py(px(6.)).border_t_1().border_color(theme.separator).bg(theme.canvas).text_size(px(ts::FOOTNOTE));
         for (p, live, failed) in recent {
             list = list.child(
                 div()
@@ -1583,9 +1598,10 @@ fn code_block(code: &Text, lang: &str, theme: &Theme, ctx: Option<&RowContext>, 
                 div()
                     .flex()
                     .items_center()
-                    .h(px(30.))
-                    .pl(px(space::M))
+                    .h(px(25.))
+                    .pl(px(10.))
                     .pr(px(space::XS))
+                    .bg(theme.card)
                     .border_b_1()
                     .border_color(theme.separator)
                     .text_size(px(ts::CAPTION))
@@ -1624,12 +1640,12 @@ fn code_block(code: &Text, lang: &str, theme: &Theme, ctx: Option<&RowContext>, 
                             div()
                                 .flex_none()
                                 .min_w_full()
-                                .px(px(space::M))
-                                .py(px(10.))
+                                .px(px(10.))
+                                .py(px(8.))
                                 .whitespace_nowrap()
                                 .font_family(MONO)
                                 .text_size(px(ts::CODE))
-                                .line_height(px(ts::CODE_LINE + 2.))
+                                .line_height(px(ts::CODE_LINE + 1.))
                                 .child(styled_text(code, theme, None)),
                         ),
                 )
@@ -1645,7 +1661,7 @@ fn code_block(code: &Text, lang: &str, theme: &Theme, ctx: Option<&RowContext>, 
 /// Markdown blocks; in a row (`ctx`), with links that know the thread, Copy on code and
 /// tables, and Mermaid diagrams drawn.
 pub fn markdown_view_in(md: &markdown::Markdown, theme: &Theme, ctx: Option<&RowContext>, window: Option<&Window>) -> impl IntoElement {
-    let mut column = div().flex().flex_col().gap(px(10.)).w_full();
+    let mut column = div().flex().flex_col().gap(px(8.)).w_full();
     for (n, block) in md.blocks.iter().enumerate() {
         column = column.child(block_element(n, block, theme, ctx, window));
     }
@@ -1719,8 +1735,26 @@ fn block_element(n: usize, block: &MdBlock, theme: &Theme, ctx: Option<&RowConte
             .into_any_element(),
         MdBlock::Table { header, rows } => {
             let columns = header.len().max(rows.iter().map(|r| r.len()).max().unwrap_or(0));
-            let cell = |s: Option<&Text>| {
-                let mut c = div().flex_1().min_w_0().px(px(space::M)).py(px(6.));
+            // Short columns (Line, #, Severity, Status) get an exact compact width so they never
+            // wrap mid-word ("Me/diu/m") AND never steal horizontal space from prose columns;
+            // longer columns share the remaining width proportionally.
+            let max_chars: Vec<usize> = (0..columns)
+                .map(|i| {
+                    let head_len = header.get(i).map_or(0, |s| s.text.chars().count());
+                    let max_body = rows.iter().filter_map(|r| r.get(i)).map(|s| s.text.chars().count()).max().unwrap_or(0);
+                    head_len.max(max_body)
+                })
+                .collect();
+            let has_flex_col = max_chars.iter().any(|&c| c > 10);
+            let cell = |i: usize, s: Option<&Text>| {
+                let chars = max_chars.get(i).copied().unwrap_or(10);
+                let mut c = if has_flex_col && chars <= 10 {
+                    let w = (chars as f32 * 7.6 + 18.).clamp(32., 86.);
+                    div().flex_none().w(px(w)).px(px(7.)).py(px(5.))
+                } else {
+                    let weight = (chars.clamp(10, 72) as f32).powf(0.85);
+                    div().flex_basis(px(0.)).flex_grow(weight).flex_shrink(1.).min_w_0().px(px(8.)).py(px(5.))
+                };
                 if let Some(s) = s {
                     c = c.child(styled_text(s, theme, ctx));
                 }
@@ -1734,9 +1768,11 @@ fn block_element(n: usize, block: &MdBlock, theme: &Theme, ctx: Option<&RowConte
                 .border_color(theme.separator)
                 .rounded(px(radius::MEDIUM))
                 .overflow_hidden()
-                .child(div().flex().bg(theme.card).font_weight(FontWeight::SEMIBOLD).children((0..columns).map(|i| cell(header.get(i)))));
+                .text_size(px(ts::FOOTNOTE))
+                .line_height(px(17.5))
+                .child(div().flex().bg(theme.card).font_weight(FontWeight::SEMIBOLD).children((0..columns).map(|i| cell(i, header.get(i)))));
             for row in rows {
-                table = table.child(div().flex().border_t_1().border_color(theme.separator).children((0..columns).map(|i| cell(row.get(i)))));
+                table = table.child(div().flex().border_t_1().border_color(theme.separator).children((0..columns).map(|i| cell(i, row.get(i)))));
             }
             // Copy as tab-separated values, over the header's corner while the pointer is
             // over the table: no room of its own, so nothing moves.
@@ -1828,7 +1864,7 @@ fn work_row(state: &ThreadState, ctx: &RowContext, item: &Item, theme: &Theme) -
         .items_center()
         .gap(px(6.))
         .w_full()
-        .h(px(26.))
+        .h(px(23.))
         .px(px(6.))
         .rounded(px(radius::MEDIUM))
         .hover(|s| s.bg(theme.hover))
@@ -2163,9 +2199,9 @@ fn step(state: &ThreadState, ctx: &RowContext, pos: i64, n: usize, e: &EntryRef,
         .when_some(spoken, |d, l| d.role(gpui_kit::Role::Button).aria_label(l).aria_expanded(open))
         .flex()
         .items_center()
-        .gap(px(space::S))
+        .gap(px(6.))
         .w_full()
-        .h(px(28.))
+        .h(px(23.))
         .px(px(6.))
         .rounded(px(radius::MEDIUM))
         .when(!open, |d| d.hover(|s| s.bg(theme.hover)))
@@ -2298,9 +2334,9 @@ fn thinking_step(thread: &Entity<ThreadState>, pos: i64, n: usize, e: &EntryRef,
         .when_some(spoken, |d, l| d.role(gpui_kit::Role::Button).aria_label(l).when(!empty, |d| d.aria_expanded(open)))
         .flex()
         .items_center()
-        .gap(px(space::S))
+        .gap(px(6.))
         .w_full()
-        .h(px(28.))
+        .h(px(23.))
         .px(px(6.))
         .rounded(px(radius::MEDIUM))
         .hover(|s| s.bg(theme.hover))

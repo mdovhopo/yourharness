@@ -33,7 +33,7 @@ actions!(
 const KEPT_TRANSCRIPTS: usize = 6;
 
 /// The sidebar's width, as dragged (`sidebarWidth`), and its limits.
-const SIDEBAR_DEFAULT: f32 = 260.;
+const SIDEBAR_DEFAULT: f32 = 252.;
 const SIDEBAR_MIN: f32 = 200.;
 const SIDEBAR_MAX: f32 = 440.;
 /// The middle column (a thread or a page) asks for this much: below it the sidebar narrows
@@ -540,17 +540,15 @@ impl RootView {
         });
     }
 
-    /// "Project · worktree · model · workflow", under the title.
+    /// Extra context beside the title: worktree and non-default workflow (project is its own
+    /// breadcrumb chip; model lives in the composer).
     fn subtitle(&self, thread: &Entity<crate::state::thread::ThreadState>, cx: &App) -> String {
         let ws = self.workspace.read(cx);
         let t = thread.read(cx);
-        let mut parts = vec![ws.project(&t.meta.project_id).map(|p| p.name.clone()).unwrap_or_default()];
+        let mut parts = vec![];
         // Running in a worktree: which one.
         if let Some(folder) = &t.meta.working_directory {
             parts.push(std::path::Path::new(folder).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| folder.clone()));
-        }
-        if let Some(model) = ws.model_of(t) {
-            parts.push(ws.models.iter().find(|m| m.value == model).map(|m| m.display_name.clone()).unwrap_or(model));
         }
         // A workflow other than Default: it can start many agents.
         let workflow = ws.workflow_of(t);
@@ -864,6 +862,11 @@ impl Render for RootView {
         });
         let selected = if page.is_some() { None } else { self.workspace.read(cx).selected_thread() };
         let title = selected.as_ref().map(|t| t.read(cx).title.clone()).unwrap_or_else(|| "YourHarness".into());
+        let project_crumb: Option<(String, String)> = selected.as_ref().and_then(|t| {
+            let pid = t.read(cx).meta.project_id.clone();
+            let name = self.workspace.read(cx).project(&pid).map(|p| p.name.clone())?;
+            Some((pid, name))
+        });
         let subtitle = selected.as_ref().map(|t| self.subtitle(t, cx)).unwrap_or_default();
         let account_chip = selected.as_ref().and_then(|t| self.account_chip(t, &Theme::get(cx).clone(), cx));
         // Started by another thread's agent: which, a click away.
@@ -1034,12 +1037,12 @@ impl Render for RootView {
                     .when(selected.is_some(), |d| {
                         d.child(
                             div()
-                                .h(px(44.))
+                                .h(px(38.))
                                 .flex_none()
                                 .flex()
                                 .items_center()
-                                .gap(px(space::M))
-                                .px(px(space::XL - 4.))
+                                .gap(px(space::S))
+                                .px(px(14.))
                                 .when(!sidebar_shown, |d| d.pl(px(84.)))
                                 .child(
                                     crate::ui::thread_toolbar::icon_button("show-sidebar", gpui_kit::component::Icon::new(gpui_kit::component::IconName::PanelLeft), if sidebar_shown { "Hide Sidebar (⌃⌘S)" } else { "Show Sidebar (⌃⌘S)" }, &theme)
@@ -1052,10 +1055,54 @@ impl Render for RootView {
                                         .flex_1()
                                         .min_w_0()
                                         .flex()
-                                        .items_baseline()
-                                        .gap(px(space::S))
-                                        .child(div().id("thread-title").role(gpui_kit::Role::Heading).aria_label(title.clone()).flex_none().max_w(gpui_kit::relative(0.7)).text_size(px(text::HEADLINE)).font_weight(FontWeight::SEMIBOLD).overflow_hidden().whitespace_nowrap().text_ellipsis().child(title))
-                                        .child(div().min_w_0().text_size(px(text::FOOTNOTE)).text_color(theme.secondary).overflow_hidden().whitespace_nowrap().text_ellipsis().child(subtitle))
+                                        .items_center()
+                                        .gap(px(6.))
+                                        .when_some(project_crumb.clone(), |d, (pid, pname)| {
+                                            let ws = self.workspace.clone();
+                                            d.child(
+                                                div()
+                                                    .id("thread-project-crumb")
+                                                    .flex_none()
+                                                    .h(px(20.))
+                                                    .px(px(6.))
+                                                    .rounded(px(radius::SMALL))
+                                                    .bg(theme.card)
+                                                    .border_1()
+                                                    .border_color(theme.separator)
+                                                    .hover(|s| s.bg(theme.hover).text_color(theme.text))
+                                                    .cursor_pointer()
+                                                    .flex()
+                                                    .items_center()
+                                                    .text_size(px(text::CAPTION))
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .text_color(theme.secondary)
+                                                    .child(pname.clone())
+                                                    .tooltip(crate::ui::sidebar::tooltip(format!("Open {pname}")))
+                                                    .on_click(move |_, _, cx| ws.update(cx, |ws, cx| ws.open_project(&pid, cx))),
+                                            )
+                                            .child(div().flex_none().text_size(px(text::FOOTNOTE)).text_color(theme.tertiary).child("/"))
+                                        })
+                                        .child(div().id("thread-title").role(gpui_kit::Role::Heading).aria_label(title.clone()).min_w_0().flex_shrink(1.).text_size(px(text::HEADLINE)).font_weight(FontWeight::SEMIBOLD).overflow_hidden().whitespace_nowrap().text_ellipsis().child(title))
+                                        .when(!subtitle.is_empty(), |d| {
+                                            d.child(
+                                                div()
+                                                    .flex_none()
+                                                    .max_w(px(180.))
+                                                    .px(px(6.))
+                                                    .h(px(19.))
+                                                    .rounded(px(radius::SMALL))
+                                                    .bg(theme.accent_soft)
+                                                    .flex()
+                                                    .items_center()
+                                                    .text_size(px(text::CAPTION))
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .text_color(theme.accent)
+                                                    .overflow_hidden()
+                                                    .whitespace_nowrap()
+                                                    .text_ellipsis()
+                                                    .child(subtitle),
+                                            )
+                                        })
                                         .when_some(account_chip, |d, chip| d.child(div().flex_none().self_center().child(chip)))
                                         .when_some(started_by, |d, (parent, name)| {
                                             let ws = self.workspace.clone();
@@ -1063,15 +1110,21 @@ impl Render for RootView {
                                                 div()
                                                     .id("started-by")
                                                     .flex_none()
-                                                    .max_w(px(260.))
+                                                    .max_w(px(220.))
+                                                    .px(px(6.))
+                                                    .h(px(19.))
+                                                    .rounded(px(radius::SMALL))
+                                                    .bg(theme.card)
+                                                    .hover(|s| s.bg(theme.hover).text_color(theme.accent))
+                                                    .flex()
+                                                    .items_center()
                                                     .overflow_hidden()
                                                     .whitespace_nowrap()
                                                     .text_ellipsis()
-                                                    .text_size(px(text::FOOTNOTE))
+                                                    .text_size(px(text::CAPTION))
                                                     .text_color(theme.secondary)
                                                     .cursor_pointer()
-                                                    .hover(|s| s.text_color(theme.accent))
-                                                    .child(format!("· Started by {name}"))
+                                                    .child(format!("↖ {name}"))
                                                     .tooltip(crate::ui::sidebar::tooltip(format!("Open “{name}”, whose agent started this thread")))
                                                     .on_click(move |_, _, cx| ws.update(cx, |ws, cx| ws.select(&parent, cx))),
                                             )
@@ -1182,7 +1235,7 @@ impl Render for RootView {
                 // sidebar's footer nor the composer.
                 let (left, right) = (left_w, right_w);
                 d.child(
-                    div().absolute().top(px(44. + space::M)).left(px(left)).right(px(right)).flex().justify_center().child(
+                    div().absolute().top(px(38. + space::M)).left(px(left)).right(px(right)).flex().justify_center().child(
                         div()
                             .flex()
                             .items_center()
@@ -1216,7 +1269,7 @@ impl Render for RootView {
             })
             // Top right of the content, under its header: clear of the composer, and of the
             // right sidebar, where the browser's page would cover it.
-            .child(div().absolute().top(px(44. + space::M)).right(px(right_w + space::M)).child(self.countdown.clone()))
+            .child(div().absolute().top(px(38. + space::M)).right(px(right_w + space::M)).child(self.countdown.clone()))
             .child(self.spotlight.clone())
             .child(self.resume.clone())
             .child(self.mcp.clone())

@@ -48,13 +48,13 @@ pub mod text {
     /// A view's own title (sheets, panels).
     pub const TITLE: f32 = 15.;
     /// A page's title (Memory, Usage, the project page).
-    pub const LARGE_TITLE: f32 = 22.;
+    pub const LARGE_TITLE: f32 = 19.;
     /// Line heights that go with them.
     pub const BODY_LINE: f32 = 19.;
     pub const CODE_LINE: f32 = 17.;
     /// Compact monospaced output (tool results, diffs), and headings.
     pub const MONO_LINE: f32 = 16.;
-    pub const TITLE_LINE: f32 = 22.;
+    pub const TITLE_LINE: f32 = 21.;
 }
 
 /// Corner radii: small for chips and inline code, medium for buttons and rows, large for cards
@@ -84,47 +84,47 @@ impl Theme {
     pub fn for_appearance(appearance: WindowAppearance) -> Theme {
         match appearance {
             WindowAppearance::Dark | WindowAppearance::VibrantDark => Theme {
-                canvas: rgb(0x1e1e1e).into(),
-                sidebar: rgb(0x252527).into(),
-                text: rgb(0xe8e8ea).into(),
-                secondary: rgb(0x98989f).into(),
-                separator: rgba(0xffffff17).into(),
-                card: rgb(0x2a2a2c).into(),
-                bubble: rgb(0x333336).into(),
-                code: rgb(0x262628).into(),
+                canvas: rgb(0x19191c).into(),
+                sidebar: rgb(0x202024).into(),
+                text: rgb(0xededf0).into(),
+                secondary: rgb(0x9b9ba4).into(),
+                separator: rgba(0xffffff1a).into(),
+                card: rgb(0x252529).into(),
+                bubble: rgb(0x2d2d33).into(),
+                code: rgb(0x1f1f23).into(),
                 accent: rgb(0x0a84ff).into(),
-                selected: rgba(0xffffff17).into(),
+                selected: rgba(0xffffff19).into(),
                 error: rgb(0xff6961).into(),
                 warning: rgb(0xff9f0a).into(),
                 keyword: rgb(0xfc5fa3).into(),
                 string: rgb(0xfc6a5d).into(),
                 number: rgb(0xd0bf69).into(),
                 comment: rgb(0x6c7986).into(),
-                tertiary: rgb(0x6a6a70).into(),
-                hover: rgba(0xffffff0d).into(),
-                accent_soft: rgba(0x0a84ff33).into(),
+                tertiary: rgb(0x6c6c75).into(),
+                hover: rgba(0xffffff0e).into(),
+                accent_soft: rgba(0x0a84ff2b).into(),
                 success: rgb(0x32d74b).into(),
             },
             _ => Theme {
                 canvas: rgb(0xffffff).into(),
-                sidebar: rgb(0xf2f2f4).into(),
-                text: rgb(0x1d1d1f).into(),
-                secondary: rgb(0x6e6e73).into(),
-                separator: rgba(0x00000017).into(),
-                card: rgb(0xf5f5f7).into(),
-                bubble: rgb(0xe9e9ee).into(),
-                code: rgb(0xf6f6f8).into(),
+                sidebar: rgb(0xf3f4f6).into(),
+                text: rgb(0x1c1c1e).into(),
+                secondary: rgb(0x66666e).into(),
+                separator: rgba(0x00000016).into(),
+                card: rgb(0xf7f7f9).into(),
+                bubble: rgb(0xebedf2).into(),
+                code: rgb(0xf5f6f8).into(),
                 accent: rgb(0x0a84ff).into(),
-                selected: rgba(0x00000014).into(),
+                selected: rgba(0x00000012).into(),
                 error: rgb(0xd70015).into(),
-                warning: rgb(0xff9f0a).into(),
+                warning: rgb(0xe58600).into(),
                 keyword: rgb(0xad3da4).into(),
                 string: rgb(0xd12f1b).into(),
                 number: rgb(0x272ad8).into(),
                 comment: rgb(0x707f8c).into(),
-                tertiary: rgb(0xa1a1a6).into(),
+                tertiary: rgb(0x9898a0).into(),
                 hover: rgba(0x0000000a).into(),
-                accent_soft: rgba(0x0a84ff1f).into(),
+                accent_soft: rgba(0x0a84ff1c).into(),
                 success: rgb(0x248a3d).into(),
             },
         }

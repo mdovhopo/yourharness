@@ -25,17 +25,17 @@ use yh_core::library::ProjectMeta;
 
 const SHOWN_PER_PROJECT: usize = 12;
 
-/// The rows' grid: every row is 28 pt; a project's chevron, then its icon, then its name, and
-/// each thread's status under the project's icon and its title under the name.
-const ROW_HEIGHT: f32 = 28.;
+/// The rows' grid: compact 24 pt rows for high concurrent-agent density without wasting an
+/// empty left chevron gutter on every thread.
+const ROW_HEIGHT: f32 = 24.;
 const ROW_INSET: f32 = 6.;
 const CHEVRON: f32 = 12.;
-const ICON: f32 = 14.;
-const GAP: f32 = 6.;
-/// A limit meter's bar: thick enough to read at a glance.
-const BAR: f32 = 6.;
-/// Where titles start, from the row's edge.
-const TITLE_X: f32 = ROW_INSET + CHEVRON + GAP + ICON + GAP;
+const ICON: f32 = 13.;
+const GAP: f32 = 5.;
+/// A limit meter's bar: slim and crisp at a glance.
+const BAR: f32 = 4.5;
+/// Where thread titles start, from the row's edge.
+const TITLE_X: f32 = ROW_INSET + 2. + ICON + GAP;
 
 /// Settings: projects folded away (0.0.x's key), shelves open, projects showing all.
 const COLLAPSED: &str = "collapsedProjectIDs";
@@ -102,6 +102,8 @@ pub struct Sidebar {
     /// The one thread row whose hover action buttons (and "…" dropdown menu) are mounted:
     /// keeps 40–120 unhovered rows from building hidden Popover/DropdownMenu trees on every render.
     hot_row: Option<String>,
+    /// Show only working, waiting, unread, or currently selected threads across projects.
+    filter_active: bool,
     pub scroll: ScrollHandle,
     renaming: Option<(String, Entity<InputState>, Subscription)>,
     pub focus: FocusHandle,
@@ -129,8 +131,8 @@ struct Nest {
     folded: bool,
 }
 
-/// How far a thread an agent started sits in from the one that started it: one status column.
-const INDENT: f32 = ICON + GAP;
+/// How far a thread an agent started sits in from the one that started it.
+const INDENT: f32 = 14.;
 
 /// What a thread's menu needs, for its context menu and its "…" button alike.
 #[derive(Clone)]
@@ -235,6 +237,7 @@ impl Sidebar {
             collapsed,
             folded_workers: HashSet::new(),
             hot_row: None,
+            filter_active: false,
             scroll: ScrollHandle::new(),
             renaming: None,
             focus: cx.focus_handle(),
@@ -266,6 +269,7 @@ impl Sidebar {
     fn rows(&self, cx: &App) -> Vec<SidebarRow> {
         let ws = self.workspace.read(cx);
         let home = ws.home_project();
+        let selected = ws.selected.as_deref();
         let mut by_project: HashMap<&str, Vec<&Entity<ThreadState>>> = HashMap::new();
         for t in &ws.threads {
             by_project.entry(t.read(cx).meta.project_id.as_str()).or_default().push(t);
@@ -274,15 +278,43 @@ impl Sidebar {
         projects.sort_by_key(|p| Some(&p.id) != home.as_ref());
         let mut rows = vec![];
         for project in projects {
-            rows.push(SidebarRow::Project(project.clone(), Some(&project.id) == home.as_ref()));
-            if self.collapsed.contains(&project.id) {
-                continue;
-            }
             let threads = by_project.get(project.id.as_str()).cloned().unwrap_or_default();
             let (mut live, mut settled): (Vec<_>, Vec<_>) = threads.into_iter().partition(|t| t.read(cx).meta.settled_at.is_none());
+            if self.filter_active {
+                let mut keep: HashSet<String> = HashSet::new();
+                let parents: HashMap<String, Option<String>> = live.iter().map(|t| {
+                    let m = &t.read(cx).meta;
+                    (m.id.clone(), m.parent_id.clone())
+                }).collect();
+                for t in &live {
+                    let st = t.read(cx);
+                    let active = st.waiting_for_you()
+                        || st.run.running
+                        || st.run.jobs.any_running()
+                        || (st.unread && selected != Some(st.id()))
+                        || selected == Some(st.id());
+                    if active {
+                        let mut cur = Some(st.id().to_string());
+                        while let Some(id) = cur {
+                            if !keep.insert(id.clone()) {
+                                break;
+                            }
+                            cur = parents.get(&id).cloned().flatten();
+                        }
+                    }
+                }
+                live.retain(|t| keep.contains(t.read(cx).id()));
+                if live.is_empty() {
+                    continue;
+                }
+            }
+            rows.push(SidebarRow::Project(project.clone(), Some(&project.id) == home.as_ref()));
+            if self.collapsed.contains(&project.id) && !self.filter_active {
+                continue;
+            }
             live.sort_by(|a, b| crate::state::workspace::sidebar_order(&a.read(cx).meta, &b.read(cx).meta));
             settled.sort_by(|a, b| b.read(cx).meta.settled_at.unwrap_or(0.).total_cmp(&a.read(cx).meta.settled_at.unwrap_or(0.)));
-            let all = self.expanded.contains(&project.id);
+            let all = self.expanded.contains(&project.id) || self.filter_active;
             // Threads an agent started sit under the one that started it; the limit counts
             // only the threads at the top.
             let nested = self.nested(live, cx);
@@ -297,10 +329,10 @@ impl Sidebar {
                 }
                 rows.push(SidebarRow::Thread(t.clone(), n));
             }
-            if tops > SHOWN_PER_PROJECT {
+            if !self.filter_active && tops > SHOWN_PER_PROJECT {
                 rows.push(SidebarRow::More(project.id.clone(), tops - SHOWN_PER_PROJECT, all));
             }
-            if !settled.is_empty() {
+            if !self.filter_active && !settled.is_empty() {
                 let open = self.shelves.contains(&project.id);
                 rows.push(SidebarRow::Shelf(project.id.clone(), settled.len(), open));
                 if open {
@@ -489,49 +521,217 @@ impl Sidebar {
         });
     }
 
-    /// New Thread and Search: rows like the threads under them, the shortcut quiet at the end.
-    fn top_buttons(&self, theme: &Theme) -> impl IntoElement {
-        let action = |id: &'static str, icon: Icon, label: &'static str, key: &'static str, strong: bool, tip: &'static str| {
-            div()
-                .id(id)
-                .flex()
-                .items_center()
-                .gap(px(GAP))
-                .h(px(ROW_HEIGHT))
-                .px(px(ROW_INSET))
-                .rounded(px(radius::MEDIUM))
-                .hover(|s| s.bg(theme.hover))
-                .child(div().flex_none().w(px(CHEVRON + GAP + ICON)).flex().justify_end().child(icon.size(px(ICON)).text_color(if strong { theme.accent } else { theme.secondary })))
-                .child(div().flex_1().when(!strong, |d| d.text_color(theme.secondary)).child(label))
-                .child(div().flex_none().text_size(px(text::CAPTION)).text_color(theme.tertiary).child(key))
-                .role(gpui_kit::Role::Button)
-                .aria_label(label)
-                .aria_description(tip)
-                .aria_keyshortcuts(key)
-                .tooltip(tooltip(tip))
-        };
+    /// New Thread and Search in a single compact row, keeping vertical space for threads.
+    fn top_buttons(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut waiting_ids = vec![];
+        let mut unread_ids = vec![];
+        let mut working_n = 0usize;
+        {
+            let ws = self.workspace.read(cx);
+            let selected = ws.selected.as_deref();
+            for t in &ws.threads {
+                let st = t.read(cx);
+                if st.meta.settled_at.is_some() {
+                    continue;
+                }
+                if st.waiting_for_you() {
+                    waiting_ids.push(st.id().to_string());
+                } else if st.run.running || st.run.jobs.agents_running() > 0 {
+                    working_n += 1;
+                } else if st.unread && selected != Some(st.id()) {
+                    unread_ids.push(st.id().to_string());
+                }
+            }
+        }
+        let show_triage = !waiting_ids.is_empty() || working_n > 0 || !unread_ids.is_empty() || self.filter_active;
+        let ws_wait = self.workspace.clone();
+        let ws_unread = self.workspace.clone();
+        let waiting_count = waiting_ids.len();
+        let unread_count = unread_ids.len();
+        let filter_on = self.filter_active;
         div()
             .flex()
             .flex_col()
+            .gap(px(5.))
             .px(px(8.))
-            .pb(px(space::S))
-            .child(action("new-thread", icons::square_pen(), "New Thread", "⌘N", true, "New Thread (⌘N)").on_click(|_, window, cx| {
-                window.dispatch_action(Box::new(crate::ui::root::NewThread), cx)
-            }))
+            .pb(px(6.))
             .child(
-                action("search", Icon::new(IconName::Search), "Search", "⌘K", false, "Search threads, what was said in them, memories and tasks, and jump there (⌘K)")
-                    .on_click(|_, window, cx| window.dispatch_action(Box::new(crate::ui::root::OpenSpotlight), cx)),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(5.))
+                    .child(
+                        div()
+                            .id("new-thread")
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .h(px(27.))
+                            .px(px(8.))
+                            .rounded(px(radius::MEDIUM))
+                            .bg(theme.card)
+                            .border_1()
+                            .border_color(theme.separator)
+                            .hover(|s| s.bg(theme.hover))
+                            .cursor_pointer()
+                            .child(icons::square_pen().size(px(13.)).text_color(theme.accent))
+                            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(text::FOOTNOTE)).font_weight(FontWeight::MEDIUM).child("New Thread"))
+                            .child(div().flex_none().text_size(px(text::CAPTION)).text_color(theme.tertiary).child("⌘N"))
+                            .role(gpui_kit::Role::Button)
+                            .aria_label("New Thread")
+                            .aria_description("New Thread (⌘N)")
+                            .aria_keyshortcuts("⌘N")
+                            .tooltip(tooltip("New Thread (⌘N)"))
+                            .on_click(|_, window, cx| window.dispatch_action(Box::new(crate::ui::root::NewThread), cx)),
+                    )
+                    .child(
+                        div()
+                            .id("search")
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .h(px(27.))
+                            .px(px(8.))
+                            .rounded(px(radius::MEDIUM))
+                            .bg(theme.hover)
+                            .border_1()
+                            .border_color(theme.separator)
+                            .hover(|s| s.bg(theme.hover))
+                            .cursor_pointer()
+                            .child(Icon::new(IconName::Search).size(px(13.)).text_color(theme.secondary))
+                            .child(div().text_size(px(text::CAPTION)).text_color(theme.tertiary).child("⌘K"))
+                            .role(gpui_kit::Role::Button)
+                            .aria_label("Search")
+                            .aria_description("Search threads, what was said in them, memories and tasks, and jump there (⌘K)")
+                            .aria_keyshortcuts("⌘K")
+                            .tooltip(tooltip("Search threads, memories and tasks (⌘K)"))
+                            .on_click(|_, window, cx| window.dispatch_action(Box::new(crate::ui::root::OpenSpotlight), cx)),
+                    ),
             )
+            .when(show_triage, |d| {
+                d.child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(px(4.))
+                        .when(waiting_count > 0, |d| {
+                            d.child(
+                                div()
+                                    .id("triage-waiting")
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(4.))
+                                    .h(px(20.))
+                                    .px(px(6.))
+                                    .rounded(px(radius::SMALL))
+                                    .bg(theme.warning.opacity(0.15))
+                                    .border_1()
+                                    .border_color(theme.warning.opacity(0.32))
+                                    .hover(|s| s.bg(theme.warning.opacity(0.24)))
+                                    .cursor_pointer()
+                                    .text_size(px(text::CAPTION))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme.warning)
+                                    .child(icons::hand().size(px(11.)).text_color(theme.warning))
+                                    .child(format!("{waiting_count} waiting"))
+                                    .tooltip(tooltip("Jump to the next thread waiting for your approval"))
+                                    .on_click(move |_, _, cx| {
+                                        ws_wait.update(cx, |ws, cx| {
+                                            let next = ws.selected.as_deref()
+                                                .and_then(|cur| waiting_ids.iter().position(|id| id == cur))
+                                                .map(|i| &waiting_ids[(i + 1) % waiting_ids.len()])
+                                                .or_else(|| waiting_ids.first());
+                                            if let Some(id) = next.cloned() {
+                                                ws.select(&id, cx);
+                                            }
+                                        });
+                                    }),
+                            )
+                        })
+                        .when(working_n > 0 || filter_on, |d| {
+                            d.child(
+                                div()
+                                    .id("triage-working")
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(4.))
+                                    .h(px(20.))
+                                    .px(px(6.))
+                                    .rounded(px(radius::SMALL))
+                                    .bg(if filter_on { theme.accent } else { theme.accent_soft })
+                                    .hover(|s| s.opacity(0.9))
+                                    .cursor_pointer()
+                                    .text_size(px(text::CAPTION))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(if filter_on { gpui_kit::white() } else { theme.accent })
+                                    .child(Icon::new(IconName::LoaderCircle).size(px(11.)).text_color(if filter_on { gpui_kit::white() } else { theme.accent }))
+                                    .child(if filter_on {
+                                        if working_n > 0 { format!("{working_n} active ×") } else { "Active only ×".into() }
+                                    } else {
+                                        format!("{working_n} active")
+                                    })
+                                    .tooltip(tooltip(if filter_on { "Showing only active, waiting and unread threads — click to show all" } else { "Filter sidebar to active, waiting and unread threads" }))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.filter_active = !this.filter_active;
+                                        cx.notify();
+                                    })),
+                            )
+                        })
+                        .when(unread_count > 0, |d| {
+                            d.child(
+                                div()
+                                    .id("triage-unread")
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(4.))
+                                    .h(px(20.))
+                                    .px(px(6.))
+                                    .rounded(px(radius::SMALL))
+                                    .bg(theme.card)
+                                    .border_1()
+                                    .border_color(theme.separator)
+                                    .hover(|s| s.bg(theme.hover))
+                                    .cursor_pointer()
+                                    .text_size(px(text::CAPTION))
+                                    .text_color(theme.secondary)
+                                    .child(div().w(px(5.)).h(px(5.)).rounded_full().bg(theme.accent))
+                                    .child(format!("{unread_count} new"))
+                                    .tooltip(tooltip("Jump to the next thread with a new reply"))
+                                    .on_click(move |_, _, cx| {
+                                        ws_unread.update(cx, |ws, cx| {
+                                            if let Some(id) = unread_ids.first().cloned() {
+                                                ws.select(&id, cx);
+                                            }
+                                        });
+                                    }),
+                            )
+                        }),
+                )
+            })
     }
 
     fn project_row(&self, project: &ProjectMeta, home: bool, first: bool, theme: &Theme, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let ws = self.workspace.read(cx);
-        let collapsed = self.collapsed.contains(&project.id);
+        let collapsed = self.collapsed.contains(&project.id) && !self.filter_active;
         let threads: Vec<&Entity<ThreadState>> = ws.threads.iter().filter(|t| t.read(cx).meta.project_id == project.id && t.read(cx).meta.settled_at.is_none()).collect();
-        let activity = threads.iter().any(|t| {
-            let t = t.read(cx);
-            t.run.running || t.unread || t.waiting_for_you() || t.run.jobs.agents_running() > 0
-        });
+        let mut waiting_n = 0usize;
+        let mut working_n = 0usize;
+        let mut unread_n = 0usize;
+        for t in &threads {
+            let st = t.read(cx);
+            if st.waiting_for_you() {
+                waiting_n += 1;
+            } else if st.run.running || st.run.jobs.agents_running() > 0 {
+                working_n += 1;
+            } else if st.unread {
+                unread_n += 1;
+            }
+        }
+        let activity = waiting_n > 0 || working_n > 0 || unread_n > 0;
         let count = threads.len();
         let selected = ws.page == Some(Page::Project(project.id.clone()));
         let memory_open = ws.page == Some(Page::Memory(project.id.clone()));
@@ -589,11 +789,11 @@ impl Sidebar {
             .flex()
             .items_center()
             .gap(px(GAP))
-            .mt(px(if first { 0. } else { space::M }))
+            .mt(px(if first { 2. } else { 10. }))
             .px(px(ROW_INSET))
             .h(px(ROW_HEIGHT))
             .rounded(px(radius::MEDIUM))
-            .text_size(px(text::FOOTNOTE))
+            .text_size(px(text::CAPTION))
             .text_color(theme.secondary)
             .when(selected, |d| d.bg(theme.selected))
             .when(!selected, |d| d.hover(|s| s.bg(theme.hover)))
@@ -628,7 +828,43 @@ impl Sidebar {
                     .gap(px(GAP))
                     .child(icon.size(px(ICON)).text_color(theme.secondary))
                     .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_weight(FontWeight::SEMIBOLD).child(name.clone()))
-                    .when(collapsed && activity, |d| d.child(div().flex_none().w(px(6.)).h(px(6.)).rounded_full().bg(theme.accent)))
+                    .when(waiting_n > 0, |d| {
+                        d.child(
+                            div()
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .gap(px(2.))
+                                .px(px(4.))
+                                .h(px(15.))
+                                .rounded(px(radius::SMALL))
+                                .bg(theme.warning.opacity(0.16))
+                                .text_color(theme.warning)
+                                .text_size(px(10.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(icons::hand().size(px(9.)).text_color(theme.warning))
+                                .child(waiting_n.to_string()),
+                        )
+                    })
+                    .when(working_n > 0, |d| {
+                        d.child(
+                            div()
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .gap(px(2.))
+                                .px(px(4.))
+                                .h(px(15.))
+                                .rounded(px(radius::SMALL))
+                                .bg(theme.accent_soft)
+                                .text_color(theme.accent)
+                                .text_size(px(10.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(Icon::new(IconName::LoaderCircle).size(px(9.)).text_color(theme.accent))
+                                .child(working_n.to_string()),
+                        )
+                    })
+                    .when(collapsed && waiting_n == 0 && working_n == 0 && activity, |d| d.child(div().flex_none().w(px(6.)).h(px(6.)).rounded_full().bg(theme.accent)))
                     .when(collapsed && !activity && count > 0, |d| d.child(div().flex_none().text_size(px(text::CAPTION)).text_color(theme.tertiary).child(count.to_string())))
                     .child(div().flex_1())
                     .when(reviews > 0, |d| {
@@ -660,14 +896,14 @@ impl Sidebar {
                     .role(gpui_kit::Role::Button)
                     .aria_label(format!("Memory of {name}"))
                     .flex_none()
-                    .w(px(22.))
-                    .h(px(22.))
+                    .w(px(20.))
+                    .h(px(20.))
                     .rounded(px(radius::SMALL))
                     .flex()
                     .items_center()
                     .justify_center()
                     .hover(|s| s.bg(theme.selected))
-                    .child(icons::brain().size(px(ICON)).text_color(if memory_open { theme.accent } else { theme.secondary }))
+                    .child(icons::brain().size(px(13.)).text_color(if memory_open { theme.accent } else { theme.secondary }))
                     .map(|d| if memory_open { d } else { hidden(d).group_hover(group.clone(), |s| visible(s)) })
                     .tooltip(tooltip(memory_tip))
                     .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -682,14 +918,14 @@ impl Sidebar {
                     .role(gpui_kit::Role::Button)
                     .aria_label(format!("New thread in {name}"))
                     .flex_none()
-                    .w(px(22.))
-                    .h(px(22.))
+                    .w(px(20.))
+                    .h(px(20.))
                     .rounded(px(radius::SMALL))
                     .flex()
                     .items_center()
                     .justify_center()
                     .hover(|s| s.bg(theme.selected))
-                    .child(Icon::new(IconName::Plus).size(px(ICON)).text_color(theme.secondary))
+                    .child(Icon::new(IconName::Plus).size(px(13.)).text_color(theme.secondary))
                     .tooltip(tooltip(format!("New thread in {name}")))
                     .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -753,18 +989,18 @@ impl Sidebar {
         // isn't following them (its turn over).
         let workers_need_you = nest.folded && nest.waiting > 0 && !t.run.running;
         let (status, status_tip): (gpui_kit::AnyElement, &str) = if workers_need_you && !waiting {
-            (icons::hand().size(px(13.)).text_color(theme.warning).into_any_element(), "A thread it started is waiting for you")
+            (icons::hand().size(px(12.)).text_color(theme.warning).into_any_element(), "A thread it started is waiting for you")
         } else if waiting {
-            (icons::hand().size(px(13.)).text_color(theme.warning).into_any_element(), "Waiting for your approval")
+            (icons::hand().size(px(12.)).text_color(theme.warning).into_any_element(), "Waiting for your approval")
         } else if running {
-            (Icon::new(IconName::LoaderCircle).size(px(13.)).text_color(theme.accent).into_any_element(), "Working…")
+            (Icon::new(IconName::LoaderCircle).size(px(12.)).text_color(theme.accent).into_any_element(), "Working…")
         } else if jobs.is_some() {
-            (icons::hourglass().size(px(12.)).text_color(fg).into_any_element(), "")
+            (icons::hourglass().size(px(11.)).text_color(fg).into_any_element(), "")
         } else if unread {
-            (div().w(px(7.)).h(px(7.)).rounded_full().bg(theme.accent).into_any_element(), "New reply")
+            (div().w(px(6.5)).h(px(6.5)).rounded_full().bg(theme.accent).into_any_element(), "New reply")
         } else {
-            // Idle: a small grey dot.
-            (div().w(px(6.)).h(px(6.)).rounded_full().bg(theme.tertiary.opacity(0.6)).into_any_element(), "")
+            // Idle: a subtle dot.
+            (div().w(px(5.)).h(px(5.)).rounded_full().bg(theme.tertiary.opacity(0.45)).into_any_element(), "")
         };
         let status_tip: SharedString = agents.clone().or_else(|| jobs.clone()).unwrap_or_else(|| status_tip.into());
         let group: SharedString = format!("thread-row-{id}").into();
@@ -782,14 +1018,14 @@ impl Sidebar {
             let button = |name: &str, icon: Icon, tip: &'static str| {
                 div()
                     .id(SharedString::from(format!("{name}-{id}")))
-                    .w(px(22.))
-                    .h(px(22.))
+                    .w(px(20.))
+                    .h(px(20.))
                     .rounded(px(radius::SMALL))
                     .flex()
                     .items_center()
                     .justify_center()
                     .hover(|s| s.bg(theme.selected))
-                    .child(icon.size(px(13.)).text_color(fg))
+                    .child(icon.size(px(12.)).text_color(fg))
                     .tooltip(tooltip(tip))
             };
             hidden(div())
@@ -837,7 +1073,7 @@ impl Sidebar {
                             Button::new(SharedString::from(format!("more-{id}")))
                                 .xsmall()
                                 .ghost()
-                                .icon(Icon::new(IconName::Ellipsis).size(px(13.)).text_color(fg))
+                                .icon(Icon::new(IconName::Ellipsis).size(px(12.)).text_color(fg))
                                 .tooltip("More")
                                 .dropdown_menu(move |menu, _, cx| m.build(menu, cx)),
                         )
@@ -871,6 +1107,7 @@ impl Sidebar {
             }
             parts.join(", ")
         };
+        let needs_attention = waiting || workers_need_you;
         div()
             .id(SharedString::from(format!("thread-{id}")))
             .role(gpui_kit::Role::ListItem)
@@ -882,36 +1119,27 @@ impl Sidebar {
             .gap(px(GAP))
             .w_full()
             .h(px(ROW_HEIGHT))
-            .pl(px(ROW_INSET + nest.depth as f32 * INDENT))
+            .pl(px(ROW_INSET + 2. + nest.depth as f32 * INDENT))
             .pr(px(ROW_INSET))
             .rounded(px(radius::MEDIUM))
             .overflow_hidden()
+            .text_size(px(text::FOOTNOTE))
             .when(is_selected, |d| d.bg(theme.selected))
-            .when(!is_selected, |d| d.hover(|s| s.bg(theme.hover)))
-            .child(if nest.workers > 0 {
-                let (this, key) = (cx.entity().downgrade(), id.clone());
-                let tip = workers_summary(&nest);
-                div()
-                    .id(SharedString::from(format!("fold-{id}")))
-                    .flex_none()
-                    .w(px(CHEVRON))
-                    .h(px(ROW_HEIGHT))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(Icon::new(if nest.folded { IconName::ChevronRight } else { IconName::ChevronDown }).size(px(10.)).text_color(theme.tertiary))
-                    .tooltip(tooltip(tip))
-                    .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(move |_, _, cx| {
-                        cx.stop_propagation();
-                        let _ = this.update(cx, |s, cx| {
-                            Self::toggle(&mut s.folded_workers, &key);
-                            cx.notify();
-                        });
-                    })
-                    .into_any_element()
-            } else {
-                div().flex_none().w(px(CHEVRON)).into_any_element()
+            .when(!is_selected && needs_attention, |d| d.bg(theme.warning.opacity(0.09)).hover(|s| s.bg(theme.warning.opacity(0.15))))
+            .when(!is_selected && !needs_attention, |d| d.hover(|s| s.bg(theme.hover)))
+            .when(is_selected, |d| {
+                d.child(div().absolute().left_0().top(px(4.)).bottom(px(4.)).w(px(2.5)).rounded_r(px(2.)).bg(theme.accent))
+            })
+            .when(nest.depth > 0, |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .left(px(ROW_INSET + 8. + (nest.depth - 1) as f32 * INDENT))
+                        .w(px(1.))
+                        .bg(theme.separator),
+                )
             })
             .child(
                 div()
@@ -934,17 +1162,55 @@ impl Sidebar {
                     .text_ellipsis()
                     .when(settled, |d| d.text_color(theme.secondary))
                     .when(unread, |d| d.font_weight(FontWeight::SEMIBOLD))
+                    .when(!unread && (is_selected || needs_attention), |d| d.font_weight(FontWeight::MEDIUM))
                     // A placeholder until the generated title arrives.
                     .when(generating, |d| d.opacity(0.55))
                     .child(t.title.clone()),
             )
-            .when(pinned, |d| d.child(icons::pin().size(px(11.)).text_color(theme.tertiary).rotate(gpui_kit::radians(0.7))))
+            .when(pinned, |d| d.child(icons::pin().size(px(10.)).text_color(theme.tertiary).rotate(gpui_kit::radians(0.7))))
             .when_some(workflow, |d, name| {
                 d.child(div().id(SharedString::from(format!("workflow-{id}"))).flex_none().child(crate::ui::icons::workflow().size(px(11.)).text_color(theme.accent)).tooltip(tooltip(SharedString::from(format!("Workflow: {name}")))))
             })
-            // Folded: how many it started, where they'd be.
-            .when(nest.folded, |d| d.child(div().flex_none().text_size(px(text::CAPTION)).text_color(theme.tertiary).child(format!("+{}", nest.workers))))
-            .child(div().flex_none().text_size(px(text::CAPTION)).text_color(if is_selected { theme.secondary } else { theme.tertiary }).child(age))
+            // Threads this agent started: a compact clickable pill to fold/unfold without wasting left gutter on every row.
+            .when(nest.workers > 0, |d| {
+                let (this, key) = (cx.entity().downgrade(), id.clone());
+                let tip = workers_summary(&nest);
+                let (bg, fg_c) = if nest.waiting > 0 {
+                    (theme.warning.opacity(0.16), theme.warning)
+                } else if nest.working > 0 {
+                    (theme.accent_soft, theme.accent)
+                } else {
+                    (theme.selected, theme.secondary)
+                };
+                d.child(
+                    div()
+                        .id(SharedString::from(format!("fold-{id}")))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap(px(2.))
+                        .h(px(16.))
+                        .px(px(4.))
+                        .rounded(px(radius::SMALL))
+                        .bg(bg)
+                        .text_size(px(10.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(fg_c)
+                        .cursor_pointer()
+                        .child(if nest.folded { format!("+{}", nest.workers) } else { format!("{}", nest.workers) })
+                        .child(Icon::new(if nest.folded { IconName::ChevronRight } else { IconName::ChevronDown }).size(px(9.)).text_color(fg_c))
+                        .tooltip(tooltip(tip))
+                        .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(move |_, _, cx| {
+                            cx.stop_propagation();
+                            let _ = this.update(cx, |s, cx| {
+                                Self::toggle(&mut s.folded_workers, &key);
+                                cx.notify();
+                            });
+                        }),
+                )
+            })
+            .child(div().flex_none().text_size(px(10.5)).text_color(if is_selected { theme.secondary } else { theme.tertiary }).child(age))
             .children(actions)
             .on_hover(cx.listener(move |this, is_hovered, _, cx| {
                 if *is_hovered && this.hot_row.as_deref() != Some(hover_id.as_str()) {
@@ -1062,8 +1328,53 @@ impl Sidebar {
             .into_any_element()
     }
 
-    /// A subscription's name over its meters: `Claude Max`, the account only in its tooltip.
-    fn subscription_row(sub: Option<&yh_core::limits::Subscription>, theme: &Theme) -> gpui_kit::AnyElement {
+    /// One compact meter cell inside a 2-column pair (`5h ━━━── 6%`), with full reset tooltip.
+    fn compact_meter(agent: &str, name: &str, window: Option<&yh_core::limits::Window>, updated: Option<f64>, now: f64, theme: &Theme) -> gpui_kit::AnyElement {
+        let title = if agent.is_empty() { yh_core::limits::title(name) } else { format!("{agent} · {}", yh_core::limits::title(name)) };
+        let used = window.map(|w| yh_core::limits::utilization(w, now));
+        let reset = window.is_some_and(|w| w.resets_at.is_some_and(|at| at <= now));
+        let tint = match used.unwrap_or(0.) {
+            u if u < 0.7 => theme.accent,
+            u if u < 0.9 => theme.warning,
+            _ => theme.error,
+        };
+        let reading = match window {
+            None => format!("{title}: no reading yet. Refresh to check."),
+            Some(_) if reset => format!("{title}: reset since the last reading. Refresh to update."),
+            Some(w) => match w.resets_at {
+                Some(at) => format!("{title}: resets {}, {}", yh_core::clock::relative(at, now), yh_core::clock::short_date_time(at)),
+                None => title.clone(),
+            },
+        };
+        let mut tip = reading;
+        if name == "five_hour" {
+            if let Some(t) = updated {
+                tip.push_str(&format!("\nUpdated {}", yh_core::clock::relative(t, now)));
+            }
+        }
+        tip.push_str("\nClick for usage (⇧⌘U)");
+        div()
+            .id(SharedString::from(format!("meter-compact-{agent}{name}")))
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap(px(5.))
+            .h(px(15.))
+            .text_size(px(10.5))
+            .child(div().flex_none().font_weight(FontWeight::MEDIUM).text_color(theme.tertiary).child(yh_core::limits::short_label(name)))
+            .child(
+                div().flex_1().min_w(px(24.)).h(px(BAR)).rounded_full().bg(theme.selected).overflow_hidden().when_some(used, |d, u| {
+                    d.child(div().h_full().rounded_full().min_w(px(BAR)).w(gpui_kit::relative(u as f32)).bg(tint))
+                }),
+            )
+            .child(div().flex_none().text_color(theme.secondary).child(used.map(|u| format!("{}%", (u * 100.).round() as i64)).unwrap_or_else(|| "–".into())))
+            .tooltip(tooltip(tip))
+            .into_any_element()
+    }
+
+    /// A subscription's name over its meters: `Claude Max`, plus 5h countdown quietly on the right.
+    fn subscription_row(sub: Option<&yh_core::limits::Subscription>, reset: String, theme: &Theme) -> gpui_kit::AnyElement {
         let plan = sub.map(|s| s.plan_name()).unwrap_or_else(|| "Claude".into());
         let tip = match sub {
             Some(s) => {
@@ -1082,14 +1393,19 @@ impl Sidebar {
         div()
             .id("subscription")
             .flex()
+            .items_center()
+            .gap(px(6.))
+            .h(px(15.))
             .text_size(px(text::CAPTION))
             .child(div().flex_none().font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(plan))
+            .child(div().flex_1())
+            .when(!reset.is_empty(), |d| d.child(div().flex_none().text_size(px(10.5)).text_color(theme.tertiary).child(reset)))
             .tooltip(tooltip(tip))
             .into_any_element()
     }
 
     /// `Antigravity · Google AI Pro` over its meters; the tooltip has every group's limits.
-    fn agy_row(limits: &crate::state::limits::AgentLimits, theme: &Theme) -> gpui_kit::AnyElement {
+    fn agy_row(limits: &crate::state::limits::AgentLimits, reset: String, theme: &Theme) -> gpui_kit::AnyElement {
         let now = now();
         let mut tip = match &limits.plan {
             Some(p) => format!("Antigravity is signed in to {p}"),
@@ -1115,10 +1431,14 @@ impl Sidebar {
         div()
             .id("agy-subscription")
             .flex()
+            .items_center()
             .gap(px(4.))
+            .h(px(15.))
             .text_size(px(text::CAPTION))
             .child(div().flex_none().font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child("Antigravity"))
-            .when_some(limits.plan.clone(), |d, p| d.child(div().min_w_0().truncate().text_color(theme.tertiary).child(p)))
+            .when_some(limits.plan.clone(), |d, p| d.child(div().flex_1().min_w_0().truncate().text_color(theme.tertiary).child(p)))
+            .when(limits.plan.is_none(), |d| d.child(div().flex_1()))
+            .when(!reset.is_empty(), |d| d.child(div().flex_none().text_size(px(10.5)).text_color(theme.tertiary).child(reset)))
             .tooltip(tooltip(tip))
             .into_any_element()
     }
@@ -1258,20 +1578,51 @@ impl Sidebar {
                 bars = bars.child(Self::account_row(a, ws.account_label(a.id()), a.id() == active.id(), now, theme, &self.workspace));
             }
         } else {
-            bars = bars.child(Self::subscription_row(active.subscription.as_ref(), theme));
-            for (name, window) in &meters {
-                bars = bars.child(Self::meter(name, window.as_ref(), updated, now, theme));
+            let reset = meters
+                .first()
+                .and_then(|(_, w)| w.as_ref())
+                .and_then(|w| w.resets_at)
+                .filter(|&at| at > now)
+                .map(|at| yh_core::clock::countdown(at, now))
+                .unwrap_or_default();
+            bars = bars.child(Self::subscription_row(active.subscription.as_ref(), reset, theme));
+            if meters.len() >= 2 {
+                bars = bars.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(10.))
+                        .child(Self::compact_meter("", &meters[0].0, meters[0].1.as_ref(), updated, now, theme))
+                        .child(Self::compact_meter("", &meters[1].0, meters[1].1.as_ref(), updated, now, theme)),
+                );
+                for (name, window) in meters.iter().skip(2) {
+                    bars = bars.child(Self::meter(name, window.as_ref(), updated, now, theme));
+                }
+            } else {
+                for (name, window) in &meters {
+                    bars = bars.child(Self::meter(name, window.as_ref(), updated, now, theme));
+                }
             }
         }
-        // Antigravity's limits under Claude's, drawn the same: its plan, then its own models' meters.
+        // Antigravity's limits under Claude's, drawn the same: compact 2-column pair.
         if ws.agy_found && (!ws.agy_limits.groups.is_empty() || ws.agy_limits.error.is_some()) {
-            bars = bars.child(div().h(px(space::XS)));
-            bars = bars.child(Self::agy_row(&ws.agy_limits, theme));
             let main = ws.agy_limits.main_group();
-            for name in yh_core::limits::PRIMARY {
-                let window = main.and_then(|g| g.windows.iter().find(|w| w.name == name));
-                bars = bars.child(Self::meter_for(main.map_or("Antigravity", |g| g.name.as_str()), name, window, ws.agy_limits.updated_at, now, theme));
-            }
+            let agent = main.map_or("Antigravity", |g| g.name.as_str());
+            let w0 = main.and_then(|g| g.windows.iter().find(|w| w.name == yh_core::limits::PRIMARY[0]));
+            let w1 = yh_core::limits::PRIMARY.get(1).and_then(|n| main.and_then(|g| g.windows.iter().find(|w| w.name == *n)));
+            let reset = w0.and_then(|w| w.resets_at).filter(|&at| at > now).map(|at| yh_core::clock::countdown(at, now)).unwrap_or_default();
+            bars = bars.child(div().h(px(3.)));
+            bars = bars.child(Self::agy_row(&ws.agy_limits, reset, theme));
+            bars = bars.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(Self::compact_meter(agent, yh_core::limits::PRIMARY[0], w0, ws.agy_limits.updated_at, now, theme))
+                    .when_some(yh_core::limits::PRIMARY.get(1), |d, n| {
+                        d.child(Self::compact_meter(agent, n, w1, ws.agy_limits.updated_at, now, theme))
+                    }),
+            );
         }
         let (awake_ws, settings_ws, refresh_ws) = (self.workspace.clone(), self.workspace.clone(), self.workspace.clone());
         let awake = ws.keep_awake.reason.is_some();
@@ -1280,12 +1631,12 @@ impl Sidebar {
         // No box: a hairline above, the meters, then a row of quiet controls.
         div()
             .flex_none()
-            .px(px(space::L))
-            .pt(px(space::M))
-            .pb(px(space::S))
+            .px(px(12.))
+            .pt(px(8.))
+            .pb(px(6.))
             .flex()
             .flex_col()
-            .gap(px(space::S))
+            .gap(px(6.))
             .border_t_1()
             .border_color(theme.separator)
             .children(self.update_row(theme, cx))
@@ -1379,10 +1730,10 @@ fn small_row(id: SharedString, label: String, theme: &Theme) -> gpui_kit::Statef
         .relative()
         .flex()
         .items_center()
-        .h(px(24.))
+        .h(px(22.))
         .pl(px(TITLE_X))
         .pr(px(space::S))
-        .text_size(px(text::FOOTNOTE))
+        .text_size(px(text::CAPTION))
         .text_color(theme.secondary)
         .rounded(px(radius::MEDIUM))
         .hover(|s| s.bg(theme.hover))
@@ -1432,14 +1783,14 @@ impl Render for Sidebar {
                         .flex()
                         .items_center()
                         .gap(px(GAP))
-                        .h(px(24.))
-                        .pl(px(ROW_INSET + CHEVRON + GAP))
+                        .h(px(22.))
+                        .pl(px(ROW_INSET + 2.))
                         .pr(px(space::S))
                         .rounded(px(radius::MEDIUM))
-                        .text_size(px(text::FOOTNOTE))
+                        .text_size(px(text::CAPTION))
                         .text_color(theme.secondary)
                         .hover(|s| s.bg(theme.hover))
-                        .child(div().w(px(ICON)).flex().justify_center().child(Icon::new(IconName::CircleCheck).size(px(12.)).text_color(theme.tertiary)))
+                        .child(div().w(px(ICON)).flex().justify_center().child(Icon::new(IconName::CircleCheck).size(px(11.)).text_color(theme.tertiary)))
                         .child("Settled")
                         .child(div().text_color(theme.tertiary).child(count.to_string()))
                         .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).size(px(10.)).text_color(theme.tertiary))
@@ -1458,10 +1809,11 @@ impl Render for Sidebar {
                     .flex()
                     .items_center()
                     .gap(px(GAP))
-                    .mt(px(space::M))
+                    .mt(px(8.))
                     .h(px(ROW_HEIGHT))
-                    .pl(px(ROW_INSET + CHEVRON + GAP))
+                    .pl(px(ROW_INSET + 2.))
                     .rounded(px(radius::MEDIUM))
+                    .text_size(px(text::FOOTNOTE))
                     .text_color(theme.secondary)
                     .hover(|s| s.bg(theme.hover))
                     .child(icons::folder_plus().size(px(ICON)).text_color(theme.secondary))
@@ -1493,9 +1845,9 @@ impl Render for Sidebar {
             .bg(theme.sidebar)
             .border_r_1()
             .border_color(theme.separator)
-            // Room for the traffic lights.
-            .child(div().h(px(44.)).flex_none())
-            .child(self.top_buttons(&theme))
+            // Room for the traffic lights, aligned with the 38 pt top bar.
+            .child(div().h(px(38.)).flex_none())
+            .child(self.top_buttons(&theme, cx))
             .child(column)
             .child(self.footer(&theme, cx))
     }

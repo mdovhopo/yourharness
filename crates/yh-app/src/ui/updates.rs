@@ -281,9 +281,9 @@ fn markdown(md: &str, theme: &Theme) -> AnyElement {
 /// The sidebar's banner while there's something to do about an update; None the rest of the time.
 pub fn banner(updater: &Entity<Updater>, workspace: &Entity<Workspace>, notes: &Entity<ReleaseNotesView>, theme: &Theme, cx: &App) -> Option<AnyElement> {
     let u = updater.read(cx);
-    let icon = |name: Icon, color: gpui_kit::Hsla| name.size(px(16.)).text_color(color);
+    let icon = |name: Icon, color: gpui_kit::Hsla| name.size(px(14.)).text_color(color);
     let small = |t: String| div().text_size(px(text::CAPTION)).text_color(theme.secondary).child(t);
-    let strong = |t: String| div().text_size(px(text::FOOTNOTE)).font_weight(FontWeight::SEMIBOLD).child(t);
+    let strong = |t: String| div().text_size(px(text::CAPTION)).font_weight(FontWeight::SEMIBOLD).child(t);
     let dismiss = |id: &'static str, tip: &'static str, f: Box<dyn Fn(&mut App)>| {
         Button::new(id).xsmall().ghost().icon(Icon::new(IconName::CircleX).size(px(13.)).text_color(theme.secondary)).tooltip(tip).on_click(move |_, _, cx| f(cx))
     };
@@ -354,8 +354,22 @@ pub fn banner(updater: &Entity<Updater>, workspace: &Entity<Workspace>, notes: &
         Phase::Checking if u.announces => row.child(icon(Icon::new(IconName::LoaderCircle), theme.secondary)).child(div().text_size(px(text::FOOTNOTE)).font_weight(FontWeight::MEDIUM).child("Checking for updates…")).into_any_element(),
         _ => {
             let (Some(from), Some(current)) = (u.updated_from.clone(), u.current.clone()) else { return None };
-            row.child(icon(crate::ui::icons::sparkles(), theme.accent))
-                .child(div().flex_1().min_w_0().flex().flex_col().items_start().child(strong(format!("Updated to {current}"))).child(whats_new("updated-notes", Some(from), current)))
+            row.px(px(7.))
+                .py(px(3.))
+                .rounded(px(radius::MEDIUM))
+                .bg(theme.accent_soft.opacity(0.7))
+                .child(icon(crate::ui::icons::sparkles(), theme.accent))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .items_center()
+                        .gap(px(5.))
+                        .child(strong(format!("v{current}")))
+                        .child(div().text_size(px(text::CAPTION)).text_color(theme.tertiary).child("·"))
+                        .child(whats_new("updated-notes", Some(from), current)),
+                )
                 .child(dismiss("updated-dismiss", "Hide this", Box::new(move |cx| u2.update(cx, |u, cx| u.dismiss_updated(cx)))))
                 .into_any_element()
         }
