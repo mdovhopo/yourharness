@@ -6,6 +6,8 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-21
+
 ### Added
 
 - Threads can run on Google's Antigravity: pick an Antigravity model in a new thread's model picker. It runs Google's own `agy acp`, signed in as you (install Antigravity's CLI and run `agy` once to sign in). Replies, thinking, commands, file edits, its plan and its questions show as Claude's do, and permission cards work as usual; in Accept Edits and Bypass the app answers for you. Settings → Agents shows whether it's found. Antigravity threads don't get the app's memory, thread and browser tools yet.
