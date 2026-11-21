@@ -867,6 +867,7 @@ impl SettingsView {
                 section("Memory")
                     .child(self.toggle("memoryEnabled", "Give agents the workspace's memory", cx))
                     .child(self.toggle("claudeCodeMemoryOff", "Turn off Claude Code's own memory files", cx))
+                    .child(self.toggle("antigravityMemoryOff", "Turn off Antigravity's own memory (/learn)", cx))
                     .child(self.toggle("memoryTrackTasks", "Track tasks in memory", cx))
                     .child(self.toggle_or("memoryTasksInStats", "Show tasks in stats and graph", false, cx))
                     .child(row(

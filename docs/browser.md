@@ -196,7 +196,7 @@ thread's browser" (`browser/remote.rs`, `yh_server::browser`).
 
 ## How it's tested
 
-`YH_BROWSER_PROBE=<steps.json>` runs tool calls at launch and prints the results (see CLAUDE.md). `scripts/browser-fidelity/run.sh` checks the page, screenshots and input against a plain page of the engine (`ENGINE=webkit`: a WKWebView; Chrome: a plain Chrome window the app makes, `YH_CEF_REFERENCE`); both must pass after a change. The MCP plumbing has unit tests (`cargo test -p yh-core -- mcp::`).
+`YH_BROWSER_PROBE=<steps.json>` runs tool calls at launch and prints the results (see AGENTS.md). `scripts/browser-fidelity/run.sh` checks the page, screenshots and input against a plain page of the engine (`ENGINE=webkit`: a WKWebView; Chrome: a plain Chrome window the app makes, `YH_CEF_REFERENCE`); both must pass after a change. The MCP plumbing has unit tests (`cargo test -p yh-core -- mcp::`).
 
 ## Decided
 

@@ -104,7 +104,7 @@ newer file instead of importing part of it. A newer database schema alone doesn'
 newer database opens).
 
 To look inside one, `ditto -x -k <file> <folder>` (or `unzip`): `data/` is a data folder a
-development build can run on. To reproduce a bug with someone's state, see CLAUDE.md
+development build can run on. To reproduce a bug with someone's state, see AGENTS.md
 (`YH_STATE_IMPORT`).
 
 ## Changing the schema

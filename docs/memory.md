@@ -56,7 +56,12 @@ by folder, so adding the folder again brings its memory back.
   title the workspace already has, kinds it doesn't know, memories over 6,000 characters, and
   anything that looks like a key or token, and names similar memories so the agent can merge.
 - **One memory, not two**: with Settings → General → Memory → "Turn off Claude Code's own memory
-  files" (on by default), the app's sessions run with `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`. That
+  files" (on by default), the app's sessions run with `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`.
+  Antigravity has no such switch: its own memory is `/learn`, which its prompt suggests whenever the
+  user corrects it and which writes rules or skills (`GEMINI.md`, `AGENTS.md`, `~/.gemini`). With
+  "Turn off Antigravity's own memory (/learn)" (on by default) its threads get
+  `memory::ANTIGRAVITY_OWN_MEMORY_OFF` after the index: no `/learn`, corrections saved as `feedback`
+  right then, stale memories updated. The Claude Code switch
   doesn't reach `claude` you run in Terminal, so a project's Memory page (and, in one line, its
   Pull Requests page) nudges while Claude Code still keeps a second memory for the folder, or has
   memory files YourHarness doesn't (matched by title, with its `MEMORY.md` index, or by what they
@@ -135,8 +140,8 @@ the thread with Find on the matched word. With nothing typed it lists recent thr
   tool, both file formats, Claude Code's folder names.
 - `scripts/preset.sh memory <dir>` makes a project with Claude Code-format memory files and a
   ChatGPT export to import. Make it outside this repo (the scratchpad, `/tmp`): a project inside
-  it reads the repo's CLAUDE.md too. Then run a development build with `YH_DATA_DIR=<dir>` (as
-  CLAUDE.md says) and:
+  it reads the repo's AGENTS.md too (CLAUDE.md imports it). Then run a development build with `YH_DATA_DIR=<dir>` (as
+  AGENTS.md says) and:
   - `YH_SEND="Remember that …" YH_MODEL=haiku`: a real turn that should save; a second launch
     with a question should read it (`sqlite3 <dir>/harness.sqlite "select * from memory_events"`).
   - `YH_MEMORY_IMPORT=<dir>/sources/claude-memory`: a direct import.

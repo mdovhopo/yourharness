@@ -34,7 +34,7 @@ After each action in `everything` and `chaos`, the state is checked, and what's 
 landing on a blank in the right project, Find marks left after closing, the keyboard on
 nothing drawn). A release needs no `WRONG`, no panic, no `INVALID`.
 
-Other probes for one view each (all in CLAUDE.md): `YH_USAGE_PROBE` (the usage chart, longest
+Other probes for one view each (all in AGENTS.md): `YH_USAGE_PROBE` (the usage chart, longest
 stall under 100 ms), `YH_FILES_PROBE` (a long file opened and scrolled in Files, under 50 ms a
 step), `YH_SEARCH_PROBE` (the full-text index catching up), `YH_SELECT_PROBE`, `YH_WHEEL`,
 `YH_SCROLL_TO`, `YH_TIMING=1` and `YH_EVENT_LOG=1`.

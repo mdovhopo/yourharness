@@ -80,7 +80,7 @@ flowchart TB
   `video_thumb.rs`. `probe.rs` is the performance run.
 - **GPUI** comes through gpui-kit (GPUI 0.3.11 and gpui-component): inputs, selects, popovers,
   dialogs, tables, charts, menus. Three crates are patched (`patches/`, unpacked into
-  `vendor/` by `scripts/vendor.sh`); CLAUDE.md says what each patch does.
+  `vendor/` by `scripts/vendor.sh`); AGENTS.md says what each patch does.
 
 ## Threads and their `claude`
 

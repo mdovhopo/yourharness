@@ -9,6 +9,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 ### Added
 
 - Usage counts Antigravity's tokens, by model (Gemini 4 Neon, Gemini 3.8 Flash…): its whole history, from the app and from the terminal, read from Antigravity's own conversations the first time you open Usage. Turns in the app are counted as they run, so one cut short by a crash still counts. Claude models run through Antigravity are priced like Claude Code's; Gemini has no Anthropic price, so its tokens show as unpriced.
+- Settings → Memory: Turn off Antigravity's own memory (/learn), on by default. Antigravity threads keep what they learn in YourHarness's memory, like Claude's: your corrections saved as feedback, memories that turned out stale brought up to date.
 
 ### Fixed
 

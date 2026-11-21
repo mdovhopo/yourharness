@@ -2035,6 +2035,7 @@ impl Workspace {
         let attachments = self.data_dir.join("attachments");
         let memory_on = self.library.setting("memoryEnabled").and_then(|v| v.as_bool()).unwrap_or(true);
         let memory_off_for_claude = self.library.setting("claudeCodeMemoryOff").and_then(|v| v.as_bool()).unwrap_or(true);
+        let memory_off_for_antigravity = self.library.setting("antigravityMemoryOff").and_then(|v| v.as_bool()).unwrap_or(true);
         let track_tasks = self.library.setting("memoryTrackTasks").and_then(|v| v.as_bool()).unwrap_or(true);
         // A side chat: a copy of its thread's conversation that can look but not edit and
         // leaves nothing behind. It reads freely; commands and web requests ask first. It sees
@@ -2113,6 +2114,10 @@ impl Workspace {
             let (text, listed) = yh_core::memory::prompt(&store.memories(Some(&scope), Some("active")), &project.name, track_tasks);
             store.note_injection(&scope, listed, text.len(), &actor);
             prompt.push(text);
+            // Antigravity has no switch for its own memory (`/learn`): it's told to leave it be.
+            if memory_off_for_antigravity && self.agent_of(t) == yh_core::agents::Agent::Antigravity {
+                prompt.push(yh_core::memory::ANTIGRAVITY_OWN_MEMORY_OFF.to_string());
+            }
             allowed.push("mcp__memory".to_string());
             let changed = self.tool_requests.clone();
             servers.push(std::sync::Arc::new(yh_core::memory_tools::MemoryTools {

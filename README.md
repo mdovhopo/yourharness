@@ -158,7 +158,7 @@ open "build/YourHarness Next.app"
 scripts/mobile.sh                       # the phone app, in a Simulator of its own
 ```
 
-Development copies use their own bundle ID, so they never share permissions with the app you use. [CLAUDE.md](CLAUDE.md) lists the launch options for test runs (scratch data folders, snapshots, probes) and the rules for working on the code. The videos and screenshots above are made from the real app by [scripts/demo](scripts/demo/README.md).
+Development copies use their own bundle ID, so they never share permissions with the app you use. [AGENTS.md](AGENTS.md) lists the launch options for test runs (scratch data folders, snapshots, probes) and the rules for working on the code. The videos and screenshots above are made from the real app by [scripts/demo](scripts/demo/README.md).
 
 <details>
 <summary><b>Releasing</b></summary>
