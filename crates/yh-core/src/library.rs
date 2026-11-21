@@ -395,6 +395,7 @@ impl Library {
                         tool_name: e.tool_name.clone(),
                         description: input["description"].as_str().map(str::to_string),
                         agent_type: input["subagent_type"].as_str().map(str::to_string),
+                        model: input["model"].as_str().map(str::to_string),
                         background: input["run_in_background"] == true,
                         has_result: e.tool_result.is_some(),
                         is_error: e.is_error,

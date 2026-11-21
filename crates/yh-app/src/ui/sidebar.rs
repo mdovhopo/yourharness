@@ -1107,6 +1107,9 @@ impl Sidebar {
             }
             parts.join(", ")
         };
+        let agent = ws.agent_of(t);
+        let is_agy = agent == yh_core::agents::Agent::Antigravity;
+        let show_provider = ws.agy_found || is_agy;
         let needs_attention = waiting || workers_need_you;
         div()
             .id(SharedString::from(format!("thread-{id}")))
@@ -1208,6 +1211,28 @@ impl Sidebar {
                                 cx.notify();
                             });
                         }),
+                )
+            })
+            .when(show_provider, |d| {
+                let color = if is_agy { theme.teal() } else { theme.accent };
+                let badge = if is_agy { "A" } else { "C" };
+                let tip = if is_agy { "Provider: Antigravity" } else { "Provider: Claude" };
+                d.child(
+                    div()
+                        .id(SharedString::from(format!("provider-{id}")))
+                        .flex_none()
+                        .w(px(14.))
+                        .h(px(14.))
+                        .rounded(px(3.5))
+                        .bg(color.opacity(0.15))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(9.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(color)
+                        .child(badge)
+                        .tooltip(tooltip(tip)),
                 )
             })
             .child(div().flex_none().text_size(px(10.5)).text_color(if is_selected { theme.secondary } else { theme.tertiary }).child(age))
@@ -1328,7 +1353,8 @@ impl Sidebar {
             .into_any_element()
     }
 
-    /// One compact meter cell inside a 2-column pair (`5h ━━━── 6%`), with full reset tooltip.
+    /// One compact meter cell inside a 2-column pair (`5h 42%   3h 36m` over a full-width bar):
+    /// keeps both utilization and reset countdown visible for both windows.
     fn compact_meter(agent: &str, name: &str, window: Option<&yh_core::limits::Window>, updated: Option<f64>, now: f64, theme: &Theme) -> gpui_kit::AnyElement {
         let title = if agent.is_empty() { yh_core::limits::title(name) } else { format!("{agent} · {}", yh_core::limits::title(name)) };
         let used = window.map(|w| yh_core::limits::utilization(w, now));
@@ -1353,28 +1379,37 @@ impl Sidebar {
             }
         }
         tip.push_str("\nClick for usage (⇧⌘U)");
+        let countdown = window.and_then(|w| w.resets_at).filter(|_| !reset).map(|at| yh_core::clock::countdown(at, now)).unwrap_or_default();
         div()
             .id(SharedString::from(format!("meter-compact-{agent}{name}")))
             .flex_1()
             .min_w_0()
             .flex()
-            .items_center()
-            .gap(px(5.))
-            .h(px(15.))
-            .text_size(px(10.5))
-            .child(div().flex_none().font_weight(FontWeight::MEDIUM).text_color(theme.tertiary).child(yh_core::limits::short_label(name)))
+            .flex_col()
+            .gap(px(3.))
             .child(
-                div().flex_1().min_w(px(24.)).h(px(BAR)).rounded_full().bg(theme.selected).overflow_hidden().when_some(used, |d, u| {
-                    d.child(div().h_full().rounded_full().min_w(px(BAR)).w(gpui_kit::relative(u as f32)).bg(tint))
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .h(px(13.))
+                    .text_size(px(10.))
+                    .child(div().flex_none().font_weight(FontWeight::MEDIUM).text_color(theme.tertiary).child(yh_core::limits::short_label(name)))
+                    .child(div().flex_none().font_weight(FontWeight::MEDIUM).text_color(theme.secondary).child(used.map(|u| format!("{}%", (u * 100.).round() as i64)).unwrap_or_else(|| "–".into())))
+                    .child(div().flex_1())
+                    .when(!countdown.is_empty(), |d| d.child(div().flex_none().text_color(theme.tertiary).whitespace_nowrap().child(countdown))),
+            )
+            .child(
+                div().w_full().h(px(4.)).rounded_full().bg(theme.selected).overflow_hidden().when_some(used, |d, u| {
+                    d.child(div().h_full().rounded_full().min_w(px(4.)).w(gpui_kit::relative(u as f32)).bg(tint))
                 }),
             )
-            .child(div().flex_none().text_color(theme.secondary).child(used.map(|u| format!("{}%", (u * 100.).round() as i64)).unwrap_or_else(|| "–".into())))
             .tooltip(tooltip(tip))
             .into_any_element()
     }
 
-    /// A subscription's name over its meters: `Claude Max`, plus 5h countdown quietly on the right.
-    fn subscription_row(sub: Option<&yh_core::limits::Subscription>, reset: String, theme: &Theme) -> gpui_kit::AnyElement {
+    /// A subscription's name over its meters: `Claude Max`, the account only in its tooltip.
+    fn subscription_row(sub: Option<&yh_core::limits::Subscription>, theme: &Theme) -> gpui_kit::AnyElement {
         let plan = sub.map(|s| s.plan_name()).unwrap_or_else(|| "Claude".into());
         let tip = match sub {
             Some(s) => {
@@ -1394,18 +1429,17 @@ impl Sidebar {
             .id("subscription")
             .flex()
             .items_center()
-            .gap(px(6.))
+            .gap(px(5.))
             .h(px(15.))
             .text_size(px(text::CAPTION))
+            .child(div().w(px(5.)).h(px(5.)).rounded_full().bg(theme.accent))
             .child(div().flex_none().font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(plan))
-            .child(div().flex_1())
-            .when(!reset.is_empty(), |d| d.child(div().flex_none().text_size(px(10.5)).text_color(theme.tertiary).child(reset)))
             .tooltip(tooltip(tip))
             .into_any_element()
     }
 
     /// `Antigravity · Google AI Pro` over its meters; the tooltip has every group's limits.
-    fn agy_row(limits: &crate::state::limits::AgentLimits, reset: String, theme: &Theme) -> gpui_kit::AnyElement {
+    fn agy_row(limits: &crate::state::limits::AgentLimits, theme: &Theme) -> gpui_kit::AnyElement {
         let now = now();
         let mut tip = match &limits.plan {
             Some(p) => format!("Antigravity is signed in to {p}"),
@@ -1432,13 +1466,12 @@ impl Sidebar {
             .id("agy-subscription")
             .flex()
             .items_center()
-            .gap(px(4.))
+            .gap(px(5.))
             .h(px(15.))
             .text_size(px(text::CAPTION))
+            .child(div().w(px(5.)).h(px(5.)).rounded_full().bg(theme.teal()))
             .child(div().flex_none().font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child("Antigravity"))
             .when_some(limits.plan.clone(), |d, p| d.child(div().flex_1().min_w_0().truncate().text_color(theme.tertiary).child(p)))
-            .when(limits.plan.is_none(), |d| d.child(div().flex_1()))
-            .when(!reset.is_empty(), |d| d.child(div().flex_none().text_size(px(10.5)).text_color(theme.tertiary).child(reset)))
             .tooltip(tooltip(tip))
             .into_any_element()
     }
@@ -1578,14 +1611,7 @@ impl Sidebar {
                 bars = bars.child(Self::account_row(a, ws.account_label(a.id()), a.id() == active.id(), now, theme, &self.workspace));
             }
         } else {
-            let reset = meters
-                .first()
-                .and_then(|(_, w)| w.as_ref())
-                .and_then(|w| w.resets_at)
-                .filter(|&at| at > now)
-                .map(|at| yh_core::clock::countdown(at, now))
-                .unwrap_or_default();
-            bars = bars.child(Self::subscription_row(active.subscription.as_ref(), reset, theme));
+            bars = bars.child(Self::subscription_row(active.subscription.as_ref(), theme));
             if meters.len() >= 2 {
                 bars = bars.child(
                     div()
@@ -1604,15 +1630,14 @@ impl Sidebar {
                 }
             }
         }
-        // Antigravity's limits under Claude's, drawn the same: compact 2-column pair.
+        // Antigravity's limits under Claude's, drawn the same: compact 2-column pair with resets.
         if ws.agy_found && (!ws.agy_limits.groups.is_empty() || ws.agy_limits.error.is_some()) {
             let main = ws.agy_limits.main_group();
             let agent = main.map_or("Antigravity", |g| g.name.as_str());
             let w0 = main.and_then(|g| g.windows.iter().find(|w| w.name == yh_core::limits::PRIMARY[0]));
             let w1 = yh_core::limits::PRIMARY.get(1).and_then(|n| main.and_then(|g| g.windows.iter().find(|w| w.name == *n)));
-            let reset = w0.and_then(|w| w.resets_at).filter(|&at| at > now).map(|at| yh_core::clock::countdown(at, now)).unwrap_or_default();
-            bars = bars.child(div().h(px(3.)));
-            bars = bars.child(Self::agy_row(&ws.agy_limits, reset, theme));
+            bars = bars.child(div().h(px(4.)));
+            bars = bars.child(Self::agy_row(&ws.agy_limits, theme));
             bars = bars.child(
                 div()
                     .flex()

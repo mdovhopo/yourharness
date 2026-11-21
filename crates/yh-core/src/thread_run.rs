@@ -25,6 +25,8 @@ const SUBAGENT_LOG: usize = 200;
 pub struct Subagent {
     pub description: String,
     pub status: String,
+    /// Model the sub-agent ran on (from its assistant turns or tool input).
+    pub model: Option<String>,
     pub steps: usize,
     /// What it reported, when it came apart from the tool's result (a background sub-agent).
     pub report: Option<String>,
@@ -63,6 +65,7 @@ impl Subagent {
         Subagent {
             description,
             status: "running".into(),
+            model: None,
             steps: 0,
             report: None,
             log: vec![],
@@ -83,6 +86,7 @@ impl Subagent {
         SubagentRecord {
             description: self.description.clone(),
             agent_type: input["subagent_type"].as_str().map(str::to_string).or_else(|| self.workflow.is_some().then(|| "Workflow".into())),
+            model: self.model.clone().or_else(|| input["model"].as_str().filter(|m| !m.is_empty()).map(str::to_string)),
             prompt: input["prompt"].as_str().unwrap_or("").to_string(),
             is_background: input["run_in_background"] == true || self.workflow.is_some(),
             status: self.status.clone(),
@@ -127,6 +131,7 @@ impl Subagent {
         Subagent {
             description: r.description,
             status: r.status,
+            model: r.model,
             steps: r.tool_uses.map_or(steps, |n| n as usize),
             report: r.report,
             log,
@@ -146,6 +151,7 @@ impl Subagent {
         Subagent {
             description: s.description,
             status: s.status,
+            model: s.model,
             steps: s.tool_uses.unwrap_or(0) as usize,
             report: None,
             log: vec![],
@@ -793,8 +799,18 @@ impl ThreadRun {
                 self.stream(seq);
                 Outcome::default()
             }
-            Event::Assistant { message, parent, blocks } => {
+            Event::Assistant { message, parent, model, blocks } => {
                 if let Some(parent) = parent {
+                    if let Some(m) = model.filter(|m| !m.is_empty()) {
+                        if let Some(seq) = self.tool(&parent, src) {
+                            let sub = self.row_mut(seq).sub.get_or_insert_with(|| Subagent::new("Sub-agent".into()));
+                            if sub.model.as_deref() != Some(m.as_str()) {
+                                sub.model = Some(m);
+                                self.live.subagents_version += 1;
+                                self.touch(seq);
+                            }
+                        }
+                    }
                     for block in &blocks {
                         if matches!(block, Block::Tool { .. }) {
                             self.subagent_step(&parent, src);
@@ -1465,7 +1481,7 @@ mod tests {
             }
         }
         // The whole message: told whole, its text the same.
-        run.apply(Event::Assistant { message: "m".into(), parent: None, blocks: vec![Block::Text("Hello, world".into())] }, &NoRows);
+        run.apply(Event::Assistant { message: "m".into(), parent: None, model: None, blocks: vec![Block::Text("Hello, world".into())] }, &NoRows);
         match run.take_changes().as_slice() {
             [RowChange::Changed { row: Some(r), .. }] => assert!(!r.live && r.data.text == "Hello, world"),
             other => panic!("{other:?}"),
@@ -1478,10 +1494,10 @@ mod tests {
         let mut run = ThreadRun { live: LiveState { total: Some(0), ..Default::default() }, ..Default::default() };
         run.live.running = true;
         run.add_user("go", &[], "u", false, false, None);
-        run.apply(Event::Assistant { message: "m".into(), parent: None, blocks: vec![Block::Tool { id: "a".into(), name: "Agent".into(), input: "{}".into() }] }, &NoRows);
+        run.apply(Event::Assistant { message: "m".into(), parent: None, model: None, blocks: vec![Block::Tool { id: "a".into(), name: "Agent".into(), input: "{}".into() }] }, &NoRows);
         run.apply(Event::SubagentStarted { tool_id: "a".into(), description: "bg".into(), task_id: Some("k".into()), background: true }, &NoRows);
         run.apply(Event::ToolResults { parent: None, results: vec![crate::claude::ToolResult { id: "a".into(), text: "started".into(), len: 7, is_error: false, full: None }] }, &NoRows);
-        run.apply(Event::Assistant { message: "m2".into(), parent: None, blocks: vec![Block::Text("Started it.".into())] }, &NoRows);
+        run.apply(Event::Assistant { message: "m2".into(), parent: None, model: None, blocks: vec![Block::Text("Started it.".into())] }, &NoRows);
         run.apply(Event::Done { is_error: false, text: String::new() }, &NoRows);
         run.take_changes();
         assert_eq!(run.take_saves().len(), 3);

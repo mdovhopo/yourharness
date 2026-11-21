@@ -1542,12 +1542,20 @@ impl Inspector {
             let (ws, t, run) = (self.workspace.clone(), thread.clone(), selected.0.clone());
             cx.defer(move |cx| ws.update(cx, |ws, cx| ws.ensure_run_detail(&t, &run, cx)));
         }
+        let thread_model = thread.read(cx).meta.model.clone();
         let mut column = div().size_full().flex().flex_col().child(panel_header("Sub-agents", Some(subtitle), theme));
         if runs.len() > 1 {
             let mut list = div().id("subagent-runs").max_h(px(152.)).overflow_y_scroll().px(px(space::S)).py(px(4.)).flex().flex_col().gap(px(1.)).border_b_1().border_color(theme.separator);
             for (id, e) in runs.iter().rev() {
                 let b = e.borrow();
                 let (description, status) = run_label(&b);
+                let row_input: serde_json::Value = b.data.tool_input.as_deref().and_then(|i| serde_json::from_str(i).ok()).unwrap_or_default();
+                let row_model = crate::ui::rows::subagent_model_label(
+                    b.sub.as_ref().and_then(|s| s.model.as_deref()),
+                    &row_input,
+                    b.sub.as_ref().and_then(|s| s.workflow.as_ref()),
+                    thread_model.as_deref(),
+                );
                 let on = *id == selected.0;
                 let (t, id2) = (thread.clone(), id.clone());
                 list = list.child(
@@ -1565,15 +1573,31 @@ impl Inspector {
                         .when(!on, |d| d.hover(|s| s.bg(theme.hover)))
                         .child(status_icon(&status, theme))
                         .child(div().flex_1().overflow_hidden().whitespace_nowrap().text_ellipsis().child(description))
+                        .when_some(row_model, |d, m| {
+                            d.child(
+                                div()
+                                    .flex_none()
+                                    .px(px(5.))
+                                    .h(px(16.))
+                                    .rounded(px(radius::SMALL))
+                                    .bg(theme.accent_soft)
+                                    .flex()
+                                    .items_center()
+                                    .text_size(px(10.))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.accent)
+                                    .child(m),
+                            )
+                        })
                         .when_some(
                             if live.contains(id) {
                                 Some("In background".to_string())
                             } else {
-                                b.data.tool_input.as_deref().and_then(|i| serde_json::from_str::<serde_json::Value>(i).ok()).and_then(|v| v["subagent_type"].as_str().map(str::to_string)).or_else(|| (b.data.tool_name.as_deref() == Some("Workflow")).then(|| "Workflow".to_string()))
+                                row_input["subagent_type"].as_str().map(str::to_string).or_else(|| (b.data.tool_name.as_deref() == Some("Workflow")).then(|| "Workflow".to_string()))
                             },
                             |d, kind| {
-                                let color = if live.contains(id) { theme.accent } else { theme.secondary };
-                                d.child(div().flex_none().max_w(px(120.)).truncate().text_size(px(text::CAPTION)).text_color(color).child(kind))
+                                let color = if live.contains(id) { theme.accent } else { theme.tertiary };
+                                d.child(div().flex_none().max_w(px(108.)).truncate().text_size(px(text::CAPTION)).text_color(color).child(kind))
                             },
                         )
                         .on_click(move |_, _, cx| {
@@ -1594,6 +1618,12 @@ impl Inspector {
         let prompt = input["prompt"].as_str().unwrap_or("").to_string();
         let workflow = sub.as_ref().and_then(|s| s.workflow.clone());
         let agent_type = input["subagent_type"].as_str().map(str::to_string).or_else(|| workflow.as_ref().map(|w| w.name.clone().map_or("Workflow".into(), |n| format!("Workflow {n}"))));
+        let sub_model = crate::ui::rows::subagent_model_label(
+            sub.as_ref().and_then(|s| s.model.as_deref()),
+            &input,
+            workflow.as_ref(),
+            thread_model.as_deref(),
+        );
         // A workflow's script, folded as a sub-agent's task is.
         let prompt = if prompt.is_empty() { input["script"].as_str().map(|s| format!("```js\n{}\n```", s.trim())).unwrap_or_default() } else { prompt };
         let log: Vec<SubStep> = sub.as_ref().map(|s| s.log.clone()).unwrap_or_default();
@@ -1691,6 +1721,22 @@ impl Inspector {
                                     .child(match tools {
                                         0 if status == "running" => status_text(&status).to_string(),
                                         n => format!("{} · {n} tool{}", status_text(&status), if n == 1 { "" } else { "s" }),
+                                    })
+                                    .when_some(sub_model, |d, m| {
+                                        d.child(
+                                            div()
+                                                .flex_none()
+                                                .px(px(5.))
+                                                .h(px(16.))
+                                                .rounded(px(radius::SMALL))
+                                                .bg(theme.accent_soft)
+                                                .flex()
+                                                .items_center()
+                                                .text_size(px(10.5))
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .text_color(theme.accent)
+                                                .child(m),
+                                        )
                                     })
                                     .when_some(
                                         {

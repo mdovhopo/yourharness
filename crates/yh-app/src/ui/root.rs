@@ -867,6 +867,7 @@ impl Render for RootView {
             let name = self.workspace.read(cx).project(&pid).map(|p| p.name.clone())?;
             Some((pid, name))
         });
+        let provider = selected.as_ref().map(|t| self.workspace.read(cx).agent_of(t.read(cx)));
         let subtitle = selected.as_ref().map(|t| self.subtitle(t, cx)).unwrap_or_default();
         let account_chip = selected.as_ref().and_then(|t| self.account_chip(t, &Theme::get(cx).clone(), cx));
         // Started by another thread's agent: which, a click away.
@@ -1083,6 +1084,31 @@ impl Render for RootView {
                                             .child(div().flex_none().text_size(px(text::FOOTNOTE)).text_color(theme.tertiary).child("/"))
                                         })
                                         .child(div().id("thread-title").role(gpui_kit::Role::Heading).aria_label(title.clone()).min_w_0().flex_shrink(1.).text_size(px(text::HEADLINE)).font_weight(FontWeight::SEMIBOLD).overflow_hidden().whitespace_nowrap().text_ellipsis().child(title))
+                                        .when_some(provider, |d, agent| {
+                                            let is_agy = agent == yh_core::agents::Agent::Antigravity;
+                                            let dot = if is_agy { theme.teal() } else { theme.accent };
+                                            let tip = if is_agy { "Provider: Antigravity (Google)" } else { "Provider: Claude (Anthropic)" };
+                                            d.child(
+                                                div()
+                                                    .id("thread-provider")
+                                                    .flex_none()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap(px(4.))
+                                                    .h(px(19.))
+                                                    .px(px(6.))
+                                                    .rounded(px(radius::SMALL))
+                                                    .bg(dot.opacity(0.13))
+                                                    .border_1()
+                                                    .border_color(dot.opacity(0.28))
+                                                    .text_size(px(text::CAPTION))
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .text_color(dot)
+                                                    .child(div().w(px(5.)).h(px(5.)).rounded_full().bg(dot))
+                                                    .child(agent.name())
+                                                    .tooltip(crate::ui::sidebar::tooltip(tip)),
+                                            )
+                                        })
                                         .when(!subtitle.is_empty(), |d| {
                                             d.child(
                                                 div()

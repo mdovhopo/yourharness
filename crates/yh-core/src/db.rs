@@ -567,6 +567,7 @@ pub struct SubagentCall {
     /// From its input (`description`, `subagent_type`, `run_in_background`), when it's in the row.
     pub description: Option<String>,
     pub agent_type: Option<String>,
+    pub model: Option<String>,
     pub background: bool,
     pub has_result: bool,
     pub is_error: bool,
@@ -602,6 +603,7 @@ fn subagent_calls(c: &Connection, thread: &str) -> rusqlite::Result<Vec<Subagent
         if let Some(input) = input.and_then(|i| serde_json::from_str::<serde_json::Value>(&i).ok()) {
             call.description = input["description"].as_str().map(str::to_string);
             call.agent_type = input["subagent_type"].as_str().map(str::to_string);
+            call.model = input["model"].as_str().map(str::to_string);
             call.background = input["run_in_background"] == true;
         }
         let run = match (run, run_blob) {

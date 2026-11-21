@@ -130,7 +130,7 @@ pub fn render_item(thread: &Entity<ThreadState>, ix: usize, window: &mut Window,
         ItemType::Text => text_row(&item.entries[0], &ctx, &theme, window),
         ItemType::Notice => notice_row(&item.entries[0], &theme),
         ItemType::Work => work_row(state, &ctx, item, &theme),
-        ItemType::Agent => agent_row(thread, item, &theme),
+        ItemType::Agent => agent_row(thread, item, &theme, state.meta.model.as_deref()),
         ItemType::Media => media_row(&item.entries[0], &ctx, &theme),
     };
     let content = match fold {
@@ -1149,8 +1149,50 @@ fn workflow_agents(w: &yh_core::subagent_record::WorkflowRun, limit: usize, them
     list.into_any_element()
 }
 
+/// Human-friendly model label for a sub-agent (from its own reported model, explicit call input,
+/// workflow agents, or fallback parent model).
+pub fn subagent_model_label(
+    sub_model: Option<&str>,
+    input: &serde_json::Value,
+    workflow: Option<&yh_core::subagent_record::WorkflowRun>,
+    fallback: Option<&str>,
+) -> Option<String> {
+    let format_raw = |raw: &str| -> Option<String> {
+        let raw = raw.trim();
+        if raw.is_empty() || raw == "default" {
+            return None;
+        }
+        Some(match raw.to_ascii_lowercase().as_str() {
+            "haiku" => "Haiku".into(),
+            "sonnet" => "Sonnet".into(),
+            "opus" => "Opus".into(),
+            _ => yh_core::usage::display_name(raw),
+        })
+    };
+    if let Some(m) = sub_model.and_then(format_raw) {
+        return Some(m);
+    }
+    if let Some(m) = input["model"].as_str().and_then(format_raw) {
+        return Some(m);
+    }
+    if let Some(w) = workflow {
+        let mut models: Vec<String> = vec![];
+        for a in &w.agents {
+            if let Some(m) = a.model.as_deref().and_then(format_raw) {
+                if !models.contains(&m) {
+                    models.push(m);
+                }
+            }
+        }
+        if let Some(first) = models.first() {
+            return Some(if models.len() > 1 { format!("{first} +{}", models.len() - 1) } else { first.clone() });
+        }
+    }
+    fallback.and_then(format_raw)
+}
+
 /// A sub-agent's call: what it's doing (its last few steps while it works), then its report.
-fn agent_row(thread: &Entity<ThreadState>, item: &Item, theme: &Theme) -> AnyElement {
+fn agent_row(thread: &Entity<ThreadState>, item: &Item, theme: &Theme, fallback_model: Option<&str>) -> AnyElement {
     let e = item.entries[0].borrow();
     let input: serde_json::Value = serde_json::from_str(e.data.tool_input.as_deref().unwrap_or("{}")).unwrap_or_default();
     let title = e
@@ -1165,6 +1207,7 @@ fn agent_row(thread: &Entity<ThreadState>, item: &Item, theme: &Theme) -> AnyEle
         Some(w) => w.name.clone().unwrap_or_else(|| "Workflow".into()),
         None => input["subagent_type"].as_str().unwrap_or("").to_string(),
     };
+    let model = subagent_model_label(e.sub.as_ref().and_then(|s| s.model.as_deref()), &input, workflow.as_ref(), fallback_model);
     let status = e.sub.as_ref().map(|s| s.status.clone()).unwrap_or_else(|| match &e.data.tool_result {
         Some(_) if e.data.is_error => "failed".into(),
         Some(_) => "completed".into(),
@@ -1259,6 +1302,9 @@ fn agent_row(thread: &Entity<ThreadState>, item: &Item, theme: &Theme) -> AnyEle
                                 .items_center()
                                 .gap(px(6.))
                                 .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_weight(FontWeight::SEMIBOLD).child(title))
+                                .when_some(model, |d, m| {
+                                    d.child(div().flex_none().text_size(px(ts::CAPTION)).line_height(px(16.)).px(px(5.)).rounded(px(radius::SMALL)).bg(theme.accent_soft).text_color(theme.accent).font_weight(FontWeight::MEDIUM).child(m))
+                                })
                                 .when(!kind.is_empty(), |d| {
                                     d.child(div().flex_none().text_size(px(ts::CAPTION)).line_height(px(16.)).px(px(6.)).rounded(px(radius::SMALL)).bg(theme.selected).text_color(theme.secondary).child(kind))
                                 }),

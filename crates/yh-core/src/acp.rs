@@ -997,7 +997,7 @@ impl Translator {
         match self.open.take() {
             Some((message, kind, text)) => {
                 let block = if kind == DeltaKind::Thinking { Block::Thinking(text) } else { Block::Text(text) };
-                vec![Event::Assistant { message, parent: None, blocks: vec![block] }]
+                vec![Event::Assistant { message, parent: None, model: None, blocks: vec![block] }]
             }
             None => vec![],
         }
@@ -1200,7 +1200,7 @@ impl Translator {
                 let shown = shown_tool(call, &self.server_names);
                 if call.shown.as_ref() != Some(&shown) {
                     call.shown = Some(shown.clone());
-                    out.push(Event::Assistant { message: format!("acp-tool-{id}"), parent: None, blocks: vec![Block::Tool { id: id.clone(), name: shown.0, input: shown.1 }] });
+                    out.push(Event::Assistant { message: format!("acp-tool-{id}"), parent: None, model: None, blocks: vec![Block::Tool { id: id.clone(), name: shown.0, input: shown.1 }] });
                 }
                 let status = u["status"].as_str().unwrap_or("");
                 if !status.is_empty() {
@@ -1236,7 +1236,7 @@ impl Translator {
                 let mut out = self.close();
                 self.blocks += 1;
                 let id = format!("acp-plan-{}{}-{}", self.nonce, self.turn, self.blocks);
-                out.push(Event::Assistant { message: id.clone(), parent: None, blocks: vec![Block::Tool { id: id.clone(), name: "TodoWrite".into(), input: json!({ "todos": todos }).to_string() }] });
+                out.push(Event::Assistant { message: id.clone(), parent: None, model: None, blocks: vec![Block::Tool { id: id.clone(), name: "TodoWrite".into(), input: json!({ "todos": todos }).to_string() }] });
                 out.push(Event::ToolResults { parent: None, results: vec![ToolResult { id, text: "Plan updated.".into(), len: 13, is_error: false, full: None }] });
                 out
             }

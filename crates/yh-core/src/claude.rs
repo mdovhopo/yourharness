@@ -338,7 +338,7 @@ pub enum Event {
     Session { id: String },
     BlockStart { message: String, index: u64, parent: Option<String>, kind: BlockKind },
     Delta { message: String, index: u64, parent: Option<String>, kind: DeltaKind, text: String },
-    Assistant { message: String, parent: Option<String>, blocks: Vec<Block> },
+    Assistant { message: String, parent: Option<String>, model: Option<String>, blocks: Vec<Block> },
     ToolResults { parent: Option<String>, results: Vec<ToolResult> },
     /// `task_id` is what `stop_task` takes to stop it; `background`: started with
     /// `run_in_background`, it outlives the turn that started it.
@@ -1079,7 +1079,8 @@ impl Parser {
                         _ => None,
                     })
                     .collect();
-                vec![Event::Assistant { message: message["id"].as_str().unwrap_or("").into(), parent, blocks }]
+                let model = message["model"].as_str().filter(|m| !m.is_empty() && *m != "<synthetic>").map(str::to_string);
+                vec![Event::Assistant { message: message["id"].as_str().unwrap_or("").into(), parent, model, blocks }]
             }
             "user" => {
                 // What wakes Claude for a job, replayed: never a message of yours.

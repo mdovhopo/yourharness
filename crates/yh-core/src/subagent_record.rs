@@ -12,6 +12,7 @@ const REFERENCE_DATE: f64 = 978_307_200.0;
 pub struct SubagentRecord {
     pub description: String,
     pub agent_type: Option<String>,
+    pub model: Option<String>,
     pub prompt: String,
     pub is_background: bool,
     /// `running`, `completed`, `failed`, `stopped`.
@@ -158,6 +159,7 @@ fn started_at(v: Option<&Value>) -> f64 {
 pub struct SubagentSummary {
     pub description: String,
     pub agent_type: Option<String>,
+    pub model: Option<String>,
     pub is_background: bool,
     /// As `SubagentRecord::decode` reads it: a run saved `running` is `stopped`.
     pub status: String,
@@ -177,6 +179,8 @@ struct SummaryFields {
     description: Option<String>,
     #[serde(default)]
     agent_type: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
     #[serde(default)]
     is_background: Option<bool>,
     #[serde(default)]
@@ -234,6 +238,7 @@ impl SubagentRecord {
         let mut w = Writer::new();
         w.str("description", &self.description);
         w.opt("agentType", &self.agent_type);
+        w.opt("model", &self.model);
         w.str("prompt", &self.prompt);
         if self.is_background {
             w.raw("isBackground", "true");
@@ -281,6 +286,7 @@ impl SubagentRecord {
         Some(SubagentSummary {
             description: f.description.unwrap_or_default(),
             agent_type: f.agent_type,
+            model: f.model,
             is_background: f.is_background.unwrap_or(false),
             status: if status == "running" { "stopped".into() } else { status },
             tool_uses: f.tool_uses,
@@ -323,6 +329,7 @@ impl SubagentRecord {
         Some(SubagentRecord {
             description: s("description").unwrap_or_default(),
             agent_type: s("agentType"),
+            model: s("model"),
             prompt: s("prompt").unwrap_or_default(),
             is_background: o.get("isBackground").and_then(|v| v.as_bool()).unwrap_or(false),
             // Still running when saved: it ended with the process it ran in.
@@ -367,6 +374,7 @@ mod tests {
         let run = SubagentRecord {
             description: "Look".into(),
             agent_type: Some("Explore".into()),
+            model: Some("claude-haiku-4-5".into()),
             prompt: "Find it".into(),
             is_background: true,
             status: "running".into(),

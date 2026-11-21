@@ -221,12 +221,13 @@ impl Spotlight {
         } else {
             ""
         };
+        let provider = ws.agent_of(&t).name();
         Some(Hit {
             id: format!("thread-{id}"),
             section,
             glyph,
             title: t.title.clone(),
-            subtitle: format!("{project} · {when}{state}"),
+            subtitle: format!("{project} · {provider} · {when}{state}"),
             snippet: None,
             shortcut: None,
             action: Action::Thread(id.to_string()),
@@ -523,7 +524,7 @@ impl Render for Spotlight {
                             .py(px(4.))
                             .rounded(px(radius::MEDIUM))
                             .text_color(fg)
-                            .when(selected, |d| d.bg(theme.accent))
+                            .when(selected, |d| d.bg(if dark { gpui_kit::rgb(0x7c5cfa).into() } else { theme.accent }))
                             .when(!selected, |d| d.hover(|s| s.bg(theme.hover)))
                             .child(div().flex_none().w(px(18.)).flex().justify_center().child(icon.size(px(14.)).text_color(if selected { gpui_kit::white() } else { tint.unwrap_or(theme.secondary) })))
                             .child(

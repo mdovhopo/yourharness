@@ -883,10 +883,10 @@ impl Engine {
         for e in batch {
             match &e {
                 Event::Catalog { .. } | Event::AgentCatalog { .. } | Event::Limits(_) | Event::Session { .. } | Event::TitleChanged(_) | Event::Skills(_) | Event::ContextWindows(_) => kept.push(e.clone()),
-                Event::Assistant { message, parent, blocks } => {
+                Event::Assistant { message, parent, model, blocks } => {
                     let tools: Vec<Block> = blocks.iter().filter(|b| matches!(b, Block::Tool { .. })).cloned().collect();
                     if !tools.is_empty() {
-                        kept.push(Event::Assistant { message: message.clone(), parent: parent.clone(), blocks: tools });
+                        kept.push(Event::Assistant { message: message.clone(), parent: parent.clone(), model: model.clone(), blocks: tools });
                     }
                 }
                 // A page-mode question answered on its page: the server has its answer, so the

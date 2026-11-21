@@ -104,6 +104,9 @@ fn summary_entry(call: yh_core::db::SubagentCall) -> EntryRef {
     if let Some(t) = call.agent_type {
         input.insert("subagent_type".into(), t.into());
     }
+    if let Some(m) = call.model {
+        input.insert("model".into(), m.into());
+    }
     if call.background {
         input.insert("run_in_background".into(), true.into());
     }

@@ -81,18 +81,24 @@ pub const MONO: &str = ".AppleSystemUIFontMonospaced";
 pub const UI: &str = ".SystemUIFont";
 
 impl Theme {
+    /// Secondary brand accent (the teal strand of the YourHarness logo): complements the
+    /// primary violet accent, e.g. to distinguish secondary agent providers at a glance.
+    pub fn teal(&self) -> Hsla {
+        if self.canvas.l < 0.5 { rgb(0x5eead4).into() } else { rgb(0x0d9488).into() }
+    }
+
     pub fn for_appearance(appearance: WindowAppearance) -> Theme {
         match appearance {
             WindowAppearance::Dark | WindowAppearance::VibrantDark => Theme {
-                canvas: rgb(0x19191c).into(),
-                sidebar: rgb(0x202024).into(),
-                text: rgb(0xededf0).into(),
-                secondary: rgb(0x9b9ba4).into(),
+                canvas: rgb(0x16191e).into(),
+                sidebar: rgb(0x1c2026).into(),
+                text: rgb(0xededf2).into(),
+                secondary: rgb(0x9a9ca8).into(),
                 separator: rgba(0xffffff1a).into(),
-                card: rgb(0x252529).into(),
-                bubble: rgb(0x2d2d33).into(),
-                code: rgb(0x1f1f23).into(),
-                accent: rgb(0x0a84ff).into(),
+                card: rgb(0x22272f).into(),
+                bubble: rgb(0x2a303b).into(),
+                code: rgb(0x1b1f25).into(),
+                accent: rgb(0x9575fa).into(),
                 selected: rgba(0xffffff19).into(),
                 error: rgb(0xff6961).into(),
                 warning: rgb(0xff9f0a).into(),
@@ -100,21 +106,21 @@ impl Theme {
                 string: rgb(0xfc6a5d).into(),
                 number: rgb(0xd0bf69).into(),
                 comment: rgb(0x6c7986).into(),
-                tertiary: rgb(0x6c6c75).into(),
+                tertiary: rgb(0x6c6e7a).into(),
                 hover: rgba(0xffffff0e).into(),
-                accent_soft: rgba(0x0a84ff2b).into(),
+                accent_soft: rgba(0x9575fa29).into(),
                 success: rgb(0x32d74b).into(),
             },
             _ => Theme {
                 canvas: rgb(0xffffff).into(),
-                sidebar: rgb(0xf3f4f6).into(),
-                text: rgb(0x1c1c1e).into(),
-                secondary: rgb(0x66666e).into(),
+                sidebar: rgb(0xf4f4f8).into(),
+                text: rgb(0x1b1c22).into(),
+                secondary: rgb(0x646572).into(),
                 separator: rgba(0x00000016).into(),
-                card: rgb(0xf7f7f9).into(),
-                bubble: rgb(0xebedf2).into(),
-                code: rgb(0xf5f6f8).into(),
-                accent: rgb(0x0a84ff).into(),
+                card: rgb(0xf8f8fb).into(),
+                bubble: rgb(0xedeef5).into(),
+                code: rgb(0xf5f6fa).into(),
+                accent: rgb(0x6d4aff).into(),
                 selected: rgba(0x00000012).into(),
                 error: rgb(0xd70015).into(),
                 warning: rgb(0xe58600).into(),
@@ -122,9 +128,9 @@ impl Theme {
                 string: rgb(0xd12f1b).into(),
                 number: rgb(0x272ad8).into(),
                 comment: rgb(0x707f8c).into(),
-                tertiary: rgb(0x9898a0).into(),
+                tertiary: rgb(0x9495a3).into(),
                 hover: rgba(0x0000000a).into(),
-                accent_soft: rgba(0x0a84ff1c).into(),
+                accent_soft: rgba(0x6d4aff1a).into(),
                 success: rgb(0x248a3d).into(),
             },
         }
@@ -159,27 +165,28 @@ pub fn apply_appearance(appearance: WindowAppearance, window: &mut Window, cx: &
         _ => ThemeMode::Light,
     };
     ComponentTheme::change(mode, Some(window), cx);
-    // Its primary buttons in the app's accent, as macOS's default buttons are.
+    // Its primary buttons in the app's violet accent, deepened slightly in dark mode so white
+    // button text stays crisp and accessible.
     let ours = Theme::get(cx);
-    let accent = ours.accent;
+    let dark = matches!(mode, ThemeMode::Dark);
+    let primary: Hsla = if dark { rgb(0x7c5cfa).into() } else { ours.accent };
     let theme = ComponentTheme::global_mut(cx);
     let colors = &mut theme.colors;
     // Dialogs and fields on the app's canvas, not the kit's near-black in dark mode.
     colors.background = ours.canvas;
-    colors.primary = accent;
-    colors.primary_hover = accent.opacity(0.9);
-    colors.primary_active = accent.opacity(0.8);
+    colors.primary = primary;
+    colors.primary_hover = primary.opacity(0.9);
+    colors.primary_active = primary.opacity(0.8);
     colors.primary_foreground = gpui_kit::white();
-    colors.button_primary = accent;
-    colors.button_primary_hover = accent.opacity(0.9);
-    colors.button_primary_active = accent.opacity(0.8);
+    colors.button_primary = primary;
+    colors.button_primary_hover = primary.opacity(0.9);
+    colors.button_primary_active = primary.opacity(0.8);
     colors.button_primary_foreground = gpui_kit::white();
     // A switch's knob is white in both modes, as macOS's (it took the near-black canvas in dark).
     colors.switch_thumb = gpui_kit::white();
     // Menus and popovers on the app's surfaces, not the kit's near-black: a card in dark mode
     // (lighter than the canvas, as macOS's menus are), white in light. A menu's lit row is the
     // soft accent, as the sidebar's selection is soft (the patched menu reads `list_active`).
-    let dark = matches!(mode, ThemeMode::Dark);
     colors.popover = if dark { ours.card } else { ours.canvas };
     colors.popover_foreground = ours.text;
     colors.list_active = ours.accent_soft;
