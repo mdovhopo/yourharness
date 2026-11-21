@@ -586,6 +586,14 @@ impl Shared {
         self.woke.is_some_and(|at| at.elapsed() > std::time::Duration::from_secs(3)) && !self.busy && self.permissions.is_empty() && !self.translator.calls_open()
     }
 
+    /// The turn under way's row in the Usage page's index: one per turn, by session and turn.
+    fn turn_usage(&self, tokens: crate::usage::Tokens) -> crate::usage::MessageUsage {
+        let model = self.translator.current_model.clone().or_else(|| self.model.clone()).unwrap_or_else(|| "antigravity".into());
+        let key = crate::usage::stable_hash(&format!("acp:{}:{}{}", self.session.as_deref().unwrap_or(""), self.translator.nonce, self.translator.turn));
+        let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0., |d| d.as_secs_f64());
+        crate::usage::MessageUsage { key, at, model, tokens, fast: false }
+    }
+
     fn prompt(&mut self, w: Waiting, writer: &flume::Sender<Value>) -> Vec<Event> {
         let Some(session) = self.session.clone() else {
             self.queue.push_front(w);
@@ -718,6 +726,16 @@ impl Shared {
                     self.woke = Some(std::time::Instant::now());
                 }
                 out.extend(self.translator.update(update));
+                // Each model call reports the context it used; added up, they're the turn's total.
+                // Only within a turn (a prompt, or the agent woken on its own): a resumed
+                // session's size isn't a call.
+                if update["sessionUpdate"] == "usage_update" && (self.busy || self.woke.is_some()) {
+                    if let Some(used) = update["used"].as_i64().filter(|u| *u > 0) {
+                        self.translator.spent += used;
+                        let tokens = crate::usage::Tokens { input: self.translator.spent, ..Default::default() };
+                        crate::usage::note_turn(self.turn_usage(tokens), false);
+                    }
+                }
                 out
             }
             (Some("session/request_permission"), Some(id)) => {
@@ -824,10 +842,7 @@ impl Shared {
                 self.busy = false;
                 // What it used, for the Usage page: Antigravity keeps no files to read it from.
                 if result["usage"].is_object() {
-                    let model = self.translator.current_model.clone().or_else(|| self.model.clone()).unwrap_or_else(|| "antigravity".into());
-                    let key = crate::usage::stable_hash(&format!("acp:{}:{}{}", self.session.as_deref().unwrap_or(""), self.translator.nonce, self.translator.turn));
-                    let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0., |d| d.as_secs_f64());
-                    crate::usage::record_turn(crate::usage::MessageUsage { key, at, model, tokens: crate::usage::acp_tokens(&result["usage"]), fast: false });
+                    crate::usage::note_turn(self.turn_usage(crate::usage::acp_tokens(&result["usage"])), true);
                 }
                 let cancelled = result["stopReason"] == "cancelled";
                 let mut out = self.translator.end_turn(cancelled);
@@ -906,11 +921,14 @@ pub struct Translator {
     window: Option<u64>,
     /// The plan it's signed in with, as its session says (`_meta.antigravity.tier`).
     plan: Option<String>,
+    /// Tokens the turn under way has used so far: its calls' context sizes, added up.
+    pub spent: i64,
 }
 
 impl Translator {
     pub fn start_turn(&mut self) {
         self.turn += 1;
+        self.spent = 0;
         self.blocks = 0;
         self.open = None;
     }
@@ -1552,6 +1570,49 @@ mod tests {
         assert_eq!((w[0].name.as_str(), w[1].name.as_str()), ("five_hour", "seven_day"));
         assert!((w[1].utilization - 0.25).abs() < 1e-9);
         assert_eq!(w[0].resets_at, crate::library::parse_iso("2026-11-21T17:02:36Z"));
+    }
+
+    /// The context sizes a turn reports, added up, are what its result says it used in all: the
+    /// Usage page's count while a turn runs is already its total.
+    #[test]
+    fn a_turns_reported_sizes_add_up_to_its_total() {
+        for recorded in [include_str!("../fixtures/antigravity-acp-1.5.14.jsonl"), include_str!("../fixtures/antigravity-acp-background.jsonl")] {
+            let (w, _sent) = flume::unbounded();
+            let mut s = Shared {
+                next_id: 0,
+                asked: HashMap::new(),
+                session: None,
+                ready: false,
+                busy: false,
+                replaying: false,
+                queue: VecDeque::new(),
+                permissions: HashMap::new(),
+                translator: Translator::default(),
+                model: None,
+                mode: None,
+                cwd: "/work".into(),
+                resume: None,
+                capabilities: Value::Null,
+                dead: false,
+                woke: None,
+                auth_methods: vec![],
+                append_system_prompt: None,
+                mcp_servers: vec![],
+                allowed_tools: vec![],
+            };
+            s.request("initialize", json!({}), Asked::Initialize, &w);
+            s.queue.push_back(Waiting { id: "m1".into(), text: "hi".into(), images: vec![] });
+            let mut checked = 0;
+            for line in recorded.lines().filter(|l| l.starts_with('>')) {
+                let message: Value = serde_json::from_str(&line[2..]).unwrap();
+                if let Some(total) = message["result"]["usage"]["totalTokens"].as_i64() {
+                    assert_eq!(s.translator.spent, total);
+                    checked += 1;
+                }
+                s.receive(&message, &w);
+            }
+            assert_eq!(checked, 1);
+        }
     }
 
     /// A real session with Antigravity 1.5.14 (sanitized): a command it moved to the background,

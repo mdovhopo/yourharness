@@ -4,8 +4,9 @@
 //! Files are read once, then only from where they were left (Claude Code appends). A reply
 //! written more than once (a line per content block, copied into a fork) counts once, by
 //! its message and request IDs. Prices are the API's, to put a subscription in dollars.
-//! Antigravity keeps no such files: the app writes down each turn it runs there as it ends
-//! (`record_turn`, `source` 1), from what the turn's result says it used.
+//! Antigravity keeps no such files: the app writes down each turn it runs there (`note_turn`),
+//! as it goes from the context sizes it reports, which add up to the turn's total, and at its
+//! end from the result's exact numbers.
 
 use rusqlite::{params, Connection};
 use serde_json::Value;
@@ -335,29 +336,84 @@ fn open(path: &Path) -> rusqlite::Result<Connection> {
 }
 
 static TURNS_DIR: OnceLock<PathBuf> = OnceLock::new();
+static TURNS: OnceLock<flume::Sender<(MessageUsage, bool)>> = OnceLock::new();
 
-/// Where `record_turn` writes: the data folder, set by the app at launch. Tests leave it unset,
+/// Where `note_turn` writes: the data folder, set by the app at launch. Tests leave it unset,
 /// so they never write.
 pub fn record_turns_in(directory: PathBuf) {
     let _ = TURNS_DIR.set(directory);
 }
 
-/// A turn run by an agent that keeps no session files of its own (Antigravity), from what its
-/// result said it used. Written aside; one already written (same key) is left as it is.
-pub fn record_turn(usage: MessageUsage) {
-    let Some(dir) = TURNS_DIR.get().cloned() else { return };
-    if usage.tokens.total() == 0 {
+/// A turn run by an agent that keeps no session files of its own (Antigravity): one row per
+/// turn, by its key. While it runs, `exact` false: what it has used so far (`source` 2), so a
+/// crash mid-turn still leaves it counted; at its end, `exact` true: its result's numbers
+/// (`source` 1), which replace the estimate and are never replaced themselves. Written aside, at
+/// most once a second.
+pub fn note_turn(usage: MessageUsage, exact: bool) {
+    let Some(dir) = TURNS_DIR.get() else { return };
+    let sender = TURNS.get_or_init(|| {
+        let (tx, rx) = flume::unbounded::<(MessageUsage, bool)>();
+        let path = dir.join("usage.sqlite");
+        std::thread::Builder::new()
+            .name("usage-turns".into())
+            .spawn(move || {
+                let mut c = None;
+                while let Ok(first) = rx.recv() {
+                    let mut batch: HashMap<i64, (MessageUsage, bool)> = HashMap::new();
+                    let mut urgent = first.1;
+                    merge_turn(&mut batch, first);
+                    let until = std::time::Instant::now() + std::time::Duration::from_secs(1);
+                    while !urgent {
+                        let Ok(next) = rx.recv_deadline(until) else { break };
+                        urgent = next.1;
+                        merge_turn(&mut batch, next);
+                    }
+                    while let Ok(next) = rx.try_recv() {
+                        merge_turn(&mut batch, next);
+                    }
+                    if c.is_none() {
+                        c = open(&path).ok();
+                        if let Some(c) = &c {
+                            let _ = c.busy_timeout(std::time::Duration::from_secs(5));
+                        }
+                    }
+                    if let Some(conn) = c.as_mut() {
+                        if write_turns(conn, batch.into_values()).is_err() {
+                            c = None;
+                        }
+                    }
+                }
+            })
+            .ok();
+        tx
+    });
+    let _ = sender.send((usage, exact));
+}
+
+/// The newest word on a turn wins, but an estimate never takes an exact count's place.
+fn merge_turn(batch: &mut HashMap<i64, (MessageUsage, bool)>, (usage, exact): (MessageUsage, bool)) {
+    if batch.get(&usage.key).is_some_and(|(_, e)| *e && !exact) {
         return;
     }
-    std::thread::spawn(move || {
-        let Ok(c) = open(&dir.join("usage.sqlite")) else { return };
-        let _ = c.busy_timeout(std::time::Duration::from_secs(5));
-        let t = &usage.tokens;
-        let _ = c.execute(
-            "INSERT OR IGNORE INTO messages (key, at, model, input, output, cache_read, cache_5m, cache_1h, fast, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 1)",
-            params![usage.key, usage.at, usage.model, t.input, t.output, t.cache_read, t.cache_5m, t.cache_1h],
-        );
-    });
+    batch.insert(usage.key, (usage, exact));
+}
+
+fn write_turns(c: &mut Connection, turns: impl Iterator<Item = (MessageUsage, bool)>) -> rusqlite::Result<()> {
+    let tx = c.transaction()?;
+    for (u, exact) in turns {
+        let t = &u.tokens;
+        let sql = if exact {
+            "INSERT INTO messages (key, at, model, input, output, cache_read, cache_5m, cache_1h, fast, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 1)
+             ON CONFLICT(key) DO UPDATE SET model = excluded.model, input = excluded.input, output = excluded.output, cache_read = excluded.cache_read,
+                cache_5m = excluded.cache_5m, cache_1h = excluded.cache_1h, source = 1"
+        } else {
+            "INSERT INTO messages (key, at, model, input, output, cache_read, cache_5m, cache_1h, fast, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 2)
+             ON CONFLICT(key) DO UPDATE SET model = excluded.model, input = excluded.input, output = excluded.output, cache_read = excluded.cache_read,
+                cache_5m = excluded.cache_5m, cache_1h = excluded.cache_1h WHERE source = 2"
+        };
+        tx.execute(sql, params![u.key, u.at, u.model, t.input, t.output, t.cache_read, t.cache_5m, t.cache_1h])?;
+    }
+    tx.commit()
 }
 
 /// An ACP prompt result's `usage` (`inputTokens` without what came from the cache).
@@ -670,6 +726,29 @@ mod tests {
         assert_eq!(spend("claude-opus-5-5", true, false, t, 1).cost, 8.);
         assert_eq!(spend("claude-haiku-5-5", false, true, t, 1).cost, 0.5);
         assert_eq!(civil(days_from_civil(2026, 11, 7)), (2026, 11, 7));
+    }
+
+    #[test]
+    fn a_turn_counts_once_and_exact_wins() {
+        let dir = std::env::temp_dir().join(format!("yh-usage-turns-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("usage.sqlite");
+        let mut c = open(&path).unwrap();
+        let at = now();
+        let turn = |input: i64, output: i64| MessageUsage { key: 7, at, model: "gemini-4-neon-high".into(), tokens: Tokens { input, output, ..Default::default() }, fast: false };
+        write_turns(&mut c, [(turn(9466, 0), false)].into_iter()).unwrap();
+        write_turns(&mut c, [(turn(19231, 0), false)].into_iter()).unwrap();
+        write_turns(&mut c, [(turn(28762, 438), true)].into_iter()).unwrap();
+        // A late estimate (queued before the end) doesn't undo the exact count.
+        write_turns(&mut c, [(turn(29200, 0), false)].into_iter()).unwrap();
+        let store = UsageStore { writer: Mutex::new(None), path: path.clone() };
+        let r = store.report(1);
+        assert_eq!((r.total.tokens.input, r.total.tokens.output, r.total.messages), (28762, 438, 1));
+        let mut batch = HashMap::new();
+        merge_turn(&mut batch, (turn(1, 1), true));
+        merge_turn(&mut batch, (turn(5, 0), false));
+        assert_eq!(batch[&7].0.tokens.input, 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
