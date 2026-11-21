@@ -1481,6 +1481,12 @@ fn language_name(lang: &str) -> String {
 fn code_block(code: &Text, lang: &str, theme: &Theme, ctx: Option<&RowContext>, n: usize) -> AnyElement {
     let name = language_name(lang);
     let has_header = ctx.is_some() || !name.is_empty();
+    let key = match ctx {
+        Some(c) => copy_hash("code-scroll", (c.thread_id.as_str(), c.pos, n)),
+        None => copy_hash("code-scroll", (n, code.text.len(), code.text.chars().take(160).collect::<String>())),
+    };
+    let (handle, before) = box_scroll(key);
+    let h = handle.clone();
     div()
         .flex()
         .flex_col()
@@ -1509,20 +1515,45 @@ fn code_block(code: &Text, lang: &str, theme: &Theme, ctx: Option<&RowContext>, 
         // over it still scrolls the transcript (the box takes only the horizontal axis).
         .child(
             div()
-                .id(id_of("code-scroll", (n, code.text.len(), ctx.map(|c| c.pos))))
+                .relative()
                 .w_full()
-                .overflow_x_scroll()
-                .restrict_scroll_to_axis()
                 .child(
                     div()
-                        .flex_none()
-                        .px(px(space::M))
-                        .py(px(10.))
-                        .whitespace_nowrap()
-                        .font_family(MONO)
-                        .text_size(px(ts::CODE))
-                        .line_height(px(ts::CODE_LINE + 2.))
-                        .child(styled_text(code, theme, None)),
+                        .id(ElementId::NamedInteger("code-scroll".into(), key))
+                        .w_full()
+                        .flex()
+                        .overflow_x_scroll()
+                        .restrict_scroll_to_axis()
+                        .track_scroll(&handle)
+                        .on_scroll(move |e: &gpui_kit::ScrollEvent, window, cx| {
+                            let delta = e.delta.pixel_delta(window.line_height());
+                            let (was, top) = (before.get(), h.max_offset());
+                            let horizontal = delta.x.abs() > delta.y.abs();
+                            let inside = horizontal
+                                && ((delta.x > px(0.) && was.x < px(0.)) || (delta.x < px(0.) && was.x > -top.x));
+                            let now = h.offset();
+                            before.set(gpui_kit::point(now.x.clamp(-top.x, px(0.)), now.y));
+                            if horizontal && (inside || top.x > px(0.)) {
+                                cx.stop_propagation();
+                            }
+                        })
+                        .child(
+                            div()
+                                .flex_none()
+                                .min_w_full()
+                                .px(px(space::M))
+                                .py(px(10.))
+                                .whitespace_nowrap()
+                                .font_family(MONO)
+                                .text_size(px(ts::CODE))
+                                .line_height(px(ts::CODE_LINE + 2.))
+                                .child(styled_text(code, theme, None)),
+                        ),
+                )
+                .child(
+                    gpui_kit::base::Scrollbar::horizontal(&handle)
+                        .id(ElementId::NamedInteger("code-scrollbar".into(), key))
+                        .mode(crate::platform::scroll_bar_mode()),
                 ),
         )
         .into_any_element()
@@ -1760,12 +1791,24 @@ fn box_scroll(key: u64) -> BoxScroll {
     })
 }
 
-/// Each capped box that can scroll: (key, how far down it is, how far it can go), for
-/// `YH_WHEEL`'s report.
+/// Each box that can scroll (vertical tool boxes and sideways code blocks): (key, how far
+/// scrolled, how far it can go), for `YH_WHEEL`'s report.
 pub fn box_offsets() -> Vec<(u64, f32, f32)> {
     BOX_SCROLLS.with(|s| {
-        let mut all: Vec<(u64, f32, f32)> =
-            s.borrow().iter().map(|(k, (h, _))| (*k, -f32::from(h.offset().y), f32::from(h.max_offset().y))).filter(|b| b.2 > 0.).collect();
+        let mut all: Vec<(u64, f32, f32)> = s
+            .borrow()
+            .iter()
+            .filter_map(|(k, (h, _))| {
+                let (off, max) = (h.offset(), h.max_offset());
+                if max.y > px(0.) {
+                    Some((*k, -f32::from(off.y), f32::from(max.y)))
+                } else if max.x > px(0.) {
+                    Some((*k, -f32::from(off.x), f32::from(max.x)))
+                } else {
+                    None
+                }
+            })
+            .collect();
         all.sort_by_key(|b| b.0);
         all
     })
@@ -2231,4 +2274,110 @@ pub fn preview_probe(ws: &Entity<crate::state::workspace::Workspace>, cx: &mut A
         let _ = cx.update(|_| eprintln!("PREVIEW {}", if crate::platform::quick_look_visible(true) { "PASS" } else { "FAIL" }));
     })
     .detach();
+}
+
+#[cfg(all(test, feature = "snapshots"))]
+mod tests {
+    use super::*;
+    use gpui::{point, size, ScrollDelta, ScrollEvent, TestAppContext, TouchPhase};
+
+    #[gpui::test]
+    fn code_block_scrolls_horizontally_in_transcript_list(cx: &mut TestAppContext) {
+        BOX_SCROLLS.with(|s| s.borrow_mut().clear());
+        let list_state = gpui::ListState::new(3, gpui::ListAlignment::Top, px(200.));
+        let long_line = "let very_long_identifier_for_horizontal_scrolling = ".to_string() + &"x".repeat(200) + ";";
+        let md = Rc::new(markdown::parse(&format!("```rust\n{long_line}\n```\n")));
+
+        struct View {
+            list: gpui::ListState,
+            md: Rc<markdown::Markdown>,
+        }
+        impl gpui::Render for View {
+            fn render(&mut self, _window: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
+                let theme = Theme::for_appearance(gpui::WindowAppearance::Light);
+                let md = self.md.clone();
+                gpui::list(self.list.clone(), move |ix, _window, _cx| {
+                    if ix == 0 {
+                        div()
+                            .w_full()
+                            .flex()
+                            .justify_center()
+                            .px(px(28.))
+                            .child(div().w_full().max_w(px(300.)).child(markdown_view(&md, &theme)))
+                            .into_any_element()
+                    } else {
+                        div().w_full().h(px(300.)).into_any_element()
+                    }
+                })
+                .size_full()
+            }
+        }
+
+        let window = cx.add_window({
+            let list = list_state.clone();
+            move |_, _| View { list, md }
+        });
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.simulate_resize(size(px(400.), px(200.)));
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+
+        let initial = box_offsets();
+        assert_eq!(initial.len(), 1, "code block should be horizontally scrollable: {initial:?}");
+        assert_eq!(initial[0].1, 0., "code block should start at x=0");
+        assert!(initial[0].2 > 500., "code block max_offset.x should reflect long line: {initial:?}");
+
+        // Swipe horizontally (with slight vertical trackpad noise) over the code area.
+        cx.simulate_event(ScrollEvent {
+            position: point(px(200.), px(50.)),
+            delta: ScrollDelta::Pixels(point(px(-80.), px(-2.))),
+            touch_phase: TouchPhase::Started,
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        let after_h = box_offsets();
+        assert!(after_h[0].1 >= 79., "expected horizontal scroll >= 79px, got {after_h:?}");
+        assert_eq!(
+            list_state.logical_scroll_top().offset_in_item,
+            px(0.),
+            "horizontal swipe over code block should not scroll the transcript vertically"
+        );
+
+        // Shift+mouse-wheel (line-based horizontal scroll on macOS) also scrolls horizontally.
+        cx.simulate_event(ScrollEvent {
+            position: point(px(200.), px(50.)),
+            delta: ScrollDelta::Lines(point(-3., 0.)),
+            touch_phase: TouchPhase::Moved,
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        let after_lines = box_offsets();
+        assert!(after_lines[0].1 > after_h[0].1, "expected line-based horizontal scroll to advance: before={after_h:?} after={after_lines:?}");
+
+        // A vertical scroll over the code block should scroll the transcript, not the code block.
+        cx.simulate_event(ScrollEvent {
+            position: point(px(200.), px(50.)),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-40.))),
+            touch_phase: TouchPhase::Started,
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        let after_v = box_offsets();
+        assert_eq!(after_v[0].1, after_lines[0].1, "vertical scroll should not move code block horizontally");
+        assert!(
+            list_state.logical_scroll_top().offset_in_item > px(0.),
+            "vertical scroll over code block should scroll the transcript"
+        );
+    }
 }

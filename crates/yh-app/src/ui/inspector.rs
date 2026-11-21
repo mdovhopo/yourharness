@@ -2948,3 +2948,98 @@ impl Render for Inspector {
             .child(div().flex_1().min_h_0().child(content))
     }
 }
+
+#[cfg(all(test, feature = "snapshots"))]
+mod tests {
+    use super::*;
+    use gpui::{point, size, ScrollDelta, ScrollEvent, TestAppContext, TouchPhase};
+
+    #[gpui::test]
+    fn file_viewer_uniform_list_scrolls_horizontally(cx: &mut TestAppContext) {
+        let scroll = UniformListScrollHandle::new();
+        let long_line: SharedString = ("let very_long_file_line = ".to_string() + &"y".repeat(200) + ";").into();
+        let lines = std::sync::Arc::new(vec![long_line.clone(), "short".into(), "short2".into()]);
+
+        struct View {
+            scroll: UniformListScrollHandle,
+            lines: std::sync::Arc<Vec<SharedString>>,
+        }
+        impl gpui::Render for View {
+            fn render(&mut self, _window: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
+                let theme = Theme::for_appearance(gpui::WindowAppearance::Light);
+                let lines = self.lines.clone();
+                let gutter = 28.;
+                div()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div().flex_1().min_h_0().child(
+                            div().size_full().flex().flex_col().child(
+                                div().flex_1().min_h_0().flex().flex_col().child(
+                                    div().flex_1().min_h_0().flex().flex_col().child(
+                                        div().flex_1().min_h_0().child(
+                                            uniform_list("file-lines", lines.len(), move |range, _, _| {
+                                                range
+                                                    .map(|i| {
+                                                        div()
+                                                            .h(px(text::CODE_LINE))
+                                                            .min_w_full()
+                                                            .flex()
+                                                            .font_family(MONO)
+                                                            .text_size(px(text::CODE))
+                                                            .line_height(px(text::CODE_LINE))
+                                                            .whitespace_nowrap()
+                                                            .child(div().flex_none().w(px(gutter)).child(format!("{}", i + 1)))
+                                                            .child(div().flex_none().child(crate::ui::selectable::SelText::new(
+                                                                gpui_kit::ElementId::NamedInteger("file-line".into(), i as u64),
+                                                                lines[i].clone(),
+                                                                code_line(&lines[i], "rs", Default::default(), &[], None, &theme),
+                                                                (1 << 62) + i as u64,
+                                                                theme.accent.opacity(0.28),
+                                                            )))
+                                                    })
+                                                    .collect()
+                                            })
+                                            .with_horizontal_sizing_behavior(gpui_kit::ListHorizontalSizingBehavior::Unconstrained)
+                                            .with_width_from_item(Some(0))
+                                            .track_scroll(&self.scroll)
+                                            .size_full(),
+                                        ),
+                                    ),
+                                ),
+                            ),
+                        ),
+                    )
+            }
+        }
+
+        let window = cx.add_window({
+            let scroll = scroll.clone();
+            move |_, _| View { scroll, lines }
+        });
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.simulate_resize(size(px(300.), px(200.)));
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+
+        let max_before = scroll.0.borrow().base_handle.max_offset();
+
+        cx.simulate_event(ScrollEvent {
+            position: point(px(150.), px(30.)),
+            delta: ScrollDelta::Pixels(point(px(-80.), px(0.))),
+            touch_phase: TouchPhase::Started,
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+
+        let offset_after = scroll.0.borrow().base_handle.offset();
+        assert!(max_before.x > px(0.), "expected max_offset.x > 0, got {max_before:?}");
+        assert!(offset_after.x < px(0.), "expected file viewer to scroll horizontally, got {offset_after:?}");
+    }
+}
