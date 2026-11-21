@@ -218,6 +218,14 @@ impl Session {
     }
 }
 
+/// The page the Files tab draws an HTML file in, and what it shows.
+struct FilePreview {
+    web: WebView,
+    /// The file it loaded, and its place over the viewer (None: parked).
+    file: String,
+    bounds: Option<(f64, f64, f64, f64)>,
+}
+
 #[derive(Default)]
 pub struct Browsers {
     /// GPUI's view: web views are laid over it.
@@ -241,6 +249,9 @@ pub struct Browsers {
     logs_told: Option<Instant>,
     /// A menu is open over the page (the window draws it under the web view): pages step aside.
     covered: bool,
+    /// The Files tab's page, an HTML file drawn: not a tab of any thread's, so the agent never
+    /// sees it. Made when one first shows, kept for the next (one web content process).
+    file_preview: Option<FilePreview>,
     /// Threads whose browser a phone watches: looked at, so never closed for being idle.
     pub remote: std::collections::HashSet<String>,
     /// When the agent last opened a page in each thread's browser (seconds since 1970): a
@@ -391,6 +402,76 @@ impl Browsers {
                 tab.web.set_frame(bounds);
             }
         }
+        if let Some(p) = &self.file_preview {
+            let bounds = p.bounds.filter(|_| !self.covered);
+            if self.host != 0 && bounds.is_some() {
+                p.web.move_to(self.host as cocoa::base::id);
+            }
+            p.web.set_frame(bounds);
+        }
+    }
+
+    /// The Files tab draws an HTML file (`file`, with what's in `folder` readable to it) at
+    /// `bounds` in the window, each frame it's drawn; None parks it. Made on first use.
+    pub fn show_file_preview(page: Option<(&str, &str, (f64, f64, f64, f64))>) {
+        Browsers::with(|b| {
+            let Some((file, folder, bounds)) = page else {
+                if let Some(p) = b.file_preview.as_mut().filter(|p| p.bounds.is_some()) {
+                    p.bounds = None;
+                    b.place();
+                }
+                return;
+            };
+            if b.host == 0 {
+                return;
+            }
+            let p = b.file_preview.get_or_insert_with(|| {
+                let web = WebView::new(b.host as cocoa::base::id, None);
+                web.set_viewport(None);
+                FilePreview { web, file: String::new(), bounds: None }
+            });
+            let mut changed = p.bounds != Some(bounds);
+            if p.file != file {
+                p.file = file.to_string();
+                p.web.load_file(file, folder);
+                changed = true;
+                if std::env::var("YH_FILES_LOG").is_ok() {
+                    eprintln!("FILES preview page {file}");
+                }
+            }
+            p.bounds = Some(bounds);
+            if changed {
+                b.place();
+            }
+        });
+    }
+
+    /// `YH_FILES_PREVIEW_SHOT=<png>`: the Files tab's page saved as it shows, and where it is
+    /// (snapshots of the window leave web views out).
+    pub fn capture_file_preview(path: String) {
+        Browsers::with(|b| {
+            let Some(p) = &b.file_preview else {
+                eprintln!("FILES preview shot: no page");
+                return;
+            };
+            eprintln!("FILES preview at {}", p.web.report_place());
+            let (tx, rx) = flume::bounded(1);
+            p.web.capture(None, 1200., path.clone(), tx);
+            std::thread::spawn(move || match rx.recv_timeout(Duration::from_secs(10)) {
+                Ok(Ok((w, h))) => eprintln!("FILES preview shot {path} ({w}×{h})"),
+                Ok(Err(e)) => eprintln!("FILES preview shot failed: {e}"),
+                Err(_) => eprintln!("FILES preview shot timed out"),
+            });
+        });
+    }
+
+    /// The HTML file the Files tab draws changed on disk: loaded again.
+    pub fn reload_file_preview(file: &str) {
+        Browsers::with(|b| {
+            if let Some(p) = b.file_preview.as_ref().filter(|p| p.file == file) {
+                p.web.reload();
+            }
+        });
     }
 
     /// The thread's browser moves to a window of its own, whose view is `host`.
@@ -457,6 +538,8 @@ impl Browsers {
                 s.tabs.clear();
                 s.selected = None;
             }
+            // Made again in the new engine when it next shows.
+            b.file_preview = None;
             b.place();
         });
     }
@@ -759,6 +842,17 @@ fn take_event(b: &mut Browsers, event: WebEvent) -> bool {
         | WebEvent::Crashed { view }
         | WebEvent::Dialog { view, .. } => *view,
     };
+    // The Files tab's page: nobody answers its dialogs, and a crash loads it again.
+    if let Some(p) = b.file_preview.as_ref().filter(|p| p.web.key() == view) {
+        match event {
+            WebEvent::Dialog { .. } => {
+                p.web.answer_dialog(false, None);
+            }
+            WebEvent::Crashed { .. } => p.web.reload(),
+            _ => {}
+        }
+        return false;
+    }
     let Some(thread) = b.sessions.iter().find(|(_, s)| s.tabs.iter().any(|t| t.web.key() == view)).map(|(t, _)| t.clone()) else { return false };
     if let WebEvent::Closed { .. } = event {
         // `window.close()` from a page a script opened: its tab goes.

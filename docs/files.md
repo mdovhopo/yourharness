@@ -39,6 +39,14 @@ lines (`open_link`); a web address opens in your browser.
   binary file (its size, and Open in Default App); pictures are drawn from their file. Lines are
   coloured by `markdown::highlight_line`, from what each starts inside (a comment or string from
   lines above), worked out once per read.
+- **Markdown and HTML are drawn**, Preview and Source in the file's bar switching to the text
+  (⌘F and a link to lines do too). Markdown up to 2 MB is parsed with the read, off the main
+  thread (`parse_markdown_file`, its links to other files made absolute from its own folder),
+  and drawn a block at a time by `rows::markdown_block` in a list that measures each block. An
+  HTML file shows in a page of the browser's engine (`Browsers::show_file_preview`): not a tab
+  of the thread's browser, so the agent never sees it; one page, made when first needed, laid
+  over the viewer each frame it's drawn and parked otherwise, reading what's in the thread's
+  folder (`WebView::load_file`), loaded again when the file changes.
 - **Only what's seen is made.** The viewer is a list of lines; Wrap Lines makes a list that
   measures each line, the first time it's wrapped.
 - **Watching.** Only the open thread's folder is watched (`FolderWatch`, through `notify`):
@@ -57,6 +65,10 @@ lines (`open_link`); a web address opens in your browser.
   open and the longest step's lines took to make (PASS under 50 ms). `YH_FILES_LOG=1` prints
   each folder read again and each file reloaded; `YH_FILES_FIND=<words>` types in Find;
   `YH_FILES_WRAP=1` turns Wrap Lines on; `YH_SNAPSHOT` draws it.
+- Markdown and HTML: `YH_OPEN_FILE=README.md` with `YH_SNAPSHOT` shows the drawn Markdown
+  (`YH_CLICK` on Source for the text). A snapshot leaves web views out, so for an HTML file
+  `YH_FILES_PREVIEW_SHOT=<png>` saves the page itself 3 s after it opens, printing where it's
+  laid (`FILES preview at …`); `YH_FILES_LOG=1` prints each file it loads.
 
 ## On the phone
 

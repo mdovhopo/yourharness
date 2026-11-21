@@ -878,6 +878,10 @@ impl Render for RootView {
         if !(selected.is_some() && ws.shows_inspector && ws.panel == crate::state::workspace::Panel::Browser) {
             crate::browser::Browsers::show(None);
         }
+        // So does the Files tab's page, an HTML file drawn.
+        if !(selected.is_some() && ws.shows_inspector && ws.panel == crate::state::workspace::Panel::Files) {
+            crate::browser::Browsers::show_file_preview(None);
+        }
         let tasks = if selected.is_some() { self.tasks.clone() } else { vec![] };
         // What each column gets in this window: a narrow one squeezes the sidebars before the
         // thread or page, and folds the left one away last.

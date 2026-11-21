@@ -446,6 +446,18 @@ pub(super) fn fade_in(layer: id) {
     }
 }
 
+/// `file://` and the path, its bytes outside a URL's plain ones percent-encoded.
+pub fn file_url(path: &str) -> String {
+    let mut url = String::from("file://");
+    for b in path.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'_' | b'.' | b'~' => url.push(b as char),
+            _ => url.push_str(&format!("%{b:02X}")),
+        }
+    }
+    url
+}
+
 /// The viewport presets (`resize`): a laptop is the default.
 pub const LAPTOP: (f64, f64) = (1512., 982.);
 pub const DESKTOP: (f64, f64) = (1920., 1080.);
@@ -512,6 +524,14 @@ impl WebView {
     /// Files for the page's next file chooser; true if it's still waiting for one.
     pub fn set_upload(&self, files: Option<Vec<String>>) -> bool { both!(self, w => w.set_upload(files)) }
     pub fn load(&self, url: &str) { both!(self, w => w.load(url)) }
+    /// Loads a file on disk, letting it read what's in `folder` too (its pictures, styles and
+    /// scripts beside it).
+    pub fn load_file(&self, file: &str, folder: &str) {
+        match self {
+            WebView::WebKit(w) => w.load_file(file, folder),
+            WebView::Chrome(w) => w.load(&file_url(file)),
+        }
+    }
     pub fn url(&self) -> Option<String> { both!(self, w => w.url()) }
     pub fn title(&self) -> Option<String> { both!(self, w => w.title()) }
     pub fn is_loading(&self) -> bool { both!(self, w => w.is_loading()) }

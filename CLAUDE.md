@@ -190,7 +190,8 @@ pushes for real: the sandbox repo only), with `YH_NEW_WORKTREE_BRANCH=<name>` ty
 `YH_NEW_STACK_BRANCHES=<a:b>` picked in New Stack (Submit off). Right sidebar: `YH_FILES_PROBE=1` (with
 `YH_OPEN_FILE`: the file scrolled through in 40 steps, printing how long it took to open and the longest
 step's lines took to make, PASS under 50 ms; try `test-harness-root/files`' 100,000-line catalog),
-`YH_FILES_WRAP=1` (Wrap Lines on), `YH_FILES_LOG=1` (prints each tree folder read again
+`YH_FILES_WRAP=1` (Wrap Lines on), `YH_FILES_PREVIEW_SHOT=<png>` (an HTML file opened in Files: its page saved 3 s
+later, which `YH_SNAPSHOT` leaves out), `YH_FILES_LOG=1` (prints each tree folder read again
 and each open file reloaded from disk, with its scroll place, and Find's counts), `YH_FILES_FIND=<words>` (Find in the
 first file opened, typed), `YH_PR_PANEL_LOG=1` (what the PRs tab lists, stacks and unsubmitted `gh stack` branches
 included, each time it changes, and `PRS activity` / `PRS looking again` when Claude touches PRs),

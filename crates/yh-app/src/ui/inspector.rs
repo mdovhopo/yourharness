@@ -152,9 +152,29 @@ struct OpenFile {
     lang: String,
     /// The widest line: the list measures it to know how far it scrolls sideways.
     widest: usize,
+    /// A Markdown file's blocks, drawn by default (`source` off), with a list that measures
+    /// each block (made when first drawn).
+    markdown: Option<std::sync::Arc<yh_core::markdown::Markdown>>,
+    rendered: Option<gpui_kit::ListState>,
+    /// A Markdown or HTML file shows its text rather than drawn.
+    source: bool,
 }
 
 impl OpenFile {
+    /// What it's drawn as, unless it shows its source.
+    fn drawn(&self) -> Drawn {
+        match drawn_as(&self.path) {
+            Drawn::Markdown if self.markdown.is_some() => Drawn::Markdown,
+            Drawn::Html if matches!(self.content, FileContent::Text(_)) => Drawn::Html,
+            _ => Drawn::Text,
+        }
+    }
+
+    /// Drawn now: rendered, not its source.
+    fn shows_rendered(&self) -> bool {
+        !self.source && self.drawn() != Drawn::Text
+    }
+
     fn lines(&self) -> Option<&std::sync::Arc<Vec<SharedString>>> {
         if let FileContent::Text(l) = &self.content { Some(l) } else { None }
     }
@@ -166,6 +186,16 @@ impl OpenFile {
         self.cut_lines = read.cut_lines;
         self.carries = read.carries;
         self.widest = read.widest;
+        self.markdown = read.markdown;
+        // Its blocks changed: measured again, from the block it was at.
+        let top = self.rendered.take().map(|old| old.logical_scroll_top());
+        self.rendered = self.markdown.as_ref().map(|md| {
+            let state = gpui_kit::ListState::new(md.blocks.len(), gpui_kit::ListAlignment::Top, px(400.));
+            if let Some(top) = top {
+                state.scroll_to(gpui_kit::ListOffset { item_ix: top.item_ix.min(md.blocks.len().saturating_sub(1)), offset_in_item: top.offset_in_item });
+            }
+            state
+        });
         // A wrapped list measures each line: made again for the new lines, at the same place.
         if let (Some(old), FileContent::Text(lines)) = (self.wrapped.take(), &self.content) {
             let state = gpui_kit::ListState::new(lines.len(), gpui_kit::ListAlignment::Top, px(400.));
@@ -183,20 +213,105 @@ struct ViewerRead {
     cut_lines: bool,
     carries: std::sync::Arc<Vec<yh_core::markdown::Carry>>,
     widest: usize,
+    markdown: Option<std::sync::Arc<yh_core::markdown::Markdown>>,
 }
 
 fn extension(path: &str) -> String {
     path.rsplit('/').next().and_then(|n| n.rsplit_once('.')).map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default()
 }
 
-/// `read_for_viewer`, with what each line starts inside worked out too.
+/// How a file can be shown besides its text.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Drawn {
+    Text,
+    /// Its Markdown drawn, as replies are.
+    Markdown,
+    /// The page, in the browser's engine.
+    Html,
+}
+
+fn drawn_as(path: &str) -> Drawn {
+    match extension(path).as_str() {
+        "md" | "markdown" | "mdown" | "mkd" | "mdx" => Drawn::Markdown,
+        "html" | "htm" | "xhtml" => Drawn::Html,
+        _ => Drawn::Text,
+    }
+}
+
+/// Markdown bigger than this shows only as text: one block of it could take a frame to lay out.
+const MAX_MARKDOWN: usize = 2 * 1024 * 1024;
+
+/// `read_for_viewer`, with what each line starts inside worked out too, and a Markdown file's
+/// blocks parsed.
 fn read_file(full: &str) -> ViewerRead {
     let (content, note, cut_lines) = read_for_viewer(full);
     let (carries, widest) = match &content {
         FileContent::Text(lines) => (yh_core::markdown::line_carries(lines, &extension(full)), widest_line(lines)),
         _ => (vec![], 0),
     };
-    ViewerRead { content, note, cut_lines, carries: std::sync::Arc::new(carries), widest }
+    let markdown = match &content {
+        FileContent::Text(lines) if drawn_as(full) == Drawn::Markdown && note.is_none() && lines.iter().map(|l| l.len() + 1).sum::<usize>() <= MAX_MARKDOWN => {
+            Some(std::sync::Arc::new(parse_markdown_file(&lines.join("\n"), full)))
+        }
+        _ => None,
+    };
+    ViewerRead { content, note, cut_lines, carries: std::sync::Arc::new(carries), widest, markdown }
+}
+
+/// A Markdown file's blocks, its links to other files made absolute (they're written from its
+/// own folder; the Files tab opens paths from the thread's), links within it dropped.
+fn parse_markdown_file(text: &str, full: &str) -> yh_core::markdown::Markdown {
+    let mut md = yh_core::markdown::parse(text);
+    let dir = full.rsplit_once('/').map_or("", |(d, _)| d);
+    for block in &mut md.blocks {
+        let styled: Vec<&mut yh_core::markdown::Styled> = match block {
+            yh_core::markdown::MdBlock::Paragraph(s) | yh_core::markdown::MdBlock::Heading(_, s) | yh_core::markdown::MdBlock::Quote(s) => vec![s],
+            yh_core::markdown::MdBlock::List(items) => items.iter_mut().map(|(_, _, s)| s).collect(),
+            yh_core::markdown::MdBlock::Table { header, rows } => header.iter_mut().chain(rows.iter_mut().flatten()).collect(),
+            yh_core::markdown::MdBlock::Code { .. } | yh_core::markdown::MdBlock::Rule => vec![],
+        };
+        for s in styled {
+            s.links.retain_mut(|(_, url)| match local_link(url, dir) {
+                Some(Some(path)) => {
+                    *url = path;
+                    true
+                }
+                Some(None) => false,
+                None => true,
+            });
+        }
+    }
+    md
+}
+
+/// Where a Markdown file's link goes: None for a web address (kept as it is), Some(None) for
+/// one within the file (`#usage`, dropped), else the file's absolute path, with its lines.
+fn local_link(url: &str, dir: &str) -> Option<Option<String>> {
+    if url.contains("://") || url.starts_with("mailto:") {
+        return None;
+    }
+    if url.starts_with('#') || url.is_empty() {
+        return Some(None);
+    }
+    // `a.md#usage` opens `a.md`; `a.rs#L12` keeps its lines.
+    let (path, fragment) = match url.split_once('#') {
+        Some((p, f)) if f.starts_with('L') && f[1..].starts_with(|c: char| c.is_ascii_digit()) => (p, format!("#{f}")),
+        Some((p, _)) => (p, String::new()),
+        None => (url, String::new()),
+    };
+    let path = path.replace("%20", " ");
+    let joined = if path.starts_with('/') { path } else { format!("{dir}/{path}") };
+    let mut parts: Vec<&str> = vec![];
+    for part in joined.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            p => parts.push(p),
+        }
+    }
+    Some(Some(format!("/{}{fragment}", parts.join("/"))))
 }
 
 /// The line that's drawn widest in a monospaced font, a tab as four.
@@ -394,6 +509,8 @@ pub struct Inspector {
     file_hits_for: Option<String>,
     /// `YH_FILES_FIND=<words>`: typed in Find once a file opens (it needs the window).
     file_find_pending: Option<String>,
+    /// An HTML file's page was drawn in the Files tab this frame.
+    preview_drawn: std::cell::Cell<bool>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -433,6 +550,7 @@ impl Inspector {
             file_hit: None,
             file_hits_for: None,
             file_find_pending: None,
+            preview_drawn: Default::default(),
             workspace,
             thread: None,
             seen_subagents: 0,
@@ -840,6 +958,9 @@ impl Inspector {
     fn reload_files(&mut self, folder: &str, files: Vec<String>, cx: &mut Context<Self>) {
         for path in files {
             let full = if path.starts_with('/') { path.clone() } else { format!("{}/{path}", folder.trim_end_matches('/')) };
+            if drawn_as(&path) == Drawn::Html {
+                crate::browser::Browsers::reload_file_preview(&full);
+            }
             let folder = folder.to_string();
             cx.spawn(async move |this, cx| {
                 let read = cx.background_executor().spawn(async move { read_file(&full) }).await;
@@ -921,6 +1042,7 @@ impl Inspector {
                 state.files[i].preview = false;
             }
             if let Some((start, _)) = lines {
+                state.files[i].source = true;
                 state.files[i].lines_picked = lines;
                 state.files[i].scroll.scroll_to_item(start.saturating_sub(4), ScrollStrategy::Top);
                 if let Some(w) = &state.files[i].wrapped {
@@ -933,7 +1055,7 @@ impl Inspector {
         let full = if relative.starts_with('/') { relative.clone() } else { format!("{}/{relative}", folder.trim_end_matches('/')) };
         let started = std::time::Instant::now();
         cx.spawn(async move |this, cx| {
-            let ViewerRead { content, note, cut_lines, carries, widest } = cx.background_executor().spawn(async move { read_file(&full) }).await;
+            let ViewerRead { content, note, cut_lines, carries, widest, markdown } = cx.background_executor().spawn(async move { read_file(&full) }).await;
             let _ = this.update(cx, |this, cx| {
                 let state = this.folders.entry(folder).or_default();
                 let scroll = UniformListScrollHandle::new();
@@ -945,7 +1067,9 @@ impl Inspector {
                     eprintln!("FILES opened {relative} ({n} lines) in {} ms", started.elapsed().as_millis());
                 }
                 let lang = extension(&relative);
-                let file = OpenFile { path: relative, content, note, cut_lines, scroll, wrapped: None, lines_picked: lines, preview, carries, lang, widest };
+                // Drawn, unless a link picked out lines.
+                let source = lines.is_some();
+                let file = OpenFile { path: relative, content, note, cut_lines, scroll, wrapped: None, lines_picked: lines, preview, carries, lang, widest, rendered: markdown.as_ref().map(|md| gpui_kit::ListState::new(md.blocks.len(), gpui_kit::ListAlignment::Top, px(400.))), markdown, source };
                 // A preview takes the last preview's place.
                 match state.files.iter().position(|f| f.preview).filter(|_| preview) {
                     Some(i) => {
@@ -958,6 +1082,13 @@ impl Inspector {
                     }
                 }
                 this.ensure_wrapped();
+                if let Ok(shot) = std::env::var("YH_FILES_PREVIEW_SHOT") {
+                    cx.spawn(async move |_, cx| {
+                        cx.background_executor().timer(std::time::Duration::from_secs(3)).await;
+                        let _ = cx.update(|_| crate::browser::Browsers::capture_file_preview(shot));
+                    })
+                    .detach();
+                }
                 static FIND_ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
                 if let Ok(words) = std::env::var("YH_FILES_FIND") {
                     if !FIND_ONCE.swap(true, std::sync::atomic::Ordering::Relaxed) {
@@ -1006,6 +1137,14 @@ impl Inspector {
         }
     }
 
+    /// Preview or Source, for the open Markdown or HTML file.
+    fn show_source(&mut self, source: bool, cx: &mut Context<Self>) {
+        if let Some(f) = self.folder(cx).and_then(|folder| self.folders.get_mut(&folder)).and_then(|s| s.files.get_mut(s.current)) {
+            f.source = source;
+        }
+        cx.notify();
+    }
+
     fn toggle_tree(&mut self, cx: &mut Context<Self>) {
         if let Some(state) = self.folder(cx).and_then(|folder| self.folders.get_mut(&folder)) {
             state.hides_tree = !state.hides_tree;
@@ -1046,6 +1185,9 @@ impl Inspector {
 
     /// ⌘F with the viewer focused: Find in the open file.
     fn show_file_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(f) = self.folder(cx).and_then(|folder| self.folders.get_mut(&folder)).and_then(|s| s.files.get_mut(s.current)) {
+            f.source = true;
+        }
         self.file_find_open = true;
         self.file_find.update(cx, |i, cx| {
             i.focus(window, cx);
@@ -1715,7 +1857,17 @@ impl Inspector {
     /// The Files tab: Show/Hide Folder, Go to File, Wrap Lines and More on top; the folder's
     /// tree; the open files in tabs (a single click in the tree opens a preview tab, in
     /// italics, that the next one replaces); and the file, coloured, or what it is instead.
+    /// The Files tab; an HTML file's page parks when it isn't drawn in it.
     fn files(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        self.preview_drawn.set(false);
+        let element = self.files_tab(theme, cx);
+        if !self.preview_drawn.get() {
+            crate::browser::Browsers::show_file_preview(None);
+        }
+        element
+    }
+
+    fn files_tab(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let Some(folder) = self.folder(cx) else { return empty("No thread open.", theme) };
         let state = self.folders.get(&folder);
         let query = !self.goto.read(cx).value().trim().is_empty();
@@ -1723,6 +1875,7 @@ impl Inspector {
         let hides_tree = state.is_some_and(|s| s.hides_tree && !s.files.is_empty());
         let has_files = state.is_some_and(|s| !s.files.is_empty());
         let wraps = self.wraps;
+        let rendered = state.and_then(|s| s.files.get(s.current)).is_some_and(|f| f.shows_rendered());
         let folder_name = folder.trim_end_matches('/').rsplit('/').next().unwrap_or("").to_string();
         let header = panel_header("Files", Some(folder_name), theme)
             .child(
@@ -1732,8 +1885,8 @@ impl Inspector {
             )
             .child(
                 tool_button("files-wrap", icons::text_wrap(), if wraps { "Don't wrap lines" } else { "Wrap lines" }, theme)
-                    .selected(wraps)
-                    .disabled(current.is_none())
+                    .selected(wraps && !rendered)
+                    .disabled(current.is_none() || rendered)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.wraps = !this.wraps;
                         this.ensure_wrapped();
@@ -1745,6 +1898,11 @@ impl Inspector {
                 tool_button("files-more", Icon::new(IconName::Ellipsis), "More", theme).disabled(current.is_none()).dropdown_menu(move |menu, _, _| match &path {
                     Some(p) => file_menu(menu, &folder, p),
                     None => menu,
+                })
+                // A menu is drawn under a page laid over the window: the page steps aside.
+                .on_open_change(|open, _, cx| {
+                    crate::browser::Browsers::set_covered(*open);
+                    cx.refresh_windows();
                 })
             });
         let top = div()
@@ -1905,7 +2063,8 @@ impl Inspector {
                 .child(div().min_w_0().text_ellipsis().overflow_hidden().text_color(theme.secondary).child(dir))
                 .child(div().flex_none().font_weight(FontWeight::MEDIUM).child(name))
                 .child(div().flex_1())
-                .when_some(file.lines().map(|l| l.len()), |d, n| d.child(div().flex_none().pl(px(space::S)).text_color(theme.tertiary).child(if n == 1 { "1 line".to_string() } else { format!("{n} lines") }))),
+                .when_some(file.lines().map(|l| l.len()).filter(|_| !file.shows_rendered()), |d, n| d.child(div().flex_none().pl(px(space::S)).text_color(theme.tertiary).child(if n == 1 { "1 line".to_string() } else { format!("{n} lines") })))
+                .when(file.drawn() != Drawn::Text, |d| d.child(div().flex_none().pl(px(space::S)).child(self.source_switch(file.source, theme, cx)))),
         );
         let notice = |line: String| {
             div()
@@ -1942,7 +2101,50 @@ impl Inspector {
                 .when(open, |d| d.child(Button::new("open-default").small().outline().icon(Icon::new(IconName::ExternalLink).size(px(13.))).label("Open in Default App").on_click(move |_, _, _| open_default(&full))))
                 .into_any_element()
         };
+        // The page shows only while it's drawn here; anything else parks it.
+        let html = (file.shows_rendered() && file.drawn() == Drawn::Html).then(|| full.clone());
+        self.preview_drawn.set(html.is_some());
         let body = match &file.content {
+            _ if html.is_some() => {
+                let (page, folder) = (html.unwrap_or_default(), folder.clone());
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .border_t_1()
+                    .border_color(theme.separator)
+                    .child(
+                        gpui_kit::canvas(
+                            move |bounds, _, _| {
+                                let (o, s) = (bounds.origin, bounds.size);
+                                crate::browser::Browsers::show_file_preview(Some((&page, &folder, (f64::from(o.x), f64::from(o.y), f64::from(s.width), f64::from(s.height)))));
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .size_full(),
+                    )
+                    .into_any_element()
+            }
+            FileContent::Text(_) if file.shows_rendered() => match (&file.markdown, &file.rendered) {
+                (Some(md), Some(state)) => {
+                    let (md, theme3) = (md.clone(), *theme);
+                    let last = md.blocks.len().saturating_sub(1);
+                    // Its texts in the window's selection after everything else, as the lines are.
+                    gpui_kit::list(state.clone(), move |i, _, _| {
+                        div()
+                            .px(px(space::L))
+                            .pt(px(if i == 0 { space::M } else { 10. }))
+                            .when(i == last, |d| d.pb(px(space::XL)))
+                            .text_size(px(text::BODY))
+                            .line_height(px(text::BODY_LINE))
+                            .child(crate::ui::rows::markdown_block(i, &md.blocks[i], 1 << 61, &theme3))
+                            .into_any_element()
+                    })
+                    .flex_1()
+                    .min_h_0()
+                    .into_any_element()
+                }
+                _ => div().flex_1().into_any_element(),
+            },
             FileContent::Missing => unavailable(Icon::new(IconName::File), "File Not Found", Some("It may have been moved or deleted.".into()), false),
             FileContent::Unreadable(why) => unavailable(Icon::new(IconName::TriangleAlert), "Can't Read This File", Some(why.clone()), false),
             FileContent::Folder => unavailable(Icon::new(IconName::Folder), "Folder", None, true),
@@ -2057,6 +2259,34 @@ impl Inspector {
                             .child(body),
                     ),
             )
+            .into_any_element()
+    }
+
+    /// Preview | Source, for a Markdown or HTML file.
+    fn source_switch(&self, source: bool, theme: &Theme, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let segment = |id: &'static str, label: &'static str, on: bool| {
+            div()
+                .id(id)
+                .px(px(space::S))
+                .h(px(18.))
+                .flex()
+                .items_center()
+                .rounded(px(radius::SMALL))
+                .text_size(px(text::CAPTION))
+                .cursor_pointer()
+                .when(on, |d| d.bg(theme.canvas).text_color(theme.text).font_weight(FontWeight::MEDIUM).shadow_sm())
+                .when(!on, |d| d.text_color(theme.secondary).hover(|s| s.text_color(theme.text)))
+                .child(label)
+        };
+        div()
+            .flex()
+            .items_center()
+            .p(px(1.))
+            .gap(px(1.))
+            .rounded(px(radius::SMALL + 1.))
+            .bg(theme.selected)
+            .child(segment("file-show-preview", "Preview", !source).on_click(cx.listener(|this, _, _, cx| this.show_source(false, cx))))
+            .child(segment("file-show-source", "Source", source).on_click(cx.listener(|this, _, _, cx| this.show_source(true, cx))))
             .into_any_element()
     }
 
@@ -2937,6 +3167,9 @@ impl Render for Inspector {
             Panel::Subagents => self.subagents(&theme, cx),
             Panel::Files => self.files(&theme, cx),
         };
+        if panel != Panel::Files {
+            crate::browser::Browsers::show_file_preview(None);
+        }
         div()
             .size_full()
             .flex()
@@ -3041,5 +3274,22 @@ mod tests {
         let offset_after = scroll.0.borrow().base_handle.offset();
         assert!(max_before.x > px(0.), "expected max_offset.x > 0, got {max_before:?}");
         assert!(offset_after.x < px(0.), "expected file viewer to scroll horizontally, got {offset_after:?}");
+    }
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::*;
+
+    #[test]
+    fn markdown_links_open_from_the_file_s_folder() {
+        assert_eq!(local_link("https://example.com", "/p/docs"), None);
+        assert_eq!(local_link("#usage", "/p/docs"), Some(None));
+        assert_eq!(local_link("cli.md", "/p/docs"), Some(Some("/p/docs/cli.md".into())));
+        assert_eq!(local_link("../src/a.rs#L12-L20", "/p/docs"), Some(Some("/p/src/a.rs#L12-L20".into())));
+        assert_eq!(local_link("./media/My%20Shot.png#top", "/p/docs"), Some(Some("/p/docs/media/My Shot.png".into())));
+        assert_eq!(drawn_as("README.md"), Drawn::Markdown);
+        assert_eq!(drawn_as("site/index.HTML"), Drawn::Html);
+        assert_eq!(drawn_as("main.rs"), Drawn::Text);
     }
 }

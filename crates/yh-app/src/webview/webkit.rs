@@ -580,6 +580,18 @@ impl WebView {
         }
     }
 
+    /// A file on disk: WebKit loads `file://` addresses only this way, with what else it may read.
+    pub fn load_file(&self, file: &str, folder: &str) {
+        unsafe {
+            let url: id = msg_send![class!(NSURL), fileURLWithPath: ns_string(file)];
+            let access: id = msg_send![class!(NSURL), fileURLWithPath: ns_string(folder) isDirectory: YES];
+            if url == nil || access == nil {
+                return;
+            }
+            let _: id = msg_send![self.view, loadFileURL: url allowingReadAccessToURL: access];
+        }
+    }
+
     pub fn url(&self) -> Option<String> {
         unsafe {
             let url: id = msg_send![self.view, URL];

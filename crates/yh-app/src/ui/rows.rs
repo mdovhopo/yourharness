@@ -1564,107 +1564,120 @@ fn code_block(code: &Text, lang: &str, theme: &Theme, ctx: Option<&RowContext>, 
 pub fn markdown_view_in(md: &markdown::Markdown, theme: &Theme, ctx: Option<&RowContext>, window: Option<&Window>) -> impl IntoElement {
     let mut column = div().flex().flex_col().gap(px(10.)).w_full();
     for (n, block) in md.blocks.iter().enumerate() {
-        let element: AnyElement = match block {
-            MdBlock::Paragraph(s) => div().child(styled_text(s, theme, ctx)).into_any_element(),
-            // Sizes from the type scale; the space above sets a heading apart from what's before.
-            MdBlock::Heading(level, s) => div()
-                .when(n > 0, |d| d.pt(px(if *level <= 2 { space::S } else { space::XS })))
-                .text_size(px(match level {
-                    1 | 2 => ts::TITLE,
-                    _ => ts::HEADLINE,
-                }))
-                .line_height(px(if *level <= 2 { 22. } else { ts::BODY_LINE }))
-                .font_weight(if *level == 1 { FontWeight::BOLD } else { FontWeight::SEMIBOLD })
-                .when(*level >= 4, |d| d.text_color(theme.secondary))
-                .child(styled_text(s, theme, ctx))
-                .into_any_element(),
-            MdBlock::Code { lang, code } if lang.eq_ignore_ascii_case("mermaid") => match (ctx, window) {
-                (Some(ctx), Some(window)) => crate::ui::diagram::diagram_block(&code.text, ctx, n, theme, window)
-                    .unwrap_or_else(|| code_block(code, lang, theme, Some(ctx), n)),
-                _ => code_block(code, lang, theme, ctx, n),
-            },
-            MdBlock::Code { lang, code } => code_block(code, lang, theme, ctx, n),
-            MdBlock::List(items) => {
-                let mut list = div().flex().flex_col().gap(px(space::XS));
-                for (depth, number, s) in items {
-                    let marker = match number {
-                        Some(n) => format!("{n}."),
-                        None => ["•", "◦", "▪"][depth % 3].to_string(),
-                    };
-                    list = list.child(
-                        div()
-                            .flex()
-                            .pl(px(2. + 20. * *depth as f32))
-                            .child(
-                                div()
-                                    .w(px(20.))
-                                    .pr(px(6.))
-                                    .flex_none()
-                                    .flex()
-                                    .justify_end()
-                                    .text_color(theme.secondary)
-                                    .child(marker),
-                            )
-                            .child(div().flex_1().min_w_0().child(styled_text(s, theme, ctx))),
-                    );
-                }
-                list.into_any_element()
-            }
-            MdBlock::Quote(s) => div()
-                .border_l(px(3.))
-                .border_color(theme.separator)
-                .pl(px(space::M))
-                .py(px(2.))
-                .text_color(theme.secondary)
-                .child(styled_text(s, theme, ctx))
-                .into_any_element(),
-            MdBlock::Table { header, rows } => {
-                let columns = header.len().max(rows.iter().map(|r| r.len()).max().unwrap_or(0));
-                let cell = |s: Option<&Text>| {
-                    let mut c = div().flex_1().min_w_0().px(px(space::M)).py(px(6.));
-                    if let Some(s) = s {
-                        c = c.child(styled_text(s, theme, ctx));
-                    }
-                    c
-                };
-                // Rules between rows only, the header on a quiet fill: a Mac list, not a grid.
-                let mut table = div()
-                    .flex()
-                    .flex_col()
-                    .border_1()
-                    .border_color(theme.separator)
-                    .rounded(px(radius::MEDIUM))
-                    .overflow_hidden()
-                    .child(div().flex().bg(theme.card).font_weight(FontWeight::SEMIBOLD).children((0..columns).map(|i| cell(header.get(i)))));
-                for row in rows {
-                    table = table.child(div().flex().border_t_1().border_color(theme.separator).children((0..columns).map(|i| cell(row.get(i)))));
-                }
-                // Copy as tab-separated values, over the header's corner while the pointer is
-                // over the table: no room of its own, so nothing moves.
-                match ctx {
-                    Some(ctx) => {
-                        let tsv = markdown::table_tsv(header, rows);
-                        div()
-                            .relative()
-                            .group("table")
-                            .child(table)
-                            .child(
-                                div().absolute().top(px(5.)).right(px(5.)).child(
-                                    copy_button("copy-table", (ctx.pos, n, &tsv), tsv.clone(), ctx, theme)
-                                        .bg(theme.card)
-                                        .when(!just_copied("copy-table", (ctx.pos, n, &tsv)), |b| b.opacity(0.).group_hover("table", |s| s.opacity(1.))),
-                                ),
-                            )
-                            .into_any_element()
-                    }
-                    None => table.into_any_element(),
-                }
-            }
-            MdBlock::Rule => div().my(px(space::XS)).h(px(1.)).bg(theme.separator).into_any_element(),
-        };
-        column = column.child(element);
+        column = column.child(block_element(n, block, theme, ctx, window));
     }
     column
+}
+
+/// One block of a Markdown file drawn on its own (the Files tab's list draws only those on
+/// screen): its texts numbered from `order`, so their ids hold from one drawing to the next.
+pub fn markdown_block(n: usize, block: &MdBlock, order: u64, theme: &Theme) -> AnyElement {
+    let kept = READING_ORDER.with(|o| o.replace(order + ((n as u64) << 16)));
+    let element = block_element(n, block, theme, None, None);
+    READING_ORDER.with(|o| o.set(kept));
+    element
+}
+
+/// The `n`th block of some Markdown.
+fn block_element(n: usize, block: &MdBlock, theme: &Theme, ctx: Option<&RowContext>, window: Option<&Window>) -> AnyElement {
+    match block {
+        MdBlock::Paragraph(s) => div().child(styled_text(s, theme, ctx)).into_any_element(),
+        // Sizes from the type scale; the space above sets a heading apart from what's before.
+        MdBlock::Heading(level, s) => div()
+            .when(n > 0, |d| d.pt(px(if *level <= 2 { space::S } else { space::XS })))
+            .text_size(px(match level {
+                1 | 2 => ts::TITLE,
+                _ => ts::HEADLINE,
+            }))
+            .line_height(px(if *level <= 2 { 22. } else { ts::BODY_LINE }))
+            .font_weight(if *level == 1 { FontWeight::BOLD } else { FontWeight::SEMIBOLD })
+            .when(*level >= 4, |d| d.text_color(theme.secondary))
+            .child(styled_text(s, theme, ctx))
+            .into_any_element(),
+        MdBlock::Code { lang, code } if lang.eq_ignore_ascii_case("mermaid") => match (ctx, window) {
+            (Some(ctx), Some(window)) => crate::ui::diagram::diagram_block(&code.text, ctx, n, theme, window)
+                .unwrap_or_else(|| code_block(code, lang, theme, Some(ctx), n)),
+            _ => code_block(code, lang, theme, ctx, n),
+        },
+        MdBlock::Code { lang, code } => code_block(code, lang, theme, ctx, n),
+        MdBlock::List(items) => {
+            let mut list = div().flex().flex_col().gap(px(space::XS));
+            for (depth, number, s) in items {
+                let marker = match number {
+                    Some(n) => format!("{n}."),
+                    None => ["•", "◦", "▪"][depth % 3].to_string(),
+                };
+                list = list.child(
+                    div()
+                        .flex()
+                        .pl(px(2. + 20. * *depth as f32))
+                        .child(
+                            div()
+                                .w(px(20.))
+                                .pr(px(6.))
+                                .flex_none()
+                                .flex()
+                                .justify_end()
+                                .text_color(theme.secondary)
+                                .child(marker),
+                        )
+                        .child(div().flex_1().min_w_0().child(styled_text(s, theme, ctx))),
+                );
+            }
+            list.into_any_element()
+        }
+        MdBlock::Quote(s) => div()
+            .border_l(px(3.))
+            .border_color(theme.separator)
+            .pl(px(space::M))
+            .py(px(2.))
+            .text_color(theme.secondary)
+            .child(styled_text(s, theme, ctx))
+            .into_any_element(),
+        MdBlock::Table { header, rows } => {
+            let columns = header.len().max(rows.iter().map(|r| r.len()).max().unwrap_or(0));
+            let cell = |s: Option<&Text>| {
+                let mut c = div().flex_1().min_w_0().px(px(space::M)).py(px(6.));
+                if let Some(s) = s {
+                    c = c.child(styled_text(s, theme, ctx));
+                }
+                c
+            };
+            // Rules between rows only, the header on a quiet fill: a Mac list, not a grid.
+            let mut table = div()
+                .flex()
+                .flex_col()
+                .border_1()
+                .border_color(theme.separator)
+                .rounded(px(radius::MEDIUM))
+                .overflow_hidden()
+                .child(div().flex().bg(theme.card).font_weight(FontWeight::SEMIBOLD).children((0..columns).map(|i| cell(header.get(i)))));
+            for row in rows {
+                table = table.child(div().flex().border_t_1().border_color(theme.separator).children((0..columns).map(|i| cell(row.get(i)))));
+            }
+            // Copy as tab-separated values, over the header's corner while the pointer is
+            // over the table: no room of its own, so nothing moves.
+            match ctx {
+                Some(ctx) => {
+                    let tsv = markdown::table_tsv(header, rows);
+                    div()
+                        .relative()
+                        .group("table")
+                        .child(table)
+                        .child(
+                            div().absolute().top(px(5.)).right(px(5.)).child(
+                                copy_button("copy-table", (ctx.pos, n, &tsv), tsv.clone(), ctx, theme)
+                                    .bg(theme.card)
+                                    .when(!just_copied("copy-table", (ctx.pos, n, &tsv)), |b| b.opacity(0.).group_hover("table", |s| s.opacity(1.))),
+                            ),
+                        )
+                        .into_any_element()
+                }
+                None => table.into_any_element(),
+            }
+        }
+        MdBlock::Rule => div().my(px(space::XS)).h(px(1.)).bg(theme.separator).into_any_element(),
+    }
 }
 
 fn summary(entries: &[EntryRef]) -> String {
