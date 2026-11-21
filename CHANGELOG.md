@@ -8,6 +8,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ### Fixed
 
+- Antigravity threads: commands Antigravity moves to the background show in the jobs strip while they run and finish with their output, instead of being marked stopped. When Antigravity picks up afterwards on its own, that reply ends properly instead of leaving the thread working forever. Stop on such a job asks Antigravity to stop it.
 - Antigravity threads: Interrupt and Send (⌘↩) and a queued message's Send Now no longer show "stopped with an error" or a finished notice first, and send the message you picked.
 - Antigravity threads: a session that can't start (not signed in) no longer leaves the thread working forever; the next message tries again.
 - Antigravity threads: Enter while it works queues the message for the turn's end (Antigravity can't be steered mid-turn), and the composer says so.

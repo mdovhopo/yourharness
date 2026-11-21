@@ -3226,6 +3226,13 @@ impl Workspace {
     /// Stops a job Claude left running (`stop_task`); its end
     /// comes back as for any other.
     pub fn stop_job(&mut self, thread: &Entity<ThreadState>, task_id: &str, cx: &mut Context<Self>) {
+        // ACP has no call to stop an agent's background task: the agent is asked to (Antigravity
+        // stops its own with its task tool), as a turn once it's free.
+        if self.agent_of(thread.read(cx)) != yh_core::agents::Agent::Claude {
+            let Some(job) = thread.read(cx).run.jobs.running.iter().find(|j| j.id == task_id).map(|j| j.description.clone()) else { return };
+            self.send_message(thread, &format!("Stop the background command you started: `{job}`. Kill it; don't wait for it."), vec![], vec![], Timing::Queue, cx);
+            return;
+        }
         let id = thread.read(cx).id().to_string();
         self.command(&id, Command::StopJob { thread: id.clone(), task_id: task_id.to_string() }, cx);
     }

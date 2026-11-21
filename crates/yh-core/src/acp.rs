@@ -79,6 +79,9 @@ struct Shared {
     capabilities: Value,
     /// No session to be had (`fail`): the process is ended, the next message starts another.
     dead: bool,
+    /// The agent at work with no prompt of ours (woken by a background job's end), and when it
+    /// last said something: that turn ends once it's been quiet a while (`woken_turn_over`).
+    woke: Option<std::time::Instant>,
     /// Its sign-in methods, from `initialize`.
     auth_methods: Vec<Value>,
 }
@@ -158,6 +161,7 @@ impl AcpProcess {
             resume: options.session_id,
             capabilities: Value::Null,
             dead: false,
+            woke: None,
             auth_methods: vec![],
         }));
         {
@@ -186,12 +190,33 @@ impl AcpProcess {
                         break;
                     }
                 }
-                // Ended for a failure already told: a quiet exit, not a crash.
-                let failed = shared.lock().unwrap().dead;
+                // Ended for a failure already told: a quiet exit, not a crash. Either way it's
+                // gone, and so is the woken-turn watch.
+                let failed = std::mem::replace(&mut shared.lock().unwrap().dead, true);
                 let code = child.lock().unwrap().wait().ok().and_then(|s| s.code()).unwrap_or(-1);
                 let code = if failed { 0 } else { code };
                 let tail = tail.lock().unwrap().clone();
                 let _ = events.send(Event::Exit { code, tail });
+            });
+        }
+        // A turn the agent took on its own (woken by a background job's end) has no reply to end
+        // it: it ends once the agent has been quiet a while.
+        {
+            let (shared, events) = (shared.clone(), events.clone());
+            std::thread::spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                let out = {
+                    let mut s = shared.lock().unwrap();
+                    if s.dead {
+                        return;
+                    }
+                    if s.woken_turn_over() { s.end_woken_turn() } else { vec![] }
+                };
+                for e in out {
+                    if events.send(e).is_err() {
+                        return;
+                    }
+                }
             });
         }
         Ok(AcpProcess { shared, writer, events, child, pid })
@@ -508,11 +533,28 @@ impl Shared {
         let _ = writer.send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
     }
 
+    /// A woken turn that's been quiet long enough (or one a message of yours comes after) ends.
+    fn end_woken_turn(&mut self) -> Vec<Event> {
+        if self.woke.take().is_none() {
+            return vec![];
+        }
+        let mut out = self.translator.end_turn(false);
+        out.push(Event::Done { is_error: false, text: String::new() });
+        out
+    }
+
+    /// Whether a woken turn is over: quiet for a few seconds, nothing waiting on you, no call of
+    /// its own still under way.
+    fn woken_turn_over(&self) -> bool {
+        self.woke.is_some_and(|at| at.elapsed() > std::time::Duration::from_secs(3)) && !self.busy && self.permissions.is_empty() && !self.translator.calls_open()
+    }
+
     fn prompt(&mut self, w: Waiting, writer: &flume::Sender<Value>) -> Vec<Event> {
         let Some(session) = self.session.clone() else {
             self.queue.push_front(w);
             return vec![];
         };
+        let mut before = self.end_woken_turn();
         let mut prompt: Vec<Value> = w.images.iter().map(|(media, data)| json!({ "type": "image", "mimeType": media, "data": data })).collect();
         if !w.text.is_empty() || prompt.is_empty() {
             prompt.push(json!({ "type": "text", "text": w.text }));
@@ -520,7 +562,8 @@ impl Shared {
         self.busy = true;
         self.translator.start_turn();
         self.request("session/prompt", json!({ "sessionId": session, "prompt": prompt }), Asked::Prompt, writer);
-        vec![Event::Lifecycle { id: w.id, state: "started".into() }, Event::Status("requesting".into())]
+        before.extend([Event::Lifecycle { id: w.id, state: "started".into() }, Event::Status("requesting".into())]);
+        before
     }
 
     fn cancel(&mut self, writer: &flume::Sender<Value>) {
@@ -589,7 +632,17 @@ impl Shared {
                 if self.replaying {
                     return vec![];
                 }
-                self.translator.update(&message["params"]["update"])
+                let update = &message["params"]["update"];
+                // Outside a prompt: the agent woken on its own is a turn of its own.
+                let mut out = vec![];
+                if !self.busy && self.ready && self.translator.is_activity(update) {
+                    if self.woke.is_none() {
+                        self.translator.start_turn();
+                    }
+                    self.woke = Some(std::time::Instant::now());
+                }
+                out.extend(self.translator.update(update));
+                out
             }
             (Some("session/request_permission"), Some(id)) => {
                 let params = &message["params"];
@@ -682,7 +735,8 @@ impl Shared {
             }
             Asked::Prompt => {
                 self.busy = false;
-                let mut out = self.translator.end_turn();
+                let cancelled = result["stopReason"] == "cancelled";
+                let mut out = self.translator.end_turn(cancelled);
                 match (error, result["stopReason"].as_str()) {
                     (Some(error), _) => out.push(Event::Done { is_error: true, text: error }),
                     (None, Some("cancelled")) => out.push(Event::Done { is_error: true, text: String::new() }),
@@ -728,6 +782,9 @@ pub struct Translator {
     /// The text or thinking being written: (its message id, kind, what it says so far).
     open: Option<(String, DeltaKind, String)>,
     calls: HashMap<String, Call>,
+    /// Commands still running when their turn ended: background jobs, finished by a later
+    /// update (Antigravity reports them done outside any prompt, then wakes the agent).
+    jobs: HashMap<String, Call>,
     /// What the session offers: its modes' ids and the one in effect, its models.
     pub modes: Vec<String>,
     pub current_mode: Option<String>,
@@ -750,16 +807,42 @@ impl Translator {
         self.open = None;
     }
 
-    /// The turn's end: what's still being written settles.
-    pub fn end_turn(&mut self) -> Vec<Event> {
+    /// The turn's end: what's still being written settles. A command still running carries on
+    /// as a background job (a turn that ended on its own: Antigravity moved it aside); anything
+    /// else unfinished, or everything in a cancelled turn, is stopped.
+    pub fn end_turn(&mut self, cancelled: bool) -> Vec<Event> {
         let mut out = self.close();
-        // Calls the agent never finished (a cancelled turn): settled as stopped.
-        for (id, call) in self.calls.iter_mut().filter(|(_, c)| !c.finished) {
-            call.finished = true;
-            out.push(Event::ToolResults { parent: None, results: vec![ToolResult { id: id.clone(), text: "Stopped.".into(), len: 8, is_error: true, full: None }] });
+        let mut started = false;
+        for (id, mut call) in std::mem::take(&mut self.calls).into_iter().filter(|(_, c)| !c.finished) {
+            if !cancelled && call.kind == "execute" {
+                out.push(Event::ToolResults { parent: None, results: vec![ToolResult { id: id.clone(), text: "Running in the background…".into(), len: 26, is_error: false, full: None }] });
+                out.push(Event::JobStarted { task_id: id.clone(), tool_id: Some(id.clone()), description: call.title.clone(), background: true, parent_task: None });
+                self.jobs.insert(id, call);
+                started = true;
+            } else {
+                call.finished = true;
+                out.push(Event::ToolResults { parent: None, results: vec![ToolResult { id, text: "Stopped.".into(), len: 8, is_error: true, full: None }] });
+            }
         }
-        self.calls.clear();
+        if started {
+            out.push(Event::JobsRunning(self.jobs.keys().cloned().collect()));
+        }
         out
+    }
+
+    /// Whether an update is the agent at work (writing, thinking, calling a tool), rather than a
+    /// background job's end or bookkeeping: outside a prompt, it's the agent woken on its own.
+    pub fn is_activity(&self, u: &Value) -> bool {
+        match u["sessionUpdate"].as_str().unwrap_or("") {
+            "agent_message_chunk" | "agent_thought_chunk" | "tool_call" | "plan" => true,
+            "tool_call_update" => !u["toolCallId"].as_str().is_some_and(|id| self.jobs.contains_key(id)),
+            _ => false,
+        }
+    }
+
+    /// A call of the turn still under way (not a background job): a woken turn isn't over yet.
+    pub fn calls_open(&self) -> bool {
+        self.calls.values().any(|c| !c.finished)
     }
 
     fn close(&mut self) -> Vec<Event> {
@@ -869,6 +952,39 @@ impl Translator {
             }
             "tool_call" | "tool_call_update" => {
                 let Some(id) = u["toolCallId"].as_str().map(str::to_string) else { return vec![] };
+                // A background job's update: its row is updated where it is, and its end ends the job.
+                if let Some(mut call) = self.jobs.remove(&id) {
+                    let status = u["status"].as_str().unwrap_or("");
+                    if !u["rawOutput"].is_null() {
+                        call.raw_output = u["rawOutput"].clone();
+                    }
+                    if let Some(c) = u["content"].as_array() {
+                        call.content = c.clone();
+                    }
+                    if status != "completed" && status != "failed" {
+                        self.jobs.insert(id, call);
+                        return vec![];
+                    }
+                    let full = result_text(&call);
+                    let len = full.len();
+                    let code = call.raw_output["exit_code"].as_i64();
+                    let state = if status == "failed" { "failed" } else { "completed" };
+                    let summary = match code {
+                        Some(c) => format!("Background command \"{}\" {state} (exit code {c})", call.title),
+                        None => format!("Background command \"{}\" {state}", call.title),
+                    };
+                    let (text, full) = if len > RESULT_HEAD {
+                        let cut = (0..=RESULT_HEAD).rev().find(|i| full.is_char_boundary(*i)).unwrap_or(0);
+                        (full[..cut].to_string(), Some(full))
+                    } else {
+                        (full, None)
+                    };
+                    return vec![
+                        Event::ToolResults { parent: None, results: vec![ToolResult { id: id.clone(), text, len, is_error: status == "failed" || code.is_some_and(|c| c != 0), full }] },
+                        Event::JobFinished { task_id: id, status: state.into(), summary: Some(summary), output_file: None },
+                        Event::JobsRunning(self.jobs.keys().cloned().collect()),
+                    ];
+                }
                 let mut out = self.close();
                 let call = self.calls.entry(id.clone()).or_default();
                 if let Some(t) = u["title"].as_str() {
@@ -1080,7 +1196,7 @@ mod tests {
         assert!(matches!(&b[1], Event::Delta { kind: DeltaKind::Text, .. }));
         let c = t.update(&chunk("agent_message_chunk", "lo"));
         assert_eq!(c.len(), 1);
-        let end = t.end_turn();
+        let end = t.end_turn(false);
         assert!(matches!(&end[0], Event::Assistant { blocks, .. } if matches!(&blocks[0], Block::Text(t) if t == "Hello")));
     }
 
@@ -1103,7 +1219,7 @@ mod tests {
         assert!(t.update(&json!({ "sessionUpdate": "tool_call_update", "toolCallId": "c1", "status": "in_progress" })).is_empty());
         let done = t.update(&json!({ "sessionUpdate": "tool_call_update", "toolCallId": "c1", "status": "completed", "content": [{ "type": "content", "content": { "type": "text", "text": "a.txt" } }] }));
         assert!(matches!(&done[0], Event::ToolResults { results, .. } if results[0].text == "a.txt" && !results[0].is_error));
-        assert!(t.end_turn().is_empty());
+        assert!(t.end_turn(false).is_empty());
     }
 
     #[test]
@@ -1115,7 +1231,7 @@ mod tests {
         let edit = t.update(&json!({ "sessionUpdate": "tool_call", "toolCallId": "e", "title": "Edit a.rs", "kind": "edit", "content": [{ "type": "diff", "path": "/p/a.rs", "oldText": "a", "newText": "b" }] }));
         assert!(matches!(&edit[0], Event::Assistant { blocks, .. } if matches!(&blocks[0], Block::Tool { name, input, .. } if name == "Edit" && input.contains("old_string"))));
         // Never finished: the turn's end settles both as stopped.
-        assert_eq!(t.end_turn().len(), 2);
+        assert_eq!(t.end_turn(false).len(), 2);
     }
 
     #[test]
@@ -1163,6 +1279,7 @@ mod tests {
             resume: None,
             capabilities: Value::Null,
             dead: false,
+            woke: None,
             auth_methods: vec![],
         };
         s.request("initialize", json!({}), Asked::Initialize, &w);
@@ -1213,6 +1330,53 @@ mod tests {
         assert_eq!(w[0].resets_at, crate::library::parse_iso("2026-11-21T17:02:36Z"));
     }
 
+    /// A real session with Antigravity 1.5.14 (sanitized): a command it moved to the background,
+    /// the prompt's end while it ran, then its result and the agent's reply with no prompt open.
+    #[test]
+    fn background_commands_are_jobs_and_a_woken_turn_ends_when_quiet() {
+        let recorded = include_str!("../fixtures/antigravity-acp-background.jsonl");
+        let (w, _sent) = flume::unbounded();
+        let mut s = Shared {
+            next_id: 0,
+            asked: HashMap::new(),
+            session: None,
+            ready: false,
+            busy: false,
+            replaying: false,
+            queue: VecDeque::new(),
+            permissions: HashMap::new(),
+            translator: Translator::default(),
+            model: None,
+            mode: Some("bypassPermissions".into()),
+            cwd: "/work".into(),
+            resume: None,
+            capabilities: Value::Null,
+            dead: false,
+            woke: None,
+            auth_methods: vec![],
+        };
+        s.request("initialize", json!({}), Asked::Initialize, &w);
+        s.queue.push_back(Waiting { id: "m1".into(), text: "run it in the background".into(), images: vec![] });
+        let mut events = vec![];
+        for line in recorded.lines().filter(|l| l.starts_with('>')) {
+            events.extend(s.receive(&serde_json::from_str(&line[2..]).unwrap(), &w));
+        }
+        let at = |pred: &dyn Fn(&Event) -> bool| events.iter().position(|e| pred(e)).expect("event");
+        let done = at(&|e| matches!(e, Event::Done { is_error: false, .. }));
+        let started = at(&|e| matches!(e, Event::JobStarted { background: true, .. }));
+        let finished = at(&|e| matches!(e, Event::JobFinished { status, summary: Some(sm), .. } if status == "completed" && sm.contains("exit code 0")));
+        // The job starts as the prompt's turn ends, and ends after it.
+        assert!(started < done && done < finished);
+        assert!(!events.iter().any(|e| matches!(e, Event::ToolResults { results, .. } if results[0].text == "Stopped.")));
+        // Its reply came with no prompt: a woken turn, over once quiet.
+        assert!(s.woke.is_some());
+        s.woke = Some(std::time::Instant::now() - std::time::Duration::from_secs(5));
+        assert!(s.woken_turn_over());
+        let end = s.end_woken_turn();
+        assert!(matches!(end.last(), Some(Event::Done { is_error: false, .. })));
+        assert!(s.woke.is_none());
+    }
+
     #[test]
     fn plans_become_the_checklist() {
         let mut t = Translator::default();
@@ -1261,6 +1425,7 @@ mod tests {
             resume: Some("old".into()),
             capabilities: Value::Null,
             dead: false,
+            woke: None,
             auth_methods: vec![],
         };
         s.request("initialize", json!({}), Asked::Initialize, &w);

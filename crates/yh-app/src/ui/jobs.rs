@@ -348,12 +348,13 @@ impl Render for JobsStrip {
         }
         // Sub-agents started since your latest message report back to Claude, as the jobs do.
         let agents_waiting = t.run.jobs.agents.iter().any(|j| j.turn == t.run.jobs.turn);
+        let who = yh_core::agents::Agent::from_id(t.meta.agent.as_deref()).name();
         let header = if (t.run.jobs.waiting() > 0 || agents_waiting) && !t.run.running {
-            "Claude is waiting on"
+            format!("{who} is waiting on")
         } else if t.run.jobs.background().next().is_some() || !t.run.jobs.agents.is_empty() {
-            "Running in the background"
+            "Running in the background".to_string()
         } else {
-            "Running"
+            "Running".to_string()
         };
         // A running sub-agent's commands are on its row, not rows of their own.
         let jobs: Vec<Job> = t.run.jobs.running.iter().filter(|j| !t.run.jobs.in_agent(j)).cloned().collect();

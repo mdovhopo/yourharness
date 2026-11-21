@@ -63,8 +63,8 @@ fn jobs_marker(t: &ThreadState, busy: bool) -> Option<SharedString> {
     Some(match waiting {
         0 if count == 1 => "1 command running".into(),
         0 => format!("{count} commands running").into(),
-        1 => "Claude is waiting on a background command".into(),
-        n => format!("Claude is waiting on {n} background commands").into(),
+        1 => format!("{} is waiting on a background command", yh_core::agents::Agent::from_id(t.meta.agent.as_deref()).name()).into(),
+        n => format!("{} is waiting on {n} background commands", yh_core::agents::Agent::from_id(t.meta.agent.as_deref()).name()).into(),
     })
 }
 
