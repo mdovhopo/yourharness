@@ -448,15 +448,7 @@ impl Workspace {
         yh_core::claude::set_chosen_claude(chosen);
         let chosen = workspace.library.setting("cliPathOverrides").and_then(|o| o["antigravity"].as_str().map(std::path::PathBuf::from));
         yh_core::acp::set_chosen_agy(chosen);
-        // Whether `agy` is here, looked for aside (the login shell's PATH may still be loading).
-        cx.spawn(async move |this, cx| {
-            let found = cx.background_executor().spawn(async move { yh_core::acp::find_agy().is_some() }).await;
-            let _ = this.update(cx, |ws, cx| {
-                ws.agy_found = found;
-                cx.notify();
-            });
-        })
-        .detach();
+        workspace.look_for_agy(cx);
         // Threads whose PRs merged settle: 20 s after launch, then every five minutes (not in
         // perf runs, which measure the transcript).
         if std::env::var("YH_PERF").is_err() {
@@ -879,6 +871,10 @@ impl Workspace {
             self.select(&id, cx);
             return id;
         }
+        // Installed since launch: its models are offered from this thread on.
+        if !self.agy_found {
+            self.look_for_agy(cx);
+        }
         let mut meta = ThreadMeta::new(yh_core::library::new_uuid(), project_id.into(), "New thread".into());
         meta.agent = self.new_thread_agent();
         let thread = make_thread(meta, cx.entity().downgrade(), cx);
@@ -891,6 +887,21 @@ impl Workspace {
         self.by_id.insert(id.clone(), thread);
         self.select(&id, cx);
         id
+    }
+
+    /// Whether Antigravity's `agy` is here, looked for aside (the login shell's PATH may still be
+    /// loading): at launch, and with each new thread until it's found.
+    fn look_for_agy(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let found = cx.background_executor().spawn(async move { yh_core::acp::find_agy().is_some() }).await;
+            let _ = this.update(cx, |ws, cx| {
+                if ws.agy_found != found {
+                    ws.agy_found = found;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// The agent new threads start on: the last one picked for a new thread (`YH_AGENT` in test
