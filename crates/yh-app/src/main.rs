@@ -47,6 +47,7 @@ fn main() {
     // data folder) is swapped in now, before the database opens.
     {
         let dir = yh_core::library::data_directory();
+        yh_core::usage::record_turns_in(dir.clone());
         if let (Some(file), true) = (env("YH_STATE_IMPORT"), env("YH_DATA_DIR").is_some()) {
             match yh_core::state_archive::open(std::path::Path::new(&file)).and_then(|o| yh_core::state_archive::stage(o, &dir)) {
                 Ok(()) => eprintln!("STATE staged {file}"),

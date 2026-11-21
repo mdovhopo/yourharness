@@ -454,11 +454,11 @@ impl Render for UsagePage {
             .child(div().flex_1())
             .child(page_kit::segmented(vec![metric("metric-tokens", "Tokens", false, icons::hash()), metric("metric-cost", "Cost", true, icons::coins())], &theme))
             .into_any_element();
-        // Tokens and cost are Claude Code's history; Antigravity has its limits above, not its tokens yet.
+        // Claude Code's history, and the Antigravity turns this app ran (agy keeps no such files).
         let agy = self.workspace.read(cx).agy_found;
         let subtitle = div()
             .truncate()
-            .child(self.reading.clone().unwrap_or_else(|| if agy { "Every Claude Code session, here or in a terminal · Antigravity: limits only".into() } else { "Every Claude Code session, here or in a terminal".into() }))
+            .child(self.reading.clone().unwrap_or_else(|| if agy { "Every Claude Code session, here or in a terminal · Antigravity threads in this app".into() } else { "Every Claude Code session, here or in a terminal".into() }))
             .into_any_element();
         let refreshing = self.refreshing;
         let toolbar = crate::ui::thread_toolbar::icon_button("usage-refresh", gpui_kit::component::Icon::new(gpui_kit::component::IconName::RefreshCw), "Read Claude Code's history again", &theme)
@@ -862,7 +862,7 @@ impl Render for UsagePage {
             .gap(px(3.))
             .text_size(px(text::CAPTION))
             .text_color(theme.tertiary)
-            .child("Costs are what the same tokens would cost on Anthropic's API, not what your plan charges. From Claude Code's session files and this app's side chats and memory agents.")
+            .child("Costs are what the same tokens would cost on Anthropic's API, not what your plan charges; models with no Anthropic price (Gemini…) count as unpriced tokens. From Claude Code's session files, this app's side chats and memory agents, and the Antigravity threads run here.")
             .child(
                 div()
                     .flex()

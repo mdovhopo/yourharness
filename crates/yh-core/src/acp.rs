@@ -822,6 +822,13 @@ impl Shared {
             }
             Asked::Prompt => {
                 self.busy = false;
+                // What it used, for the Usage page: Antigravity keeps no files to read it from.
+                if result["usage"].is_object() {
+                    let model = self.translator.current_model.clone().or_else(|| self.model.clone()).unwrap_or_else(|| "antigravity".into());
+                    let key = crate::usage::stable_hash(&format!("acp:{}:{}{}", self.session.as_deref().unwrap_or(""), self.translator.nonce, self.translator.turn));
+                    let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0., |d| d.as_secs_f64());
+                    crate::usage::record_turn(crate::usage::MessageUsage { key, at, model, tokens: crate::usage::acp_tokens(&result["usage"]), fast: false });
+                }
                 let cancelled = result["stopReason"] == "cancelled";
                 let mut out = self.translator.end_turn(cancelled);
                 match (error, result["stopReason"].as_str()) {

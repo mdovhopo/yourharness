@@ -6,6 +6,10 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+### Added
+
+- Usage counts the tokens of Antigravity threads run in the app, by model (Gemini 4 Neon, Gemini 3.8 Flash…). Claude models run through Antigravity are priced like Claude Code's; Gemini has no Anthropic price, so its tokens show as unpriced.
+
 ### Fixed
 
 - Antigravity threads now show a command in the jobs strip when Antigravity moves it to the background mid-turn and keeps working, not only when the turn ends while it runs.

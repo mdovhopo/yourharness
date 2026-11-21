@@ -4,13 +4,15 @@
 //! Files are read once, then only from where they were left (Claude Code appends). A reply
 //! written more than once (a line per content block, copied into a fork) counts once, by
 //! its message and request IDs. Prices are the API's, to put a subscription in dollars.
+//! Antigravity keeps no such files: the app writes down each turn it runs there as it ends
+//! (`record_turn`, `source` 1), from what the turn's result says it used.
 
 use rusqlite::{params, Connection};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Tokens {
@@ -217,6 +219,13 @@ pub fn family(model: &str) -> String {
     if id.ends_with("-v1") || id.ends_with("-v2") {
         id.truncate(id.len() - 3);
     }
+    // Antigravity's model IDs carry their thinking level: `gemini-4-neon-high`, `claude-opus-5-5-low`.
+    for level in ["-low", "-medium", "-high", "-xhigh", "-max"] {
+        if let Some(stem) = id.strip_suffix(level).filter(|s| !s.is_empty()) {
+            id.truncate(stem.len());
+            break;
+        }
+    }
     if let Some(i) = id.rfind('-') {
         let tail = &id[i + 1..];
         if tail.len() == 8 && tail.chars().all(|c| c.is_ascii_digit()) {
@@ -226,10 +235,10 @@ pub fn family(model: &str) -> String {
     id
 }
 
-/// "Opus 5.5", "Haiku 3.5": for people.
+/// "Opus 5.5", "Haiku 3.5", "Gemini 4 Neon": for people.
 pub fn display_name(model: &str) -> String {
     let f = family(model);
-    let Some(rest) = f.strip_prefix("claude-") else { return model.to_string() };
+    let Some(rest) = f.strip_prefix("claude-") else { return other_name(&f).unwrap_or_else(|| model.to_string()) };
     let parts: Vec<&str> = rest.split('-').collect();
     let names: Vec<String> = parts
         .iter()
@@ -248,6 +257,26 @@ pub fn display_name(model: &str) -> String {
     } else {
         format!("{} {}", names.join(" "), numbers.join("."))
     }
+}
+
+/// Another maker's model ID as words: `gemini-3.8-flash` "Gemini 3.8 Flash", `gpt-oss-120b` "GPT OSS 120B".
+fn other_name(id: &str) -> Option<String> {
+    if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.') {
+        return None;
+    }
+    let words: Vec<String> = id
+        .split('-')
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            if matches!(w, "gpt" | "oss") || (w.chars().any(|c| c.is_ascii_digit()) && w.chars().any(|c| c.is_ascii_alphabetic())) {
+                w.to_uppercase()
+            } else {
+                let mut c = w.chars();
+                c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
+            }
+        })
+        .collect();
+    Some(words.join(" "))
 }
 
 // MARK: The index
@@ -303,6 +332,38 @@ fn open(path: &Path) -> rusqlite::Result<Connection> {
         ))?;
     }
     Ok(c)
+}
+
+static TURNS_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Where `record_turn` writes: the data folder, set by the app at launch. Tests leave it unset,
+/// so they never write.
+pub fn record_turns_in(directory: PathBuf) {
+    let _ = TURNS_DIR.set(directory);
+}
+
+/// A turn run by an agent that keeps no session files of its own (Antigravity), from what its
+/// result said it used. Written aside; one already written (same key) is left as it is.
+pub fn record_turn(usage: MessageUsage) {
+    let Some(dir) = TURNS_DIR.get().cloned() else { return };
+    if usage.tokens.total() == 0 {
+        return;
+    }
+    std::thread::spawn(move || {
+        let Ok(c) = open(&dir.join("usage.sqlite")) else { return };
+        let _ = c.busy_timeout(std::time::Duration::from_secs(5));
+        let t = &usage.tokens;
+        let _ = c.execute(
+            "INSERT OR IGNORE INTO messages (key, at, model, input, output, cache_read, cache_5m, cache_1h, fast, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 1)",
+            params![usage.key, usage.at, usage.model, t.input, t.output, t.cache_read, t.cache_5m, t.cache_1h],
+        );
+    });
+}
+
+/// An ACP prompt result's `usage` (`inputTokens` without what came from the cache).
+pub fn acp_tokens(usage: &Value) -> Tokens {
+    let n = |k: &str| usage[k].as_i64().unwrap_or(0).max(0);
+    Tokens { input: n("inputTokens"), output: n("outputTokens"), cache_read: n("cachedReadTokens"), cache_5m: n("cachedWriteTokens"), cache_1h: 0 }
 }
 
 pub struct Refresh {
@@ -597,6 +658,14 @@ mod tests {
         assert_eq!(family("claude-opus-4-5[1m]"), "claude-opus-4-5");
         assert_eq!(display_name("claude-opus-5-5"), "Opus 5.5");
         assert_eq!(display_name("claude-3-5-haiku"), "Haiku 3.5");
+        // Antigravity's, thinking level and all.
+        assert_eq!(family("claude-opus-5-5-high"), "claude-opus-5-5");
+        assert_eq!(display_name("gemini-4-neon-xhigh"), "Gemini 4 Neon");
+        assert_eq!(display_name("gemini-3.8-flash-low"), "Gemini 3.8 Flash");
+        assert_eq!(display_name("gpt-oss-120b-medium"), "GPT OSS 120B");
+        assert_eq!(display_name("<synthetic>"), "<synthetic>");
+        let u = serde_json::json!({"inputTokens":11447,"outputTokens":603,"cachedReadTokens":7553,"cachedWriteTokens":0,"thoughtTokens":524,"totalTokens":19603});
+        assert_eq!(acp_tokens(&u).total(), 19603);
         let t = Tokens { input: 1_000_000, ..Default::default() };
         assert_eq!(spend("claude-opus-5-5", true, false, t, 1).cost, 8.);
         assert_eq!(spend("claude-haiku-5-5", false, true, t, 1).cost, 0.5);
