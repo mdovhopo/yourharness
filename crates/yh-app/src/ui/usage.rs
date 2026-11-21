@@ -494,7 +494,7 @@ impl Render for UsagePage {
                 .child(div().flex_1().child(page_kit::empty_state(icons::chart_column(), "Reading Your History", "Every session's replies, here or in a terminal, added up by day and by model.", None, &theme)))
                 .into_any_element();
         };
-        // Colors follow the model, by when it was first used, never by this range's ranking.
+        // Colors follow the model, by its tokens over all time, never by this range's ranking.
         let used: Vec<&String> = report.models.iter().map(|(m, _)| m).collect();
         let mut series: Vec<(String, String, Hsla)> = vec![];
         let mut other = false;

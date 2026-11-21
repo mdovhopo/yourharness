@@ -599,7 +599,7 @@ impl UsageStore {
         let mut report = Report { first_day: first, days: vec![Day::default(); days.max(1)], models: vec![], total: Spend::default(), all_models: vec![] };
         let Ok(c) = Connection::open_with_flags(&self.path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY) else { return report };
         let mut totals: HashMap<String, Spend> = HashMap::new();
-        let mut firsts: HashMap<String, (i64, f64)> = HashMap::new();
+        let mut ever: HashMap<String, i64> = HashMap::new();
         let Ok(mut s) = c.prepare("SELECT bucket, model, fast, long, input, output, cache_read, cache_5m, cache_1h, messages FROM buckets WHERE messages > 0") else { return report };
         let rows = s.query_map([], |r| {
             Ok((
@@ -616,9 +616,7 @@ impl UsageStore {
             let spend = spend(&model, fast, long, tokens, messages);
             let fam = family(&model);
             let day = *day_of.entry(bucket).or_insert_with(|| local_day(bucket as f64 * 900.));
-            let e = firsts.entry(fam.clone()).or_insert((day, 0.));
-            e.0 = e.0.min(day);
-            e.1 += spend.cost + spend.unpriced as f64 / 1e12;
+            *ever.entry(fam.clone()).or_default() += spend.tokens.total();
             if day < first || day > today {
                 continue;
             }
@@ -630,8 +628,9 @@ impl UsageStore {
         }
         report.models = totals.into_iter().collect();
         report.models.sort_by(|a, b| b.1.cost.total_cmp(&a.1.cost).then(b.1.tokens.total().cmp(&a.1.tokens.total())).then(a.0.cmp(&b.0)));
-        let mut order: Vec<(String, (i64, f64))> = firsts.into_iter().collect();
-        order.sort_by(|a, b| b.1 .0.cmp(&a.1 .0).then(b.1 .1.total_cmp(&a.1 .1)).then(a.0.cmp(&b.0)));
+        // By tokens, not cost: Antigravity's models have no prices.
+        let mut order: Vec<(String, i64)> = ever.into_iter().collect();
+        order.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
         report.all_models = order.into_iter().map(|(m, _)| m).collect();
         report
     }
@@ -686,7 +685,8 @@ pub struct Report {
     /// The models used in the range, the costliest first.
     pub models: Vec<(String, Spend)>,
     pub total: Spend,
-    /// Every model ever seen, the newest first: colors follow a model whatever the range.
+    /// Every model ever seen, the most tokens first: colors follow a model whatever the range,
+    /// the biggest getting them, the smallest sharing Other.
     pub all_models: Vec<String>,
 }
 
@@ -835,6 +835,25 @@ mod tests {
         merge_turn(&mut batch, turn("s", 7, 1, 1, true));
         merge_turn(&mut batch, turn("s", 7, 5, 0, false));
         assert_eq!(batch[&7].usage.tokens.input, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Colors go to the models with the most tokens ever, not the newest: a tiny new one
+    /// can't push the one doing the work into Other.
+    #[test]
+    fn models_ranked_by_tokens_ever() {
+        let dir = std::env::temp_dir().join(format!("yh-usage-rank-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("usage.sqlite");
+        let _ = std::fs::remove_file(&path);
+        let mut c = open(&path).unwrap();
+        let at = |model: &str, key: i64, days_ago: f64, input: i64| {
+            let usage = MessageUsage { key, at: now() - days_ago * 86400., model: model.into(), tokens: Tokens { input, ..Default::default() }, fast: false };
+            Turn { usage, session: "s".into(), exact: true }
+        };
+        write_turns(&mut c, [at("claude-opus-5-5", 1, 40., 900_000), at("gemini-3.8-flash-low", 2, 0., 10), at("gemini-4-neon-high", 3, 1., 5_000), at("gemini-4-neon", 4, 0., 5_000)].into_iter()).unwrap();
+        let r = UsageStore { writer: Mutex::new(None), path: path.clone() }.report(7);
+        assert_eq!(r.all_models, ["claude-opus-5-5", "gemini-4-neon", "gemini-3.8-flash"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

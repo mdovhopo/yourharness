@@ -13,6 +13,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 ### Fixed
 
 - Antigravity threads now show a command in the jobs strip when Antigravity moves it to the background mid-turn and keeps working, not only when the turn ends while it runs.
+- Usage gives its colors to the models you used most, not the newest ones: Opus 5.5 no longer falls into Other once a few new models (Antigravity's Gemini) show up.
 
 ## [0.6.1] - 2026-11-21
 
