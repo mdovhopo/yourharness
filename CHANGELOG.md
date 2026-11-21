@@ -6,6 +6,8 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-21
+
 ### Changed
 
 - Antigravity's usage limits show like Claude's: under Claude's in the sidebar (its 5-hour and weekly limits for Gemini models, every group in the tooltip) and on the Usage page's Limits card (Gemini models, Claude and GPT models, Gemini 4 Argon), with your plan. They come from Antigravity's own `agy` (`/usage`, no model asked) and refresh at launch, after each Antigravity turn and with the refresh button.
