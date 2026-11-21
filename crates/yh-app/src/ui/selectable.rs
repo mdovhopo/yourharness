@@ -88,29 +88,69 @@ impl SelText {
     /// The runs for `rich`: cut wherever a style starts or ends, each piece the inherited
     /// style with every highlight over it, in SF Mono where a mono range covers it.
     fn rich_runs(text: &str, base: &TextStyle, highlights: &[(Range<usize>, HighlightStyle)], mono: &[Range<usize>]) -> Vec<TextRun> {
-        let mut cuts: Vec<usize> = vec![0, text.len()];
+        let len = text.len();
+        let mut cuts: Vec<usize> = Vec::with_capacity(2 + (highlights.len() + mono.len()) * 2);
+        cuts.push(0);
+        cuts.push(len);
         for r in highlights.iter().map(|(r, _)| r).chain(mono.iter()) {
-            cuts.push(r.start.min(text.len()));
-            cuts.push(r.end.min(text.len()));
+            cuts.push(r.start.min(len));
+            cuts.push(r.end.min(len));
         }
         cuts.sort_unstable();
         cuts.dedup();
         cuts.retain(|c| text.is_char_boundary(*c));
-        cuts.windows(2)
-            .filter(|w| w[1] > w[0])
-            .map(|w| {
-                let mut style = base.clone();
-                for (r, h) in highlights {
-                    if r.start <= w[0] && w[1] <= r.end {
-                        style = style.highlight(*h);
-                    }
+
+        // Sweep-line in O((H + M) log(H + M) + C) preserving original highlight overlay order.
+        let mut hl_order: Vec<usize> = (0..highlights.len()).filter(|&i| highlights[i].0.start < highlights[i].0.end).collect();
+        hl_order.sort_unstable_by_key(|&i| (highlights[i].0.start, i));
+
+        let mut mono_sorted: Vec<(usize, usize)> = mono.iter().filter(|r| r.start < r.end).map(|r| (r.start, r.end)).collect();
+        mono_sorted.sort_unstable_by_key(|&(s, _)| s);
+
+        let mut active: Vec<usize> = vec![];
+        let mut hi = 0;
+        let mut mi = 0;
+        let mut mono_max_end = 0usize;
+        let mut runs = Vec::with_capacity(cuts.len().saturating_sub(1));
+
+        for w in cuts.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            if b <= a {
+                continue;
+            }
+            while hi < hl_order.len() && highlights[hl_order[hi]].0.start <= a {
+                let idx = hl_order[hi];
+                if highlights[idx].0.end > a {
+                    active.push(idx);
                 }
-                if mono.iter().any(|r| r.start <= w[0] && w[1] <= r.end) {
-                    style.font_family = crate::theme::MONO.into();
+                hi += 1;
+            }
+            active.retain(|&idx| highlights[idx].0.end > a);
+            if active.len() > 1 {
+                active.sort_unstable();
+            }
+            while mi < mono_sorted.len() && mono_sorted[mi].0 <= a {
+                mono_max_end = mono_max_end.max(mono_sorted[mi].1);
+                mi += 1;
+            }
+            let is_mono = mono_max_end >= b;
+            let has_hl = active.iter().any(|&idx| highlights[idx].0.end >= b);
+            if !has_hl && !is_mono {
+                runs.push(base.to_run(b - a));
+                continue;
+            }
+            let mut style = base.clone();
+            for &idx in &active {
+                if highlights[idx].0.end >= b {
+                    style = style.highlight(highlights[idx].1);
                 }
-                style.to_run(w[1] - w[0])
-            })
-            .collect()
+            }
+            if is_mono {
+                style.font_family = crate::theme::MONO.into();
+            }
+            runs.push(style.to_run(b - a));
+        }
+        runs
     }
 
     fn link_at(links: &[Range<usize>], layout: &gpui_kit::TextLayout, position: Point<Pixels>) -> Option<usize> {
@@ -259,5 +299,51 @@ impl Element for SelText {
                 });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn naive_rich_runs(text: &str, base: &TextStyle, highlights: &[(Range<usize>, HighlightStyle)], mono: &[Range<usize>]) -> Vec<TextRun> {
+        let mut cuts: Vec<usize> = vec![0, text.len()];
+        for r in highlights.iter().map(|(r, _)| r).chain(mono.iter()) {
+            cuts.push(r.start.min(text.len()));
+            cuts.push(r.end.min(text.len()));
+        }
+        cuts.sort_unstable();
+        cuts.dedup();
+        cuts.retain(|c| text.is_char_boundary(*c));
+        cuts.windows(2)
+            .filter(|w| w[1] > w[0])
+            .map(|w| {
+                let mut style = base.clone();
+                for (r, h) in highlights {
+                    if r.start <= w[0] && w[1] <= r.end {
+                        style = style.highlight(*h);
+                    }
+                }
+                if mono.iter().any(|r| r.start <= w[0] && w[1] <= r.end) {
+                    style.font_family = crate::theme::MONO.into();
+                }
+                style.to_run(w[1] - w[0])
+            })
+            .collect()
+    }
+
+    #[test]
+    fn sweep_line_rich_runs_matches_naive() {
+        let text = "Hello café `code_span` and **bold** world!";
+        let base = TextStyle::default();
+        let red = HighlightStyle { color: Some(gpui_kit::hsla(0., 1., 0.5, 1.)), ..Default::default() };
+        let blue = HighlightStyle { color: Some(gpui_kit::hsla(0.6, 1., 0.5, 1.)), ..Default::default() };
+        let bg = HighlightStyle { background_color: Some(gpui_kit::hsla(0.15, 1., 0.5, 0.4)), ..Default::default() };
+        // Overlapping highlights in non-sorted order, plus overlapping mono ranges and a non-boundary end.
+        let highlights = vec![(0..15, red), (6..22, blue), (10..30, bg), (5..12, bg)];
+        let mono = vec![11..22, 18..25];
+        let got = SelText::rich_runs(text, &base, &highlights, &mono);
+        let expected = naive_rich_runs(text, &base, &highlights, &mono);
+        assert_eq!(got, expected);
     }
 }

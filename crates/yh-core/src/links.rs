@@ -5,7 +5,7 @@
 //! and a name that could be several files isn't linked rather than linked to the wrong one.
 
 use crate::markdown::{Markdown, MdBlock, Span, Styled};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
 
 /// The thread's repo, as its `origin` names it.
@@ -67,28 +67,32 @@ impl Linker {
 
     /// Adds the links found in one piece of text; the ones its author made stay as they are.
     pub fn link(&self, styled: &mut Styled) {
-        let text = styled.text.clone();
-        for (range, url) in bare_urls(&text) {
-            mark(styled, range, url, false);
+        let mut candidates: Vec<(Range<usize>, String, bool)> = vec![];
+        for (range, url) in bare_urls(&styled.text) {
+            candidates.push((range, url, false));
         }
-        if text.contains('#') || text.contains('!') {
-            for r in issue_references(&text) {
+        if styled.text.contains('#') || styled.text.contains('!') {
+            for r in issue_references(&styled.text) {
                 if let Some(url) = self.issue_url(&r) {
-                    mark(styled, r.range, url, false);
+                    candidates.push((r.range, url, false));
                 }
             }
         }
-        if !self.paths.is_empty() && (text.contains('/') || text.contains('.')) {
-            for (range, path, lines) in self.file_references(&text) {
+        if !self.paths.is_empty() && (styled.text.contains('/') || styled.text.contains('.')) {
+            for (range, path, lines) in self.file_references(&styled.text) {
                 let mut url = format!("{}/{}", self.root, path);
                 match lines {
                     Some((a, b)) if b > a => url += &format!(":{a}-{b}"),
                     Some((a, _)) => url += &format!(":{a}"),
                     None => {}
                 }
-                mark(styled, range, url, true);
+                candidates.push((range, url, true));
             }
         }
+        if candidates.is_empty() {
+            return;
+        }
+        mark_batch(styled, candidates);
     }
 
     /// GitHub sends `/issues/N` on to `/pull/N` when N is a pull request, so one URL serves both.
@@ -112,18 +116,21 @@ impl Linker {
 
     /// The path, relative to the root, that `candidate` names, if it's one of the root's files.
     pub fn resolve(&self, candidate: &str) -> Option<String> {
-        let mut relative = candidate.to_string();
-        if let Some(rest) = relative.strip_prefix("~/") {
-            relative = format!("{}/{rest}", std::env::var("HOME").unwrap_or_default());
-        }
-        if relative.starts_with('/') {
+        let expanded;
+        let mut s = if let Some(rest) = candidate.strip_prefix("~/") {
+            expanded = format!("{}/{rest}", std::env::var("HOME").unwrap_or_default());
+            expanded.as_str()
+        } else {
+            candidate
+        };
+        if s.starts_with('/') {
             // Outside the folder: never linked, so nothing outside it is ever opened.
-            relative = relative.strip_prefix(&format!("{}/", self.root))?.to_string();
+            s = s.strip_prefix(&self.root)?.strip_prefix('/')?;
         }
-        while let Some(rest) = relative.strip_prefix("./") {
-            relative = rest.to_string();
+        while let Some(rest) = s.strip_prefix("./") {
+            s = rest;
         }
-        let bare = relative.trim_end_matches('/');
+        let bare = s.trim_end_matches('/');
         if bare.is_empty() || bare.starts_with("../") {
             return None;
         }
@@ -132,8 +139,10 @@ impl Linker {
         }
         // A name or the end of a path: linked when only one file ends that way.
         let name = bare.rsplit('/').next().unwrap_or(bare);
-        let suffix = format!("/{bare}");
-        let mut matching = self.by_name.get(name)?.iter().filter(|p| *p == bare || p.ends_with(&suffix));
+        let bare_len = bare.len();
+        let mut matching = self.by_name.get(name)?.iter().filter(|p| {
+            p.as_str() == bare || (p.len() > bare_len && p.as_bytes()[p.len() - bare_len - 1] == b'/' && p.ends_with(bare))
+        });
         let first = matching.next()?;
         matching.next().is_none().then(|| first.clone())
     }
@@ -316,6 +325,92 @@ pub fn bare_urls(text: &str) -> Vec<(Range<usize>, String)> {
     found
 }
 
+/// Links a batch of candidates in priority order in O((S + L) log(S + L)), preserving the exact
+/// precedence and span-splitting semantics of `mark`.
+fn mark_batch(styled: &mut Styled, candidates: Vec<(Range<usize>, String, bool)>) {
+    // Fast path requires existing spans to be sorted and disjoint (always true for parsed markdown).
+    let sorted_disjoint = styled.spans.windows(2).all(|w| w[0].0.end <= w[1].0.start);
+    if !sorted_disjoint {
+        for (range, url, in_code) in candidates {
+            mark(styled, range, url, in_code);
+        }
+        return;
+    }
+
+    // Disjoint accepted link ranges, keyed by start -> end, for O(log L) overlap tests.
+    let mut accepted: BTreeMap<usize, usize> = BTreeMap::new();
+    for (r, _) in &styled.links {
+        if !r.is_empty() {
+            accepted.insert(r.start, r.end);
+        }
+    }
+
+    let mut additions: Vec<(Range<usize>, Span)> = vec![];
+    for (range, url, in_code) in candidates {
+        if range.is_empty() {
+            continue;
+        }
+        // Reject if overlapping any existing or previously accepted link.
+        if let Some((_, &end)) = accepted.range(..range.end).next_back() {
+            if end > range.start {
+                continue;
+            }
+        }
+        // Find the first original span with `span.end > range.start`.
+        let first = styled.spans.partition_point(|(r, _)| r.end <= range.start);
+        let span_kind = match styled.spans.get(first) {
+            Some((outer, kind)) if outer.start < range.end => {
+                // Reject if a second original span also overlaps `range`.
+                if styled.spans.get(first + 1).is_some_and(|(r, _)| r.start < range.end) {
+                    continue;
+                }
+                if outer.start > range.start || outer.end < range.end || matches!(kind, Span::Link | Span::CodeLink) {
+                    continue;
+                }
+                if *kind == Span::Code && !in_code {
+                    continue;
+                }
+                if *kind == Span::Code { Span::CodeLink } else { Span::Link }
+            }
+            _ => Span::Link,
+        };
+        accepted.insert(range.start, range.end);
+        additions.push((range.clone(), span_kind));
+        styled.links.push((range, url));
+    }
+
+    if additions.is_empty() {
+        return;
+    }
+    additions.sort_unstable_by_key(|(r, _)| r.start);
+
+    // Single O(S + L) merge splitting any enclosing original spans around the new disjoint links.
+    let old_spans = std::mem::take(&mut styled.spans);
+    let mut merged = Vec::with_capacity(old_spans.len() + additions.len() * 2);
+    let mut li = 0;
+    for (outer, kind) in old_spans {
+        while li < additions.len() && additions[li].0.end <= outer.start {
+            merged.push(additions[li].clone());
+            li += 1;
+        }
+        let mut cursor = outer.start;
+        while li < additions.len() && additions[li].0.start < outer.end {
+            let (lr, lk) = &additions[li];
+            if cursor < lr.start {
+                merged.push((cursor..lr.start, kind));
+            }
+            merged.push((lr.clone(), *lk));
+            cursor = lr.end;
+            li += 1;
+        }
+        if cursor < outer.end {
+            merged.push((cursor..outer.end, kind));
+        }
+    }
+    merged.extend_from_slice(&additions[li..]);
+    styled.spans = merged;
+}
+
 /// Links `range` to `url` unless a link is there already. Inside a code span only when
 /// `in_code` (paths are named in code spans); a span around it is split around the link.
 fn mark(styled: &mut Styled, range: Range<usize>, url: String, in_code: bool) {
@@ -426,5 +521,21 @@ mod tests {
         }
         assert!(s.spans.iter().any(|(_, k)| *k == Span::CodeLink));
         assert_eq!(s.links.len(), 2);
+    }
+
+    #[test]
+    fn multiple_links_split_single_enclosing_span_in_priority_order() {
+        let mut md = parse("**check https://x.dev/src/main.rs then #12 and src/main.rs and README.md end**");
+        linker().link_markdown(&mut md);
+        let MdBlock::Paragraph(s) = &md.blocks[0] else { panic!() };
+        for w in s.spans.windows(2) {
+            assert!(w[0].0.end <= w[1].0.start, "overlapping spans: {:?}", s.spans);
+        }
+        // URL wins over the embedded `src/main.rs` path; issue + two file refs also linked inside bold.
+        let labels: Vec<&str> = s.links.iter().map(|(r, _)| &s.text[r.clone()]).collect();
+        assert_eq!(labels, ["https://x.dev/src/main.rs", "#12", "src/main.rs", "README.md"]);
+        // Surrounding bold pieces remain Bold.
+        assert_eq!(s.spans[0].1, Span::Bold);
+        assert_eq!(s.spans.last().unwrap().1, Span::Bold);
     }
 }

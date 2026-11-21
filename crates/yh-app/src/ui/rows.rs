@@ -588,59 +588,90 @@ fn command_name(text: &str) -> Option<usize> {
     (len > 0 && rest[len..].chars().next().is_none_or(char::is_whitespace)).then_some(len + 1)
 }
 
-/// Your message's text: a command's name in bold monospace, `@mentions` and the thread's file
-/// paths as links into the Files tab.
-fn user_text(text: &str, ctx: &RowContext, theme: &Theme, window: &Window) -> AnyElement {
-    let mut styled = Text { text: text.to_string(), spans: vec![], links: vec![] };
-    if let Some(linker) = ctx.linker.as_deref() {
+fn user_styled_of(e: &EntryRef, linker: Option<&Linker>) -> Rc<Text> {
+    let revision = linker.map_or(0, |l| l.revision);
+    let mut b = e.borrow_mut();
+    if let Some((version, links, styled)) = &b.user_links {
+        if *version == b.version && *links == revision {
+            return styled.clone();
+        }
+    }
+    let mut styled = Text { text: b.data.text.clone(), spans: vec![], links: vec![] };
+    if let Some(linker) = linker {
         linker.link(&mut styled);
     }
+    let styled = Rc::new(styled);
+    b.user_links = Some((b.version, revision, styled.clone()));
+    styled
+}
+
+/// Your message's text: a command's name in bold monospace, `@mentions` and the thread's file
+/// paths as links into the Files tab.
+fn user_text(e: &EntryRef, ctx: &RowContext, theme: &Theme, window: &Window) -> AnyElement {
+    let styled = user_styled_of(e, ctx.linker.as_deref());
+    let text = styled.text.as_str();
     let command = command_name(text);
     if command.is_none() && styled.links.is_empty() {
         return selectable(text.to_string(), theme);
     }
     // Runs: the window's text style, the command in Menlo semibold, links in the accent.
     let base = window.text_style();
-    let mut cuts: Vec<usize> = vec![0, text.len()];
+    let marks = find_marks(text);
+    let mut cuts: Vec<usize> = Vec::with_capacity(3 + (styled.links.len() + marks.len()) * 2);
+    cuts.push(0);
+    cuts.push(text.len());
     if let Some(end) = command {
         cuts.push(end);
     }
+    let mut link_ranges: Vec<(usize, usize)> = Vec::with_capacity(styled.links.len());
     for (r, _) in &styled.links {
         cuts.push(r.start);
         cuts.push(r.end);
+        link_ranges.push((r.start, r.end));
     }
-    let marks = find_marks(text);
+    link_ranges.sort_unstable_by_key(|&(s, _)| s);
     for (r, _) in &marks {
         cuts.push(r.start);
         cuts.push(r.end);
     }
     cuts.sort_unstable();
     cuts.dedup();
-    let runs: Vec<gpui_kit::TextRun> = cuts
-        .windows(2)
-        .filter(|w| w[1] > w[0])
-        .map(|w| {
-            let mut run = base.to_run(w[1] - w[0]);
-            if command.is_some_and(|end| w[0] < end) {
-                run.font = gpui_kit::Font { family: MONO.into(), weight: FontWeight::SEMIBOLD, ..run.font };
-            }
-            if styled.links.iter().any(|(r, _)| r.start <= w[0] && w[1] <= r.end) {
-                run.color = theme.accent;
-            }
-            if let Some((_, mark)) = marks.iter().find(|(r, _)| r.start <= w[0] && w[1] <= r.end) {
+    let mut li = 0usize;
+    let mut mi = 0usize;
+    let mut runs: Vec<gpui_kit::TextRun> = Vec::with_capacity(cuts.len().saturating_sub(1));
+    for w in cuts.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        if b <= a {
+            continue;
+        }
+        while li < link_ranges.len() && link_ranges[li].1 <= a {
+            li += 1;
+        }
+        while mi < marks.len() && marks[mi].0.end <= a {
+            mi += 1;
+        }
+        let mut run = base.to_run(b - a);
+        if command.is_some_and(|end| a < end) {
+            run.font = gpui_kit::Font { family: MONO.into(), weight: FontWeight::SEMIBOLD, ..run.font };
+        }
+        if link_ranges.get(li).is_some_and(|&(s, e)| s <= a && b <= e) {
+            run.color = theme.accent;
+        }
+        if let Some((r, mark)) = marks.get(mi) {
+            if r.start <= a && b <= r.end {
                 run.background_color = mark.background_color;
             }
-            run
-        })
-        .collect();
-    let shaped = StyledText::new(SharedString::from(text.to_string())).with_runs(runs);
+        }
+        runs.push(run);
+    }
+    let shaped = StyledText::new(SharedString::from(styled.text.clone())).with_runs(runs);
     if styled.links.is_empty() {
         return shaped.into_any_element();
     }
     let ranges: Vec<std::ops::Range<usize>> = styled.links.iter().map(|(r, _)| r.clone()).collect();
     let urls: Vec<String> = styled.links.iter().map(|(_, u)| u.clone()).collect();
     let target = (ctx.thread_id.clone(), ctx.project_id.clone());
-    gpui_kit::InteractiveText::new(id_of("user-text", (ctx.pos, text)), shaped)
+    gpui_kit::InteractiveText::new(id_of("user-text", (ctx.pos, text.len())), shaped)
         .on_click(ranges, move |ix, window, cx| {
             if let Some(url) = urls.get(ix) {
                 follow(url, Some(&target), window, cx);
@@ -726,14 +757,18 @@ fn user_row(item: &Item, ctx: &RowContext, from: Option<String>, theme: &Theme, 
             })))
         })
         .when(!text.is_empty(), |d| {
+            // A wide message already fills the 80% cap: giving it a definite width lets Taffy
+            // skip the intrinsic MaxContent shaping pass over huge user prompts.
+            let wide = text.len() >= 120 && text.lines().take(20).any(|l| l.len() >= 100);
             d.child(
                 div()
-                    .max_w(gpui_kit::relative(0.8))
+                    .when(wide, |d| d.w(gpui_kit::relative(0.8)))
+                    .when(!wide, |d| d.max_w(gpui_kit::relative(0.8)))
                     .bg(theme.bubble)
                     .px(px(14.))
                     .py(px(space::S))
                     .rounded(px(radius::LARGE))
-                    .child(user_text(&text, ctx, theme, window)),
+                    .child(user_text(&item.entries[0], ctx, theme, window)),
             )
         })
         .when_some(note, |d, (mark, n)| {
@@ -748,8 +783,9 @@ fn user_row(item: &Item, ctx: &RowContext, from: Option<String>, theme: &Theme, 
                 .gap(px(space::XS))
                 .h(px(20.))
                 .when(!text.is_empty(), |d| {
-                    let shown = just_copied("copy-user", (pos, &text));
-                    d.child(copy_button("copy-user", (pos, &text), text.clone(), ctx, theme).when(!shown, |b| b.opacity(0.).group_hover("user-message", |s| s.opacity(1.))))
+                    let key = (ctx.thread_id.as_str(), pos, text.len());
+                    let shown = just_copied("copy-user", key);
+                    d.child(copy_button("copy-user", key, text.clone(), ctx, theme).when(!shown, |b| b.opacity(0.).group_hover("user-message", |s| s.opacity(1.))))
                 })
                 .when_some(date, |d, date| {
                     let full = yh_core::clock::full_time(date);
@@ -795,8 +831,9 @@ fn text_row(e: &EntryRef, ctx: &RowContext, theme: &Theme, window: &Window) -> A
         .group("reply")
         .child(markdown_view_in(&md, theme, Some(ctx), Some(window)))
         .child(div().h(px(20.)).mt(px(space::XS)).ml(px(-6.)).flex().when(!live, |d| {
-            let shown = just_copied("copy-reply", (ctx.pos, &text));
-            d.child(copy_button("copy-reply", (ctx.pos, &text), text.clone(), ctx, theme).when(!shown, |b| b.opacity(0.).group_hover("reply", |s| s.opacity(1.))))
+            let key = (ctx.thread_id.as_str(), ctx.pos, text.len());
+            let shown = just_copied("copy-reply", key);
+            d.child(copy_button("copy-reply", key, text.clone(), ctx, theme).when(!shown, |b| b.opacity(0.).group_hover("reply", |s| s.opacity(1.))))
         }))
         .into_any_element()
 }
@@ -1508,7 +1545,7 @@ fn code_block(code: &Text, lang: &str, theme: &Theme, ctx: Option<&RowContext>, 
                     .text_size(px(ts::CAPTION))
                     .text_color(theme.secondary)
                     .child(div().flex_1().min_w_0().font_weight(FontWeight::MEDIUM).child(name))
-                    .when_some(ctx, |d, ctx| d.child(copy_button("copy-code", (ctx.pos, n, &code.text), code.text.clone(), ctx, theme))),
+                    .when_some(ctx, |d, ctx| d.child(copy_button("copy-code", (ctx.thread_id.as_str(), ctx.pos, n, code.text.len()), code.text.clone(), ctx, theme))),
             )
         })
         // Long lines scroll sideways instead of wrapping; a vertical wheel
@@ -1660,15 +1697,16 @@ fn block_element(n: usize, block: &MdBlock, theme: &Theme, ctx: Option<&RowConte
             match ctx {
                 Some(ctx) => {
                     let tsv = markdown::table_tsv(header, rows);
+                    let key = (ctx.thread_id.as_str(), ctx.pos, n, tsv.len());
                     div()
                         .relative()
                         .group("table")
                         .child(table)
                         .child(
                             div().absolute().top(px(5.)).right(px(5.)).child(
-                                copy_button("copy-table", (ctx.pos, n, &tsv), tsv.clone(), ctx, theme)
+                                copy_button("copy-table", key, tsv.clone(), ctx, theme)
                                     .bg(theme.card)
-                                    .when(!just_copied("copy-table", (ctx.pos, n, &tsv)), |b| b.opacity(0.).group_hover("table", |s| s.opacity(1.))),
+                                    .when(!just_copied("copy-table", key), |b| b.opacity(0.).group_hover("table", |s| s.opacity(1.))),
                             ),
                         )
                         .into_any_element()

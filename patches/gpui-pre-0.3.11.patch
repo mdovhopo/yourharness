@@ -1,5 +1,5 @@
---- gpui-pre/src/view.rs	2026-11-08 18:49:20
-+++ gpui-pre/src/view.rs	2026-11-08 18:49:35
+--- gpui-pre/src/view.rs
++++ gpui-pre/src/view.rs
 @@ -554,6 +554,9 @@
                      && element_state.cache_key.opacity.to_bits() == opacity.to_bits()
                      && !window.dirty_views.contains(&entity_id)
@@ -10,3 +10,225 @@
                  {
                      let prepaint_start = window.prepaint_index();
                      window.reuse_prepaint(element_state.prepaint_range.clone());
+--- gpui-pre/src/text_system.rs
++++ gpui-pre/src/text_system.rs
+@@ -728,6 +728,7 @@
+         let max_wrap_lines = line_clamp;
+         let mut wrapped_lines = 0;
+ 
++        let mut last_font: Option<(Font, FontId)> = None;
+         let mut process_line = |line_text: SharedString, line_start, line_end| {
+             font_runs.clear();
+ 
+@@ -741,14 +742,13 @@
+ 
+                 let run_len_within_line = cmp::min(line_end - run_start, run.len);
+ 
+-                let decoration_changed = if let Some(last_run) = decoration_runs.last_mut()
++                if let Some(last_run) = decoration_runs.last_mut()
+                     && last_run.color == run.color
+                     && last_run.underline == run.underline
+                     && last_run.strikethrough == run.strikethrough
+                     && last_run.background_color == run.background_color
+                 {
+                     last_run.len += run_len_within_line as u32;
+-                    false
+                 } else {
+                     decoration_runs.push(DecorationRun {
+                         len: run_len_within_line as u32,
+@@ -757,13 +757,22 @@
+                         underline: run.underline,
+                         strikethrough: run.strikethrough,
+                     });
+-                    true
+-                };
++                }
+ 
+-                let font_id = self.resolve_font(&run.font);
++                // YourHarness patch: cache last resolved font and merge font runs by font_id
++                // alone. Decoration changes (Find highlights, link/syntax colors) are applied at
++                // paint time by byte offset, so splitting font_runs on decoration changes forced
++                // CoreText re-shaping and invalidated LineLayoutCache on every Find keystroke.
++                let font_id = match &last_font {
++                    Some((prev, id)) if *prev == run.font => *id,
++                    _ => {
++                        let id = self.resolve_font(&run.font);
++                        last_font = Some((run.font.clone(), id));
++                        id
++                    }
++                };
+                 if let Some(font_run) = font_runs.last_mut()
+                     && font_id == font_run.font_id
+-                    && !decoration_changed
+                 {
+                     font_run.len += run_len_within_line;
+                 } else {
+--- gpui-pre/src/elements/text.rs
++++ gpui-pre/src/elements/text.rs
+@@ -700,8 +700,9 @@
+                     return size;
+                 }
+ 
+-                let mut line_wrapper = cx.text_system().line_wrapper(text_style.font(), font_size);
+                 let (text, runs) = if let Some(truncate_width) = truncate_width {
++                    // YourHarness patch: only check out LineWrapper when truncating.
++                    let mut line_wrapper = cx.text_system().line_wrapper(text_style.font(), font_size);
+                     if let Some(max_lines) = text_style.line_clamp
+                         && let Some(wrap_width) = wrap_width
+                     {
+@@ -831,7 +832,17 @@
+         let line_height = element_state.line_height;
+         let mut line_origin = bounds.origin;
+         let text_style = window.text_style();
++        // YourHarness patch: skip lines completely outside the window content mask.
++        let clip = window.content_mask().bounds;
+         for line in &element_state.lines {
++            let height = line.size(line_height).height;
++            if line_origin.y + height + line_height < clip.top() {
++                line_origin.y += height;
++                continue;
++            }
++            if line_origin.y - line_height > clip.bottom() {
++                break;
++            }
+             if matches!(pass, TextPaintPass::All | TextPaintPass::Background) {
+                 line.paint_background(
+                     line_origin,
+@@ -854,7 +865,7 @@
+                 )
+                 .log_err();
+             }
+-            line_origin.y += line.size(line_height).height;
++            line_origin.y += height;
+         }
+         Ok(())
+     }
+--- gpui-pre/src/text_system/line.rs
++++ gpui-pre/src/text_system/line.rs
+@@ -799,6 +799,10 @@
+     window: &mut Window,
+     cx: &mut App,
+ ) -> Result<()> {
++    // YourHarness patch: avoid paint_layer and full glyph iteration when no run paints a background.
++    if !decoration_runs.iter().any(|r| r.background_color.is_some()) {
++        return Ok(());
++    }
+     let line_bounds = line_paint_bounds(
+         origin,
+         layout,
+--- gpui-pre/src/text_system/line_layout.rs
++++ gpui-pre/src/text_system/line_layout.rs
+@@ -489,12 +489,57 @@
+ struct WrapScratch {
+     glyph_indices: FxHashSet<usize>,
+     break_indices: Vec<usize>,
++}
++
++// YourHarness patch: keep recently evicted shaped lines warm across frames (bounded)
++// so fast scrolling and switching between huge threads do not re-shape the same lines
++// through CoreText every time they leave the viewport for a frame.
++const MAX_WARM_ENTRIES: usize = 4_096;
++
++struct WarmCache<V> {
++    map: FxHashMap<Arc<CacheKey>, V>,
++    order: std::collections::VecDeque<Arc<CacheKey>>,
++}
++
++impl<V> Default for WarmCache<V> {
++    fn default() -> Self {
++        Self {
++            map: FxHashMap::default(),
++            order: std::collections::VecDeque::new(),
++        }
++    }
++}
++
++impl<V> WarmCache<V> {
++    fn insert(&mut self, key: Arc<CacheKey>, value: V) {
++        if let Some(slot) = self.map.get_mut(&key) {
++            *slot = value;
++            return;
++        }
++        while self.map.len() >= MAX_WARM_ENTRIES {
++            let Some(oldest) = self.order.pop_front() else {
++                break;
++            };
++            self.map.remove(&oldest);
++        }
++        if self.order.len() > MAX_WARM_ENTRIES * 2 {
++            self.order.retain(|k| self.map.contains_key(k));
++        }
++        self.order.push_back(key.clone());
++        self.map.insert(key, value);
++    }
++
++    fn remove_entry(&mut self, key: &dyn AsCacheKeyRef) -> Option<(Arc<CacheKey>, V)> {
++        self.map.remove_entry(key)
++    }
+ }
+ 
+ #[derive(Default)]
+ struct LineLayoutCacheState {
+     previous_frame: FrameCache,
+     current_frame: FrameCache,
++    warm_lines: WarmCache<Arc<LineLayout>>,
++    warm_wrapped_lines: WarmCache<Arc<WrappedLineLayout>>,
+ }
+ 
+ #[derive(Default)]
+@@ -549,6 +594,7 @@
+         let LineLayoutCacheState {
+             previous_frame,
+             current_frame,
++            ..
+         } = &mut *state;
+ 
+         for key in &previous_frame.used_lines[range.start.lines_index..range.end.lines_index] {
+@@ -586,10 +632,16 @@
+         let LineLayoutCacheState {
+             previous_frame,
+             current_frame,
++            warm_lines,
++            warm_wrapped_lines,
+         } = &mut *self.state.borrow_mut();
+         std::mem::swap(previous_frame, current_frame);
+-        current_frame.lines.clear();
+-        current_frame.wrapped_lines.clear();
++        for (k, v) in current_frame.lines.drain() {
++            warm_lines.insert(k, v);
++        }
++        for (k, v) in current_frame.wrapped_lines.drain() {
++            warm_wrapped_lines.insert(k, v);
++        }
+         current_frame.used_lines.clear();
+         current_frame.used_wrapped_lines.clear();
+     }
+@@ -622,7 +674,11 @@
+         drop(state);
+ 
+         let mut state = self.state.borrow_mut();
+-        let previous_frame_entry = state.previous_frame.wrapped_lines.remove_entry(key);
++        let previous_frame_entry = state
++            .previous_frame
++            .wrapped_lines
++            .remove_entry(key)
++            .or_else(|| state.warm_wrapped_lines.remove_entry(key));
+         if let Some((key, layout)) = previous_frame_entry {
+             state
+                 .current_frame
+@@ -698,8 +754,14 @@
+         let LineLayoutCacheState {
+             previous_frame,
+             current_frame,
++            warm_lines,
++            ..
+         } = &mut *state;
+-        if let Some((key, layout)) = previous_frame.lines.remove_entry(key) {
++        if let Some((key, layout)) = previous_frame
++            .lines
++            .remove_entry(key)
++            .or_else(|| warm_lines.remove_entry(key))
++        {
+             current_frame.lines.insert(key.clone(), layout.clone());
+             current_frame.used_lines.push(key);
+             layout

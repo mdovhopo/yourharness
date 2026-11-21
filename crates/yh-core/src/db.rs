@@ -732,15 +732,14 @@ impl Writer {
         let old = &self.state;
         for (key, value) in &state.values {
             if old.values.get(key) != Some(value) {
-                self.c.execute(
-                    "INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                    params![key, value],
-                )?;
+                self.c
+                    .prepare_cached("INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")?
+                    .execute(params![key, value])?;
             }
         }
         for key in old.values.keys() {
             if !state.values.contains_key(key) {
-                self.c.execute("DELETE FROM settings WHERE key = ?", [key])?;
+                self.c.prepare_cached("DELETE FROM settings WHERE key = ?")?.execute([key])?;
             }
         }
         let old_projects: HashMap<&str, (usize, &Vec<u8>)> =
@@ -749,16 +748,17 @@ impl Writer {
             if old_projects.get(id.as_str()) == Some(&(position, json)) {
                 continue;
             }
-            self.c.execute(
-                "INSERT INTO projects(id, position, json) VALUES (?, ?, ?)
-                 ON CONFLICT(id) DO UPDATE SET position = excluded.position, json = excluded.json",
-                params![id, position as i64, json],
-            )?;
+            self.c
+                .prepare_cached(
+                    "INSERT INTO projects(id, position, json) VALUES (?, ?, ?)
+                     ON CONFLICT(id) DO UPDATE SET position = excluded.position, json = excluded.json",
+                )?
+                .execute(params![id, position as i64, json])?;
         }
         let ids: HashSet<&str> = state.projects.iter().map(|(id, _)| id.as_str()).collect();
         for (id, _) in &old.projects {
             if !ids.contains(id.as_str()) {
-                self.c.execute("DELETE FROM projects WHERE id = ?", [id])?;
+                self.c.prepare_cached("DELETE FROM projects WHERE id = ?")?.execute([id])?;
             }
         }
         let old_threads: HashMap<&str, (usize, &ThreadRecord)> =
@@ -767,18 +767,19 @@ impl Writer {
             if old_threads.get(t.id.as_str()) == Some(&(position, t)) {
                 continue;
             }
-            self.c.execute(
-                "INSERT INTO threads(id, project_id, position, updated_at, session_id, json) VALUES (?, ?, ?, ?, ?, ?)
-                 ON CONFLICT(id) DO UPDATE SET project_id = excluded.project_id, position = excluded.position,
-                     updated_at = excluded.updated_at, session_id = excluded.session_id, json = excluded.json",
-                params![t.id, t.project_id, position as i64, t.updated_at, t.session_id, t.json],
-            )?;
+            self.c
+                .prepare_cached(
+                    "INSERT INTO threads(id, project_id, position, updated_at, session_id, json) VALUES (?, ?, ?, ?, ?, ?)
+                     ON CONFLICT(id) DO UPDATE SET project_id = excluded.project_id, position = excluded.position,
+                         updated_at = excluded.updated_at, session_id = excluded.session_id, json = excluded.json",
+                )?
+                .execute(params![t.id, t.project_id, position as i64, t.updated_at, t.session_id, t.json])?;
         }
         let ids: HashSet<&str> = state.threads.iter().map(|t| t.id.as_str()).collect();
         for t in &old.threads {
             if !ids.contains(t.id.as_str()) {
                 // The transcript stays until it's deleted: an undone delete brings the thread back.
-                self.c.execute("DELETE FROM threads WHERE id = ?", [&t.id])?;
+                self.c.prepare_cached("DELETE FROM threads WHERE id = ?")?.execute([&t.id])?;
             }
         }
         self.state = state;
@@ -786,11 +787,10 @@ impl Writer {
     }
 
     fn write_rows(&mut self, thread: &str, count: usize, rows: BTreeMap<usize, Row>) -> rusqlite::Result<()> {
-        let saved: usize = self
-            .c
-            .query_row("SELECT entry_count FROM transcripts WHERE thread_id = ?", [thread], |r| r.get::<_, i64>(0))
-            .optional()?
-            .map_or(0, |n| n as usize);
+        let saved: usize = {
+            let mut s = self.c.prepare_cached("SELECT entry_count FROM transcripts WHERE thread_id = ?")?;
+            s.query_row([thread], |r| r.get::<_, i64>(0)).optional()?.map_or(0, |n| n as usize)
+        };
         for (seq, row) in rows {
             if seq < count {
                 self.upsert(thread, seq, &row)?;
@@ -799,20 +799,19 @@ impl Writer {
         if saved > count {
             self.truncate(thread, count)?;
         }
-        self.c.execute(
+        let mut s = self.c.prepare_cached(
             "INSERT INTO transcripts(thread_id, saved_at, entry_count) VALUES (?, ?, ?)
              ON CONFLICT(thread_id) DO UPDATE SET saved_at = excluded.saved_at, entry_count = excluded.entry_count",
-            params![thread, now(), count as i64],
         )?;
+        s.execute(params![thread, now(), count as i64])?;
         Ok(())
     }
 
     fn truncate(&mut self, thread: &str, from: usize) -> rusqlite::Result<()> {
-        self.c.execute(
-            "DELETE FROM entries_fts WHERE rowid IN (SELECT rowid FROM entries WHERE thread_id = ? AND seq >= ?)",
-            params![thread, from as i64],
-        )?;
-        self.c.execute("DELETE FROM entries WHERE thread_id = ? AND seq >= ?", params![thread, from as i64])?;
+        self.c
+            .prepare_cached("DELETE FROM entries_fts WHERE rowid IN (SELECT rowid FROM entries WHERE thread_id = ? AND seq >= ?)")?
+            .execute(params![thread, from as i64])?;
+        self.c.prepare_cached("DELETE FROM entries WHERE thread_id = ? AND seq >= ?")?.execute(params![thread, from as i64])?;
         Ok(())
     }
 
@@ -822,10 +821,9 @@ impl Writer {
             Some(compressed) if compressed.len() < data.len() => (1, compressed),
             _ => (0, data.to_vec()),
         };
-        self.c.execute(
-            "INSERT OR IGNORE INTO blobs(hash, size, codec, data) VALUES (?, ?, ?, ?)",
-            params![hash, data.len() as i64, codec, stored],
-        )?;
+        self.c
+            .prepare_cached("INSERT OR IGNORE INTO blobs(hash, size, codec, data) VALUES (?, ?, ?, ?)")?
+            .execute(params![hash, data.len() as i64, codec, stored])?;
         Ok(hash)
     }
 
@@ -844,8 +842,10 @@ impl Writer {
                 if text.len() > BLOB_THRESHOLD {
                     result_blob = Some(self.store_blob(text.as_bytes())?);
                     // Characters as 0.0.x counted them: graphemes.
-                    result_length = Some(text.graphemes(true).count() as i64);
-                    result = Some(text.graphemes(true).take(RESULT_HEAD).collect());
+                    // Pure ASCII without CR has 1 byte per grapheme (no CRLF clusters).
+                    let (count, head) = grapheme_count_and_head(text, RESULT_HEAD);
+                    result_length = Some(count as i64);
+                    result = Some(head);
                 }
             }
         }
@@ -857,19 +857,21 @@ impl Writer {
             }
         }
         self.rev += 1;
-        self.c.execute(
-            "INSERT INTO entries(thread_id, seq, id, kind, text, tool_name, tool_input, tool_input_blob, tool_result,
-                                 tool_result_blob, tool_result_length, tool_is_error, notice_style, attachments, delivery,
-                                 date, turn_ended_at, subagent, subagent_blob, rev, changed_files)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(thread_id, seq) DO UPDATE SET id = excluded.id, kind = excluded.kind, text = excluded.text,
-                 tool_name = excluded.tool_name, tool_input = excluded.tool_input, tool_input_blob = excluded.tool_input_blob,
-                 tool_result = excluded.tool_result, tool_result_blob = excluded.tool_result_blob,
-                 tool_result_length = excluded.tool_result_length, tool_is_error = excluded.tool_is_error,
-                 notice_style = excluded.notice_style, attachments = excluded.attachments, delivery = excluded.delivery,
-                 date = excluded.date, turn_ended_at = excluded.turn_ended_at, subagent = excluded.subagent,
-                 subagent_blob = excluded.subagent_blob, rev = excluded.rev, changed_files = excluded.changed_files",
-            params![
+        self.c
+            .prepare_cached(
+                "INSERT INTO entries(thread_id, seq, id, kind, text, tool_name, tool_input, tool_input_blob, tool_result,
+                                     tool_result_blob, tool_result_length, tool_is_error, notice_style, attachments, delivery,
+                                     date, turn_ended_at, subagent, subagent_blob, rev, changed_files)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(thread_id, seq) DO UPDATE SET id = excluded.id, kind = excluded.kind, text = excluded.text,
+                     tool_name = excluded.tool_name, tool_input = excluded.tool_input, tool_input_blob = excluded.tool_input_blob,
+                     tool_result = excluded.tool_result, tool_result_blob = excluded.tool_result_blob,
+                     tool_result_length = excluded.tool_result_length, tool_is_error = excluded.tool_is_error,
+                     notice_style = excluded.notice_style, attachments = excluded.attachments, delivery = excluded.delivery,
+                     date = excluded.date, turn_ended_at = excluded.turn_ended_at, subagent = excluded.subagent,
+                     subagent_blob = excluded.subagent_blob, rev = excluded.rev, changed_files = excluded.changed_files",
+            )?
+            .execute(params![
                 thread,
                 seq as i64,
                 row.id,
@@ -891,10 +893,30 @@ impl Writer {
                 subagent_blob,
                 self.rev,
                 row.changed_files
-            ],
-        )?;
+            ])?;
         Ok(())
     }
+}
+
+/// Grapheme count and first `head` graphemes of `text`, fast-pathed for CR-free ASCII and
+/// single-pass otherwise.
+fn grapheme_count_and_head(text: &str, head: usize) -> (usize, String) {
+    if text.is_ascii() && !text.as_bytes().contains(&b'\r') {
+        let len = text.len();
+        return (len, text[..head.min(len)].to_string());
+    }
+    let mut count = 0usize;
+    let mut head_end = 0usize;
+    for (idx, g) in text.grapheme_indices(true) {
+        count += 1;
+        if count == head {
+            head_end = idx + g.len();
+        }
+    }
+    if count < head {
+        head_end = text.len();
+    }
+    (count, text[..head_end].to_string())
 }
 
 impl Writer {
@@ -919,22 +941,25 @@ impl Writer {
         let Some(last) = changes.last().map(|c| c.6) else { return Ok(false) };
         self.c.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| {
+            let mut del = self.c.prepare_cached("DELETE FROM entries_fts WHERE rowid = ?")?;
+            let mut ins = self.c.prepare_cached("INSERT INTO entries_fts(rowid, body) VALUES (?, ?)")?;
             for (rowid, kind, text, name, input, result, _) in &changes {
-                self.c.execute("DELETE FROM entries_fts WHERE rowid = ?", [rowid])?;
+                del.execute([rowid])?;
                 let body = match kind.as_str() {
                     "user" | "assistant" | "notice" | "commandOutput" => text.clone(),
                     "tool" => [name, input, result].iter().filter_map(|x| x.as_deref()).collect::<Vec<_>>().join("\n"),
                     _ => String::new(),
                 };
                 if !body.is_empty() {
-                    self.c.execute("INSERT INTO entries_fts(rowid, body) VALUES (?, ?)", params![rowid, body])?;
+                    ins.execute(params![rowid, body])?;
                 }
             }
-            self.c.execute(
-                "INSERT INTO index_state(indexer, rev, updated_at) VALUES ('fts', ?, ?)
-                 ON CONFLICT(indexer) DO UPDATE SET rev = excluded.rev, updated_at = excluded.updated_at",
-                params![last, now()],
-            )?;
+            self.c
+                .prepare_cached(
+                    "INSERT INTO index_state(indexer, rev, updated_at) VALUES ('fts', ?, ?)
+                     ON CONFLICT(indexer) DO UPDATE SET rev = excluded.rev, updated_at = excluded.updated_at",
+                )?
+                .execute(params![last, now()])?;
             Ok(())
         })();
         match result {
@@ -1294,6 +1319,22 @@ mod tests {
         let packed = lzfse::encode(&data).unwrap();
         assert!(packed.len() < data.len());
         assert_eq!(lzfse::decode(&packed, data.len()).unwrap(), data);
+    }
+
+    #[test]
+    fn grapheme_fast_path_matches_unicode_segmentation() {
+        for sample in [
+            "plain ascii\nline two\nline three",
+            "crlf\r\nline two\r\nend",
+            "café 👨‍👩‍👧‍👦 résumé naïve",
+            "",
+        ] {
+            for head in [0, 1, 5, 10, 100] {
+                let expected_count = sample.graphemes(true).count();
+                let expected_head: String = sample.graphemes(true).take(head).collect();
+                assert_eq!(grapheme_count_and_head(sample, head), (expected_count, expected_head));
+            }
+        }
     }
 
     /// The user's kind of data: the extreme preset (a 2 GB copy of real-sized threads), read.

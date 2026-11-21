@@ -6,7 +6,7 @@ use yh_core::library::{EntryData, Kind, ThreadMeta};
 use yh_core::thread_run::{ComposerState, LiveState, RowChange, TextPatch, TranscriptRow};
 pub use yh_core::plan::is_plan_tool;
 pub use yh_core::thread_run::{Elicitation, Permission, SubStep, Subagent, AGENT_TOOLS};
-use yh_core::markdown::Markdown;
+use yh_core::markdown::{Markdown, Styled};
 use gpui_kit::{px, ListAlignment, ListOffset, ListState};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -23,6 +23,8 @@ pub struct Entry {
     pub open: bool,
     /// Its text parsed, for (version, links revision).
     pub markdown: Option<(u64, u64, Rc<Markdown>)>,
+    /// User message text linked, for (version, links revision).
+    pub user_links: Option<(u64, u64, Rc<Styled>)>,
     /// Its row number in the whole saved transcript.
     pub seq: usize,
     /// When it was written (seconds since 1970), for rows made here.
@@ -37,7 +39,7 @@ pub type EntryRef = Rc<RefCell<Entry>>;
 
 /// A row as the run told it, to show.
 fn entry_of(r: TranscriptRow) -> EntryRef {
-    Rc::new(RefCell::new(Entry { data: r.data, live: r.live, sub: r.sub, version: 0, open: false, markdown: None, seq: r.seq, date: r.date, delivery: r.delivery }))
+    Rc::new(RefCell::new(Entry { data: r.data, live: r.live, sub: r.sub, version: 0, open: false, markdown: None, user_links: None, seq: r.seq, date: r.date, delivery: r.delivery }))
 }
 
 /// A row read from storage: a sub-agent's call with its run as it was saved.
@@ -216,6 +218,8 @@ pub struct ThreadState {
     pub find_hit: Option<i64>,
     /// What Find looks for while open (folded: no case, no accents); None draws no marks.
     pub find_query: Option<String>,
+    /// Bumped whenever held rows or their searchable text change, so Find skips redundant rescans.
+    pub find_epoch: u64,
     pub sign_in: Option<SignInAsk>,
     /// Its first title was a guess (the subject wasn't known yet): written again from the
     /// conversation once the first turn is over.
@@ -276,6 +280,7 @@ impl ThreadState {
             plan: Default::default(),
             find_hit: None,
             find_query: None,
+            find_epoch: 0,
             sign_in: None,
             title_needs_refinement: false,
             before: 0,
@@ -345,6 +350,7 @@ impl ThreadState {
         let top = self.list.logical_scroll_top();
         self.items.splice(0..0, items);
         self.before = before;
+        self.find_epoch += 1;
         if was_empty {
             self.list.reset(self.items.len());
         } else {
@@ -385,6 +391,7 @@ impl ThreadState {
             let id = e.borrow().data.id.clone();
             self.tools.insert(id, (e.clone(), pos));
         }
+        self.find_epoch += 1;
     }
 
     /// A held row by its number, with its item's.
@@ -427,6 +434,7 @@ impl ThreadState {
                         }
                         b.version += 1;
                     }
+                    self.find_epoch += 1;
                     self.touch_pos(pos);
                 }
             }
@@ -499,6 +507,7 @@ impl ThreadState {
             }
         }
         self.before += count;
+        self.find_epoch += 1;
         self.list.splice(0..cut, 0);
         self.refresh_folds();
     }
@@ -506,6 +515,7 @@ impl ThreadState {
     /// Lets go of the rows; they're read again on the next visit.
     pub fn unload(&mut self) {
         self.items.clear();
+        self.find_epoch += 1;
         self.list.reset(0);
         self.before = 0;
         // Its sub-agents stay listed, summarized; the one read whole goes back to a summary.

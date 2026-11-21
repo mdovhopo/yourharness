@@ -3,6 +3,8 @@
 # (not committed; Cargo.toml's [patch.crates-io] points there). Run by scripts/bundle.sh.
 # gpui-pre-macos: GPUI_KEEP_DRAWING=1 keeps drawing a window parked off screen (test runs).
 # gpui-pre: cached views draw anew while VoiceOver listens (a reused one left its tree).
+# gpui-base: tab-free textarea wrapping uses GPUI's cached-width LineWrapper instead of ~6 CoreText
+# shaping calls per line (fixes ~900 ms freezes on huge pastes and draft restores).
 # gpui-component: an icon-only button is named by its tooltip for VoiceOver; menus on the app's type
 # scale (13 pt rows, 22 pt tall), a hairline edge, one shadow, a soft lit row (`list_active`).
 #
@@ -14,6 +16,7 @@ ROOT="${0:A:h:h}"
 # name:version:sha256
 for spec in gpui-pre-macos:0.3.11:d7410cfdaa1fa55a414346cc492d18ce340e3a8b6d0ac3213b984ed690c82b92 \
     gpui-pre:0.3.11:9303c771abf2acff2a96d706f69d9a82088c4770173a07cce88f0002431d887d \
+    gpui-base:0.9.0:cff6377e30f0c857681662e7edc7286bf30f5606033390401b0706d7bd930833 \
     gpui-component:0.9.0:45bbfdba0efa392190f2fd446ec311325302eb047d5ce45dc1bcf189cb18f5eb; do
     name=${spec%%:*} rest=${spec#*:}
     version=${rest%%:*} cksum=${rest#*:}

@@ -17,6 +17,8 @@ pub struct FindBar {
     pub open: bool,
     hits: Vec<i64>,
     current: Option<usize>,
+    /// `(thread_id, folded_query, find_epoch)` that `hits` was computed for.
+    searched: Option<(String, String, u64)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -28,7 +30,7 @@ impl FindBar {
             InputEvent::PressEnter { shift, .. } => this.step(!*shift, cx),
             _ => {}
         })];
-        FindBar { workspace, input, open: false, hits: vec![], current: None, _subscriptions: subscriptions }
+        FindBar { workspace, input, open: false, hits: vec![], current: None, searched: None, _subscriptions: subscriptions }
     }
 
     pub fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -45,6 +47,7 @@ impl FindBar {
         self.open = false;
         self.hits.clear();
         self.current = None;
+        self.searched = None;
         if let Some(t) = self.workspace.read(cx).selected_thread() {
             t.update(cx, |t, cx| {
                 t.set_find_query(None);
@@ -65,7 +68,13 @@ impl FindBar {
         let q = self.query(cx);
         let Some(thread) = self.workspace.read(cx).selected_thread() else { return };
         let was = self.current.and_then(|i| self.hits.get(i).copied());
-        self.hits = if q.is_empty() { vec![] } else { thread.read(cx).find(&q) };
+        let (tid, epoch, hits) = {
+            let t = thread.read(cx);
+            let hits = if q.is_empty() { vec![] } else { t.find(&q) };
+            (t.id().to_string(), t.find_epoch, hits)
+        };
+        self.hits = hits;
+        self.searched = Some((tid, q.clone(), epoch));
         self.current = was.and_then(|p| self.hits.iter().position(|h| *h == p)).or(self.hits.len().checked_sub(1));
         let hit = self.current.map(|i| self.hits[i]);
         thread.update(cx, |t, cx| {
@@ -85,11 +94,20 @@ impl FindBar {
     /// past the oldest row held, the page before is read first and looked through too.
     pub fn step(&mut self, newer: bool, cx: &mut Context<Self>) {
         let Some(thread) = self.workspace.read(cx).selected_thread() else { return };
-        // Rows came (an earlier page, a new reply) since the last look.
-        let was = self.current.and_then(|i| self.hits.get(i).copied());
+        // Only rescan when rows came/changed, the thread switched, or the query changed.
         let q = self.query(cx);
-        if !q.is_empty() {
-            self.hits = thread.read(cx).find(&q);
+        let needs_rescan = {
+            let t = thread.read(cx);
+            self.searched.as_ref().is_none_or(|(tid, sq, epoch)| tid != t.id() || sq != &q || *epoch != t.find_epoch)
+        };
+        if !q.is_empty() && needs_rescan {
+            let was = self.current.and_then(|i| self.hits.get(i).copied());
+            let (tid, epoch, hits) = {
+                let t = thread.read(cx);
+                (t.id().to_string(), t.find_epoch, t.find(&q))
+            };
+            self.hits = hits;
+            self.searched = Some((tid, q, epoch));
             self.current = was.and_then(|p| self.hits.iter().position(|h| *h == p)).or(self.hits.len().checked_sub(1));
         }
         if self.hits.is_empty() {

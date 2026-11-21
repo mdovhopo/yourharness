@@ -1,0 +1,36 @@
+--- gpui-base/src/input/editor/display_map/text_wrapper.rs
++++ gpui-base/src/input/editor/display_map/text_wrapper.rs
+@@ -545,7 +545,8 @@
+         let font = self.font.clone();
+         let font_size = self.font_size;
+         let wrapping_indent = self.wrapping_indent;
+-        let tab_stop = tab_stop_width(&text_system, &font, font_size, self.tab_size);
++        let tab_size = self.tab_size;
++        let mut tab_stop = None;
+         self.update_lines(
+             changed_text,
+             range,
+@@ -575,6 +576,23 @@
+                     offset = range.end;
+                 }
+                 if fragments.is_empty() {
++                    // YourHarness patch: `measured_wrap` shapes ~6 substrings per logical line
++                    // through CoreText (~900 ms on a 200 KB paste or draft restore). For tab-free
++                    // lines, GPUI's cached-width `LineWrapper` wraps in <1 ms with the same
++                    // Unicode line-break and grapheme rules.
++                    if !line_str.contains('\t') {
++                        let indent = match wrapping_indent {
++                            WrappingIndent::Same => gpui::IndentAdjustment::SameIndent,
++                            WrappingIndent::None => gpui::IndentAdjustment::NoIndent,
++                        };
++                        return MeasuredWrap::uncached(
++                            line_wrapper
++                                .wrap_line(&[LineFragment::text(line_str)], wrap_width, indent)
++                                .collect(),
++                        );
++                    }
++                    let tab_stop = *tab_stop
++                        .get_or_insert_with(|| tab_stop_width(&text_system, &font, font_size, tab_size));
+                     return measured_wrap(line_str, wrap_width, wrapping_indent, |text| {
+                         measurements.borrow_mut().measure(text, || {
+                             let layout = text_system.layout_line(

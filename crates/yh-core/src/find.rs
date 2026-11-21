@@ -42,36 +42,131 @@ pub fn query(text: &str) -> String {
 
 /// Whether `text` has the folded `query` anywhere.
 pub fn contains(text: &str, query: &str) -> bool {
-    !query.is_empty() && first(text, query, 0).is_some()
+    if query.is_empty() {
+        return false;
+    }
+    if text.is_ascii() && query.is_ascii() {
+        return contains_ascii(text.as_bytes(), query.as_bytes());
+    }
+    contains_unicode(text, query)
 }
 
 /// Where the folded `query` is in `text`, as byte ranges of `text`, left to right, not overlapping.
 pub fn ranges(text: &str, query: &str) -> Vec<Range<usize>> {
-    let mut out = vec![];
     if query.is_empty() {
-        return out;
+        return vec![];
     }
-    let mut from = 0;
-    while let Some(r) = first(text, query, from) {
-        from = r.end;
-        out.push(r);
+    if text.is_ascii() && query.is_ascii() {
+        return ranges_ascii(text.as_bytes(), query.as_bytes());
+    }
+    ranges_unicode(text, query)
+}
+
+fn contains_ascii(tb: &[u8], qb: &[u8]) -> bool {
+    let qlen = qb.len();
+    if qlen > tb.len() || qb.iter().any(u8::is_ascii_uppercase) {
+        return false;
+    }
+    let lo = qb[0];
+    let hi = lo.to_ascii_uppercase();
+    let last = tb.len() - qlen;
+    let mut i = 0;
+    while i <= last {
+        let b = tb[i];
+        if (b == lo || b == hi) && tb[i..i + qlen].eq_ignore_ascii_case(qb) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+fn ranges_ascii(tb: &[u8], qb: &[u8]) -> Vec<Range<usize>> {
+    let qlen = qb.len();
+    if qlen > tb.len() || qb.iter().any(u8::is_ascii_uppercase) {
+        return vec![];
+    }
+    let lo = qb[0];
+    let hi = lo.to_ascii_uppercase();
+    let last = tb.len() - qlen;
+    let mut out = vec![];
+    let mut i = 0;
+    while i <= last {
+        let b = tb[i];
+        if (b == lo || b == hi) && tb[i..i + qlen].eq_ignore_ascii_case(qb) {
+            out.push(i..i + qlen);
+            i += qlen;
+        } else {
+            i += 1;
+        }
     }
     out
 }
 
-/// The first match at or after byte `from`.
-fn first(text: &str, query: &str, from: usize) -> Option<Range<usize>> {
+fn contains_unicode(text: &str, query: &str) -> bool {
     let wanted: Vec<char> = query.chars().collect();
-    let chars: Vec<(usize, char)> = text[from..].char_indices().map(|(i, c)| (i + from, fold_char(c))).collect();
-    if wanted.len() > chars.len() {
-        return None;
+    if wanted.is_empty() {
+        return false;
     }
-    (0..=chars.len() - wanted.len()).find_map(|s| {
-        wanted.iter().enumerate().all(|(k, w)| chars[s + k].1 == *w).then(|| {
-            let end = chars.get(s + wanted.len()).map_or(text.len(), |(i, _)| *i);
-            chars[s].0..end
-        })
-    })
+    if wanted.len() == 1 {
+        let w = wanted[0];
+        return text.chars().any(|c| fold_char(c) == w);
+    }
+    // KMP over folded chars: O(N + M) worst-case with zero allocation for `text`.
+    let mut lps = vec![0usize; wanted.len()];
+    let mut len = 0;
+    let mut i = 1;
+    while i < wanted.len() {
+        if wanted[i] == wanted[len] {
+            len += 1;
+            lps[i] = len;
+            i += 1;
+        } else if len > 0 {
+            len = lps[len - 1];
+        } else {
+            i += 1;
+        }
+    }
+    let mut j = 0;
+    for c in text.chars() {
+        let fc = fold_char(c);
+        while j > 0 && fc != wanted[j] {
+            j = lps[j - 1];
+        }
+        if fc == wanted[j] {
+            j += 1;
+            if j == wanted.len() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn ranges_unicode(text: &str, query: &str) -> Vec<Range<usize>> {
+    let wanted: Vec<char> = query.chars().collect();
+    let wlen = wanted.len();
+    if wlen == 0 {
+        return vec![];
+    }
+    let chars: Vec<(usize, char)> = text.char_indices().map(|(i, c)| (i, fold_char(c))).collect();
+    if wlen > chars.len() {
+        return vec![];
+    }
+    let w0 = wanted[0];
+    let last = chars.len() - wlen;
+    let mut out = vec![];
+    let mut s = 0;
+    while s <= last {
+        if chars[s].1 == w0 && (1..wlen).all(|k| chars[s + k].1 == wanted[k]) {
+            let end = chars.get(s + wlen).map_or(text.len(), |(i, _)| *i);
+            out.push(chars[s].0..end);
+            s += wlen;
+        } else {
+            s += 1;
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -95,5 +190,19 @@ mod tests {
         assert_eq!(ranges("aaaa", "aa"), vec![0..2, 2..4]);
         assert_eq!(ranges("naïve", &query("i")), vec![2..4]);
         assert!(ranges("short", "longer query").is_empty());
+    }
+
+    #[test]
+    fn ascii_and_unicode_paths_match_edge_cases() {
+        // Pure ASCII fast path: case-insensitivity, non-overlapping, uppercase query rejected.
+        assert_eq!(ranges("Foo fOO FOO bar foo", "foo"), vec![0..3, 4..7, 8..11, 16..19]);
+        assert!(contains("Foo BAR", "bar"));
+        assert!(!contains("Foo BAR", "BAR"));
+        assert!(ranges("Foo BAR", "BAR").is_empty());
+        // Unicode KMP fallback (repeating prefix) and multi-byte folding.
+        assert!(contains("aaaaéaaaaab", "aaaab"));
+        assert!(!contains("aaaaéaaaaac", "aaaab"));
+        assert!(contains("café", "e"));
+        assert_eq!(ranges("éÉe", "e"), vec![0..2, 2..4, 4..5]);
     }
 }

@@ -427,7 +427,7 @@ impl Composer {
                 InputEvent::Change => {
                     this.update_suggestions(window, cx);
                     // Send greys out with nothing to send: a redraw only when that flips.
-                    let empty = this.input.read(cx).value().trim().is_empty();
+                    let empty = is_blank_input(this.input.read(cx));
                     if empty != this.empty {
                         this.empty = empty;
                         cx.notify();
@@ -1305,8 +1305,9 @@ impl Render for Composer {
             let inspector = if self.workspace.read(cx).shows_inspector { crate::ui::inspector::WIDTH } else { 0. };
             f32::from(window.viewport_size().width) - inspector - 260. - 40. < 540.
         };
-        let has_text = !self.input.read(cx).value().trim().is_empty() || attached.is_some();
-        self.empty = self.input.read(cx).value().trim().is_empty();
+        let blank = is_blank_input(self.input.read(cx));
+        let has_text = !blank || attached.is_some();
+        self.empty = blank;
         let composer = div()
             .capture_key_down(cx.listener(Self::on_key))
             .children(attached.map(|a| a.px(px(space::XS)).pt(px(space::XS))))
@@ -2013,6 +2014,28 @@ struct Suggestion {
     run: Option<String>,
 }
 
+/// True when the composer's Rope has no non-whitespace text, without cloning it.
+fn is_blank_input(i: &TextareaState) -> bool {
+    i.text().chunks().all(|c| c.trim().is_empty())
+}
+
+/// The whitespace-delimited token ending at the caret: `(start_byte, token)`.
+fn trailing_token(i: &TextareaState) -> (usize, String) {
+    let rope = i.text();
+    let mut cursor = i.cursor().min(rope.len());
+    while cursor > 0 && !rope.is_char_boundary(cursor) {
+        cursor -= 1;
+    }
+    let mut start = cursor;
+    for c in rope.chars_at(cursor).reversed() {
+        if c.is_whitespace() {
+            break;
+        }
+        start -= c.len_utf8();
+    }
+    (start, rope.slice(start..cursor).to_string())
+}
+
 struct Suggest {
     items: Vec<Suggestion>,
     index: usize,
@@ -2039,15 +2062,14 @@ impl Composer {
     }
 
     fn update_suggestions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (text, cursor) = {
-            let i = self.input.read(cx);
-            (i.value().to_string(), i.cursor())
-        };
-        let before = text.get(..cursor).unwrap_or(&text);
+        // Only inspect the single whitespace-delimited token ending at the caret,
+        // avoiding cloning a huge prompt out of the Rope on every keystroke.
+        let (token_start, token) = trailing_token(self.input.read(cx));
         let Some(thread) = self.thread(cx) else { return };
         // `/name` at the start (commands and skills), or as a word later on (skills to chain:
         // only what the agent can run itself).
-        if let Some((start, q)) = yh_core::claude::trailing_command(before) {
+        if let Some(q) = token.strip_prefix('/').filter(|q| !q.contains('/')) {
+            let start = token_start;
             let q = q.to_lowercase();
             let project = thread.read(cx).meta.project_id.clone();
             let chained = start > 0;
@@ -2107,14 +2129,14 @@ impl Composer {
             return;
         }
         // `@word` after a space or at the start: files and folders of the thread's folder.
-        let at = before.rfind('@').filter(|&i| (i == 0 || before[..i].ends_with(char::is_whitespace)) && !before[i + 1..].contains(char::is_whitespace));
-        let Some(at) = at else {
+        let Some(query) = token.strip_prefix('@').filter(|q| !q.contains('@')) else {
             if self.suggest.take().is_some() {
                 cx.notify();
             }
             return;
         };
-        let query = before[at + 1..].to_string();
+        let at = token_start;
+        let query = query.to_string();
         let task = self.workspace.update(cx, |ws, cx| ws.mention_files(&thread, query, cx));
         self._mentions = Some(cx.spawn_in(window, async move |this, cx| {
             let files = task.await;

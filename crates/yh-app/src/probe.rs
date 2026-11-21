@@ -723,6 +723,91 @@ impl Probe {
         self.set_composer("clear-draft", String::new()).await;
     }
 
+    /// Huge prompt benchmark: pasting, typing, scrolling, switching drafts, and sending huge prompts (15KB, 60KB, 200KB).
+    async fn huge_prompt(&mut self, list: &[Entity<ThreadState>]) {
+        let make_prompt = |lines: usize| -> String {
+            (0..lines)
+                .map(|i| format!("Line {i:04}: check crates/mod_{}/src/sub_{}/file_{}.rs:42 and https://example.com/issue/{i} #42 parser timezone migration\n", i % 15, i % 30, i % 1500))
+                .collect()
+        };
+        let make_single_line = |chars: usize| -> String {
+            let chunk = "crates/mod_1/src/sub_2/file_3.rs:42 parser timezone migration token cache budget ";
+            chunk.repeat((chars / chunk.len()).max(1))
+        };
+        for (tag, text) in [
+            ("15k", make_prompt(130)),
+            ("60k", make_prompt(520)),
+            ("200k", make_prompt(1750)),
+            ("100k-wrap", make_single_line(100_000)),
+        ] {
+            let bytes = text.len();
+            self.set_composer(&format!("huge-paste-{tag}"), text).await;
+            self.sleep(150).await;
+            if self.focus_composer().await {
+                self.type_keys(&format!("huge-key-{tag}"), "testing typing latency", 25).await;
+            }
+            // Wheel-scroll inside the composer
+            if let Some(b) = bounds("composer") {
+                let (x, y) = (f32::from(b.origin.x) + 120.0, f32::from(b.origin.y) + 60.0);
+                for dy in [120, -120] {
+                    self.note(&format!("huge-scroll-{tag}"));
+                    let sent = Instant::now();
+                    for _ in 0..8 {
+                        platform::wheel(self.ns, x, y, dy);
+                        self.sleep(8).await;
+                    }
+                    let shown = self.painted().await;
+                    self.record(&format!("huge-scroll-{tag}"), sent, shown, shown);
+                }
+            }
+            if tag == "200k" && list.len() >= 2 {
+                // Switch away (saves 200KB draft) and switch back (restores 200KB draft)
+                self.switch_to(&list[1]).await;
+                self.sleep(150).await;
+                self.switch_to(&list[0]).await;
+                self.sleep(150).await;
+            }
+            log(&format!("huge-prompt {tag} ({bytes} bytes) done"));
+            self.set_composer(&format!("huge-clear-{tag}"), String::new()).await;
+            self.sleep(100).await;
+        }
+        // Send a 100KB prompt into the transcript (fake claude ignores non-PERF messages or returns quickly)
+        let send_text = make_prompt(900);
+        self.set_composer("huge-send-paste", send_text).await;
+        self.act("huge-send-submit", |r, window, cx| {
+            r.read(cx).composer.clone().update(cx, |c, cx| c.submit(yh_core::claude::Timing::Steer, window, cx));
+        })
+        .await;
+        self.sleep(300).await;
+        self.wheel_transcript(40, 120).await;
+        self.wheel_transcript(40, -120).await;
+    }
+
+    /// Huge thread operations: Find on huge prompts/replies, expand dense work turn, open big tool, load earlier pages.
+    async fn huge_thread_ops(&mut self, list: &[Entity<ThreadState>]) {
+        if !list.is_empty() {
+            self.switch_to(&list[0]).await;
+            self.sleep(200).await;
+        }
+        // Find a common word across huge prompts & replies (hundreds/thousands of matches!)
+        self.g_find().await;
+        self.sleep(200).await;
+        // Expand work turn & big tool
+        self.g_work().await;
+        self.sleep(200).await;
+        // Load earlier pages 4 times
+        for _ in 0..4 {
+            self.g_earlier().await;
+            self.sleep(150).await;
+        }
+        // Switch across huge threads (Huge 01..04 including 150KB draft on Huge 02)
+        for t in list.iter().take(4) {
+            self.switch_to(t).await;
+            self.sleep(150).await;
+        }
+        self.switch_to(&list[0]).await;
+    }
+
     async fn tab(&mut self, panel: crate::state::workspace::Panel) {
         let kind = format!("tab-{}", panel.label().to_lowercase().replace(' ', "-"));
         self.act_ws(&kind, move |ws, cx| ws.show_panel(panel, cx)).await;
@@ -1500,6 +1585,8 @@ async fn run(p: &mut Probe) {
         "scroll-huge-fast",
         "switch-huge",
         "switch-all-idle",
+        "huge-prompt",
+        "huge-thread-ops",
         "stream-1",
         "stream-all",
         "stream-all-scroll",
@@ -1557,6 +1644,8 @@ async fn run(p: &mut Probe) {
                 }
                 p.switching(&threads, Instant::now() + s, 1500).await;
             }
+            "huge-prompt" => p.huge_prompt(&threads).await,
+            "huge-thread-ops" => p.huge_thread_ops(&threads).await,
             "stream-1" => {
                 let end = p.start_turns(&threads[..1], seconds, &rate).await;
                 p.sleep(end.saturating_duration_since(Instant::now()).as_millis() as u64).await;
