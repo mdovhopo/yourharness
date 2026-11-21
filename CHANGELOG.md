@@ -9,7 +9,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 ### Changed
 
 - Antigravity's usage limits show like Claude's: under Claude's in the sidebar (its 5-hour and weekly limits for Gemini models, every group in the tooltip) and on the Usage page's Limits card (Gemini models, Claude and GPT models, Gemini 4 Argon), with your plan. They come from Antigravity's own `agy` (`/usage`, no model asked) and refresh at launch, after each Antigravity turn and with the refresh button.
-- The model picker lists every Antigravity model your account has as soon as Antigravity's CLI is found, before any Antigravity thread has run. It shows the thread's own agent's models, with the other agent in one submenu (Claude Code or Antigravity), and Antigravity's Default says which model it picks. Installing Antigravity's CLI while the app is open no longer needs a restart.
+- The model picker lists every Antigravity model your account has as soon as Antigravity's CLI is found, before any Antigravity thread has run. The agent is a chip of its own next to the model (Claude Code or Antigravity), changeable until a thread's first message; the model chip lists only that agent's models, and Antigravity's Default says which model it picks. Installing Antigravity's CLI while the app is open no longer needs a restart.
 
 ## [0.4.0] - 2026-11-21
 

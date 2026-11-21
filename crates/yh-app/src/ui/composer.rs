@@ -815,30 +815,55 @@ impl Composer {
         let agent_models: Rc<Vec<PickerModel>> = Rc::new(
             ws.agent_models.iter().map(|m| PickerModel { value: m.value.clone(), name: m.display_name.clone(), description: m.description.clone(), efforts: vec![], alias: true }).collect(),
         );
-        let offers_agy = agy || (can_switch && ws.agy_found);
         let efforts = if agy { vec![] } else { models.iter().find(|m| m.value == current_model).map(|m| m.efforts.clone()).unwrap_or_default() };
         let mode_label = MODES.iter().find(|(v, _)| *v == mode).map_or("Auto", |(_, l)| l);
         let models = Rc::new(models);
         let w = self.workspace.downgrade();
         let (secondary, error, accent) = (theme.secondary, theme.error, theme.accent);
         let agy_default = ws.agent_default_name();
+        // The agent the thread runs on, its own chip: changeable until the first message, then
+        // only saying which; not there at all when Claude Code is the only agent here.
+        let agent_menu = (agy || ws.agy_found).then(|| {
+            let (w, id) = (w.clone(), id.clone());
+            let agent = if agy { yh_core::agents::Agent::Antigravity } else { yh_core::agents::Agent::Claude };
+            let label = if agy { "Antigravity" } else { "Claude Code" };
+            let tip = if can_switch { "Agent".to_string() } else { format!("This thread runs on {label}. New threads can use another.") };
+            Button::new("agent")
+                .ghost()
+                .small()
+                .flex_none()
+                .icon(Icon::new(IconName::Bot).size(px(13.)).text_color(secondary))
+                .when(!compact, |b| b.child(picker_label(label.to_string(), secondary)))
+                .accessibility_label(format!("Agent: {label}"))
+                .tooltip(tip)
+                .disabled(!can_switch)
+                .dropdown_caret(can_switch && !compact)
+                .dropdown_menu(move |mut menu, _, _| {
+                    menu = menu.min_w(px(260.)).label("Agent");
+                    for (a, name, detail) in [
+                        (yh_core::agents::Agent::Claude, "Claude Code", "Anthropic's agent, signed in as you"),
+                        (yh_core::agents::Agent::Antigravity, "Antigravity", "Google's agent (agy), signed in as you"),
+                    ] {
+                        let (w, id) = (w.clone(), id.clone());
+                        menu = menu.item(picker_row(name.into(), Some(detail.into()), secondary, None).checked(agent == a).on_click(move |_, _, cx| {
+                            let _ = w.update(cx, |ws, cx| ws.set_agent(&id, a, None, cx));
+                        }));
+                    }
+                    menu.separator().item(crate::ui::page_kit::menu_note("Until its first message. New threads start on the last one picked."))
+                })
+        });
         let model_menu = {
             let (w, id, models, current) = (w.clone(), id.clone(), models.clone(), current_model.clone());
             let agent_models = agent_models.clone();
             Button::new("model").ghost().small().flex_none().icon(icons::sparkles().size(px(13.)).text_color(secondary)).child(picker_label(model_name.clone(), secondary)).accessibility_label(format!("Model: {model_name}")).tooltip("Model").dropdown_caret(true).dropdown_menu(move |mut menu, window, cx| {
                 menu = menu.min_w(px(260.));
-                // The thread's own agent's models; the other agent's in a submenu, while the thread
-                // can still go onto it (before its first message).
+                // Only the thread's own agent's models: the agent has its own chip.
                 let rows = PickerRows { w: w.clone(), id: id.clone(), secondary };
                 if agy {
                     menu = rows.antigravity(menu.label("Antigravity"), &agent_models, Some(current.as_str()), agy_default.clone());
-                    if can_switch {
-                        let (rows, models) = (rows.clone(), models.clone());
-                        menu = menu.separator().submenu("Claude Code", window, cx, move |sub, _, _| rows.claude(sub, &models, None, true));
-                    }
-                    return menu.separator().item(crate::ui::page_kit::menu_note("Switches instantly. Runs Google's own agy, signed in as you."));
+                    return menu.separator().item(crate::ui::page_kit::menu_note("Switches instantly."));
                 }
-                menu = rows.claude(menu.label("Claude Code"), &models, Some(current.as_str()), false);
+                menu = rows.claude(menu.label("Claude Code"), &models, Some(current.as_str()));
                 let pinned: Vec<PickerModel> = models.iter().filter(|m| !m.alias).cloned().collect();
                 if !pinned.is_empty() {
                     let (rows, current) = (rows.clone(), current.clone());
@@ -848,10 +873,6 @@ impl Composer {
                         }
                         sub
                     });
-                }
-                if offers_agy {
-                    let (rows, agent_models, agy_default) = (rows.clone(), agent_models.clone(), agy_default.clone());
-                    menu = menu.separator().submenu("Antigravity", window, cx, move |sub, _, _| rows.antigravity(sub, &agent_models, None, agy_default.clone()));
                 }
                 menu.separator().item(crate::ui::page_kit::menu_note("Switches instantly. Set the default in Settings."))
             })
@@ -938,6 +959,7 @@ impl Composer {
             .gap(px(2.))
             .text_size(px(text::FOOTNOTE))
             .text_color(theme.secondary)
+            .children(agent_menu)
             .child(model_menu)
             .children(effort_menu)
             .children(workflow_menu)
@@ -950,8 +972,7 @@ fn picker_label(label: String, color: gpui_kit::Hsla) -> gpui_kit::Div {
     div().text_size(px(text::FOOTNOTE)).text_color(color).child(label)
 }
 
-/// The model picker's rows for one thread: a model of the agent it's on switches the model, one
-/// of the other agent's moves the thread there (only before its first message).
+/// The model picker's rows for one thread, of the agent it's on.
 #[derive(Clone)]
 struct PickerRows {
     w: gpui_kit::WeakEntity<Workspace>,
@@ -977,9 +998,8 @@ impl PickerRows {
         })
     }
 
-    /// Claude Code's models (`current`: the thread's, when it's on Claude). `pinned`: its pinned
-    /// versions after the rest, in a submenu of their own otherwise.
-    fn claude(&self, mut menu: gpui_kit::component::menu::PopupMenu, models: &[PickerModel], current: Option<&str>, pinned: bool) -> gpui_kit::component::menu::PopupMenu {
+    /// Claude Code's models but its pinned versions (`current`: the thread's).
+    fn claude(&self, mut menu: gpui_kit::component::menu::PopupMenu, models: &[PickerModel], current: Option<&str>) -> gpui_kit::component::menu::PopupMenu {
         let claude = yh_core::agents::Agent::Claude;
         // The catalog lists "default" itself; without it, Default comes first.
         if !models.iter().any(|m| m.value == "default") {
@@ -989,17 +1009,10 @@ impl PickerRows {
             // The catalog names the default itself ("Default (recommended)"), its model in the description.
             menu = menu.item(self.row(m, current == Some(m.value.as_str()), claude, (m.value != "default").then(|| m.value.clone())));
         }
-        if pinned && models.iter().any(|m| !m.alias) {
-            menu = menu.separator();
-            for m in models.iter().filter(|m| !m.alias) {
-                menu = menu.item(self.row(m, current == Some(m.value.as_str()), claude, Some(m.value.clone())));
-            }
-        }
         menu
     }
 
-    /// Antigravity's models (`current`: the thread's, when it's on Antigravity); Default names
-    /// the model it picks when it's known.
+    /// Antigravity's models (`current`: the thread's); Default names the model it picks when known.
     fn antigravity(&self, mut menu: gpui_kit::component::menu::PopupMenu, models: &[PickerModel], current: Option<&str>, default: Option<String>) -> gpui_kit::component::menu::PopupMenu {
         let agy = yh_core::agents::Agent::Antigravity;
         let subtitle = default.map_or_else(|| "Antigravity's own choice".to_string(), |d| format!("{d} · Antigravity's own choice"));
