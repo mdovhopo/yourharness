@@ -6,6 +6,8 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-21
+
 ### Fixed
 
 - Antigravity threads: commands Antigravity moves to the background show in the jobs strip while they run and finish with their output, instead of being marked stopped. When Antigravity picks up afterwards on its own, that reply ends properly instead of leaving the thread working forever. Stop on such a job asks Antigravity to stop it.
