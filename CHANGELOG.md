@@ -6,6 +6,10 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+### Changed
+
+- The model picker lists every Antigravity model your account has as soon as Antigravity's CLI is found, before any Antigravity thread has run. It shows the thread's own agent's models, with the other agent in one submenu (Claude Code or Antigravity), and Antigravity's Default says which model it picks. Installing Antigravity's CLI while the app is open no longer needs a restart.
+
 ## [0.4.0] - 2026-11-21
 
 ### Added

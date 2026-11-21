@@ -256,6 +256,58 @@ impl AcpProcess {
         unsafe { libc::kill(self.pid as i32, libc::SIGTERM) };
         let _ = self.child.lock().map(|mut c| c.try_wait());
     }
+
+    /// Ends the session, when the agent can (`session/close`): a throwaway one leaves nothing in
+    /// its history.
+    fn close_session(&self) {
+        let mut s = self.shared.lock().unwrap();
+        if let (Some(session), false) = (s.session.clone(), s.capabilities["sessionCapabilities"]["close"].is_null()) {
+            s.request("session/close", json!({ "sessionId": session }), Asked::Setting, &self.writer);
+        }
+    }
+}
+
+/// An agent's models (in `ModelInfo`'s JSON shape) and the one it defaults to, from a throwaway
+/// session in an empty folder, closed at once: nothing is asked of a model. Blocks, 30 s at most.
+pub fn read_catalog(agent: Agent) -> Option<(Value, Option<String>)> {
+    let folder = std::env::temp_dir().join("yourharness-agent-catalog");
+    std::fs::create_dir_all(&folder).ok()?;
+    let options = LaunchOptions {
+        agent,
+        cwd: folder.to_string_lossy().into_owned(),
+        session_id: None,
+        model: None,
+        mode: None,
+        effort: None,
+        add_dirs: vec![],
+        env: vec![],
+        claude_config: None,
+        append_system_prompt: None,
+        allowed_tools: vec![],
+        servers: vec![],
+        extra_args: vec![],
+        flag_settings: None,
+    };
+    let (tx, rx) = flume::unbounded();
+    let mut process = AcpProcess::spawn(options, tx).ok()?;
+    process.initialize();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut found = None;
+    while let Ok(event) = rx.recv_deadline(deadline) {
+        match event {
+            Event::AgentCatalog { models, current_model, .. } if models.as_array().is_some_and(|m| !m.is_empty()) => {
+                found = Some((models, current_model));
+                break;
+            }
+            Event::Done { .. } | Event::Exit { .. } => break,
+            _ => {}
+        }
+    }
+    process.close_session();
+    // Its answer to the close, or a moment: then it's let go of.
+    let _ = rx.recv_timeout(std::time::Duration::from_millis(500));
+    process.terminate();
+    found
 }
 
 /// The option to pick for an answer: one of its kind that applies once, else any of its kind;

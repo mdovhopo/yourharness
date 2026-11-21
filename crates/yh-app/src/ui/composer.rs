@@ -821,69 +821,37 @@ impl Composer {
         let models = Rc::new(models);
         let w = self.workspace.downgrade();
         let (secondary, error, accent) = (theme.secondary, theme.error, theme.accent);
+        let agy_default = ws.agent_default_name();
         let model_menu = {
             let (w, id, models, current) = (w.clone(), id.clone(), models.clone(), current_model.clone());
             let agent_models = agent_models.clone();
             Button::new("model").ghost().small().flex_none().icon(icons::sparkles().size(px(13.)).text_color(secondary)).child(picker_label(model_name.clone(), secondary)).accessibility_label(format!("Model: {model_name}")).tooltip("Model").dropdown_caret(true).dropdown_menu(move |mut menu, window, cx| {
                 menu = menu.min_w(px(260.));
-                // A model of the agent it isn't on moves it there (only before its first message).
-                let pick_on = |agent: yh_core::agents::Agent, value: Option<String>| {
-                    let (w, id) = (w.clone(), id.clone());
-                    move |_: &gpui_kit::ClickEvent, _: &mut Window, cx: &mut App| {
-                        let _ = w.update(cx, |ws, cx| {
-                            let on = ws.thread(&id).map(|t| ws.agent_of(t.read(cx)));
-                            if on == Some(agent) {
-                                ws.set_model(&id, value.clone(), cx)
-                            } else {
-                                ws.set_agent(&id, agent, value.clone(), cx)
-                            }
-                        });
+                // The thread's own agent's models; the other agent's in a submenu, while the thread
+                // can still go onto it (before its first message).
+                let rows = PickerRows { w: w.clone(), id: id.clone(), secondary };
+                if agy {
+                    menu = rows.antigravity(menu.label("Antigravity"), &agent_models, Some(current.as_str()), agy_default.clone());
+                    if can_switch {
+                        let (rows, models) = (rows.clone(), models.clone());
+                        menu = menu.separator().submenu("Claude Code", window, cx, move |sub, _, _| rows.claude(sub, &models, None, true));
                     }
-                };
-                if offers_agy {
-                    menu = menu.label("Antigravity");
-                    let pick = |value: Option<String>| pick_on(yh_core::agents::Agent::Antigravity, value);
-                    menu = menu.item(picker_row("Default".into(), Some("Antigravity's own choice".into()), secondary, None).checked(agy && current == "default").on_click(pick(None)));
-                    for m in agent_models.iter() {
-                        menu = menu.item(picker_row(m.name.clone(), m.description.clone(), secondary, None).checked(agy && current == m.value).on_click(pick(Some(m.value.clone()))));
-                    }
-                    if agy && !can_switch {
-                        return menu.separator().item(crate::ui::page_kit::menu_note("Switches instantly. Antigravity runs Google's own agy, signed in as you."));
-                    }
-                    menu = menu.separator();
+                    return menu.separator().item(crate::ui::page_kit::menu_note("Switches instantly. Runs Google's own agy, signed in as you."));
                 }
-                menu = menu.label("Claude Code");
-                let pick = |value: Option<String>| pick_on(yh_core::agents::Agent::Claude, value);
-                let current = if agy { String::new() } else { current.clone() };
-                // The catalog lists "default" itself; without it, Default comes first.
-                if !models.iter().any(|m| m.value == "default") {
-                    menu = menu.item(picker_row("Default".into(), None, secondary, None).checked(current == "default").on_click(pick(None)));
-                }
-                for m in models.iter().filter(|m| m.alias) {
-                    // The catalog names the default itself ("Default (recommended)"), its model in the description.
-                    let title = m.name.clone();
-                    let target = (m.value != "default").then(|| m.value.clone());
-                    menu = menu.item(picker_row(title, m.description.clone(), secondary, None).checked(current == m.value).on_click(pick(target)));
-                }
+                menu = rows.claude(menu.label("Claude Code"), &models, Some(current.as_str()), false);
                 let pinned: Vec<PickerModel> = models.iter().filter(|m| !m.alias).cloned().collect();
                 if !pinned.is_empty() {
-                    let (w, id, current) = (w.clone(), id.clone(), current.clone());
+                    let (rows, current) = (rows.clone(), current.clone());
                     menu = menu.separator().submenu("Pinned Versions", window, cx, move |mut sub, _, _| {
                         for m in &pinned {
-                            let (w, id, value) = (w.clone(), id.clone(), m.value.clone());
-                            sub = sub.item(picker_row(m.name.clone(), m.description.clone(), secondary, None).checked(current == m.value).on_click(move |_, _, cx| {
-                                let _ = w.update(cx, |ws, cx| {
-                                    let claude = ws.thread(&id).is_some_and(|t| ws.agent_of(t.read(cx)) == yh_core::agents::Agent::Claude);
-                                    if claude {
-                                        ws.set_model(&id, Some(value.clone()), cx)
-                                    } else {
-                                        ws.set_agent(&id, yh_core::agents::Agent::Claude, Some(value.clone()), cx)
-                                    }
-                                });
-                            }));
+                            sub = sub.item(rows.row(m, current == m.value, yh_core::agents::Agent::Claude, Some(m.value.clone())));
                         }
                         sub
                     });
+                }
+                if offers_agy {
+                    let (rows, agent_models, agy_default) = (rows.clone(), agent_models.clone(), agy_default.clone());
+                    menu = menu.separator().submenu("Antigravity", window, cx, move |sub, _, _| rows.antigravity(sub, &agent_models, None, agy_default.clone()));
                 }
                 menu.separator().item(crate::ui::page_kit::menu_note("Switches instantly. Set the default in Settings."))
             })
@@ -980,6 +948,70 @@ impl Composer {
 /// A picker's label: footnote size, secondary, so the row stays quiet next to Send.
 fn picker_label(label: String, color: gpui_kit::Hsla) -> gpui_kit::Div {
     div().text_size(px(text::FOOTNOTE)).text_color(color).child(label)
+}
+
+/// The model picker's rows for one thread: a model of the agent it's on switches the model, one
+/// of the other agent's moves the thread there (only before its first message).
+#[derive(Clone)]
+struct PickerRows {
+    w: gpui_kit::WeakEntity<Workspace>,
+    id: String,
+    secondary: gpui_kit::Hsla,
+}
+
+impl PickerRows {
+    fn row(&self, m: &PickerModel, checked: bool, agent: yh_core::agents::Agent, value: Option<String>) -> PopupMenuItem {
+        self.item(m.name.clone(), m.description.clone(), checked, agent, value)
+    }
+
+    fn item(&self, title: String, subtitle: Option<String>, checked: bool, agent: yh_core::agents::Agent, value: Option<String>) -> PopupMenuItem {
+        let (w, id) = (self.w.clone(), self.id.clone());
+        picker_row(title, subtitle, self.secondary, None).checked(checked).on_click(move |_, _, cx| {
+            let _ = w.update(cx, |ws, cx| {
+                if ws.thread(&id).map(|t| ws.agent_of(t.read(cx))) == Some(agent) {
+                    ws.set_model(&id, value.clone(), cx)
+                } else {
+                    ws.set_agent(&id, agent, value.clone(), cx)
+                }
+            });
+        })
+    }
+
+    /// Claude Code's models (`current`: the thread's, when it's on Claude). `pinned`: its pinned
+    /// versions after the rest, in a submenu of their own otherwise.
+    fn claude(&self, mut menu: gpui_kit::component::menu::PopupMenu, models: &[PickerModel], current: Option<&str>, pinned: bool) -> gpui_kit::component::menu::PopupMenu {
+        let claude = yh_core::agents::Agent::Claude;
+        // The catalog lists "default" itself; without it, Default comes first.
+        if !models.iter().any(|m| m.value == "default") {
+            menu = menu.item(self.item("Default".into(), None, current == Some("default"), claude, None));
+        }
+        for m in models.iter().filter(|m| m.alias) {
+            // The catalog names the default itself ("Default (recommended)"), its model in the description.
+            menu = menu.item(self.row(m, current == Some(m.value.as_str()), claude, (m.value != "default").then(|| m.value.clone())));
+        }
+        if pinned && models.iter().any(|m| !m.alias) {
+            menu = menu.separator();
+            for m in models.iter().filter(|m| !m.alias) {
+                menu = menu.item(self.row(m, current == Some(m.value.as_str()), claude, Some(m.value.clone())));
+            }
+        }
+        menu
+    }
+
+    /// Antigravity's models (`current`: the thread's, when it's on Antigravity); Default names
+    /// the model it picks when it's known.
+    fn antigravity(&self, mut menu: gpui_kit::component::menu::PopupMenu, models: &[PickerModel], current: Option<&str>, default: Option<String>) -> gpui_kit::component::menu::PopupMenu {
+        let agy = yh_core::agents::Agent::Antigravity;
+        let subtitle = default.map_or_else(|| "Antigravity's own choice".to_string(), |d| format!("{d} · Antigravity's own choice"));
+        menu = menu.item(self.item("Default".into(), Some(subtitle), current == Some("default"), agy, None));
+        if models.is_empty() {
+            return menu.item(crate::ui::page_kit::menu_note("Antigravity's models show once it has been reached."));
+        }
+        for m in models {
+            menu = menu.item(self.row(m, current == Some(m.value.as_str()), agy, Some(m.value.clone())));
+        }
+        menu
+    }
 }
 
 /// A model as the picker lists it.

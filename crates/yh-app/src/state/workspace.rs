@@ -292,6 +292,7 @@ impl Workspace {
             .setting("antigravityModels")
             .and_then(|v| v.as_array().map(|a| a.iter().filter_map(ModelInfo::from_json).collect()))
             .unwrap_or_default();
+        let agent_current_model = library.setting("antigravityDefaultModel").and_then(|v| v.as_str().map(str::to_string));
         let (tool_requests, requests) = flume::unbounded();
         cx.spawn(async move |this, cx| {
             while let Ok(request) = requests.recv_async().await {
@@ -381,7 +382,7 @@ impl Workspace {
             browser_hub,
             models,
             agent_models,
-            agent_current_model: None,
+            agent_current_model,
             agy_found: false,
             accounts: vec![crate::state::limits::AccountState::new(yh_core::accounts::Account::main())],
             active_account: yh_core::accounts::MAIN.into(),
@@ -641,6 +642,12 @@ impl Workspace {
         self.models.iter().find(|m| m.value == model).is_none_or(|m| m.supports_auto_mode)
     }
 
+    /// Antigravity's default model by name ("Gemini 4 Neon"), when known.
+    pub fn agent_default_name(&self) -> Option<String> {
+        let current = self.agent_current_model.as_ref()?;
+        Some(self.agent_models.iter().find(|m| &m.value == current).map_or_else(|| current.clone(), |m| m.display_name.clone()))
+    }
+
     /// The model's name as the catalog has it ("Haiku"), else as set.
     /// "Default" when none is chosen (the catalog's "Default (recommended)" is long for a chip).
     pub fn model_name(&self, thread: &ThreadState) -> String {
@@ -894,14 +901,46 @@ impl Workspace {
     fn look_for_agy(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             let found = cx.background_executor().spawn(async move { yh_core::acp::find_agy().is_some() }).await;
-            let _ = this.update(cx, |ws, cx| {
-                if ws.agy_found != found {
-                    ws.agy_found = found;
-                    cx.notify();
-                }
-            });
+            let stale = this
+                .update(cx, |ws, cx| {
+                    if ws.agy_found != found {
+                        ws.agy_found = found;
+                        cx.notify();
+                    }
+                    found && ws.agent_models_stale()
+                })
+                .unwrap_or(false);
+            // Its models, for the picker before any Antigravity thread has run.
+            if stale && std::env::var("YH_NO_CLAUDE").is_err() {
+                let catalog = cx.background_executor().spawn(async move { yh_core::acp::read_catalog(yh_core::agents::Agent::Antigravity) }).await;
+                let _ = this.update(cx, |ws, cx| {
+                    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+                    ws.library.set_setting("antigravityModelsAt", &Value::from(now));
+                    if let Some((models, current)) = catalog {
+                        ws.note_agent_default(current);
+                        ws.note_agent_catalog(&models, cx);
+                    }
+                });
+            }
         })
         .detach();
+    }
+
+    /// Antigravity's models were never read, or not for a while (`MODELS_MAX_AGE`).
+    fn agent_models_stale(&self) -> bool {
+        let at = self.library.setting("antigravityModelsAt").and_then(|v| v.as_u64()).unwrap_or(0);
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+        self.agent_models.is_empty() || now.saturating_sub(at) > MODELS_MAX_AGE.as_millis() as u64
+    }
+
+    /// The model Antigravity runs when none is chosen, as its sessions say: kept for the picker.
+    fn note_agent_default(&mut self, current: Option<String>) {
+        if current.is_some() && current != self.agent_current_model {
+            self.agent_current_model = current;
+            if let Some(c) = &self.agent_current_model {
+                self.library.set_setting("antigravityDefaultModel", &Value::from(c.as_str()));
+            }
+        }
     }
 
     /// The agent new threads start on: the last one picked for a new thread (`YH_AGENT` in test
@@ -3818,8 +3857,9 @@ impl Workspace {
                     self.note_catalog(models, commands, &project, cx);
                 }
                 Event::AgentCatalog { models, current_model, .. } => {
-                    if current_model.is_some() && *current_model != self.agent_current_model {
-                        self.agent_current_model = current_model.clone();
+                    // A thread's own session: its current model is the default only when none was chosen.
+                    if thread.read(cx).meta.model.is_none() {
+                        self.note_agent_default(current_model.clone());
                         cx.notify();
                     }
                     self.note_agent_catalog(models, cx)
