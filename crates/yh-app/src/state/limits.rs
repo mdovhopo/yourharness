@@ -14,6 +14,76 @@ use serde_json::{json, Value};
 use yh_core::accounts::Account;
 use yh_core::limits::Subscription;
 
+/// Antigravity's usage limits: each group of models that shares them (Gemini models, Claude and
+/// GPT models, Gemini 4 Argon), as `agy -p /usage` says, and the plan it's signed in with. Kept
+/// between launches as `antigravityUsage` (`/usage`'s JSON), `antigravityUsageAt` (seconds) and
+/// `antigravityPlan`.
+#[derive(Default)]
+pub struct AgentLimits {
+    pub groups: Vec<yh_core::acp::UsageGroup>,
+    pub updated_at: Option<f64>,
+    /// "Google AI Pro", from its sessions.
+    pub plan: Option<String>,
+    pub refreshing: bool,
+    pub error: Option<String>,
+}
+
+impl AgentLimits {
+    pub fn load(library: &yh_core::library::Library) -> AgentLimits {
+        AgentLimits {
+            groups: library.setting("antigravityUsage").map(|d| yh_core::acp::usage_groups(&d)).unwrap_or_default(),
+            updated_at: library.setting("antigravityUsageAt").and_then(|v| v.as_f64()),
+            plan: library.setting("antigravityPlan").and_then(|v| v.as_str().map(str::to_string)),
+            refreshing: false,
+            error: None,
+        }
+    }
+
+    fn now() -> f64 {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0., |d| d.as_secs_f64())
+    }
+
+    /// Not read for `seconds`.
+    pub fn due(&self, seconds: f64) -> bool {
+        self.updated_at.is_none_or(|t| Self::now() - t > seconds)
+    }
+
+    pub fn note(&mut self, data: Value, library: &yh_core::library::Library) {
+        self.groups = yh_core::acp::usage_groups(&data);
+        let now = Self::now();
+        self.updated_at = Some(now);
+        self.error = None;
+        library.set_setting("antigravityUsage", &data);
+        library.set_setting("antigravityUsageAt", &Value::from(now));
+    }
+
+    pub fn note_plan(&mut self, plan: Option<String>, library: &yh_core::library::Library) {
+        if plan.is_some() && plan != self.plan {
+            self.plan = plan;
+            if let Some(p) = &self.plan {
+                library.set_setting("antigravityPlan", &Value::from(p.as_str()));
+            }
+        }
+    }
+
+    /// The group its main models count against (Gemini's), for the footer's two meters.
+    pub fn main_group(&self) -> Option<&yh_core::acp::UsageGroup> {
+        self.groups.iter().find(|g| g.name.starts_with("Gemini Models")).or(self.groups.first())
+    }
+
+    /// For test runs' logs: each group's windows, used.
+    pub fn describe(&self) -> String {
+        if let Some(e) = &self.error {
+            return format!("couldn't read: {e}");
+        }
+        self.groups
+            .iter()
+            .map(|g| format!("{}: {}", g.name, g.windows.iter().map(|w| format!("{} {:.0}%", w.name, w.utilization * 100.)).collect::<Vec<_>>().join(", ")))
+            .collect::<Vec<_>>()
+            .join(" · ")
+    }
+}
+
 /// A Claude account as the app knows it.
 pub struct AccountState {
     pub account: Account,
@@ -211,11 +281,36 @@ impl Workspace {
         for id in ids {
             self.refresh_account(&id, cx);
         }
+        self.refresh_agy_limits(cx);
     }
 
     /// Whether any account's refresh is under way.
     pub fn limits_refreshing(&self) -> bool {
-        self.accounts.iter().any(|a| a.refreshing)
+        self.accounts.iter().any(|a| a.refreshing) || self.agy_limits.refreshing
+    }
+
+    /// Antigravity's limits read again through `agy -p /usage` (no model asked), aside.
+    pub fn refresh_agy_limits(&mut self, cx: &mut Context<Self>) {
+        if !self.agy_found || self.agy_limits.refreshing || std::env::var("YH_NO_CLAUDE").is_ok() {
+            return;
+        }
+        self.agy_limits.refreshing = true;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let read = cx.background_executor().spawn(async move { yh_core::acp::read_usage() }).await;
+            let _ = this.update(cx, |ws, cx| {
+                ws.agy_limits.refreshing = false;
+                match read {
+                    Ok(data) => ws.agy_limits.note(data, &ws.library),
+                    Err(e) => ws.agy_limits.error = Some(e),
+                }
+                if std::env::var("YH_DATA_DIR").is_ok() {
+                    eprintln!("LIMITS antigravity: {}", ws.agy_limits.describe());
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub fn refresh_account(&mut self, id: &str, cx: &mut Context<Self>) {

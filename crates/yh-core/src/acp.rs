@@ -267,9 +267,98 @@ impl AcpProcess {
     }
 }
 
-/// An agent's models (in `ModelInfo`'s JSON shape) and the one it defaults to, from a throwaway
-/// session in an empty folder, closed at once: nothing is asked of a model. Blocks, 30 s at most.
-pub fn read_catalog(agent: Agent) -> Option<(Value, Option<String>)> {
+/// A group of models sharing limits, as Antigravity's `/usage` lists them ("Gemini Models",
+/// "Claude and GPT models"): its windows as Claude's limits are read (`five_hour`, `seven_day`,
+/// used 0…1), so they're drawn the same way.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UsageGroup {
+    pub name: String,
+    /// Which models count against it ("Models within this group: …").
+    pub description: String,
+    pub windows: Vec<crate::limits::Window>,
+}
+
+/// `/usage`'s groups, from its JSON (`command.data`).
+pub fn usage_groups(data: &Value) -> Vec<UsageGroup> {
+    data["groups"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|g| UsageGroup {
+            name: g["name"].as_str().unwrap_or("Models").to_string(),
+            description: g["description"].as_str().unwrap_or("").to_string(),
+            windows: g["buckets"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|b| crate::limits::Window {
+                    name: match b["window"].as_str().unwrap_or("") {
+                        "5h" => "five_hour".to_string(),
+                        "weekly" => "seven_day".to_string(),
+                        other => other.to_string(),
+                    },
+                    utilization: (1. - b["remaining_fraction"].as_f64().unwrap_or(1.)).clamp(0., 1.),
+                    resets_at: b["reset_time"].as_str().and_then(crate::library::parse_iso),
+                })
+                .collect::<Vec<_>>(),
+        })
+        .map(|mut g| {
+            // As Claude's are listed: the 5-hour window first, then the weekly.
+            g.windows.sort_by_key(|w| crate::limits::PRIMARY.iter().position(|p| *p == w.name).unwrap_or(usize::MAX));
+            g
+        })
+        .filter(|g| !g.windows.is_empty())
+        .collect()
+}
+
+/// Antigravity's usage limits, from the official `agy` (`agy -p /usage`: a command of its own,
+/// no model asked, nothing of its sign-in read): `/usage`'s JSON. Blocks, 30 s at most.
+pub fn read_usage() -> Result<Value, String> {
+    let agy = find_agy().ok_or(AGY_NOT_FOUND)?;
+    let folder = std::env::temp_dir().join("yourharness-agent-catalog");
+    std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
+    let mut command = Command::new(agy);
+    command.args(["-p", "/usage", "--output-format", "json"]).current_dir(&folder).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    crate::shell_env::apply(&mut command);
+    command.env("AGY_CLI_DISABLE_AUTO_UPDATE", "1");
+    let mut child = command.spawn().map_err(|e| e.to_string())?;
+    let mut stdout = child.stdout.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        let mut out = String::new();
+        let _ = std::io::Read::read_to_string(&mut stdout, &mut out);
+        out
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(50)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("Antigravity didn't answer within 30 seconds.".into());
+            }
+        }
+    }
+    let out = reader.join().unwrap_or_default();
+    let reply: Value = serde_json::from_str(out.trim()).map_err(|_| "Antigravity's answer wasn't readable.".to_string())?;
+    match reply["command"]["data"].get("groups") {
+        Some(_) => Ok(reply["command"]["data"].clone()),
+        None => Err(reply["response"].as_str().or(reply["error"].as_str()).unwrap_or("Antigravity reported no limits.").trim().to_string()),
+    }
+}
+
+/// What a throwaway session says of an agent: its models (in `ModelInfo`'s JSON shape), the one
+/// it defaults to, and the plan it's signed in with.
+pub struct Catalog {
+    pub models: Value,
+    pub default_model: Option<String>,
+    pub plan: Option<String>,
+}
+
+/// An agent's catalog, from a throwaway session in an empty folder, closed at once: nothing is
+/// asked of a model. Blocks, 30 s at most.
+pub fn read_catalog(agent: Agent) -> Option<Catalog> {
     let folder = std::env::temp_dir().join("yourharness-agent-catalog");
     std::fs::create_dir_all(&folder).ok()?;
     let options = LaunchOptions {
@@ -295,8 +384,8 @@ pub fn read_catalog(agent: Agent) -> Option<(Value, Option<String>)> {
     let mut found = None;
     while let Ok(event) = rx.recv_deadline(deadline) {
         match event {
-            Event::AgentCatalog { models, current_model, .. } if models.as_array().is_some_and(|m| !m.is_empty()) => {
-                found = Some((models, current_model));
+            Event::AgentCatalog { models, current_model, plan, .. } if models.as_array().is_some_and(|m| !m.is_empty()) => {
+                found = Some(Catalog { models, default_model: current_model, plan });
                 break;
             }
             Event::Done { .. } | Event::Exit { .. } => break,
@@ -617,6 +706,8 @@ pub struct Translator {
     config: Vec<Value>,
     /// Tokens in the context, as the agent last said.
     pub usage: Option<u64>,
+    /// The plan it's signed in with, as its session says (`_meta.antigravity.tier`).
+    plan: Option<String>,
 }
 
 impl Translator {
@@ -699,6 +790,9 @@ impl Translator {
         }
         self.current_model = result["models"]["currentModelId"].as_str().map(str::to_string);
         self.note_config(&result["configOptions"]);
+        if let Some(plan) = result["_meta"]["antigravity"]["tier"]["name"].as_str() {
+            self.plan = Some(plan.to_string());
+        }
     }
 
     /// The models and commands, as an agent catalog.
@@ -716,7 +810,7 @@ impl Translator {
             .iter()
             .filter_map(|c| Some(json!({ "name": c["name"].as_str()?, "description": c["description"], "argumentHint": c["input"]["hint"] })))
             .collect();
-        vec![Event::AgentCatalog { agent: Agent::Antigravity, models: Value::Array(models), commands: Value::Array(commands), current_model: self.current_model.clone() }]
+        vec![Event::AgentCatalog { agent: Agent::Antigravity, models: Value::Array(models), commands: Value::Array(commands), current_model: self.current_model.clone(), plan: self.plan.clone() }]
     }
 
     pub fn update(&mut self, u: &Value) -> Vec<Event> {
@@ -1057,6 +1151,22 @@ mod tests {
         assert!(reply.contains("hi"), "{reply}");
         assert!(matches!(events.iter().rev().find(|e| matches!(e, Event::Done { .. })), Some(Event::Done { is_error: false, .. })));
         assert!(s.permissions.is_empty() && !s.busy);
+    }
+
+    #[test]
+    fn usage_reads_as_claude_limits() {
+        // As `agy -p /usage --output-format json` (1.5.14) says it, its `command.data`.
+        let data = json!({ "groups": [
+            { "name": "Gemini Models", "description": "Models within this group: Gemini 4 Neon", "buckets": [
+                { "id": "gemini-weekly", "window": "weekly", "remaining_fraction": 0.75, "reset_time": "2026-11-28T12:02:36Z" },
+                { "id": "gemini-5h", "window": "5h", "remaining_fraction": 0.9882404804229736, "reset_time": "2026-11-21T17:02:36Z" } ] },
+            { "name": "Empty", "buckets": [] } ] });
+        let groups = usage_groups(&data);
+        assert_eq!(groups.len(), 1);
+        let w = &groups[0].windows;
+        assert_eq!((w[0].name.as_str(), w[1].name.as_str()), ("five_hour", "seven_day"));
+        assert!((w[1].utilization - 0.25).abs() < 1e-9);
+        assert_eq!(w[0].resets_at, crate::library::parse_iso("2026-11-21T17:02:36Z"));
     }
 
     #[test]

@@ -190,12 +190,15 @@ impl UsagePage {
             .map(|a| (ws.account_label(a.id()), a.limits_updated_at, yh_core::limits::meters(a.limits.as_ref()).into_iter().filter_map(|(_, w)| w).collect::<Vec<_>>()))
             .filter(|(_, _, w)| !w.is_empty())
             .collect();
-        if accounts.is_empty() {
+        // Antigravity's groups of models, each with its own limits, after Claude's accounts.
+        let agy: Vec<yh_core::acp::UsageGroup> = if ws.agy_found { ws.agy_limits.groups.clone() } else { vec![] };
+        let agy_plan = ws.agy_limits.plan.clone();
+        if accounts.is_empty() && agy.is_empty() {
             return None;
         }
-        let refreshing = ws.accounts.iter().any(|a| a.refreshing);
-        let updated = accounts.iter().filter_map(|a| a.1).fold(None, |m: Option<f64>, t| Some(m.map_or(t, |m| m.max(t))));
-        let several = accounts.len() > 1;
+        let refreshing = ws.limits_refreshing();
+        let updated = accounts.iter().filter_map(|a| a.1).chain(ws.agy_limits.updated_at.filter(|_| !agy.is_empty())).fold(None, |m: Option<f64>, t| Some(m.map_or(t, |m| m.max(t))));
+        let several = accounts.len() > 1 || !agy.is_empty();
         let (label_w, tail_w) = if narrow { (124., 92.) } else { (172., 140.) };
         let workspace = self.workspace.clone();
         let mut card = page_kit::card(theme).px(px(space::L)).pt(px(space::M)).pb(px(space::M - 2.)).flex().flex_col().child(
@@ -208,7 +211,7 @@ impl UsagePage {
                     d.child(div().text_size(px(text::CAPTION)).text_color(theme.secondary).child(format!("Updated {}", yh_core::clock::relative(t, now))))
                 }))
                 .child(
-                    crate::ui::thread_toolbar::icon_button("limits-refresh", gpui_kit::component::Icon::new(gpui_kit::component::IconName::RefreshCw), "Ask Claude for the limits now", theme)
+                    crate::ui::thread_toolbar::icon_button("limits-refresh", gpui_kit::component::Icon::new(gpui_kit::component::IconName::RefreshCw), if agy.is_empty() { "Ask Claude for the limits now" } else { "Ask Claude and Antigravity for the limits now" }, theme)
                         .loading(refreshing)
                         .disabled(refreshing)
                         .on_click(move |_, _, cx| workspace.update(cx, |ws, cx| ws.refresh_limits(cx))),
@@ -220,6 +223,27 @@ impl UsagePage {
             }
             for w in windows {
                 card = card.child(limit_row(&account, &w, now, label_w, tail_w, theme));
+            }
+        }
+        for g in &agy {
+            let header = match &agy_plan {
+                Some(plan) => format!("Antigravity · {} · {plan}", g.name),
+                None => format!("Antigravity · {}", g.name),
+            };
+            let models = g.description.strip_prefix("Models within this group: ").unwrap_or(&g.description).to_string();
+            card = card.child(
+                div()
+                    .id(SharedString::from(format!("agy-group-{}", g.name)))
+                    .pt(px(space::S))
+                    .pb(px(2.))
+                    .text_size(px(text::CAPTION))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.tertiary)
+                    .child(header)
+                    .when(!models.is_empty(), |d| d.tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(models.clone()).build(window, cx))),
+            );
+            for w in &g.windows {
+                card = card.child(limit_row(&format!("agy-{}", g.name), w, now, label_w, tail_w, theme));
             }
         }
         Some(card.into_any_element())

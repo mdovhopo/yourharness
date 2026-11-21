@@ -1000,7 +1000,13 @@ impl Sidebar {
     /// `5h ━━━━──── 6%  2h 14m`: each limit used, and how long until it resets. The tooltip says
     /// when; a click opens Usage.
     fn meter(name: &str, window: Option<&yh_core::limits::Window>, updated: Option<f64>, now: f64, theme: &Theme) -> gpui_kit::AnyElement {
-        let title = yh_core::limits::title(name);
+        Self::meter_for("", name, window, updated, now, theme)
+    }
+
+    /// A meter of an agent's (`agent`: "" for Claude, else its key, and "Gemini models · " in
+    /// its tooltip's title via `limits` names).
+    fn meter_for(agent: &str, name: &str, window: Option<&yh_core::limits::Window>, updated: Option<f64>, now: f64, theme: &Theme) -> gpui_kit::AnyElement {
+        let title = if agent.is_empty() { yh_core::limits::title(name) } else { format!("{agent} · {}", yh_core::limits::title(name)) };
         let used = window.map(|w| yh_core::limits::utilization(w, now));
         let reset = window.is_some_and(|w| w.resets_at.is_some_and(|at| at <= now));
         let tint = match used.unwrap_or(0.) {
@@ -1025,7 +1031,7 @@ impl Sidebar {
         tip.push_str("\nClick for usage (⇧⌘U)");
         let countdown = window.and_then(|w| w.resets_at).filter(|_| !reset).map(|at| yh_core::clock::countdown(at, now)).unwrap_or_default();
         div()
-            .id(SharedString::from(format!("meter-{name}")))
+            .id(SharedString::from(format!("meter-{agent}{name}")))
             .flex()
             .items_center()
             .gap(px(space::S))
@@ -1065,6 +1071,41 @@ impl Sidebar {
             .flex()
             .text_size(px(text::CAPTION))
             .child(div().flex_none().font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(plan))
+            .tooltip(tooltip(tip))
+            .into_any_element()
+    }
+
+    /// `Antigravity · Google AI Pro` over its meters; the tooltip has every group's limits.
+    fn agy_row(limits: &crate::state::limits::AgentLimits, theme: &Theme) -> gpui_kit::AnyElement {
+        let now = now();
+        let mut tip = match &limits.plan {
+            Some(p) => format!("Antigravity is signed in to {p}"),
+            None => "Antigravity".to_string(),
+        };
+        for g in &limits.groups {
+            tip.push_str(&format!("\n\n{}", g.name));
+            if let Some(models) = g.description.strip_prefix("Models within this group: ") {
+                tip.push_str(&format!(" ({models})"));
+            }
+            for w in &g.windows {
+                let used = (yh_core::limits::utilization(w, now) * 100.).round() as i64;
+                let reset = w.resets_at.filter(|at| *at > now).map(|at| format!(" · resets {}", yh_core::clock::relative(at, now))).unwrap_or_default();
+                tip.push_str(&format!("\n{}: {used}% used{reset}", yh_core::limits::title(&w.name)));
+            }
+        }
+        if let Some(e) = &limits.error {
+            tip.push_str(&format!("\n\nLast refresh: {e}"));
+        }
+        if let Some(t) = limits.updated_at {
+            tip.push_str(&format!("\nUpdated {}", yh_core::clock::relative(t, now)));
+        }
+        div()
+            .id("agy-subscription")
+            .flex()
+            .gap(px(4.))
+            .text_size(px(text::CAPTION))
+            .child(div().flex_none().font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child("Antigravity"))
+            .when_some(limits.plan.clone(), |d, p| d.child(div().min_w_0().truncate().text_color(theme.tertiary).child(p)))
             .tooltip(tooltip(tip))
             .into_any_element()
     }
@@ -1207,6 +1248,16 @@ impl Sidebar {
             bars = bars.child(Self::subscription_row(active.subscription.as_ref(), theme));
             for (name, window) in &meters {
                 bars = bars.child(Self::meter(name, window.as_ref(), updated, now, theme));
+            }
+        }
+        // Antigravity's limits under Claude's, drawn the same: its plan, then its own models' meters.
+        if ws.agy_found && (!ws.agy_limits.groups.is_empty() || ws.agy_limits.error.is_some()) {
+            bars = bars.child(div().h(px(space::XS)));
+            bars = bars.child(Self::agy_row(&ws.agy_limits, theme));
+            let main = ws.agy_limits.main_group();
+            for name in yh_core::limits::PRIMARY {
+                let window = main.and_then(|g| g.windows.iter().find(|w| w.name == name));
+                bars = bars.child(Self::meter_for(main.map_or("Antigravity", |g| g.name.as_str()), name, window, ws.agy_limits.updated_at, now, theme));
             }
         }
         let (awake_ws, settings_ws, refresh_ws) = (self.workspace.clone(), self.workspace.clone(), self.workspace.clone());

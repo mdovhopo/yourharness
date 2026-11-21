@@ -177,6 +177,8 @@ pub struct Workspace {
     agent_current_model: Option<String>,
     /// Whether Antigravity's `agy` is here: its models are offered in the picker.
     pub agy_found: bool,
+    /// Antigravity's usage limits as `agy -p /usage` last said (`state/limits.rs`).
+    pub agy_limits: crate::state::limits::AgentLimits,
     /// The Claude accounts, the main one first, each with its usage limits and who it's signed
     /// in as (`state/limits.rs`, `state/accounts.rs`). Never empty.
     pub accounts: Vec<crate::state::limits::AccountState>,
@@ -293,6 +295,7 @@ impl Workspace {
             .and_then(|v| v.as_array().map(|a| a.iter().filter_map(ModelInfo::from_json).collect()))
             .unwrap_or_default();
         let agent_current_model = library.setting("antigravityDefaultModel").and_then(|v| v.as_str().map(str::to_string));
+        let library_for_limits = library.clone();
         let (tool_requests, requests) = flume::unbounded();
         cx.spawn(async move |this, cx| {
             while let Ok(request) = requests.recv_async().await {
@@ -383,6 +386,7 @@ impl Workspace {
             models,
             agent_models,
             agent_current_model,
+            agy_limits: crate::state::limits::AgentLimits::load(&library_for_limits),
             agy_found: false,
             accounts: vec![crate::state::limits::AccountState::new(yh_core::accounts::Account::main())],
             active_account: yh_core::accounts::MAIN.into(),
@@ -910,15 +914,19 @@ impl Workspace {
                     found && ws.agent_models_stale()
                 })
                 .unwrap_or(false);
+            if found {
+                let _ = this.update(cx, |ws, cx| ws.refresh_agy_limits(cx));
+            }
             // Its models, for the picker before any Antigravity thread has run.
             if stale && std::env::var("YH_NO_CLAUDE").is_err() {
                 let catalog = cx.background_executor().spawn(async move { yh_core::acp::read_catalog(yh_core::agents::Agent::Antigravity) }).await;
                 let _ = this.update(cx, |ws, cx| {
                     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
                     ws.library.set_setting("antigravityModelsAt", &Value::from(now));
-                    if let Some((models, current)) = catalog {
-                        ws.note_agent_default(current);
-                        ws.note_agent_catalog(&models, cx);
+                    if let Some(c) = catalog {
+                        ws.note_agent_default(c.default_model);
+                        ws.agy_limits.note_plan(c.plan, &ws.library);
+                        ws.note_agent_catalog(&c.models, cx);
                     }
                 });
             }
@@ -3856,7 +3864,8 @@ impl Workspace {
                     let project = thread.read(cx).meta.project_id.clone();
                     self.note_catalog(models, commands, &project, cx);
                 }
-                Event::AgentCatalog { models, current_model, .. } => {
+                Event::AgentCatalog { models, current_model, plan, .. } => {
+                    self.agy_limits.note_plan(plan.clone(), &self.library);
                     // A thread's own session: its current model is the default only when none was chosen.
                     if thread.read(cx).meta.model.is_none() {
                         self.note_agent_default(current_model.clone());
@@ -3887,6 +3896,10 @@ impl Workspace {
             }
         }
         let ended = u.turn_ended.is_some();
+        // An Antigravity turn used some of its limits: read them again (at most every 30 s).
+        if ended && self.agent_of(thread.read(cx)) == yh_core::agents::Agent::Antigravity && self.agy_limits.due(30.) {
+            self.refresh_agy_limits(cx);
+        }
         thread.update(cx, |t, cx| {
             t.apply_update(u.changes, u.live, u.plan, u.session_reset, ended);
             cx.notify();

@@ -323,9 +323,9 @@ impl SubagentUsage {
 pub enum Event {
     /// The CLI's catalog, as JSON: `models` (see `ModelInfo`) and `commands`.
     Catalog { models: Value, commands: Value },
-    /// Another agent's catalog (an ACP agent's models and commands, in the same shapes), and its
-    /// model in effect: kept apart from Claude's.
-    AgentCatalog { agent: crate::agents::Agent, models: Value, commands: Value, current_model: Option<String> },
+    /// Another agent's catalog (an ACP agent's models and commands, in the same shapes), its
+    /// model in effect and the plan it's signed in with ("Google AI Pro"): kept apart from Claude's.
+    AgentCatalog { agent: crate::agents::Agent, models: Value, commands: Value, current_model: Option<String>, plan: Option<String> },
     /// Where your message is: `queued` (waiting for the current step), `started`,
     /// `completed`, `cancelled`.
     Lifecycle { id: String, state: String },
