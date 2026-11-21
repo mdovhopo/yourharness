@@ -6,6 +6,8 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-21
+
 ### Added
 
 - Files tab: Markdown files open drawn (headings, lists, tables, code), with links to other files opening in the tab; HTML files open as the page, its styles and pictures loaded from beside it. Preview and Source in the file's bar switch between that and the text; ⌘F, or a link to lines, shows the text.
