@@ -6,6 +6,8 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-11-21
+
 ### Added
 
 - Antigravity threads now get YourHarness's memory (the workspace's memory index and tasks in the prompt, plus the memory tools), built-in browser, thread and automation tools, and inline media (`show_media`), served over a local per-session bridge and pre-approved without permission prompts.
