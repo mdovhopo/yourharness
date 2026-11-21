@@ -936,15 +936,23 @@ impl Composer {
         };
         let mode_menu = {
             let (w, project, current) = (w.clone(), project.clone(), mode.clone());
-            let help = if mode == "auto" && !auto_ok { format!("{model_name} doesn't support Auto, so Claude asks before changes") } else { format!("Permissions for {project_name}") };
+            let help = match (mode == "auto" && !auto_ok, agy) {
+                (true, false) => format!("{model_name} doesn't support Auto, so Claude asks before changes"),
+                (true, true) => "Your Antigravity account has no Auto mode, so it asks before changes".to_string(),
+                _ => format!("Permissions for {project_name}"),
+            };
             let model_name = model_name.clone();
             let mode_icon = if mode == "bypass" { icons::shield().text_color(error) } else if mode == "auto" { icons::shield_check().text_color(secondary) } else { icons::shield().text_color(secondary) };
             Button::new("mode").ghost().small().flex_none().icon(mode_icon.size(px(13.))).accessibility_label(format!("Permissions: {mode_label}")).when(!compact, |b| b.child(picker_label(mode_label.to_string(), secondary))).tooltip(help).dropdown_caret(!compact).dropdown_menu(move |mut menu, _, _| {
                 menu = menu.min_w(px(280.)).label(format!("Permissions · {project_name}"));
                 for (value, _) in MODES {
                     let (w, project) = (w.clone(), project.clone());
-                    let (title, detail) = mode_detail(value);
-                    let detail = if *value == "auto" && !auto_ok { format!("Not available with {model_name}. Claude asks instead.") } else { detail.to_string() };
+                    let (title, detail) = mode_detail(value, agy);
+                    let detail = match (*value == "auto" && !auto_ok, agy) {
+                        (true, false) => format!("Not available with {model_name}. Claude asks instead."),
+                        (true, true) => "Not offered for your Antigravity account. It asks instead.".to_string(),
+                        _ => detail,
+                    };
                     let tint = (*value == "bypass").then_some(error);
                     menu = menu.item(picker_row(title.to_string(), Some(detail), secondary, tint).checked(current == *value).on_click(move |_, _, cx| {
                         let _ = w.update(cx, |ws, cx| ws.set_mode(&project, value, cx));
@@ -1074,13 +1082,18 @@ fn effort_detail(e: &str) -> Option<&'static str> {
 }
 
 /// A permission mode's long name and what it does.
-fn mode_detail(mode: &str) -> (&'static str, &'static str) {
+/// A permission mode's name and what it means for the thread's agent (`agy`: Antigravity, whose
+/// Plan has no plan card: it may look, and its changes are declined).
+fn mode_detail(mode: &str, agy: bool) -> (&'static str, String) {
+    let who = if agy { "Antigravity" } else { "Claude" };
     match mode {
-        "ask" => ("Ask Before Changes", "Claude asks before editing files or running commands."),
-        "acceptEdits" => ("Auto-Accept Edits", "File edits go through. Commands still ask."),
-        "plan" => ("Plan Only", "Claude explores and plans, but changes nothing."),
-        "bypass" => ("Bypass Permissions", "Everything runs without asking. Use with care."),
-        _ => ("Auto", "Claude runs what looks safe and asks when something looks risky."),
+        "ask" => ("Ask Before Changes", format!("{who} asks before editing files or running commands.")),
+        "acceptEdits" => ("Auto-Accept Edits", "File edits go through. Commands still ask.".to_string()),
+        "plan" if agy => ("Plan Only", "Antigravity looks and plans; its edits and commands are declined.".to_string()),
+        "plan" => ("Plan Only", "Claude explores and plans, but changes nothing.".to_string()),
+        "bypass" => ("Bypass Permissions", "Everything runs without asking. Use with care.".to_string()),
+        _ if agy => ("Auto", "Antigravity's own review runs what looks safe and asks when unsure.".to_string()),
+        _ => ("Auto", "Claude runs what looks safe and asks when something looks risky.".to_string()),
     }
 }
 
@@ -1187,6 +1200,9 @@ impl Render for Composer {
             let t = thread.read(cx);
             (t.run.running, t.permission().cloned(), t.run.permissions.len(), self.workspace.read(cx).agent_of(t))
         };
+        let agent_name = agent.name();
+        // Only Claude Code takes a message into the turn under way.
+        let steers = agent == yh_core::agents::Agent::Claude;
         // While Claude works, what typing does: it steers, or with ⌘↩ goes now. Antigravity
         // can't be steered: a message waits for its turn's end.
         if running != self.steering || agent != self.placeholder_agent {
@@ -1334,27 +1350,39 @@ impl Render for Composer {
                             let _ = w.update(cx, |ws, cx| ws.stop(&stop_thread, &removing, cx));
                         })))
                     })
-                    // Something to send while Claude works: stop it and send this now (⌘↩), or
-                    // queue it for when Claude is done (⌥↩).
+                    // Something to send while the agent works: stop it and send this now (⌘↩), or
+                    // queue it for when it's done (⌥↩; ↩ too for an agent that can't be steered).
                     .when(running && has_text, |d| {
                         d.child(
                             Button::new("interrupt-send")
                                 .small()
                                 .ghost()
                                 .icon(icons::zap().size(px(15.)).text_color(theme.text))
-                                .tooltip("Interrupt and Send: stop Claude and send this now (⌘↩)")
+                                .tooltip(format!("Interrupt and Send: stop {agent_name} and send this now (⌘↩)"))
                                 .on_click(cx.listener(|this, _, window, cx| this.submit(Timing::Now, window, cx))),
                         )
-                        .child(
-                            Button::new("queue-send")
-                                .small()
-                                .ghost()
-                                .icon(icons::clock().size(px(15.)).text_color(theme.text))
-                                .tooltip("Queue (⌥↩): send this once Claude is done, as a turn of its own")
-                                .on_click(cx.listener(|this, _, window, cx| this.submit(Timing::Queue, window, cx))),
-                        )
+                        .when(steers, |d| {
+                            d.child(
+                                Button::new("queue-send")
+                                    .small()
+                                    .ghost()
+                                    .icon(icons::clock().size(px(15.)).text_color(theme.text))
+                                    .tooltip("Queue (⌥↩): send this once Claude is done, as a turn of its own")
+                                    .on_click(cx.listener(|this, _, window, cx| this.submit(Timing::Queue, window, cx))),
+                            )
+                        })
                     })
-                    .child(if running {
+                    .child(if running && !steers {
+                        // An agent that can't be steered: ↩ queues it for the turn's end.
+                        Button::new("send")
+                            .small()
+                            .primary()
+                            .disabled(!has_text)
+                            .icon(icons::clock().size(px(13.)))
+                            .label("Queue")
+                            .tooltip(format!("Queue (↩): send this once {agent_name} is done, as a turn of its own. ⌘↩ stops it and sends now."))
+                            .on_click(cx.listener(|this, _, window, cx| this.submit(Timing::Queue, window, cx)))
+                    } else if running {
                         // While Claude works, ↩ steers: the message joins the turn after the current step.
                         Button::new("send")
                             .small()
@@ -1594,6 +1622,7 @@ impl Composer {
     /// turn's end (queued). Each can still go now (Claude is interrupted), come back to the
     /// composer, or be dropped.
     fn queued_strip(&self, thread: &Entity<ThreadState>, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui_kit::Div> {
+        let agent_name = self.workspace.read(cx).agent_of(thread.read(cx)).name();
         let queued = thread.read(cx).queued_messages();
         if queued.is_empty() {
             return None;
@@ -1605,13 +1634,13 @@ impl Composer {
                 (c.sending_now.contains(&id), c.restore_on_withdraw.contains(&id) || self.withdrawing.contains(&id))
             };
             let status = if sending {
-                "Interrupting Claude to send this…"
+                format!("Interrupting {agent_name} to send this…")
             } else if taking {
-                "Taking it back…"
+                "Taking it back…".to_string()
             } else if later {
-                "Queued · sent once Claude is done"
+                format!("Queued · sent once {agent_name} is done")
             } else {
-                "Steering · Claude reads it after its current step"
+                format!("Steering · {agent_name} reads it after its current step")
             };
             let label = match (text.is_empty(), attachments) {
                 (false, _) => text,
@@ -1651,7 +1680,7 @@ impl Composer {
                         .flex()
                         .flex_none()
                         .gap(px(2.))
-                        .child(Button::new(SharedString::from(format!("queued-now-{i}"))).ghost().small().icon(icons::zap().size(px(13.)).text_color(theme.secondary)).label("Send Now").tooltip("Interrupt Claude and send this now").on_click(
+                        .child(Button::new(SharedString::from(format!("queued-now-{i}"))).ghost().small().icon(icons::zap().size(px(13.)).text_color(theme.secondary)).label("Send Now").tooltip(format!("Interrupt {agent_name} and send this now")).on_click(
                             move |_, _, cx| {
                                 let _ = w.update(cx, |ws, cx| ws.send_now(&t1, &i1, cx));
                             },
@@ -2022,15 +2051,19 @@ impl Composer {
             let q = q.to_lowercase();
             let project = thread.read(cx).meta.project_id.clone();
             let chained = start > 0;
+            let agent = self.workspace.read(cx).agent_of(thread.read(cx));
+            let claude = agent == yh_core::agents::Agent::Claude;
             // The project's own commands, read with a throwaway `claude` once per launch, so
-            // the menu is right before any session there has started.
-            self.workspace.update(cx, |ws, cx| ws.load_commands(&project, cx));
+            // the menu is right before any session there has started (Claude Code's only).
+            if claude {
+                self.workspace.update(cx, |ws, cx| ws.load_commands(&project, cx));
+            }
             let commands = {
                 let ws = self.workspace.read(cx);
-                if chained {
-                    ws.chainable_commands(&project)
-                } else {
-                    ws.menu_commands(&project)
+                match (chained, claude) {
+                    (true, true) => ws.chainable_commands(&project),
+                    (true, false) => vec![],
+                    (false, _) => ws.menu_commands_for(&project, agent),
                 }
             };
             // An MCP prompt is found by what it shows ("github:review") too.
@@ -2244,6 +2277,8 @@ pub(crate) const SKIP_MESSAGE: &str = "The user chose not to answer. Continue wi
 /// Claude asks (`AskUserQuestion`): pick options or write your own; Skip declines.
 pub struct QuestionCard {
     workspace: Option<gpui_kit::WeakEntity<Workspace>>,
+    /// The agent asking, by name.
+    who: &'static str,
     input: String,
     questions: Vec<Question>,
     _subscriptions: Vec<Subscription>,
@@ -2255,6 +2290,14 @@ impl QuestionCard {
     /// and replaces a single choice.
     fn new(p: &Permission, workspace: gpui_kit::WeakEntity<Workspace>, window: &mut Window, cx: &mut Context<Composer>) -> Option<Entity<QuestionCard>> {
         let input: Value = serde_json::from_str(&p.input).ok()?;
+        let who = workspace
+            .upgrade()
+            .and_then(|w| {
+                let ws = w.read(cx);
+                let t = ws.thread(ws.selected.as_deref()?)?;
+                Some(ws.agent_of(t.read(cx)).name())
+            })
+            .unwrap_or("Claude");
         let parsed: Vec<(String, Option<String>, bool, Vec<(String, Option<String>)>)> = input["questions"]
             .as_array()?
             .iter()
@@ -2304,7 +2347,7 @@ impl QuestionCard {
                     Question { question, header, multi, options, chosen: BTreeSet::new(), other }
                 })
                 .collect();
-            QuestionCard { workspace: Some(workspace), input: raw, questions, _subscriptions: subscriptions }
+            QuestionCard { workspace: Some(workspace), who, input: raw, questions, _subscriptions: subscriptions }
         }))
     }
 
@@ -2356,7 +2399,7 @@ impl QuestionCard {
 impl Render for QuestionCard {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::get(cx);
-        let title = card_title(icons::message_question(), if self.questions.len() == 1 { "Claude asks".to_string() } else { format!("Claude asks {} questions", self.questions.len()) }, &theme);
+        let title = card_title(icons::message_question(), if self.questions.len() == 1 { format!("{} asks", self.who) } else { format!("{} asks {} questions", self.who, self.questions.len()) }, &theme);
         // The questions scroll past 420 pt; the title and buttons stay.
         let mut questions = div().id("question-list").max_h(px(420.)).overflow_y_scroll().flex().flex_col().gap(px(space::S + 2.));
         for (qi, q) in self.questions.iter().enumerate() {

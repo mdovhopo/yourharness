@@ -86,6 +86,14 @@ impl AgentProcess {
         }
     }
 
+    /// A waiting message sent now: the turn stops for it (`claude` takes it next by itself).
+    pub fn send_now(&mut self, id: &str) {
+        match self {
+            AgentProcess::Claude(p) => p.interrupt(),
+            AgentProcess::Acp(p) => p.send_now(id),
+        }
+    }
+
     pub fn stop_task(&mut self, task_id: &str) {
         if let AgentProcess::Claude(p) = self {
             p.stop_task(task_id)

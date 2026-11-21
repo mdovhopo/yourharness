@@ -77,6 +77,8 @@ struct Shared {
     resume: Option<String>,
     /// The agent's `initialize` answer: what it can do.
     capabilities: Value,
+    /// No session to be had (`fail`): the process is ended, the next message starts another.
+    dead: bool,
     /// Its sign-in methods, from `initialize`.
     auth_methods: Vec<Value>,
 }
@@ -149,12 +151,13 @@ impl AcpProcess {
             replaying: false,
             queue: VecDeque::new(),
             permissions: HashMap::new(),
-            translator: Translator::default(),
+            translator: Translator { nonce: format!("{:x}-", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis())), ..Translator::default() },
             model: options.model.filter(|m| !m.is_empty()),
             mode: options.mode,
             cwd: options.cwd.clone(),
             resume: options.session_id,
             capabilities: Value::Null,
+            dead: false,
             auth_methods: vec![],
         }));
         {
@@ -178,8 +181,15 @@ impl AcpProcess {
                             return;
                         }
                     }
+                    if shared.lock().unwrap().dead {
+                        let _ = child.lock().unwrap().kill();
+                        break;
+                    }
                 }
+                // Ended for a failure already told: a quiet exit, not a crash.
+                let failed = shared.lock().unwrap().dead;
                 let code = child.lock().unwrap().wait().ok().and_then(|s| s.code()).unwrap_or(-1);
+                let code = if failed { 0 } else { code };
                 let tail = tail.lock().unwrap().clone();
                 let _ = events.send(Event::Exit { code, tail });
             });
@@ -189,6 +199,11 @@ impl AcpProcess {
 
     pub fn initialize(&mut self) {
         let mut s = self.shared.lock().unwrap();
+        // Its session, known from the start: an exit before the agent answers isn't Claude's
+        // failed `--resume` (ACP brings a session back itself, or says why not).
+        if let Some(session) = s.resume.clone() {
+            let _ = self.events.send(Event::Session { id: session });
+        }
         let params = json!({
             "protocolVersion": PROTOCOL_VERSION,
             // Files and terminals are the agent's own: it reads, writes and runs in the folder.
@@ -221,6 +236,16 @@ impl AcpProcess {
 
     pub fn interrupt(&mut self) {
         self.shared.lock().unwrap().cancel(&self.writer);
+    }
+
+    /// A waiting message sent now: first in line, and the turn under way stopped for it.
+    pub fn send_now(&mut self, id: &str) {
+        let mut s = self.shared.lock().unwrap();
+        if let Some(at) = s.queue.iter().position(|w| w.id == id) {
+            let w = s.queue.remove(at).expect("found");
+            s.queue.push_front(w);
+        }
+        s.cancel(&self.writer);
     }
 
     /// Takes back a message still waiting: its lifecycle ends `cancelled`.
@@ -354,6 +379,7 @@ pub struct Catalog {
     pub models: Value,
     pub default_model: Option<String>,
     pub plan: Option<String>,
+    pub modes: Vec<String>,
 }
 
 /// An agent's catalog, from a throwaway session in an empty folder, closed at once: nothing is
@@ -384,8 +410,8 @@ pub fn read_catalog(agent: Agent) -> Option<Catalog> {
     let mut found = None;
     while let Ok(event) = rx.recv_deadline(deadline) {
         match event {
-            Event::AgentCatalog { models, current_model, plan, .. } if models.as_array().is_some_and(|m| !m.is_empty()) => {
-                found = Some(Catalog { models, default_model: current_model, plan });
+            Event::AgentCatalog { models, current_model, plan, modes, .. } if models.as_array().is_some_and(|m| !m.is_empty()) => {
+                found = Some(Catalog { models, default_model: current_model, plan, modes });
                 break;
             }
             Event::Done { .. } | Event::Exit { .. } => break,
@@ -450,12 +476,14 @@ fn agent_mode(mode: &str, offered: &[String]) -> &'static str {
     }
 }
 
-/// Whether the app allows a call without asking you, in this permission mode.
-fn answers_itself(mode: Option<&str>, kind: &str) -> bool {
+/// The app's answer to a call without asking you, in this permission mode: allow (Bypass, an
+/// edit in Accept Edits), decline (Plan: it may look but not change anything), or ask.
+fn answers_itself(mode: Option<&str>, kind: &str) -> Option<bool> {
     match mode {
-        Some("bypassPermissions") => true,
-        Some("acceptEdits") => kind == "edit",
-        _ => false,
+        Some("bypassPermissions") => Some(true),
+        Some("acceptEdits") if kind == "edit" => Some(true),
+        Some("plan") if matches!(kind, "edit" | "delete" | "move" | "execute") => Some(false),
+        _ => None,
     }
 }
 
@@ -465,6 +493,7 @@ pub const NOT_SIGNED_IN: &str = "Antigravity isn't signed in. Run `agy` once in 
 impl Shared {
     /// No session to be had: the turn ends with why, and what waited for it is withdrawn.
     fn fail(&mut self, error: String) -> Vec<Event> {
+        self.dead = true;
         let mut out = vec![Event::Done { is_error: true, text: error }];
         for w in self.queue.drain(..) {
             out.push(Event::Lifecycle { id: w.id, state: "cancelled".into() });
@@ -574,8 +603,8 @@ impl Shared {
                     return vec![Event::Permission { request_id, tool: "AskUserQuestion".into(), description, input }];
                 }
                 let kind = call["kind"].as_str().map(str::to_string).or_else(|| call["toolCallId"].as_str().and_then(|c| self.translator.kind_of(c))).unwrap_or_default();
-                if answers_itself(self.mode.as_deref(), &kind) {
-                    let _ = writer.send(json!({ "jsonrpc": "2.0", "id": id, "result": { "outcome": permission_outcome(&options, true) } }));
+                if let Some(allow) = answers_itself(self.mode.as_deref(), &kind) {
+                    let _ = writer.send(json!({ "jsonrpc": "2.0", "id": id, "result": { "outcome": permission_outcome(&options, allow) } }));
                     return vec![];
                 }
                 let (tool, input) = self.translator.permission_tool(call);
@@ -691,6 +720,9 @@ struct Call {
 /// `session/update`s into the transcript's events, one turn at a time. Pure: tested on its own.
 #[derive(Default)]
 pub struct Translator {
+    /// This process's own mark in its rows' ids: turns count from 1 in each process, and a
+    /// resumed session's rows mustn't take an earlier one's.
+    nonce: String,
     turn: u64,
     blocks: u64,
     /// The text or thinking being written: (its message id, kind, what it says so far).
@@ -704,8 +736,9 @@ pub struct Translator {
     commands: Vec<Value>,
     /// The session's settings (`configOptions`): its model and mode among them, when it has them.
     config: Vec<Value>,
-    /// Tokens in the context, as the agent last said.
+    /// Tokens in the context, as the agent last said, and its model's window.
     pub usage: Option<u64>,
+    window: Option<u64>,
     /// The plan it's signed in with, as its session says (`_meta.antigravity.tier`).
     plan: Option<String>,
 }
@@ -810,7 +843,7 @@ impl Translator {
             .iter()
             .filter_map(|c| Some(json!({ "name": c["name"].as_str()?, "description": c["description"], "argumentHint": c["input"]["hint"] })))
             .collect();
-        vec![Event::AgentCatalog { agent: Agent::Antigravity, models: Value::Array(models), commands: Value::Array(commands), current_model: self.current_model.clone(), plan: self.plan.clone() }]
+        vec![Event::AgentCatalog { agent: Agent::Antigravity, models: Value::Array(models), commands: Value::Array(commands), current_model: self.current_model.clone(), plan: self.plan.clone(), modes: self.modes.clone() }]
     }
 
     pub fn update(&mut self, u: &Value) -> Vec<Event> {
@@ -824,7 +857,7 @@ impl Translator {
                 }
                 let open = self.open.get_or_insert_with(|| {
                     self.blocks += 1;
-                    (format!("acp-{}-{}", self.turn, self.blocks), kind, String::new())
+                    (format!("acp-{}{}-{}", self.nonce, self.turn, self.blocks), kind, String::new())
                 });
                 open.2.push_str(text);
                 let message = open.0.clone();
@@ -884,7 +917,7 @@ impl Translator {
                     .unwrap_or_default();
                 let mut out = self.close();
                 self.blocks += 1;
-                let id = format!("acp-plan-{}-{}", self.turn, self.blocks);
+                let id = format!("acp-plan-{}{}-{}", self.nonce, self.turn, self.blocks);
                 out.push(Event::Assistant { message: id.clone(), parent: None, blocks: vec![Block::Tool { id: id.clone(), name: "TodoWrite".into(), input: json!({ "todos": todos }).to_string() }] });
                 out.push(Event::ToolResults { parent: None, results: vec![ToolResult { id, text: "Plan updated.".into(), len: 13, is_error: false, full: None }] });
                 out
@@ -901,9 +934,19 @@ impl Translator {
                 self.current_mode = u["currentModeId"].as_str().map(str::to_string);
                 vec![]
             }
+            // Tokens in the context and the window's size: the composer's context ring.
             "usage_update" => {
-                self.usage = u["used"].as_u64().or(self.usage);
-                vec![]
+                let mut out = vec![];
+                if let Some(size) = u["size"].as_u64().filter(|s| *s > 0 && self.window != Some(*s)) {
+                    self.window = Some(size);
+                    out.push(Event::ContextWindows(vec![(self.current_model.clone().unwrap_or_default(), size)]));
+                }
+                // As it goes, as Claude's does; 0 is the session's start, before anything's in it.
+                if let Some(used) = u["used"].as_u64().filter(|u| *u > 0) {
+                    self.usage = Some(used);
+                    out.push(Event::ContextUsage(used));
+                }
+                out
             }
             _ => vec![],
         }
@@ -1119,6 +1162,7 @@ mod tests {
             cwd: "/work/rproj".into(),
             resume: None,
             capabilities: Value::Null,
+            dead: false,
             auth_methods: vec![],
         };
         s.request("initialize", json!({}), Asked::Initialize, &w);
@@ -1216,6 +1260,7 @@ mod tests {
             cwd: "/p".into(),
             resume: Some("old".into()),
             capabilities: Value::Null,
+            dead: false,
             auth_methods: vec![],
         };
         s.request("initialize", json!({}), Asked::Initialize, &w);

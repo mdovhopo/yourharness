@@ -567,7 +567,8 @@ impl RootView {
         use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
         let ws = self.workspace.read(cx);
         let enabled: Vec<&crate::state::limits::AccountState> = ws.accounts.iter().filter(|a| a.account.enabled).collect();
-        if enabled.len() < 2 {
+        // Claude accounts are Claude Code's: another agent's thread runs on its own sign-in.
+        if enabled.len() < 2 || ws.agent_of(thread.read(cx)) != yh_core::agents::Agent::Claude {
             return None;
         }
         let id = thread.read(cx).id().to_string();

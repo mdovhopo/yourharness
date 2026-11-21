@@ -454,7 +454,12 @@ impl Render for UsagePage {
             .child(div().flex_1())
             .child(page_kit::segmented(vec![metric("metric-tokens", "Tokens", false, icons::hash()), metric("metric-cost", "Cost", true, icons::coins())], &theme))
             .into_any_element();
-        let subtitle = div().truncate().child(self.reading.clone().unwrap_or_else(|| "Every Claude Code session, here or in a terminal".into())).into_any_element();
+        // Tokens and cost are Claude Code's history; Antigravity has its limits above, not its tokens yet.
+        let agy = self.workspace.read(cx).agy_found;
+        let subtitle = div()
+            .truncate()
+            .child(self.reading.clone().unwrap_or_else(|| if agy { "Every Claude Code session, here or in a terminal · Antigravity: limits only".into() } else { "Every Claude Code session, here or in a terminal".into() }))
+            .into_any_element();
         let refreshing = self.refreshing;
         let toolbar = crate::ui::thread_toolbar::icon_button("usage-refresh", gpui_kit::component::Icon::new(gpui_kit::component::IconName::RefreshCw), "Read Claude Code's history again", &theme)
             .loading(refreshing)

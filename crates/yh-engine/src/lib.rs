@@ -623,10 +623,10 @@ impl Engine {
                 self.update(&thread);
             }
             Command::SendNow { thread, message } => {
-                self.run_of(&thread).live.composer.sending_now.insert(message);
+                self.run_of(&thread).live.composer.sending_now.insert(message.clone());
                 self.update(&thread);
                 if let Some(rt) = self.runtimes.get_mut(&thread) {
-                    rt.process.interrupt();
+                    rt.process.send_now(&message);
                 }
             }
             Command::StopJob { thread, task_id } => {
@@ -744,17 +744,23 @@ impl Engine {
         }
         let rt = self.runtimes.get_mut(thread).expect("ready");
         rt.idle_at = None;
+        // An ACP agent stops the turn for a message sent now as for Stop: marked as for the
+        // message, its end is no error and no "finished" (`claude` says so itself).
+        let acp_now = priority == Some("now") && rt.process.agent() != yh_core::agents::Agent::Claude;
         rt.process.send(&delivery.text, &delivery.blocks, &message_id, priority);
+        if acp_now {
+            self.run_of(thread).live.composer.sending_now.insert(message_id);
+        }
     }
 
     fn request(&mut self, thread: &str, request: serde_json::Value, reply: flume::Sender<Result<serde_json::Value, String>>) {
         let Some(rt) = self.runtimes.get_mut(thread) else {
-            let _ = reply.send(Err("No Claude Code process.".into()));
+            let _ = reply.send(Err("No agent process.".into()));
             return;
         };
         let rx = rt.process.request(request);
         std::thread::spawn(move || {
-            let answer = rx.recv_timeout(Duration::from_secs(30)).map_err(|_| "Claude Code didn't answer.".to_string()).and_then(|r| r);
+            let answer = rx.recv_timeout(Duration::from_secs(30)).map_err(|_| "The agent didn't answer.".to_string()).and_then(|r| r);
             let _ = reply.send(answer);
         });
     }
@@ -783,6 +789,7 @@ impl Engine {
         };
         process.initialize();
         self.run_of(thread).live.received_init = false;
+        self.run_of(thread).agent = process.agent();
         self.generation += 1;
         let generation = self.generation;
         let pid = process.pid();

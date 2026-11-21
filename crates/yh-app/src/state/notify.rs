@@ -82,12 +82,13 @@ impl Workspace {
         if thread.elicitation().is_some() && !thread.waiting_for_you() {
             return "An MCP server is asking you something.".into();
         }
+        let who = yh_core::agents::Agent::from_id(thread.meta.agent.as_deref()).name();
         // The newest request: the one that just came.
-        let Some(p) = thread.run.permissions.last() else { return "Claude is waiting for you.".into() };
+        let Some(p) = thread.run.permissions.last() else { return format!("{who} is waiting for you.") };
         let input: Value = serde_json::from_str(&p.input).unwrap_or(Value::Null);
         match p.tool.as_str() {
-            "AskUserQuestion" => input["questions"][0]["question"].as_str().map(|q| format!("Claude asks: {q}")).unwrap_or_else(|| "Claude has a question for you.".into()),
-            "ExitPlanMode" => "Claude has a plan ready for you to review.".into(),
+            "AskUserQuestion" => input["questions"][0]["question"].as_str().map(|q| format!("{who} asks: {q}")).unwrap_or_else(|| format!("{who} has a question for you.")),
+            "ExitPlanMode" => format!("{who} has a plan ready for you to review."),
             tool => {
                 let detail = ["command", "file_path", "path", "url", "pattern", "description"].iter().find_map(|k| input[*k].as_str().map(str::to_string));
                 let verb = match tool {
@@ -114,7 +115,7 @@ impl Workspace {
             .take_while(|i| i.ty != ItemType::User)
             .filter(|i| i.ty == ItemType::Text)
             .find_map(|i| i.entries.first().map(|e| e.borrow().data.text.clone()).filter(|t| !t.trim().is_empty()));
-        let Some(reply) = reply else { return "Claude finished.".into() };
+        let Some(reply) = reply else { return format!("{} finished.", yh_core::agents::Agent::from_id(thread.meta.agent.as_deref()).name()) };
         let plain: String = reply.chars().filter(|c| !"*_`#>".contains(*c)).collect();
         let plain = plain.lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ");
         truncate(&plain, 180)

@@ -163,7 +163,7 @@ pub fn recover(db: &Database, thread: &str, session_id: Option<&str>) -> usize {
         count += 1;
     }
     let note = if backfill.is_empty() {
-        "YourHarness closed while Claude was working, so this turn stopped here."
+        "YourHarness closed while the agent was working, so this turn stopped here."
     } else {
         "YourHarness closed while Claude was working. What Claude did until then was recovered from its session history."
     };

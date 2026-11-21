@@ -879,7 +879,7 @@ pub fn set_working_activity(working: bool) {
         if working && token.get() == nil {
             // NSActivityUserInitiatedAllowingIdleSystemSleep
             let options: u64 = 0x00FF_FFFF & !(1u64 << 20);
-            let reason = NSString::alloc(nil).init_str("Claude is working");
+            let reason = NSString::alloc(nil).init_str("An agent is working");
             let t: id = msg_send![info, beginActivityWithOptions: options reason: reason];
             let _: id = msg_send![t, retain];
             token.set(t);

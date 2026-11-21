@@ -449,6 +449,8 @@ impl LiveState {
 #[derive(Default)]
 pub struct ThreadRun {
     pub live: LiveState,
+    /// The agent its process runs (the engine says so at each launch): named in its notices.
+    pub agent: crate::agents::Agent,
     /// Keep every row (a thread whose rows aren't saved: a side chat): nothing to read them back from.
     pub keep_all: bool,
 
@@ -719,7 +721,7 @@ impl ThreadRun {
                 Outcome::default()
             }
             Event::ConversationReset => {
-                self.notice("Context cleared. Claude starts fresh from here.");
+                self.notice(&format!("Context cleared. {} starts fresh from here.", self.agent.name()));
                 self.live.composer.context_tokens = None;
                 Outcome::chrome(true)
             }
@@ -1008,7 +1010,7 @@ impl ThreadRun {
                         self.notice("Interrupted");
                     } else if text.is_empty() || (text.starts_with("error_") && !text.contains(' ')) {
                         let why = if text.is_empty() { String::new() } else { format!(" ({text})") };
-                        self.error_notice(&format!("Claude stopped with an error{why}."));
+                        self.error_notice(&format!("{} stopped with an error{why}.", self.agent.name()));
                     } else {
                         self.error_notice(&text);
                     }
@@ -1069,7 +1071,8 @@ impl ThreadRun {
                 Outcome::chrome(!gone.is_empty())
             }
             Event::Exit { code, tail } => {
-                self.cut_off_jobs("stopped when Claude exited", src);
+                let why = format!("stopped when {} exited", self.agent.name());
+                self.cut_off_jobs(&why, src);
                 self.end_turn(src);
                 // Whatever still waited never reached Claude: back to the composer.
                 self.restore_queued();
@@ -1085,7 +1088,7 @@ impl ThreadRun {
                 } else if code != 0 {
                     let detail: Vec<&str> = tail.lines().filter(|l| !l.trim().is_empty()).collect();
                     let detail = detail[detail.len().saturating_sub(3)..].join("\n");
-                    self.error_notice(format!("Claude exited (code {code}). {detail}").trim_end());
+                    self.error_notice(format!("{} exited (code {code}). {detail}", self.agent.name()).trim_end());
                 }
                 self.live.received_init = false;
                 Outcome { chrome: true, session_reset, ..Default::default() }

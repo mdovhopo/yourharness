@@ -216,7 +216,7 @@ fn row_label(item: &Item, fold: Fold, linker: Option<&Linker>) -> Option<String>
         }
         ItemType::Text => {
             drop(e);
-            Some(format!("Claude: {}", markdown_of(entry, linker).plain_text()))
+            Some(format!("Reply: {}", markdown_of(entry, linker).plain_text()))
         }
         ItemType::Notice if e.data.kind == Kind::Command => {
             drop(e);
@@ -347,7 +347,7 @@ fn turn_summary(state: &ThreadState, work: &TurnWork, open: bool, pos: i64, thre
                 .child(if open { "Hide work" } else { "Show work" }),
         )
         .tooltip(move |window, cx| {
-            gpui_kit::component::tooltip::Tooltip::new(if open { "Hide Claude's work" } else { "Show what Claude did: thinking, tool calls and sub-agents" }).build(window, cx)
+            gpui_kit::component::tooltip::Tooltip::new(if open { "Hide the agent's work" } else { "Show what the agent did: thinking, tool calls and sub-agents" }).build(window, cx)
         })
         .on_click(move |_, _, cx| {
             handle.update(cx, |t, cx| {
@@ -665,7 +665,7 @@ fn user_row(item: &Item, ctx: &RowContext, from: Option<String>, theme: &Theme, 
     // composer, not here).
     let note = match e.delivery.as_deref() {
         Some("steered") => Some((crate::ui::icons::corner_down_right(), "Steered · Claude read this after its step")),
-        Some("interrupted") => Some((crate::ui::icons::zap(), "Interrupted Claude to send this")),
+        Some("interrupted") => Some((crate::ui::icons::zap(), "Interrupted the turn to send this")),
         _ => None,
     };
 

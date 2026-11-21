@@ -128,6 +128,10 @@ pub use yh_engine::ids::{MEMORY_AGENT, SETTINGS, SIDE};
 /// What a side chat's agent is told.
 const SIDE_CHAT_PROMPT: &str = "This is a side conversation. You are a copy of the conversation above, opened so the user can ask something on the side without interrupting or adding to the main thread; nothing said here reaches it. Answer the question directly and briefly. You have Read, Glob, Grep, Bash, WebFetch and WebSearch: use them when the answer needs a fresh look rather than what the conversation already says. The app asks the user to approve commands that could change something. You have no tools to edit files: if the answer needs changes, say what the main thread should do.";
 
+/// A side chat of a thread on another agent (Antigravity): Claude can't take a copy of that
+/// conversation, so it starts without it.
+const SIDE_CHAT_FRESH_PROMPT: &str = "This is a side conversation, opened next to a thread so the user can ask something on the side without interrupting or adding to it; nothing said here reaches it. That thread runs on another agent, so you don't see its conversation: if the question depends on it, say so and ask for what you need. Answer directly and briefly. You have Read, Glob, Grep, Bash, WebFetch and WebSearch for a look at the project. The app asks the user to approve commands that could change something. You have no tools to edit files: if the answer needs changes, say what the main thread should do.";
+
 /// The side chat's view of its thread's browser.
 const SIDE_BROWSER_PROMPT: &str = "You can look at the thread's browser, built into YourHarness, with the mcp__browser__ tools: status, snapshot, screenshot, console and network. You can't click or type there; that's for the main thread.";
 
@@ -175,6 +179,11 @@ pub struct Workspace {
     pub agent_models: Vec<ModelInfo>,
     /// The model Antigravity's last session said it was on (its default, when none is chosen).
     agent_current_model: Option<String>,
+    /// The modes Antigravity's sessions offer (`auto` only for some accounts); empty until known.
+    agent_modes: Vec<String>,
+    /// Antigravity's own commands and skills (`/goal`, `/compact`…), as its sessions list them
+    /// (saved as `antigravityCommands`): the "/" menu of its threads.
+    agent_commands: Vec<SlashCommand>,
     /// Whether Antigravity's `agy` is here: its models are offered in the picker.
     pub agy_found: bool,
     /// Antigravity's usage limits as `agy -p /usage` last said (`state/limits.rs`).
@@ -296,6 +305,7 @@ impl Workspace {
             .unwrap_or_default();
         let agent_current_model = library.setting("antigravityDefaultModel").and_then(|v| v.as_str().map(str::to_string));
         let library_for_limits = library.clone();
+        let agent_commands = library.setting("antigravityCommands").and_then(|v| v.as_array().map(|a| a.iter().filter_map(SlashCommand::from_json).collect())).unwrap_or_default();
         let (tool_requests, requests) = flume::unbounded();
         cx.spawn(async move |this, cx| {
             while let Ok(request) = requests.recv_async().await {
@@ -386,6 +396,8 @@ impl Workspace {
             models,
             agent_models,
             agent_current_model,
+            agent_modes: vec![],
+            agent_commands,
             agy_limits: crate::state::limits::AgentLimits::load(&library_for_limits),
             agy_found: false,
             accounts: vec![crate::state::limits::AccountState::new(yh_core::accounts::Account::main())],
@@ -642,6 +654,10 @@ impl Workspace {
     /// Whether the thread's model can run in Auto (unknown models are given the benefit of the
     /// doubt).
     pub fn supports_auto_mode(&self, thread: &ThreadState) -> bool {
+        // Antigravity's Auto is its account's, not its model's: offered by its sessions or not.
+        if self.agent_of(thread) != yh_core::agents::Agent::Claude {
+            return self.agent_modes.is_empty() || self.agent_modes.iter().any(|m| m == "auto");
+        }
         let model = self.model_of(thread).unwrap_or_else(|| "default".into());
         self.models.iter().find(|m| m.value == model).is_none_or(|m| m.supports_auto_mode)
     }
@@ -669,7 +685,12 @@ impl Workspace {
         }
     }
 
+    /// Claude Code's reasoning effort, a launch option of `claude`: none for another agent, so a
+    /// change never starts its process over.
     pub fn effort_of(&self, thread: &ThreadState) -> Option<String> {
+        if self.agent_of(thread) != yh_core::agents::Agent::Claude {
+            return None;
+        }
         thread.meta.effort.clone().or_else(|| self.default_setting("effort"))
     }
 
@@ -924,6 +945,9 @@ impl Workspace {
                     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
                     ws.library.set_setting("antigravityModelsAt", &Value::from(now));
                     if let Some(c) = catalog {
+                        if !c.modes.is_empty() {
+                            ws.agent_modes = c.modes;
+                        }
                         ws.note_agent_default(c.default_model);
                         ws.agy_limits.note_plan(c.plan, &ws.library);
                         ws.note_agent_catalog(&c.models, cx);
@@ -1819,6 +1843,16 @@ impl Workspace {
     }
 
     pub fn set_model(&mut self, id: &str, model: Option<String>, cx: &mut Context<Self>) {
+        // A model of the other agent's (the phone's list, `yh`, a tool) would be passed to this
+        // thread's agent at every launch: refused.
+        if let (Some(thread), Some(m)) = (self.thread(id), model.as_deref()) {
+            let on_agent = self.agent_of(thread.read(cx)) != yh_core::agents::Agent::Claude;
+            let agents_model = self.agent_models.iter().any(|a| a.value == m);
+            if (on_agent && !agents_model && !self.agent_models.is_empty()) || (!on_agent && agents_model && !self.models.iter().any(|c| c.value == m)) {
+                eprintln!("model {m} isn't this thread's agent's: ignored");
+                return;
+            }
+        }
         let value = model.clone();
         self.update_meta(id, cx, |m, r| {
             m.model = value.clone();
@@ -1884,6 +1918,9 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let from_agent = self.agent_sender.take();
+        // An ACP agent can't be steered mid-turn: what would steer waits for the turn's end and
+        // goes as a turn of its own, and shows as such.
+        let timing = if timing == Timing::Steer && self.agent_of(thread.read(cx)) != yh_core::agents::Agent::Claude { Timing::Queue } else { timing };
         let mut text = text.trim().to_string();
         if text.is_empty() && images.is_empty() && files.is_empty() {
             return;
@@ -1956,7 +1993,8 @@ impl Workspace {
             self.begin_turn_changes(thread, &message_id, cx);
         }
         let project = thread.read(cx).meta.project_id.clone();
-        let for_agent = if id.starts_with(SIDE) { text.clone() } else { self.message_for_agent(&text, &project) };
+        // Skills to chain are Claude Code's.
+        let for_agent = if id.starts_with(SIDE) || self.agent_of(thread.read(cx)) != yh_core::agents::Agent::Claude { text.clone() } else { self.message_for_agent(&text, &project) };
         let effort = self.effort_of(thread.read(cx));
         let blocks: Vec<(String, String)> = images
             .iter()
@@ -2013,7 +2051,7 @@ impl Workspace {
                 extra.push("--fork-session".into());
             }
             let mut servers: Vec<std::sync::Arc<dyn yh_core::mcp::ToolServer>> = vec![];
-            let mut prompt = vec![SIDE_CHAT_PROMPT.to_string()];
+            let mut prompt = vec![if fork.is_some() || parent_thread.as_ref().is_some_and(|p| self.agent_of(p.read(cx)) == yh_core::agents::Agent::Claude) { SIDE_CHAT_PROMPT } else { SIDE_CHAT_FRESH_PROMPT }.to_string()];
             let mut allowed = vec![];
             let mut env = vec![];
             if self.library.setting("browserTools").and_then(|v| v.as_bool()).unwrap_or(true) {
@@ -2073,7 +2111,10 @@ impl Workspace {
             let scope = yh_core::memory::scope_of(&project.id);
             let actor = yh_core::memory::Actor { kind: "agent".into(), thread: Some(t.id().to_string()) };
             let (text, listed) = yh_core::memory::prompt(&store.memories(Some(&scope), Some("active")), &project.name, track_tasks);
-            store.note_injection(&scope, listed, text.len(), &actor);
+            // Counted only where it's given: another agent's thread gets no prompt from us yet.
+            if self.agent_of(t) == yh_core::agents::Agent::Claude {
+                store.note_injection(&scope, listed, text.len(), &actor);
+            }
             prompt.push(text);
             allowed.push("mcp__memory".to_string());
             let changed = self.tool_requests.clone();
@@ -2426,6 +2467,12 @@ impl Workspace {
     /// A control request to the thread's `claude` (started in its folder if it isn't running),
     /// and its reply: `mcp_status`, `mcp_toggle`, `mcp_authenticate`…
     pub fn mcp(&mut self, thread: &Entity<ThreadState>, request: Value, cx: &mut Context<Self>) -> Task<Result<Value, String>> {
+        // Claude Code's MCP: another agent's thread has none of it (nor a process started for it).
+        let agent = self.agent_of(thread.read(cx));
+        if agent != yh_core::agents::Agent::Claude {
+            let why = format!("MCP servers here are Claude Code's; {} uses its own.", agent.name());
+            return cx.background_executor().spawn(async move { Err(why) });
+        }
         let id = thread.read(cx).id().to_string();
         let effort = self.effort_of(thread.read(cx));
         let (reply, answer) = flume::bounded(1);
@@ -2573,8 +2620,11 @@ impl Workspace {
         let p = p.read(cx);
         let mut meta = ThreadMeta::new(format!("{SIDE}{parent}"), p.meta.project_id.clone(), "Side Chat".into());
         meta.working_directory = Some(self.folder_of(p));
-        meta.model = p.meta.model.clone();
-        meta.effort = p.meta.effort.clone();
+        // Side chats run on Claude: a thread on another agent lends them neither model nor effort.
+        if self.agent_of(p) == yh_core::agents::Agent::Claude {
+            meta.model = p.meta.model.clone();
+            meta.effort = p.meta.effort.clone();
+        }
         let chat = make_thread(meta, cx.entity().downgrade(), cx);
         chat.update(cx, |t, _| {
             t.loaded = true;
@@ -3115,7 +3165,9 @@ impl Workspace {
         for thread in cut {
             let (id, session) = {
                 let t = thread.read(cx);
-                (t.id().to_string(), t.run.session_id.clone())
+                // Only Claude Code's session files can fill in a cut-off turn.
+                let claude = self.agent_of(t) == yh_core::agents::Agent::Claude;
+                (t.id().to_string(), t.run.session_id.clone().filter(|_| claude))
             };
             let db = db.clone();
             let weak = thread.downgrade();
@@ -3433,6 +3485,14 @@ impl Workspace {
     }
 
     /// What the "/" menu offers in a project: the app's own, then the CLI's.
+    /// What the "/" menu offers on a thread of `agent`: on Antigravity, `/btw` and its own.
+    pub fn menu_commands_for(&self, project_id: &str, agent: yh_core::agents::Agent) -> Vec<SlashCommand> {
+        if agent == yh_core::agents::Agent::Claude {
+            return self.menu_commands(project_id);
+        }
+        app_commands().into_iter().filter(|c| c.name == "btw").chain(self.agent_commands.iter().cloned()).collect()
+    }
+
     pub fn menu_commands(&self, project_id: &str) -> Vec<SlashCommand> {
         let own = app_commands();
         let theirs = self.commands(project_id).iter().filter(|c| !own.iter().any(|o| o.name == c.name) && !TERMINAL_ONLY.contains(&c.name.as_str())).cloned();
@@ -3485,6 +3545,9 @@ impl Workspace {
     fn handle_command(&mut self, thread: &Entity<ThreadState>, text: &str, cx: &mut Context<Self>) -> CommandHandling {
         let Some((name, args)) = yh_core::claude::parse_command(text) else { return CommandHandling::NotOurs };
         let id = thread.read(cx).id().to_string();
+        if self.agent_of(thread.read(cx)) != yh_core::agents::Agent::Claude {
+            return self.handle_agent_command(thread, &name, &args, cx);
+        }
         match name.as_str() {
             // Already on the side: the question is all that's left.
             "btw" if id.starts_with(SIDE) => {
@@ -3538,6 +3601,47 @@ impl Workspace {
             "rename" => {
                 self.composer.renames.insert(id);
                 CommandHandling::NotOurs
+            }
+            _ => CommandHandling::NotOurs,
+        }
+    }
+
+    /// A command on a thread of another agent (Antigravity): the app's own that make sense there,
+    /// the rest go to the agent as typed (its own commands: `/goal`, `/compact`…).
+    fn handle_agent_command(&mut self, thread: &Entity<ThreadState>, name: &str, args: &str, cx: &mut Context<Self>) -> CommandHandling {
+        let id = thread.read(cx).id().to_string();
+        let agent = self.agent_of(thread.read(cx)).name();
+        match name {
+            "btw" => {
+                self.ask_aside(&id, args, cx);
+                CommandHandling::Done
+            }
+            "mcp" => {
+                self.composer_notice(thread, &format!("MCP servers here are Claude Code's. {agent} uses its own: run `agy mcp` in Terminal."), cx);
+                CommandHandling::Done
+            }
+            "model" if !args.is_empty() => {
+                let found = self.agent_models.iter().find(|m| m.value.eq_ignore_ascii_case(args) || m.display_name.eq_ignore_ascii_case(args)).map(|m| (m.value.clone(), m.display_name.clone()));
+                match found {
+                    Some((value, label)) => {
+                        self.set_model(&id, Some(value), cx);
+                        self.composer_notice(thread, &format!("Model set to {label}"), cx);
+                    }
+                    None if args.eq_ignore_ascii_case("default") => {
+                        self.set_model(&id, None, cx);
+                        self.composer_notice(thread, &format!("Model set to {agent}'s default"), cx);
+                    }
+                    None => self.composer_error(thread, &format!("{agent} has no model “{args}”. Pick one from the model menu."), cx),
+                }
+                CommandHandling::Done
+            }
+            "effort" => {
+                self.composer_notice(thread, &format!("{agent}'s thinking level follows its model here; reasoning effort and workflows are Claude Code's."), cx);
+                CommandHandling::Done
+            }
+            "rename" if !args.is_empty() => {
+                self.rename(&id, args, cx);
+                CommandHandling::Done
             }
             _ => CommandHandling::NotOurs,
         }
@@ -3681,7 +3785,7 @@ impl Workspace {
     /// The thread's MCP servers from its running `claude` (`mcp_status`), for the attention chip.
     pub fn refresh_mcp_attention(&mut self, thread: &Entity<ThreadState>, cx: &mut Context<Self>) {
         let id = thread.read(cx).id().to_string();
-        if id.starts_with(SIDE) || id.starts_with(MEMORY_AGENT) || !self.pids.contains_key(&id) {
+        if id.starts_with(SIDE) || id.starts_with(MEMORY_AGENT) || !self.pids.contains_key(&id) || self.agent_of(thread.read(cx)) != yh_core::agents::Agent::Claude {
             return;
         }
         let task = self.mcp(thread, serde_json::json!({ "subtype": "mcp_status" }), cx);
@@ -3828,7 +3932,9 @@ impl Workspace {
                 Output::NeedsLaunch { thread } => {
                     let launch = match self.thread(&thread) {
                         Some(t) => {
-                            self.note_launch_account(&thread);
+                            if self.agent_of(t.read(cx)) == yh_core::agents::Agent::Claude {
+                                self.note_launch_account(&thread);
+                            }
                             let effort = self.effort_of(t.read(cx));
                             let (options, note) = self.launch_options(&t, cx);
                             Command::Launch { thread: thread.clone(), options, effort, note }
@@ -3864,7 +3970,15 @@ impl Workspace {
                     let project = thread.read(cx).meta.project_id.clone();
                     self.note_catalog(models, commands, &project, cx);
                 }
-                Event::AgentCatalog { models, current_model, plan, .. } => {
+                Event::AgentCatalog { models, current_model, plan, modes, commands, .. } => {
+                    if !modes.is_empty() {
+                        self.agent_modes = modes.clone();
+                    }
+                    let listed: Vec<SlashCommand> = commands.as_array().map(|a| a.iter().filter_map(SlashCommand::from_json).collect()).unwrap_or_default();
+                    if !listed.is_empty() && listed != self.agent_commands {
+                        self.agent_commands = listed;
+                        self.library.set_setting("antigravityCommands", commands);
+                    }
                     self.agy_limits.note_plan(plan.clone(), &self.library);
                     // A thread's own session: its current model is the default only when none was chosen.
                     if thread.read(cx).meta.model.is_none() {

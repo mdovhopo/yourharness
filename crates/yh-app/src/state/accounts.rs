@@ -70,6 +70,10 @@ impl Workspace {
 
     /// Its `claude` starts over when it runs on another account than the thread's now.
     fn relaunch_if_elsewhere(&mut self, thread: &str, cx: &mut Context<Self>) {
+        // Another agent's thread doesn't run on a Claude account: nothing to start over.
+        if self.thread(thread).is_some_and(|t| self.agent_of(t.read(cx)) != yh_core::agents::Agent::Claude) {
+            return;
+        }
         let now = self.account_of(thread).id().to_string();
         if self.runtime_accounts.get(thread).is_some_and(|a| *a != now) {
             self.command(thread, Command::Relaunch { thread: thread.to_string() }, cx);

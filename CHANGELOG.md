@@ -6,6 +6,16 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+### Fixed
+
+- Antigravity threads: Interrupt and Send (⌘↩) and a queued message's Send Now no longer show "stopped with an error" or a finished notice first, and send the message you picked.
+- Antigravity threads: a session that can't start (not signed in) no longer leaves the thread working forever; the next message tries again.
+- Antigravity threads: Enter while it works queues the message for the turn's end (Antigravity can't be steered mid-turn), and the composer says so.
+- Antigravity threads: the "/" menu lists Antigravity's own commands and skills; `/model` takes its models, `/rename` renames here, `/mcp` and `/effort` explain they're Claude Code's. Effort changes no longer restart Antigravity, and a Claude model can't be set on an Antigravity thread (or the other way round).
+- Antigravity threads: Plan mode lets it look and plan but declines its edits and commands; Auto follows whether your Antigravity account offers it. The permission texts name the right agent.
+- Antigravity threads: the context ring shows how full its context is; a side chat runs on Claude's own model and says it can't see the thread; the Claude account chip no longer shows on them.
+- Notifications, questions and errors name the thread's agent instead of always "Claude".
+
 ## [0.5.0] - 2026-11-21
 
 ### Changed

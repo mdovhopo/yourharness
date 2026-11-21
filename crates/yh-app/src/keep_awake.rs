@@ -153,7 +153,7 @@ impl KeepAwake {
             return;
         }
         let kind = CFString::new(if display { "PreventUserIdleDisplaySleep" } else { "PreventUserIdleSystemSleep" });
-        let name = CFString::new("YourHarness: keeping the Mac awake while Claude works");
+        let name = CFString::new("YourHarness: keeping the Mac awake while an agent works");
         let mut id = 0u32;
         // kIOPMAssertionLevelOn = 255
         if unsafe { IOPMAssertionCreateWithName(kind.as_concrete_TypeRef(), 255, name.as_concrete_TypeRef(), &mut id) } == 0 {
@@ -165,7 +165,7 @@ impl KeepAwake {
     pub fn describe(&self) -> String {
         match &self.reason {
             None => "The Mac may sleep".into(),
-            Some(Reason::Working) => "Awake while Claude works".into(),
+            Some(Reason::Working) => "Awake while an agent works".into(),
             Some(Reason::Always) => "Awake while YourHarness is open".into(),
             Some(Reason::AfterWork(u)) | Some(Reason::Manual(Some(u))) => {
                 let mins = u.saturating_duration_since(Instant::now()).as_secs().div_ceil(60);

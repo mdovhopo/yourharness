@@ -324,8 +324,9 @@ pub enum Event {
     /// The CLI's catalog, as JSON: `models` (see `ModelInfo`) and `commands`.
     Catalog { models: Value, commands: Value },
     /// Another agent's catalog (an ACP agent's models and commands, in the same shapes), its
-    /// model in effect and the plan it's signed in with ("Google AI Pro"): kept apart from Claude's.
-    AgentCatalog { agent: crate::agents::Agent, models: Value, commands: Value, current_model: Option<String>, plan: Option<String> },
+    /// model in effect, the plan it's signed in with ("Google AI Pro") and the modes it offers
+    /// (`default`, `accept-edits`, `auto`…): kept apart from Claude's.
+    AgentCatalog { agent: crate::agents::Agent, models: Value, commands: Value, current_model: Option<String>, plan: Option<String>, modes: Vec<String> },
     /// Where your message is: `queued` (waiting for the current step), `started`,
     /// `completed`, `cancelled`.
     Lifecycle { id: String, state: String },
