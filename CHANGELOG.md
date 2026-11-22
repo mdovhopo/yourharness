@@ -6,6 +6,8 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-22
+
 ### Added
 
 - Usage counts Antigravity's tokens, by model (Gemini 4 Neon, Gemini 3.8 Flash…): its whole history, from the app and from the terminal, read from Antigravity's own conversations the first time you open Usage. Turns in the app are counted as they run, so one cut short by a crash still counts. Claude models run through Antigravity are priced like Claude Code's; Gemini has no Anthropic price, so its tokens show as unpriced.
