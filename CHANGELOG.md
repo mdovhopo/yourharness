@@ -13,6 +13,7 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ### Fixed
 
+- Huge threads and huge prompts stay responsive: pasting or switching to a 200 KB prompt (including tab-indented code) wraps in ~20–30 ms instead of freezing for nearly a second, typing in the composer no longer copies the whole draft per keystroke, Find in thread highlights and jumps without re-shaping lines or stalling, giant pasted user messages (>40 lines / >6 KB) fold to a preview with a toggle (auto-expanding for Find hits), and streaming across many huge threads uses much less CPU and memory (lazy sidebar hover menus, sweep-line text runs, clipped line painting, a bounded warm line-layout cache, cached user-message linking, and idle-delayed FTS5 indexing).
 - Antigravity threads now show a command in the jobs strip when Antigravity moves it to the background mid-turn and keeps working, not only when the turn ends while it runs.
 - Usage gives its colors to the models you used most, not the newest ones: Opus 5.5 no longer falls into Other once a few new models (Antigravity's Gemini) show up.
 
