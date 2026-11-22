@@ -11,6 +11,10 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 - Usage counts Antigravity's tokens, by model (Gemini 4 Neon, Gemini 3.8 Flash…): its whole history, from the app and from the terminal, read from Antigravity's own conversations the first time you open Usage. Turns in the app are counted as they run, so one cut short by a crash still counts. Claude models run through Antigravity are priced like Claude Code's; Gemini has no Anthropic price, so its tokens show as unpriced.
 - Settings → Memory: Turn off Antigravity's own memory (/learn), on by default. Antigravity threads keep what they learn in YourHarness's memory, like Claude's: your corrections saved as feedback, memories that turned out stale brought up to date.
 
+### Changed
+
+- Compact UI/UX pass across Mac and iOS: logo-aligned violet primary accent (and teal for Antigravity), higher-density concurrent-agent sidebar/list with one-tap attention/working jump strips and Active filter, compact side-by-side 5-hour and 7-day usage limits with exact reset countdowns (and account email hidden by default), provider-only badges on every thread (keeping model choices inside thread controls), an always-visible compact thread/provider header bar on iPhone, and sub-agent model pills in both transcript cards and sub-agent detail views.
+
 ### Fixed
 
 - Huge threads and huge prompts stay responsive: pasting or switching to a 200 KB prompt (including tab-indented code) wraps in ~20–30 ms instead of freezing for nearly a second, typing in the composer no longer copies the whole draft per keystroke, Find in thread highlights and jumps without re-shaping lines or stalling, giant pasted user messages (>40 lines / >6 KB) fold to a preview with a toggle (auto-expanding for Find hits), and streaming across many huge threads uses much less CPU and memory (lazy sidebar hover menus, sweep-line text runs, clipped line painting, a bounded warm line-layout cache, cached user-message linking, and idle-delayed FTS5 indexing).
