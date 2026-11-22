@@ -99,6 +99,9 @@ pub struct Sidebar {
     collapsed: HashSet<String>,
     /// Threads whose agent-started threads are folded away under them.
     folded_workers: HashSet<String>,
+    /// The one thread row whose hover action buttons (and "…" dropdown menu) are mounted:
+    /// keeps 40–120 unhovered rows from building hidden Popover/DropdownMenu trees on every render.
+    hot_row: Option<String>,
     pub scroll: ScrollHandle,
     renaming: Option<(String, Entity<InputState>, Subscription)>,
     pub focus: FocusHandle,
@@ -231,6 +234,7 @@ impl Sidebar {
             shelves,
             collapsed,
             folded_workers: HashSet::new(),
+            hot_row: None,
             scroll: ScrollHandle::new(),
             renaming: None,
             focus: cx.focus_handle(),
@@ -769,8 +773,10 @@ impl Sidebar {
         let this = cx.entity().downgrade();
         let age = yh_core::clock::short_age(t.meta.updated_at / 1000.0, now);
         // Hover covers the end of the title with the row's own colour, so nothing moves.
+        // Only mount the action strip (with its DropdownMenu popover) on the last-hovered row.
         let cover = theme.sidebar;
-        let actions = {
+        let is_hot = self.hot_row.as_deref() == Some(id.as_str());
+        let actions = is_hot.then(|| {
             let (ws1, ws2, i1, i2) = (self.workspace.clone(), self.workspace.clone(), id.clone(), id.clone());
             let m = menu.clone();
             let button = |name: &str, icon: Icon, tip: &'static str| {
@@ -837,7 +843,8 @@ impl Sidebar {
                         )
                         .child(div().w(px(2.))),
                 )
-        };
+        });
+        let hover_id = id.clone();
         // VoiceOver: the title, then what it's doing.
         let spoken = {
             let mut parts = vec![t.title.clone()];
@@ -938,7 +945,13 @@ impl Sidebar {
             // Folded: how many it started, where they'd be.
             .when(nest.folded, |d| d.child(div().flex_none().text_size(px(text::CAPTION)).text_color(theme.tertiary).child(format!("+{}", nest.workers))))
             .child(div().flex_none().text_size(px(text::CAPTION)).text_color(if is_selected { theme.secondary } else { theme.tertiary }).child(age))
-            .child(actions)
+            .children(actions)
+            .on_hover(cx.listener(move |this, is_hovered, _, cx| {
+                if *is_hovered && this.hot_row.as_deref() != Some(hover_id.as_str()) {
+                    this.hot_row = Some(hover_id.clone());
+                    cx.notify();
+                }
+            }))
             .when(tracking, |d| d.child(probe::tracker(format!("thread:{id}"))))
             .on_click(move |event, window, cx| {
                 let id = click_id.clone();

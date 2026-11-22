@@ -588,27 +588,34 @@ fn command_name(text: &str) -> Option<usize> {
     (len > 0 && rest[len..].chars().next().is_none_or(char::is_whitespace)).then_some(len + 1)
 }
 
-fn user_styled_of(e: &EntryRef, linker: Option<&Linker>) -> Rc<Text> {
+fn user_styled_of(e: &EntryRef, linker: Option<&Linker>, expanded: bool) -> Rc<Text> {
     let revision = linker.map_or(0, |l| l.revision);
     let mut b = e.borrow_mut();
-    if let Some((version, links, styled)) = &b.user_links {
-        if *version == b.version && *links == revision {
+    if let Some((version, links, was_expanded, styled)) = &b.user_links {
+        if *version == b.version && *links == revision && *was_expanded == expanded {
             return styled.clone();
         }
     }
-    let mut styled = Text { text: b.data.text.clone(), spans: vec![], links: vec![] };
+    let slice = if expanded {
+        b.data.text.as_str()
+    } else if let Some(cut) = crate::state::thread::user_preview_end(&b.data.text) {
+        &b.data.text[..cut]
+    } else {
+        b.data.text.as_str()
+    };
+    let mut styled = Text { text: slice.to_string(), spans: vec![], links: vec![] };
     if let Some(linker) = linker {
         linker.link(&mut styled);
     }
     let styled = Rc::new(styled);
-    b.user_links = Some((b.version, revision, styled.clone()));
+    b.user_links = Some((b.version, revision, expanded, styled.clone()));
     styled
 }
 
 /// Your message's text: a command's name in bold monospace, `@mentions` and the thread's file
 /// paths as links into the Files tab.
-fn user_text(e: &EntryRef, ctx: &RowContext, theme: &Theme, window: &Window) -> AnyElement {
-    let styled = user_styled_of(e, ctx.linker.as_deref());
+fn user_text(e: &EntryRef, expanded: bool, ctx: &RowContext, theme: &Theme, window: &Window) -> AnyElement {
+    let styled = user_styled_of(e, ctx.linker.as_deref(), expanded);
     let text = styled.text.as_str();
     let command = command_name(text);
     if command.is_none() && styled.links.is_empty() {
@@ -690,6 +697,7 @@ fn ctx_parent_title(parent: &str, cx: &App) -> Option<String> {
 fn user_row(item: &Item, ctx: &RowContext, from: Option<String>, theme: &Theme, window: &Window) -> AnyElement {
     let e = item.entries[0].borrow();
     let text = e.data.text.clone();
+    let open = e.open || expand_all();
     let images = e.data.attachments.clone();
     let date = e.date;
     // Sent while Claude worked: how it got in, under the bubble (queued ones wait above the
@@ -759,7 +767,44 @@ fn user_row(item: &Item, ctx: &RowContext, from: Option<String>, theme: &Theme, 
         .when(!text.is_empty(), |d| {
             // A wide message already fills the 80% cap: giving it a definite width lets Taffy
             // skip the intrinsic MaxContent shaping pass over huge user prompts.
-            let wide = text.len() >= 120 && text.lines().take(20).any(|l| l.len() >= 100);
+            let preview_cut = crate::state::thread::user_preview_end(&text);
+            let shown_slice = match (preview_cut, open) {
+                (Some(cut), false) => &text[..cut],
+                _ => text.as_str(),
+            };
+            let wide = shown_slice.len() >= 120 && shown_slice.lines().take(20).any(|l| l.len() >= 100);
+            let toggle = preview_cut.map(|_| {
+                let handle = ctx.thread.clone();
+                let entry = item.entries[0].clone();
+                let label = if open {
+                    "Show less".to_string()
+                } else {
+                    let total_lines = text.as_bytes().iter().filter(|&&b| b == b'\n').count() + 1;
+                    let kb = (text.len() + 512) / 1024;
+                    format!("Show all {total_lines} lines ({kb} KB)")
+                };
+                div()
+                    .id(("user-fold", pos as u64 as usize))
+                    .mt(px(space::XS))
+                    .pt(px(space::XS))
+                    .border_t_1()
+                    .border_color(theme.separator.opacity(0.6))
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .text_size(px(ts::CAPTION))
+                    .text_color(theme.secondary)
+                    .hover(|s| s.text_color(theme.text))
+                    .cursor_pointer()
+                    .child(icon(if open { IconName::ChevronUp } else { IconName::ChevronDown }, 12., theme.secondary))
+                    .child(label)
+                    .on_click(move |_, _, cx| {
+                        handle.update(cx, |t, cx| {
+                            t.toggle_step(pos, &entry);
+                            cx.notify();
+                        })
+                    })
+            });
             d.child(
                 div()
                     .when(wide, |d| d.w(gpui_kit::relative(0.8)))
@@ -768,7 +813,8 @@ fn user_row(item: &Item, ctx: &RowContext, from: Option<String>, theme: &Theme, 
                     .px(px(14.))
                     .py(px(space::S))
                     .rounded(px(radius::LARGE))
-                    .child(user_text(&item.entries[0], ctx, theme, window)),
+                    .child(user_text(&item.entries[0], open, ctx, theme, window))
+                    .children(toggle),
             )
         })
         .when_some(note, |d, (mark, n)| {

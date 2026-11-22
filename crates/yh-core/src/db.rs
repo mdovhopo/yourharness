@@ -138,11 +138,11 @@ fn migrate(c: &Connection) -> rusqlite::Result<()> {
 /// How long after opening the index starts catching up when nothing's written (tests set 0).
 pub static INDEX_DELAY_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(3000);
 
-/// Idle: brings the full-text index up to date, a batch at a time, so a write that arrives
-/// waits for one batch at most.
+/// Idle: brings the full-text index up to date, a small batch at a time, so a write or flush
+/// that arrives waits briefly at most.
 fn index_while_idle(w: &mut Writer, inbox: &flume::Receiver<Job>) {
     while inbox.is_empty() {
-        match w.index_batch(500) {
+        match w.index_batch(100) {
             Ok(true) => continue,
             Ok(false) => break,
             Err(e) => {
@@ -188,6 +188,7 @@ impl Database {
                 // catches up on what's not in it yet (rows from before, an older version's);
                 // then after every write.
                 let start = std::time::Duration::from_millis(INDEX_DELAY_MS.load(std::sync::atomic::Ordering::Relaxed));
+                let idle_wait = start.min(std::time::Duration::from_millis(500));
                 let mut first_job = match inbox.recv_timeout(start) {
                     Ok(job) => Some(job),
                     Err(flume::RecvTimeoutError::Timeout) => {
@@ -216,7 +217,17 @@ impl Database {
                     for f in flushes {
                         let _ = f.send(());
                     }
-                    index_while_idle(&mut w, &inbox);
+                    // Wait for a brief write lull before FTS5 indexing so active streaming and
+                    // thread-switch flushes never contend with FTS5 commits / WAL checkpoints.
+                    if idle_wait.is_zero() {
+                        index_while_idle(&mut w, &inbox);
+                    } else if inbox.is_empty() {
+                        match inbox.recv_timeout(idle_wait) {
+                            Ok(job) => first_job = Some(job),
+                            Err(flume::RecvTimeoutError::Timeout) => index_while_idle(&mut w, &inbox),
+                            Err(flume::RecvTimeoutError::Disconnected) => return,
+                        }
+                    }
                 }
             })
             .map_err(|e| e.to_string())?;

@@ -23,8 +23,8 @@ pub struct Entry {
     pub open: bool,
     /// Its text parsed, for (version, links revision).
     pub markdown: Option<(u64, u64, Rc<Markdown>)>,
-    /// User message text linked, for (version, links revision).
-    pub user_links: Option<(u64, u64, Rc<Styled>)>,
+    /// User message text linked, for (version, links revision, expanded).
+    pub user_links: Option<(u64, u64, bool, Rc<Styled>)>,
     /// Its row number in the whole saved transcript.
     pub seq: usize,
     /// When it was written (seconds since 1970), for rows made here.
@@ -45,6 +45,43 @@ fn entry_of(r: TranscriptRow) -> EntryRef {
 /// A row read from storage: a sub-agent's call with its run as it was saved.
 fn entry(data: EntryData, seq: usize) -> EntryRef {
     entry_of(TranscriptRow::saved(data, seq))
+}
+
+/// Byte offset where a huge user message folds into a preview, or `None` for normal prompts.
+/// Keeps giant pasted logs/specs (>6 KB or >40 lines) from forcing 2,000 synchronous CoreText
+/// shaping calls the first time they scroll into view.
+pub fn user_preview_end(text: &str) -> Option<usize> {
+    const FOLD_BYTES: usize = 6_000;
+    const FOLD_LINES: usize = 40;
+    const PREVIEW_BYTES: usize = 2_400;
+    const PREVIEW_LINES: usize = 24;
+    if text.len() <= FOLD_BYTES && text.as_bytes().iter().filter(|&&b| b == b'\n').count() < FOLD_LINES {
+        return None;
+    }
+    let mut end = text.len().min(PREVIEW_BYTES);
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut lines = 0;
+    for (i, b) in text.as_bytes()[..end].iter().enumerate() {
+        if *b == b'\n' {
+            lines += 1;
+            if lines >= PREVIEW_LINES {
+                end = i;
+                break;
+            }
+        }
+    }
+    // Snap back to the end of the previous line if we hit the byte cap mid-line.
+    if lines < PREVIEW_LINES && end < text.len() {
+        if let Some(nl) = text[..end].rfind('\n') {
+            if nl > 200 {
+                end = nl;
+            }
+        }
+    }
+    // Don't fold if the preview already covers almost everything.
+    (end > 0 && text.len().saturating_sub(end) > 400).then_some(end)
 }
 
 impl Entry {
@@ -768,7 +805,9 @@ impl ThreadState {
                     let mut b = e.borrow_mut();
                     let hidden = b.data.tool_input.as_deref().is_some_and(|s| yh_core::find::contains(s, &query))
                         || b.data.tool_result.as_deref().is_some_and(|s| yh_core::find::contains(s, &query))
-                        || (b.data.kind == Kind::Thinking && yh_core::find::contains(&b.data.text, &query));
+                        || (b.data.kind == Kind::Thinking && yh_core::find::contains(&b.data.text, &query))
+                        || (b.data.kind == Kind::User
+                            && user_preview_end(&b.data.text).is_some_and(|cut| !yh_core::find::contains(&b.data.text[..cut], &query)));
                     if hidden && !b.open {
                         b.open = true;
                         b.version += 1;
@@ -1041,5 +1080,21 @@ mod tests {
         t.prepend(vec![agent("a3", "Held", None)], 11);
         assert_eq!(t.subagents().len(), 3);
         assert!(!t.saved_runs.contains_key("a3"));
+    }
+
+    #[test]
+    fn huge_user_messages_fold_cleanly_and_expand_for_find_hits() {
+        assert_eq!(user_preview_end("short message\nwith two lines"), None);
+        let huge = (0..120).map(|i| format!("Line {i:03}: café details for row {i}\n")).collect::<String>();
+        let cut = user_preview_end(&huge).expect("huge message folds");
+        assert!(huge.is_char_boundary(cut));
+        assert!(cut < huge.len() && cut > 200);
+        // Find in thread auto-expands a folded giant user message when the match is in its tail.
+        let mut t = ThreadState::new(ThreadMeta::new("T".into(), "P".into(), "t".into()));
+        t.prepend(vec![EntryData::new("u1", Kind::User, format!("{huge}\nUNIQUE_TAIL_NEEDLE"))], 0);
+        assert!(!t.items[0].entries[0].borrow().open);
+        t.set_find_query(Some(yh_core::find::query("UNIQUE_TAIL_NEEDLE")));
+        t.show_hit(Some(t.items[0].pos));
+        assert!(t.items[0].entries[0].borrow().open);
     }
 }

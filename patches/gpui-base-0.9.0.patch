@@ -10,22 +10,41 @@
          self.update_lines(
              changed_text,
              range,
-@@ -575,6 +576,23 @@
+@@ -575,6 +576,42 @@
                      offset = range.end;
                  }
                  if fragments.is_empty() {
 +                    // YourHarness patch: `measured_wrap` shapes ~6 substrings per logical line
 +                    // through CoreText (~900 ms on a 200 KB paste or draft restore). For tab-free
-+                    // lines, GPUI's cached-width `LineWrapper` wraps in <1 ms with the same
-+                    // Unicode line-break and grapheme rules.
++                    // and leading-tab lines, GPUI's cached-width `LineWrapper` wraps in <1 ms with
++                    // the same Unicode line-break and grapheme rules.
++                    let indent = match wrapping_indent {
++                        WrappingIndent::Same => gpui::IndentAdjustment::SameIndent,
++                        WrappingIndent::None => gpui::IndentAdjustment::NoIndent,
++                    };
 +                    if !line_str.contains('\t') {
-+                        let indent = match wrapping_indent {
-+                            WrappingIndent::Same => gpui::IndentAdjustment::SameIndent,
-+                            WrappingIndent::None => gpui::IndentAdjustment::NoIndent,
-+                        };
 +                        return MeasuredWrap::uncached(
 +                            line_wrapper
 +                                .wrap_line(&[LineFragment::text(line_str)], wrap_width, indent)
++                                .collect(),
++                        );
++                    }
++                    let rest = line_str.trim_start_matches('\t');
++                    if !rest.contains('\t') {
++                        let tab_stop = *tab_stop.get_or_insert_with(|| {
++                            tab_stop_width(&text_system, &font, font_size, tab_size)
++                        });
++                        let leading_tabs = line_str.len() - rest.len();
++                        let mut tab_frags = Vec::with_capacity(leading_tabs + usize::from(!rest.is_empty()));
++                        for _ in 0..leading_tabs {
++                            tab_frags.push(LineFragment::element(tab_stop, 1));
++                        }
++                        if !rest.is_empty() {
++                            tab_frags.push(LineFragment::text(rest));
++                        }
++                        return MeasuredWrap::uncached(
++                            line_wrapper
++                                .wrap_line(&tab_frags, wrap_width, indent)
 +                                .collect(),
 +                        );
 +                    }

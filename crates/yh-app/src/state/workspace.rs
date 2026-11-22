@@ -1496,13 +1496,16 @@ impl Workspace {
     pub fn note_working(&mut self, cx: &mut Context<Self>) {
         let busy = |t: &ThreadState| t.run.running || t.run.jobs.agents_running() > 0;
         let working = self.threads.iter().any(|t| busy(t.read(cx))) || self.by_id.values().any(|t| busy(t.read(cx)));
+        let before = self.keep_awake.reason.clone();
         self.keep_awake.set_working(working);
         // App Nap held off while Claude works (test runs hold it off for good, `hold_off_app_nap`).
         crate::platform::set_working_activity(working);
         if std::env::var("YH_KEEP_AWAKE_LOG").is_ok() {
             eprintln!("Keep awake: {}", self.keep_awake.describe());
         }
-        self.schedule_keep_awake(cx);
+        if self.keep_awake.reason != before {
+            self.schedule_keep_awake(cx);
+        }
     }
 
     pub fn schedule_keep_awake(&mut self, cx: &mut Context<Self>) {

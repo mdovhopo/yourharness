@@ -734,10 +734,16 @@ impl Probe {
             let chunk = "crates/mod_1/src/sub_2/file_3.rs:42 parser timezone migration token cache budget ";
             chunk.repeat((chars / chunk.len()).max(1))
         };
+        let make_tab_prompt = |lines: usize| -> String {
+            (0..lines)
+                .map(|i| format!("\t\tif err := handleRow({i}, \"crates/mod_{}/src/file_{}.rs:42\"); err != nil {{ return err }}\n", i % 15, i % 1500))
+                .collect()
+        };
         for (tag, text) in [
             ("15k", make_prompt(130)),
             ("60k", make_prompt(520)),
             ("200k", make_prompt(1750)),
+            ("200k-tabs", make_tab_prompt(2000)),
             ("100k-wrap", make_single_line(100_000)),
         ] {
             let bytes = text.len();
