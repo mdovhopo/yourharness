@@ -556,6 +556,7 @@ struct SubagentInfo: Codable, Sendable, Hashable {
     let description: String
     let status: String
     let agentType: String?
+    var model: String? = nil
     let toolUses: Int?
     let tokens: Int?
     let durationMs: Int?

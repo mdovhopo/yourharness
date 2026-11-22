@@ -401,13 +401,10 @@ struct ThreadSettings: View {
     private var models: [ModelOption] { store.models(for: thread?.agent) }
     private var model: ModelOption? { models.first { $0.id == thread?.model } }
 
-    /// What shows under the title: the agent when it isn't Claude, the model, and the effort when
-    /// one is chosen.
+    /// What shows under the title: provider only (model and effort stay inside this menu).
     @MainActor static func summary(_ thread: ThreadInfo?, store: Store) -> String? {
         guard let thread else { return nil }
-        let model = store.models(for: thread.agent).first { $0.id == thread.model }?.name ?? thread.model.map(short)
-        let agent = thread.agent.map { store.agentName($0) }
-        return [agent, model, thread.agent == nil ? thread.effort.map(effortName) : nil].compactMap { $0 }.joined(separator: " · ").nilIfEmpty
+        return Brand.providerLabel(thread.agent, store: store)
     }
 
     /// The agent's default model by name ("Default (Gemini 3 Pro)"), or "Default".
@@ -655,7 +652,7 @@ private struct CardFrame<Content: View>: View {
 }
 
 /// Buttons sharing a card's width equally.
-@ViewBuilder private func choice(_ title: String, prominent: Bool, disabled: Bool = false, action: @escaping () -> Void) -> some View {
+@MainActor @ViewBuilder private func choice(_ title: String, prominent: Bool, disabled: Bool = false, action: @escaping () -> Void) -> some View {
     if prominent {
         Button(action: action) { Text(title).fontWeight(.semibold).frame(maxWidth: .infinity) }
             .buttonStyle(.glassProminent)

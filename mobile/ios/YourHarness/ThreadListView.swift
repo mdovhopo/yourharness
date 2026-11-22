@@ -111,7 +111,23 @@ struct ThreadListView: View {
             if store.state != .connected, store.sections.isEmpty {
                 ConnectionRow(state: store.state, address: store.shownAddress)
             }
-            ForEach(store.sections) { section in
+            if store.waitingCount > 0 || store.runningCount > 0 {
+                Section {
+                    AttentionStrip(
+                        waitingCount: store.waitingCount,
+                        runningCount: store.runningCount,
+                        onOpenWaiting: {
+                            if let t = firstMatchingThread(in: store, where: \.isWaiting) { openThread(t.id) }
+                        },
+                        onOpenRunning: {
+                            if let t = firstMatchingThread(in: store, where: \.isRunning) { openThread(t.id) }
+                        }
+                    )
+                }
+                .listSectionSpacing(.compact)
+            }
+            let nonEmpty = store.sections.filter { !$0.live.isEmpty || !$0.settled.isEmpty }
+            ForEach(nonEmpty.isEmpty ? store.sections : nonEmpty) { section in
                 Section {
                     ForEach(section.live) { thread in
                         NavigationLink(value: thread.id) { ThreadRow(thread: thread) }
@@ -125,22 +141,50 @@ struct ThreadListView: View {
                             }
                         } label: {
                             Label("Settled · \(section.settled.count)", systemImage: "tray")
+                                .font(.footnote)
                                 .foregroundStyle(.secondary)
                         }
                     }
                 } header: {
-                    HStack {
+                    HStack(spacing: 6) {
                         Text(section.project.name)
+                        if !section.live.isEmpty {
+                            Text("\(section.live.count)")
+                                .font(.caption2.weight(.semibold))
+                                .monospacedDigit()
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1)
+                                .background(Color(.tertiarySystemFill), in: .capsule)
+                        }
                         Spacer()
                         if store.offersSearch {
                             Button("Pull Requests", systemImage: "arrow.triangle.pull") { pullsOn = nil; pullsFor = section.project }
                                 .labelStyle(.iconOnly)
-                                .font(.body)
+                                .font(.subheadline)
                                 .accessibilityLabel("Pull requests in \(section.project.name)")
                         }
                     }
                 }
             }
+            if !store.limits.isEmpty || !store.agentLimits.isEmpty {
+                ThreadsLimitsSection(store: store, onTapUsage: { fleet.tab = .usage })
+            }
+    }
+
+    private func firstMatchingThread(in store: Store, where predicate: (ThreadInfo) -> Bool) -> ThreadInfo? {
+        for section in store.sections {
+            if let t = section.live.first(where: predicate) { return t }
+        }
+        return store.threads.values.first(where: predicate)
+    }
+
+    private func openThread(_ id: String) {
+        if let selection {
+            selection.wrappedValue = id
+        } else {
+            store.show(id)
+        }
     }
 
     /// Every Mac's threads in one list: projects of the same name together, each row saying its Mac.
@@ -150,7 +194,35 @@ struct ThreadListView: View {
         ForEach(fleet.stores.filter { $0.state != .connected && $0.sections.isEmpty }) { mac in
             ConnectionRow(state: mac.state, address: "\(mac.displayName) · \(mac.shownAddress)")
         }
-        ForEach(fleet.mixedSections) { section in
+        let totalWaiting = fleet.stores.reduce(0) { $0 + $1.waitingCount }
+        let totalRunning = fleet.stores.reduce(0) { $0 + $1.runningCount }
+        if totalWaiting > 0 || totalRunning > 0 {
+            Section {
+                AttentionStrip(
+                    waitingCount: totalWaiting,
+                    runningCount: totalRunning,
+                    onOpenWaiting: {
+                        for mac in fleet.stores {
+                            if let t = firstMatchingThread(in: mac, where: \.isWaiting) {
+                                fleet.open(t.id, on: mac)
+                                break
+                            }
+                        }
+                    },
+                    onOpenRunning: {
+                        for mac in fleet.stores {
+                            if let t = firstMatchingThread(in: mac, where: \.isRunning) {
+                                fleet.open(t.id, on: mac)
+                                break
+                            }
+                        }
+                    }
+                )
+            }
+            .listSectionSpacing(.compact)
+        }
+        let nonEmptyMixed = fleet.mixedSections.filter { !$0.live.isEmpty || !$0.settled.isEmpty }
+        ForEach(nonEmptyMixed.isEmpty ? fleet.mixedSections : nonEmptyMixed) { section in
             Section {
                 ForEach(section.live) { mixedRow($0) }
                 if !section.settled.isEmpty {
@@ -158,18 +230,28 @@ struct ThreadListView: View {
                         ForEach(section.settled) { mixedRow($0) }
                     } label: {
                         Label("Settled · \(section.settled.count)", systemImage: "tray")
+                            .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
                 }
             } header: {
-                HStack {
+                HStack(spacing: 6) {
                     Text(section.name)
+                    if !section.live.isEmpty {
+                        Text("\(section.live.count)")
+                            .font(.caption2.weight(.semibold))
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Color(.tertiarySystemFill), in: .capsule)
+                    }
                     Spacer()
                     let withPulls = section.projects.filter { $0.mac.offersSearch }
                     if withPulls.count == 1, let only = withPulls.first {
                         Button("Pull Requests", systemImage: "arrow.triangle.pull") { pullsOn = only.mac; pullsFor = only.project }
                             .labelStyle(.iconOnly)
-                            .font(.body)
+                            .font(.subheadline)
                             .accessibilityLabel("Pull requests in \(section.name)")
                     } else if withPulls.count > 1 {
                         // The same project on several Macs: its PRs as each Mac sees them.
@@ -181,11 +263,14 @@ struct ThreadListView: View {
                             }
                         }
                         .labelStyle(.iconOnly)
-                        .font(.body)
+                        .font(.subheadline)
                         .accessibilityLabel("Pull requests in \(section.name)")
                     }
                 }
             }
+        }
+        if !store.limits.isEmpty || !store.agentLimits.isEmpty {
+            ThreadsLimitsSection(store: store, onTapUsage: { fleet.tab = .usage })
         }
     }
 
@@ -375,7 +460,10 @@ struct SearchView: View {
                     ForEach(hits) { hit in
                         Button { store.show(hit.thread) } label: {
                             VStack(alignment: .leading, spacing: 3) {
-                                Text(store.threads[hit.thread]?.title ?? "Thread").font(.subheadline.weight(.semibold)).lineLimit(1)
+                                HStack(spacing: 6) {
+                                    ProviderBadge(agent: store.threads[hit.thread]?.agent)
+                                    Text(store.threads[hit.thread]?.title ?? "Thread").font(.subheadline.weight(.semibold)).lineLimit(1)
+                                }
                                 Text(Self.marked(hit.snippet)).font(.subheadline).foregroundStyle(.secondary).lineLimit(3)
                             }
                             .padding(.vertical, 2)
@@ -474,47 +562,184 @@ struct LimitRow: View {
     }
 }
 
+/// Compact top status bar for high-throughput concurrent agent work: one tap jumps to the
+/// thread waiting on your approval or running right now.
+private struct AttentionStrip: View {
+    let waitingCount: Int
+    let runningCount: Int
+    let onOpenWaiting: () -> Void
+    let onOpenRunning: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if waitingCount > 0 {
+                Button(action: onOpenWaiting) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "hand.raised.fill")
+                            .font(.caption2.weight(.semibold))
+                        Text("\(waitingCount) needs you")
+                            .font(.caption.weight(.semibold))
+                            .monospacedDigit()
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 9, weight: .bold))
+                            .opacity(0.75)
+                    }
+                    .foregroundStyle(.orange)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(Color.orange.opacity(0.14), in: .capsule)
+                    .overlay(Capsule().strokeBorder(Color.orange.opacity(0.32), lineWidth: 0.5))
+                }
+                .buttonStyle(.plain)
+            }
+            if runningCount > 0 {
+                Button(action: onOpenRunning) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "circle.fill")
+                            .font(.system(size: 6))
+                            .symbolEffect(.pulse, options: .repeating)
+                        Text("\(runningCount) working")
+                            .font(.caption.weight(.semibold))
+                            .monospacedDigit()
+                    }
+                    .foregroundStyle(.green)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(Color.green.opacity(0.13), in: .capsule)
+                    .overlay(Capsule().strokeBorder(Color.green.opacity(0.28), lineWidth: 0.5))
+                }
+                .buttonStyle(.plain)
+            }
+            Spacer(minLength: 0)
+        }
+        .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
+    }
+}
+
+/// Compact lower limits card on the Threads tab, mirroring the Mac sidebar's limits footer
+/// (both 5h and 7d windows with reset countdowns, one tap to open Usage).
+private struct ThreadsLimitsSection: View {
+    let store: Store
+    let onTapUsage: () -> Void
+
+    var body: some View {
+        Section {
+            Button(action: onTapUsage) {
+                VStack(alignment: .leading, spacing: 10) {
+                    if !store.limits.isEmpty {
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack(spacing: 6) {
+                                Circle().fill(Brand.accent).frame(width: 7, height: 7)
+                                Text(store.subscription?.plan ?? "Claude")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.primary)
+                                Spacer()
+                                Image(systemName: "chevron.right")
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(.tertiary)
+                            }
+                            CompactLimitsGrid(windows: store.limits, dense: true)
+                        }
+                    }
+                    ForEach(store.agentLimits, id: \.agent) { limits in
+                        if let first = limits.groups.first, !first.windows.isEmpty {
+                            if !store.limits.isEmpty { Divider() }
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack(spacing: 6) {
+                                    Circle().fill(Brand.teal).frame(width: 7, height: 7)
+                                    Text(store.agentName(limits.agent))
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(.primary)
+                                    if !first.name.isEmpty {
+                                        Text(first.name)
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(1)
+                                    }
+                                    Spacer()
+                                    if store.limits.isEmpty {
+                                        Image(systemName: "chevron.right")
+                                            .font(.caption2.weight(.semibold))
+                                            .foregroundStyle(.tertiary)
+                                    }
+                                }
+                                CompactLimitsGrid(windows: first.windows, dense: true, accentColor: Brand.teal)
+                            }
+                        }
+                    }
+                }
+                .padding(.vertical, 2)
+                .contentShape(.rect)
+            }
+            .buttonStyle(.plain)
+        } header: {
+            Text("Usage")
+        }
+    }
+}
+
 struct ThreadRow: View {
     let thread: ThreadInfo
     /// The Mac it's on, said first under its title (the list of every Mac).
     var mac: String? = nil
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 9) {
+            ProviderBadge(agent: thread.agent)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 4) {
                     if thread.pinned {
-                        Image(systemName: "pin.fill").font(.caption2).foregroundStyle(.orange)
+                        Image(systemName: "pin.fill").font(.system(size: 10)).foregroundStyle(.orange)
                             .accessibilityLabel("Pinned")
                     }
-                    Text(thread.title).lineLimit(1)
+                    Text(thread.title)
+                        .font(.subheadline.weight(.medium))
+                        .lineLimit(1)
                 }
                 Text(mac.map { "\($0) · \(Self.subtitle(thread))" } ?? Self.subtitle(thread))
-                    .font(.subheadline)
+                    .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
-            Spacer(minLength: 0)
+            Spacer(minLength: 4)
             if thread.isWaiting {
-                Image(systemName: "hand.raised.fill")
-                    .font(.footnote)
-                    .foregroundStyle(.orange)
-                    .accessibilityLabel("Needs you")
+                HStack(spacing: 3) {
+                    Image(systemName: "hand.raised.fill")
+                        .font(.system(size: 9, weight: .semibold))
+                    Text("Needs")
+                        .font(.caption2.weight(.semibold))
+                }
+                .foregroundStyle(.orange)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2.5)
+                .background(Color.orange.opacity(0.14), in: .capsule)
+                .overlay(Capsule().strokeBorder(Color.orange.opacity(0.28), lineWidth: 0.5))
+                .accessibilityLabel("Needs you")
             } else if thread.isRunning {
                 Image(systemName: "circle.fill")
-                    .font(.system(size: 8))
+                    .font(.system(size: 7))
                     .foregroundStyle(.green)
                     .symbolEffect(.pulse, options: .repeating)
+                    .padding(4)
+                    .background(Color.green.opacity(0.14), in: .circle)
                     .accessibilityLabel("Working")
             } else if thread.backgroundJobs > 0 {
                 // The turn's over, something it started still runs (a dev server, a sub-agent).
-                Image(systemName: "hourglass")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .accessibilityLabel(thread.backgroundJobs == 1 ? "1 job running" : "\(thread.backgroundJobs) jobs running")
+                HStack(spacing: 3) {
+                    Image(systemName: "hourglass")
+                        .font(.system(size: 9))
+                    Text("\(thread.backgroundJobs)")
+                        .font(.caption2.weight(.semibold))
+                        .monospacedDigit()
+                }
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color(.tertiarySystemFill), in: .capsule)
+                .accessibilityLabel(thread.backgroundJobs == 1 ? "1 job running" : "\(thread.backgroundJobs) jobs running")
             }
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, 1)
     }
 
     private static let relative: RelativeDateTimeFormatter = {
@@ -526,9 +751,8 @@ struct ThreadRow: View {
     static func subtitle(_ t: ThreadInfo) -> String {
         let date = Date(timeIntervalSince1970: t.updatedAt / 1000)
         let when = Date().timeIntervalSince(date) < 60 ? "now" : relative.localizedString(for: date, relativeTo: Date())
-        // A thread on another agent says which: "2h · Antigravity · gemini-3-pro".
-        let parts = [when, t.agent?.capitalized, t.model?.replacingOccurrences(of: "claude-", with: "")]
-        return parts.compactMap { $0 }.joined(separator: " · ")
+        // Provider only (model stays internal inside thread settings): "Claude · 2h", "Antigravity · 1h".
+        return "\(Brand.providerLabel(t.agent)) · \(when)"
     }
 }
 
@@ -781,7 +1005,7 @@ struct UsageView: View {
         List {
             ForEach(groups) { group in
                 Section {
-                    ForEach(group.windows) { LimitRow(window: $0) }
+                    CompactLimitsGrid(windows: group.windows)
                 } header: {
                     SubscriptionHeader(subscription: group.subscription, macs: group.macs.map { $0.displayName })
                 }
@@ -789,7 +1013,7 @@ struct UsageView: View {
             ForEach(agentGroups, id: \.mac.id) { mac, limits in
                 ForEach(limits.groups) { group in
                     Section {
-                        ForEach(group.windows) { LimitRow(window: $0) }
+                        CompactLimitsGrid(windows: group.windows, accentColor: Brand.teal)
                     } header: {
                         AgentLimitsHeader(agent: mac.agentName(limits.agent), group: group.name, plan: limits.plan, mac: mac.displayName)
                     }
@@ -797,7 +1021,7 @@ struct UsageView: View {
             }
             if !groups.isEmpty || !agentGroups.isEmpty {
                 Section {} footer: {
-                    Text("As your Macs last heard from Claude. They hear again with each turn.")
+                    Text("As your Macs last heard. Updates with each turn.")
                 }
             }
         }
@@ -821,7 +1045,7 @@ private struct AgentLimitsHeader: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 6) {
-                Image(systemName: "cpu")
+                Circle().fill(Brand.teal).frame(width: 8, height: 8)
                 Text(agent).fontWeight(.semibold)
                 Text(group).foregroundStyle(.secondary).lineLimit(1)
             }
@@ -837,7 +1061,7 @@ private struct AgentLimitsHeader: View {
     }
 }
 
-/// "Claude Max · a@b.c", and the Macs signed in to it.
+/// "Claude Max", and the Macs signed in to it (account email stays hidden by default).
 private struct SubscriptionHeader: View {
     let subscription: Subscription?
     let macs: [String]
@@ -845,11 +1069,8 @@ private struct SubscriptionHeader: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 6) {
-                Image(systemName: "person.crop.circle")
+                Circle().fill(Brand.accent).frame(width: 8, height: 8)
                 Text(subscription?.plan ?? "Claude").fontWeight(.semibold)
-                if let who = subscription?.email ?? subscription?.org {
-                    Text(who).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
-                }
             }
             .font(.subheadline)
             .foregroundStyle(.primary)
@@ -888,7 +1109,7 @@ private struct ThreadActions: ViewModifier {
                 }
                 .swipeActions(edge: .trailing) {
                     Button(thread.settled ? "Bring Back" : "Settle", systemImage: thread.settled ? "tray.and.arrow.up" : "checkmark.circle") { store.settle(thread.id, !thread.settled) }
-                        .tint(.indigo)
+                        .tint(Brand.accent)
                 }
                 .contextMenu {
                     Button("Rename…", systemImage: "pencil") {
@@ -974,12 +1195,14 @@ struct NewThreadSheet: View {
                     } label: {
                         Label("Permissions", systemImage: "shield")
                     }
-                } footer: {
-                    Text("Permissions apply to every thread in \(project?.name ?? "the project").")
                 }
                 .pickerStyle(.menu)
+                .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
                 AgentLimitsSection(agent: agentID)
             }
+            .listSectionSpacing(.compact)
+            .contentMargins(.top, 6, for: .scrollContent)
+            .environment(\.defaultMinListRowHeight, 36)
             .navigationTitle("New Thread")
             .navigationSubtitle([project?.name, mac].compactMap { $0 }.joined(separator: " · "))
             .navigationBarTitleDisplayMode(.inline)
@@ -1069,21 +1292,37 @@ struct AgentLimitsSection: View {
             if let limits = store.agentLimits.first(where: { $0.agent == agent }) {
                 ForEach(limits.groups) { group in
                     Section {
-                        ForEach(group.windows) { LimitRow(window: $0) }
-                    } header: {
-                        Text(group.name)
-                    } footer: {
-                        if group.id == limits.groups.last?.id, let plan = limits.plan { Text(plan) }
+                        VStack(alignment: .leading, spacing: 5) {
+                            HStack(spacing: 6) {
+                                Circle().fill(Brand.teal).frame(width: 7, height: 7)
+                                Text(group.name)
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.primary)
+                                Spacer()
+                                if let plan = limits.plan {
+                                    Text(plan)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            CompactLimitsGrid(windows: group.windows, dense: true, accentColor: Brand.teal)
+                        }
+                        .padding(.vertical, 2)
                     }
                 }
             }
         } else if !store.limits.isEmpty {
             Section {
-                ForEach(store.limits) { LimitRow(window: $0) }
-            } header: {
-                Text("Claude's Limits")
-            } footer: {
-                if let plan = store.subscription?.plan { Text(plan) }
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(spacing: 6) {
+                        Circle().fill(Brand.accent).frame(width: 7, height: 7)
+                        Text(store.subscription?.plan ?? "Claude Limits")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.primary)
+                    }
+                    CompactLimitsGrid(windows: store.limits, dense: true)
+                }
+                .padding(.vertical, 2)
             }
         }
     }

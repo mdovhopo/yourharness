@@ -88,6 +88,45 @@ struct TranscriptScreen: View {
         return true
     }
 
+    @ViewBuilder private var threadHeaderBar: some View {
+        if sizeClass != .regular, let thread = store.threads[threadID] {
+            VStack(spacing: 0) {
+                HStack(spacing: 8) {
+                    HStack(spacing: 4) {
+                        if let project = store.projectName(of: thread) {
+                            Text(project)
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .layoutPriority(0)
+                            Text("·")
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
+                        }
+                        Text(thread.title)
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                            .layoutPriority(1)
+                    }
+                    Spacer(minLength: 4)
+                    ProviderPill(agent: thread.agent, label: store.agentName(thread.agent))
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 7)
+                .background(.bar)
+                Divider()
+            }
+        }
+    }
+
+    private var navigationSubtitleText: String {
+        guard let thread = store.threads[threadID] else { return "" }
+        return [store.projectName(of: thread), store.agentName(thread.agent)]
+            .compactMap { $0 }
+            .joined(separator: " · ")
+    }
+
     var body: some View {
         // Something always there, so it appears (and opens the thread) wherever it's placed:
         // an empty view never appears in a split view's detail.
@@ -99,6 +138,7 @@ struct TranscriptScreen: View {
                                         onFile: store.offersFiles ? { store.openFile = FileTarget(thread: threadID, path: $0.path, line: $0.line, end: $0.end) } : nil).ignoresSafeArea(.container, edges: .bottom)
             }
         }
+        .safeAreaInset(edge: .top, spacing: 0) { threadHeaderBar }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 8) {
                 if let page = offeredPage { pageCard(page) }
@@ -274,8 +314,8 @@ struct TranscriptScreen: View {
             store.answerQuestion(q, accept: answer == "accept", in: threadID)
         }
         .navigationTitle(store.threads[threadID]?.title ?? "Thread")
-        // The project, then the model and effort it runs with.
-        .navigationSubtitle([store.threads[threadID].flatMap(store.projectName), store.offersControl ? ThreadSettings.summary(store.threads[threadID], store: store) : nil].compactMap { $0 }.joined(separator: " · "))
+        // The project and provider (model stays internal inside thread settings).
+        .navigationSubtitle(navigationSubtitleText)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             if store.offersBrowser {
@@ -851,6 +891,7 @@ final class RowCell: UICollectionViewCell, UIGestureRecognizerDelegate {
     private var rules: [UIView] = []
     private var icons: [UIImageView] = []
     private var cards: [UIView] = []
+    private var pills: [UILabel] = []
     private var pictures: [PictureView] = []
     private var diagrams: [DiagramView] = []
     /// The thread its row is in, for its pictures.
@@ -932,7 +973,7 @@ final class RowCell: UICollectionViewCell, UIGestureRecognizerDelegate {
     }
 
     func configure(_ layout: RowLayout) {
-        var used = (labels: 0, bubbles: 0, codes: 0, rules: 0, icons: 0, cards: 0, pictures: 0, diagrams: 0)
+        var used = (labels: 0, bubbles: 0, codes: 0, rules: 0, icons: 0, cards: 0, pills: 0, pictures: 0, diagrams: 0)
         for part in layout.parts {
             switch part {
             case .text(let text, let frame, let lines):
@@ -976,17 +1017,33 @@ final class RowCell: UICollectionViewCell, UIGestureRecognizerDelegate {
                 i.tintColor = tint
                 i.frame = frame
             case .card(let frame):
+                let scale = traitCollection.displayScale > 0 ? traitCollection.displayScale : 3
                 let c = take(&cards, &used.cards) { () -> UIView in
                     let c = UIView()
                     c.backgroundColor = .secondarySystemBackground
-                    c.layer.cornerRadius = 16
+                    c.layer.cornerRadius = 14
                     c.layer.cornerCurve = .continuous
-                    c.layer.borderWidth = 1 / UIScreen.main.scale
+                    c.layer.borderWidth = 1 / scale
                     c.layer.borderColor = UIColor.separator.cgColor
                     return c
                 }
+                c.layer.borderWidth = 1 / scale
+                c.layer.borderColor = UIColor.separator.resolvedColor(with: traitCollection).cgColor
                 c.frame = frame
                 contentView.sendSubviewToBack(c)
+            case .pill(let text, let bg, let border, let frame):
+                let p = take(&pills, &used.pills) { () -> UILabel in
+                    let p = UILabel()
+                    p.textAlignment = .center
+                    p.clipsToBounds = true
+                    p.layer.borderWidth = 0.5
+                    return p
+                }
+                p.attributedText = text
+                p.backgroundColor = bg
+                p.layer.borderColor = border.resolvedColor(with: traitCollection).cgColor
+                p.frame = frame
+                p.layer.cornerRadius = frame.height / 2
             case .picture(let index, let frame):
                 let v = take(&pictures, &used.pictures) { PictureView(frame: .zero) }
                 v.frame = frame
@@ -1001,6 +1058,7 @@ final class RowCell: UICollectionViewCell, UIGestureRecognizerDelegate {
             }
         }
         hide(cards, from: used.cards)
+        hide(pills, from: used.pills)
         hide(pictures, from: used.pictures)
         hide(diagrams, from: used.diagrams)
         hide(labels, from: used.labels)

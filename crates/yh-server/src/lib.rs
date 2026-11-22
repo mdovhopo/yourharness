@@ -202,6 +202,7 @@ fn subagent_info(sub: &yh_core::thread_run::Subagent, input: Option<&str>) -> wi
         description: sub.description.clone(),
         status: sub.status.clone(),
         agent_type: input["subagent_type"].as_str().map(str::to_string),
+        model: sub.model.clone().or_else(|| input["model"].as_str().map(str::to_string)),
         tool_uses: sub.tool_uses.or((sub.steps > 0).then_some(sub.steps as u64)),
         tokens: sub.tokens,
         duration_ms: sub.duration_ms,

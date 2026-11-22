@@ -193,7 +193,7 @@ final class DiagramView: UIView {
     var key = ""
     var onTap: (() -> Void)?
     /// Room around the drawing.
-    static let padding: CGFloat = 12
+    nonisolated static let padding: CGFloat = 12
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -346,7 +346,7 @@ extension Ink {
             case "secondary": .secondaryLabel
             case "canvas": .secondarySystemBackground
             case "card": .tertiarySystemBackground
-            case "accent": .tintColor
+            case "accent": Brand.accentUI
             default: .label
             }
         }
@@ -423,20 +423,84 @@ struct SubagentSheet: View {
 
     private var run: SubagentRun? { store.subagentRuns["\(thread)#\(seq)"] }
     private var info: SubagentInfo? { run?.info ?? store.transcript?.row(seq)?.row.subagent }
+    private var modelLabel: String? {
+        Brand.subagentModelLabel(info?.model ?? ToolSummary.field("model", in: store.transcript?.row(seq)?.row.toolInput ?? ""))
+    }
+
+    private func statusColor(_ status: String) -> Color {
+        switch status {
+        case "running": Brand.accent
+        case "completed": .green
+        case "failed": .red
+        default: .secondary
+        }
+    }
+
+    private func statsLine(_ info: SubagentInfo) -> String? {
+        var parts: [String] = []
+        if let uses = info.toolUses { parts.append("\(uses) tool\(uses == 1 ? "" : "s")") }
+        if let tokens = info.tokens {
+            if tokens >= 1000 {
+                parts.append(String(format: "%.1fk tokens", Double(tokens) / 1000.0))
+            } else {
+                parts.append("\(tokens) tokens")
+            }
+        }
+        if let ms = info.durationMs {
+            parts.append(ms >= 60_000 ? "\(ms / 60_000)m \(ms % 60_000 / 1000)s" : "\(max(1, ms / 1000))s")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
 
     var body: some View {
         NavigationStack {
             List {
                 if let info {
                     Section {
-                        LabeledContent("Status", value: SubagentSheet.statusName(info.status))
-                        if let type = info.agentType { LabeledContent("Agent", value: type) }
-                        if let uses = info.toolUses { LabeledContent("Tool uses", value: uses.formatted()) }
-                        if let tokens = info.tokens { LabeledContent("Tokens", value: tokens.formatted()) }
-                        if let ms = info.durationMs { LabeledContent("Time", value: Duration.milliseconds(ms).formatted(.units(allowed: [.minutes, .seconds], width: .abbreviated))) }
-                        if info.status == "running", let activity = info.activity {
-                            Label(activity, systemImage: "ellipsis").foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack(spacing: 6) {
+                                HStack(spacing: 4) {
+                                    Circle()
+                                        .fill(statusColor(info.status))
+                                        .frame(width: 6, height: 6)
+                                    Text(SubagentSheet.statusName(info.status))
+                                        .font(.caption2.weight(.semibold))
+                                        .foregroundStyle(statusColor(info.status))
+                                }
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 2.5)
+                                .background(statusColor(info.status).opacity(0.14), in: .capsule)
+                                .overlay(Capsule().strokeBorder(statusColor(info.status).opacity(0.28), lineWidth: 0.5))
+
+                                if let modelLabel {
+                                    ModelPill(label: modelLabel)
+                                }
+
+                                if let type = info.agentType, !type.isEmpty {
+                                    Text(type)
+                                        .font(.caption2.weight(.medium))
+                                        .foregroundStyle(.secondary)
+                                        .padding(.horizontal, 7)
+                                        .padding(.vertical, 2.5)
+                                        .background(Color(.tertiarySystemFill), in: .capsule)
+                                        .lineLimit(1)
+                                }
+                                Spacer(minLength: 0)
+                            }
+                            if let stats = statsLine(info) {
+                                Text(stats)
+                                    .font(.caption)
+                                    .monospacedDigit()
+                                    .foregroundStyle(.secondary)
+                            }
+                            if info.status == "running", let activity = info.activity {
+                                Label(activity, systemImage: "ellipsis")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                            }
                         }
+                        .padding(.vertical, 2)
                     }
                 }
                 if let prompt = run?.prompt, !prompt.isEmpty {
@@ -451,7 +515,13 @@ struct SubagentSheet: View {
                 }
                 if let report = run?.report, !report.isEmpty {
                     Section("Report") {
-                        Text(report).font(.callout).textSelection(.enabled)
+                        HStack(alignment: .top, spacing: 10) {
+                            RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                                .fill(Brand.accent)
+                                .frame(width: 3)
+                            Text(report).font(.callout).textSelection(.enabled)
+                        }
+                        .padding(.vertical, 2)
                     }
                 }
                 if run == nil {
@@ -474,7 +544,7 @@ struct SubagentSheet: View {
         .presentationDragIndicator(.visible)
     }
 
-    static func statusName(_ s: String) -> String {
+    nonisolated static func statusName(_ s: String) -> String {
         switch s {
         case "running": "Working"
         case "completed": "Done"

@@ -169,7 +169,7 @@ struct PullDiffLines: View {
                 .padding(.horizontal, 8).padding(.vertical, 5)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .frame(width: codeWidth.map { $0 + gutter + Self.charWidth * 2 }, alignment: .leading)
-                .background(Color.blue.opacity(0.08))
+                .background(Color.accentColor.opacity(0.10))
         case .note:
             Text(line.text).font(.caption2).italic().foregroundStyle(.secondary)
                 .padding(.leading, gutter + Self.charWidth * 2).padding(.vertical, 2)

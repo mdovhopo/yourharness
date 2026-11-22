@@ -34,6 +34,8 @@ struct RowLayout: @unchecked Sendable {
         case icon(symbol: String, tint: UIColor, CGRect)
         /// A sub-agent's card behind its lines.
         case card(CGRect)
+        /// A compact rounded pill badge (e.g. a sub-agent's model).
+        case pill(NSAttributedString, bg: UIColor, border: UIColor, CGRect)
         /// One of the row's pictures, loaded from the Mac when shown.
         case picture(index: Int, CGRect)
         /// A Mermaid diagram drawn as the Mac draws it (`DiagramCache`), by its source's key.
@@ -48,7 +50,7 @@ struct RowLayout: @unchecked Sendable {
     /// Diagrams in it, by key: measured again once they're drawn.
     var diagramKeys: [String] = []
 
-    static let rowGap: CGFloat = 10
+    static let rowGap: CGFloat = 8
     static let codePadding = UIEdgeInsets(top: 8, left: 12, bottom: 10, right: 12)
 
     static func make(_ row: RowModel, width: CGFloat, fonts f: Fonts) -> RowLayout {
@@ -82,41 +84,66 @@ struct RowLayout: @unchecked Sendable {
             height = y + 2
             spoken = "You: " + text + (pictures.isEmpty ? "" : ", \(pictures.count) picture\(pictures.count == 1 ? "" : "s")")
         case .agent(let t, let info):
-            // A card: what it does, how it went, what it's doing now.
+            // A card: what it does, its model pill, how it went, and what it's doing now.
             let running = info?.status == "running" || (info == nil && t.running)
             let status = info?.status ?? (t.running ? "running" : t.failed ? "failed" : "completed")
-            let pad: CGFloat = 12
+            let pad: CGFloat = 11
             let title = NSAttributedString(string: info?.description ?? t.target ?? "Sub-agent", attributes: [.font: f.headline, .foregroundColor: UIColor.label])
+            let modelLabel = Brand.subagentModelLabel(info?.model ?? ToolSummary.field("model", in: row.row.toolInput ?? ""))
             var facts = [running ? "Working" : SubagentSheet.statusName(status)]
             if let type = info?.agentType { facts.append(type) }
-            if let uses = info?.toolUses, uses > 0 { facts.append("\(uses) tool use\(uses == 1 ? "" : "s")") }
-            if let tokens = info?.tokens { facts.append(tokens >= 1000 ? "\(tokens / 1000)k tokens" : "\(tokens) tokens") }
+            if let uses = info?.toolUses, uses > 0 { facts.append("\(uses) tool\(uses == 1 ? "" : "s")") }
+            if let tokens = info?.tokens {
+                if tokens >= 1000 {
+                    facts.append(String(format: "%.1fk tok", Double(tokens) / 1000.0))
+                } else {
+                    facts.append("\(tokens) tok")
+                }
+            }
             if let ms = info?.durationMs, !running { facts.append(ms >= 60_000 ? "\(ms / 60_000)m \(ms % 60_000 / 1000)s" : "\(max(1, ms / 1000))s") }
             let line = NSAttributedString(string: facts.joined(separator: " · "), attributes: [.font: f.footnote, .foregroundColor: UIColor.secondaryLabel])
-            let inner = width - pad * 2 - 30
-            let titleHeight = measure(title, width: inner, maxLines: 2, lineHeight: f.headline.lineHeight).height
+            let inner = width - pad * 2 - 28
             let lineHeight = ceil(f.footnote.lineHeight)
-            var y: CGFloat = 6 + pad
+            let titleLineHeight = ceil(f.headline.lineHeight)
+            var y: CGFloat = 5 + pad
+
+            var titleWidth = inner
+            var pillPart: Part?
+            if let modelLabel {
+                let pillFont = UIFont.systemFont(ofSize: max(10, f.caption.pointSize), weight: .semibold)
+                let pillAttr = NSAttributedString(string: modelLabel, attributes: [.font: pillFont, .foregroundColor: Brand.accentUI])
+                let pillTextSize = measure(pillAttr, width: inner * 0.45)
+                let pillW = min(ceil(pillTextSize.width) + 14, inner * 0.45)
+                let pillH = max(18, ceil(pillTextSize.height) + 4)
+                let pillX = width - pad - pillW
+                let pillY = y + max(0, (titleLineHeight - pillH) / 2)
+                let border = Brand.accentUI.withAlphaComponent(0.32)
+                pillPart = .pill(pillAttr, bg: Brand.accentSoftUI, border: border, CGRect(x: pillX, y: pillY, width: pillW, height: pillH))
+                titleWidth = max(80, inner - pillW - 8)
+            }
+
+            let titleHeight = measure(title, width: titleWidth, maxLines: 2, lineHeight: f.headline.lineHeight).height
             parts = [
                 .card(.zero),
-                .icon(symbol: "person.2", tint: .secondaryLabel, CGRect(x: pad, y: y, width: 22, height: ceil(f.headline.lineHeight))),
-                .text(title, CGRect(x: pad + 30, y: y, width: inner, height: titleHeight), lines: 2),
+                .icon(symbol: "person.2", tint: Brand.accentUI, CGRect(x: pad, y: y, width: 20, height: titleLineHeight)),
+                .text(title, CGRect(x: pad + 28, y: y, width: titleWidth, height: titleHeight), lines: 2),
             ]
-            y += titleHeight + 2
-            let tint: UIColor = status == "failed" ? .systemRed : status == "completed" ? .systemGreen : .secondaryLabel
+            if let pillPart { parts.append(pillPart) }
+            y += titleHeight + 3
+            let tint: UIColor = running ? Brand.accentUI : status == "failed" ? .systemRed : status == "completed" ? .systemGreen : .secondaryLabel
             let symbol = running ? "ellipsis.circle" : status == "failed" ? "xmark.octagon.fill" : status == "completed" ? "checkmark.circle.fill" : "stop.circle"
-            parts.append(.icon(symbol: symbol, tint: tint, CGRect(x: pad, y: y, width: 22, height: lineHeight)))
-            parts.append(.text(line, CGRect(x: pad + 30, y: y, width: inner, height: lineHeight), lines: 1))
+            parts.append(.icon(symbol: symbol, tint: tint, CGRect(x: pad, y: y, width: 20, height: lineHeight)))
+            parts.append(.text(line, CGRect(x: pad + 28, y: y, width: inner, height: lineHeight), lines: 1))
             y += lineHeight
             if running, let activity = info?.activity {
                 let a = NSAttributedString(string: activity, attributes: [.font: f.footnoteItalic, .foregroundColor: UIColor.secondaryLabel])
-                parts.append(.text(a, CGRect(x: pad + 30, y: y + 2, width: inner, height: lineHeight), lines: 1))
+                parts.append(.text(a, CGRect(x: pad + 28, y: y + 2, width: inner, height: lineHeight), lines: 1))
                 y += lineHeight + 2
             }
-            let card = CGRect(x: 0, y: 6, width: width, height: y + pad - 6)
+            let card = CGRect(x: 0, y: 5, width: width, height: y + pad - 5)
             parts[0] = .card(card)
-            height = card.maxY + 6
-            spoken = "Sub-agent: " + title.string + ", " + line.string
+            height = card.maxY + 5
+            spoken = "Sub-agent: " + title.string + (modelLabel.map { ", \($0)" } ?? "") + ", " + line.string
         case .media(let t, let pictures):
             let lineHeight = ceil(f.footnote.lineHeight)
             let label = NSAttributedString(string: pictures.isEmpty ? "Showed you a file" : "Showed you \(pictures.count) picture\(pictures.count == 1 ? "" : "s")",
@@ -298,7 +325,7 @@ enum Style {
                     if inline.contains(.strikethrough) { attributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue }
                 }
                 if let link = run.link {
-                    attributes[.foregroundColor] = UIColor.tintColor
+                    attributes[.foregroundColor] = Brand.accentUI
                     attributes[.link] = link
                 }
                 attributes[.font] = font

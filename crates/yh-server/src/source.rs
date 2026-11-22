@@ -246,10 +246,16 @@ impl Source {
             RawRun::Inline(b) => Some(b),
             RawRun::Blob(hash) => yh_core::db::blob(&self.c, &hash).ok().flatten(),
         };
+        let input_model = row
+            .tool_input
+            .as_deref()
+            .and_then(|i| serde_json::from_str::<Value>(i).ok())
+            .and_then(|v| v["model"].as_str().map(str::to_string));
         row.subagent = bytes.and_then(|b| yh_core::subagent_record::SubagentRecord::summary(&b)).map(|s| SubagentInfo {
             description: s.description,
             status: s.status,
             agent_type: s.agent_type,
+            model: s.model.or(input_model),
             tool_uses: s.tool_uses,
             tokens: s.tokens,
             duration_ms: s.duration_ms,
