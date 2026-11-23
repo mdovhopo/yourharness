@@ -1104,9 +1104,15 @@ impl Workspace {
             .unwrap_or_default();
         let mut projects: Vec<&ProjectMeta> = self.projects.iter().filter(|p| !collapsed.contains(&p.id)).collect();
         projects.sort_by_key(|p| Some(&p.id) != home.as_ref());
+        let hide_auto = self.hide_automation_threads();
         let mut out = vec![];
         for p in projects {
-            let mut live: Vec<&ThreadMeta> = self.threads.iter().map(|t| &t.read(cx).meta).filter(|m| m.project_id == p.id && m.settled_at.is_none()).collect();
+            let mut live: Vec<&ThreadMeta> = self
+                .threads
+                .iter()
+                .map(|t| &t.read(cx).meta)
+                .filter(|m| m.project_id == p.id && m.settled_at.is_none() && !(hide_auto && m.automation_id.is_some()))
+                .collect();
             live.sort_by(|a, b| sidebar_order(a, b));
             out.extend(nest(live, |m| (m.id.clone(), m.parent_id.clone(), m.created_at)).into_iter().map(|(m, _)| m.id.clone()));
         }

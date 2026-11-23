@@ -19,6 +19,8 @@ use std::sync::Mutex;
 pub const SETTING: &str = "automations";
 /// Global kill-switch setting: when true, no scheduled or event automations fire automatically.
 pub const PAUSED_SETTING: &str = "automationsPaused";
+/// When true, threads created by automations are hidden from the sidebar (default false).
+pub const HIDE_THREADS_SETTING: &str = "hideAutomationThreads";
 /// Runs remembered per automation, newest last.
 const MAX_RUNS: usize = 50;
 /// A run later than this after it was due counts as caught up (the app was closed, or asleep).

@@ -270,9 +270,14 @@ impl Sidebar {
         let ws = self.workspace.read(cx);
         let home = ws.home_project();
         let selected = ws.selected.as_deref();
+        let hide_auto = ws.hide_automation_threads();
         let mut by_project: HashMap<&str, Vec<&Entity<ThreadState>>> = HashMap::new();
         for t in &ws.threads {
-            by_project.entry(t.read(cx).meta.project_id.as_str()).or_default().push(t);
+            let m = &t.read(cx).meta;
+            if hide_auto && m.automation_id.is_some() {
+                continue;
+            }
+            by_project.entry(m.project_id.as_str()).or_default().push(t);
         }
         let mut projects: Vec<&ProjectMeta> = ws.projects.iter().collect();
         projects.sort_by_key(|p| Some(&p.id) != home.as_ref());
@@ -529,16 +534,18 @@ impl Sidebar {
         {
             let ws = self.workspace.read(cx);
             let selected = ws.selected.as_deref();
+            let hide_auto = ws.hide_automation_threads();
             for t in &ws.threads {
                 let st = t.read(cx);
                 if st.meta.settled_at.is_some() {
                     continue;
                 }
+                let hidden_auto = hide_auto && st.meta.automation_id.is_some();
                 if st.waiting_for_you() {
                     waiting_ids.push(st.id().to_string());
-                } else if st.run.running || st.run.jobs.agents_running() > 0 {
+                } else if !hidden_auto && (st.run.running || st.run.jobs.agents_running() > 0) {
                     working_n += 1;
-                } else if st.unread && selected != Some(st.id()) {
+                } else if !hidden_auto && st.unread && selected != Some(st.id()) {
                     unread_ids.push(st.id().to_string());
                 }
             }
@@ -749,7 +756,15 @@ impl Sidebar {
     fn project_row(&self, project: &ProjectMeta, home: bool, first: bool, theme: &Theme, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let ws = self.workspace.read(cx);
         let collapsed = self.collapsed.contains(&project.id) && !self.filter_active;
-        let threads: Vec<&Entity<ThreadState>> = ws.threads.iter().filter(|t| t.read(cx).meta.project_id == project.id && t.read(cx).meta.settled_at.is_none()).collect();
+        let hide_auto = ws.hide_automation_threads();
+        let threads: Vec<&Entity<ThreadState>> = ws
+            .threads
+            .iter()
+            .filter(|t| {
+                let m = &t.read(cx).meta;
+                m.project_id == project.id && m.settled_at.is_none() && !(hide_auto && m.automation_id.is_some())
+            })
+            .collect();
         let mut waiting_n = 0usize;
         let mut working_n = 0usize;
         let mut unread_n = 0usize;

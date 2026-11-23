@@ -790,7 +790,8 @@ impl SettingsView {
             .child(
                 section("Automations")
                     .child(self.toggle("agentAutomations", "Let Claude make and change automations", cx))
-                    .footer("When you ask for something later, on a schedule, or on a Mac event, Claude can make a workspace or global automation. Open Automations (⇧⌘A) in the sidebar to manage them all. Off, existing ones keep running."),
+                    .child(self.toggle_or(yh_core::automations::HIDE_THREADS_SETTING, "Do not show threads from automations", false, cx))
+                    .footer("When you ask for something later, on a schedule, or on a Mac event, Claude can make a workspace or global automation. Open Automations (⇧⌘A) in the sidebar to manage them and open their runs even when hidden from the sidebar."),
             )
             .child(
                 section("Thread Titles")

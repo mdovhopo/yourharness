@@ -93,6 +93,11 @@ impl Workspace {
         self.library.setting(automations::PAUSED_SETTING).and_then(|v| v.as_bool()).unwrap_or(false)
     }
 
+    /// Whether automation-created threads are hidden from the sidebar (off by default).
+    pub fn hide_automation_threads(&self) -> bool {
+        self.library.setting(automations::HIDE_THREADS_SETTING).and_then(|v| v.as_bool()).unwrap_or(false)
+    }
+
     pub fn set_automations_paused(&mut self, paused: bool, cx: &mut Context<Self>) {
         self.library.set_setting(automations::PAUSED_SETTING, &Value::Bool(paused));
         self.automations_changed(cx);

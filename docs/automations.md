@@ -12,7 +12,10 @@ or **git/PR event**, or on demand from the UI, Spotlight (`⌘K`), or the comman
   and run history (status, trigger reason, duration, and clickable thread links).
 - **Project page**: compact workspace summary linking directly into the Automations page filtered
   to that workspace.
-- **Sidebar badges**: threads started by an automation carry a subtle bolt icon.
+- **Sidebar badges**: threads started by an automation carry a subtle bolt icon. Settings →
+  Automations → **Do not show threads from automations** (`hideAutomationThreads`, off by default)
+  hides them from the sidebar while keeping them accessible from Run History (and still surfacing
+  any thread waiting on your approval).
 
 ## Scopes & Thread Policies
 
