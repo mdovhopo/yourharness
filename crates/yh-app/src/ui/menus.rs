@@ -11,6 +11,7 @@ use gpui_kit::{App, Entity, Menu, MenuItem, OsAction, SystemMenuType};
 #[derive(Clone, PartialEq, Default, Debug)]
 pub struct MenuState {
     pub usage_open: bool,
+    pub automations_open: bool,
     pub inspector_open: bool,
     /// A thread is on screen (not a page): Find, the message jumps, the right sidebar.
     pub thread_visible: bool,
@@ -24,6 +25,7 @@ impl MenuState {
         let thread = if ws.page.is_none() { ws.selected_thread() } else { None };
         MenuState {
             usage_open: ws.page == Some(Page::Usage),
+            automations_open: ws.page == Some(Page::Automations),
             inspector_open: ws.shows_inspector,
             thread_visible: thread.is_some(),
             running: thread.as_ref().is_some_and(|t| t.read(cx).run.running),
@@ -102,6 +104,7 @@ pub fn set(state: &MenuState, cx: &mut App) {
         Menu {
             name: "View".into(),
             items: vec![
+                MenuItem::action(if s.automations_open { "Hide Automations" } else { "Automations" }, ToggleAutomations),
                 MenuItem::action("Memory", OpenMemory),
                 MenuItem::action(if s.usage_open { "Hide Usage" } else { "Usage" }, ToggleUsage),
                 MenuItem::separator(),

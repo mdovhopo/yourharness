@@ -1238,3 +1238,141 @@ pub fn scroll_bar_mode() -> gpui_kit::base::ScrollbarMode {
     // NSScrollerStyleLegacy = 0: always there; NSScrollerStyleOverlay = 1: while scrolling.
     if style == 0 { gpui_kit::base::ScrollbarMode::Always } else { gpui_kit::base::ScrollbarMode::Scrolling }
 }
+
+// MARK: Mac System Events (Automations)
+
+/// Whether the Mac is currently running on AC power (true on desktops without a battery).
+pub fn is_on_ac_power() -> bool {
+    #[link(name = "IOKit", kind = "framework")]
+    unsafe extern "C" {
+        fn IOPSCopyPowerSourcesInfo() -> *const c_void;
+        fn IOPSGetProvidingPowerSourceType(snapshot: *const c_void) -> core_foundation::string::CFStringRef;
+    }
+    use core_foundation::base::{CFRelease, TCFType};
+    use core_foundation::string::CFString;
+    unsafe {
+        let info = IOPSCopyPowerSourcesInfo();
+        if info.is_null() {
+            return true;
+        }
+        let kind = IOPSGetProvidingPowerSourceType(info);
+        let on_ac = if kind.is_null() {
+            true
+        } else {
+            let s = CFString::wrap_under_get_rule(kind).to_string();
+            s != "Battery Power"
+        };
+        CFRelease(info);
+        on_ac
+    }
+}
+
+/// Native macOS events delivered by `MacEventMonitor` without any privacy prompts.
+#[derive(Clone, Debug)]
+pub enum MacSystemEvent {
+    Wake,
+    ScreenUnlock,
+    AppLaunched { name: String, bundle_id: String },
+    AppQuit { name: String, bundle_id: String },
+    PowerChanged { on_ac: bool },
+}
+
+/// Active AppKit & DistributedNotificationCenter observers for Mac system event triggers.
+/// Mounted lazily only when an enabled automation needs Mac events; removes all observers on Drop.
+pub struct MacEventMonitor {
+    /// `(notification_center, observer_token)` pairs retained until Drop.
+    observers: Vec<(usize, usize)>,
+}
+
+impl MacEventMonitor {
+    pub fn start() -> (Self, flume::Receiver<MacSystemEvent>) {
+        let (tx, rx) = flume::unbounded::<MacSystemEvent>();
+        let mut observers: Vec<(usize, usize)> = vec![];
+        unsafe {
+            let ws: id = msg_send![class!(NSWorkspace), sharedWorkspace];
+            let ws_nc: id = msg_send![ws, notificationCenter];
+            let dist_nc: id = msg_send![class!(NSDistributedNotificationCenter), defaultCenter];
+
+            let add = |nc: id, name: &str, tx: flume::Sender<MacSystemEvent>, map: fn(id) -> Option<MacSystemEvent>, out: &mut Vec<(usize, usize)>| {
+                let ns_name = NSString::alloc(nil).init_str(name);
+                let blk = block::ConcreteBlock::new(move |note: id| {
+                    if let Some(ev) = map(note) {
+                        let _ = tx.send(ev);
+                    }
+                })
+                .copy();
+                let obs: id = msg_send![nc, addObserverForName: ns_name object: nil queue: nil usingBlock: &*blk];
+                if obs != nil {
+                    let _: id = msg_send![obs, retain];
+                    out.push((nc as usize, obs as usize));
+                }
+            };
+
+            fn read_app(note: id) -> Option<(String, String)> {
+                unsafe {
+                    let info: id = msg_send![note, userInfo];
+                    if info == nil {
+                        return None;
+                    }
+                    let key = NSString::alloc(nil).init_str("NSWorkspaceApplicationKey");
+                    let app: id = msg_send![info, objectForKey: key];
+                    if app == nil {
+                        return None;
+                    }
+                    let ns_to_str = |s: id| -> String {
+                        if s == nil {
+                            return String::new();
+                        }
+                        let p: *const std::ffi::c_char = msg_send![s, UTF8String];
+                        if p.is_null() { String::new() } else { std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned() }
+                    };
+                    let name = ns_to_str(msg_send![app, localizedName]);
+                    let bundle_id = ns_to_str(msg_send![app, bundleIdentifier]);
+                    (!name.is_empty() || !bundle_id.is_empty()).then_some((name, bundle_id))
+                }
+            }
+
+            add(ws_nc, "NSWorkspaceDidWakeNotification", tx.clone(), |_| Some(MacSystemEvent::Wake), &mut observers);
+            add(
+                ws_nc,
+                "NSWorkspaceDidLaunchApplicationNotification",
+                tx.clone(),
+                |note| read_app(note).map(|(name, bundle_id)| MacSystemEvent::AppLaunched { name, bundle_id }),
+                &mut observers,
+            );
+            add(
+                ws_nc,
+                "NSWorkspaceDidTerminateApplicationNotification",
+                tx.clone(),
+                |note| read_app(note).map(|(name, bundle_id)| MacSystemEvent::AppQuit { name, bundle_id }),
+                &mut observers,
+            );
+            add(dist_nc, "com.apple.screenIsUnlocked", tx.clone(), |_| Some(MacSystemEvent::ScreenUnlock), &mut observers);
+            add(
+                dist_nc,
+                "com.apple.system.powermanagement.poweradapter",
+                tx,
+                |_| Some(MacSystemEvent::PowerChanged { on_ac: is_on_ac_power() }),
+                &mut observers,
+            );
+        }
+        (MacEventMonitor { observers }, rx)
+    }
+}
+
+impl Drop for MacEventMonitor {
+    fn drop(&mut self) {
+        let pairs = std::mem::take(&mut self.observers);
+        if pairs.is_empty() {
+            return;
+        }
+        run_on_main(Box::new(move || unsafe {
+            for (nc, obs) in pairs {
+                let nc = nc as id;
+                let obs = obs as id;
+                let _: () = msg_send![nc, removeObserver: obs];
+                let _: () = msg_send![obs, release];
+            }
+        }));
+    }
+}

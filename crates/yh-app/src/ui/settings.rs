@@ -790,7 +790,7 @@ impl SettingsView {
             .child(
                 section("Automations")
                     .child(self.toggle("agentAutomations", "Let Claude make and change automations", cx))
-                    .footer("When you ask for something later or again and again, Claude can make an automation: a prompt the project runs by itself, once or on a schedule. Every project's page lists them. Off, the ones there keep running, and threads already open keep the tools until their Claude starts again."),
+                    .footer("When you ask for something later, on a schedule, or on a Mac event, Claude can make a workspace or global automation. Open Automations (⇧⌘A) in the sidebar to manage them all. Off, existing ones keep running."),
             )
             .child(
                 section("Thread Titles")

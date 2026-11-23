@@ -41,6 +41,8 @@ Usage:
   yh projects            List projects
   yh add FOLDER          Add a folder as a project
   yh rename THREAD TITLE | pin THREAD | unpin THREAD | settle THREAD | unsettle THREAD
+  yh trigger AUTOMATION [--data TEXT] [-f FILE]... [--show] [--wait | --follow]
+                         Trigger an automation by name, slug, or ID (great for Shortcuts & hooks)
   yh status              Whether the app is running, and which
 
 THREAD is an ID, the start of one, a title, or \"last\" (the latest one worked on).
@@ -59,7 +61,7 @@ Environment: YH_DATA_DIR (another data folder), YH_APP (the app to start).
 ";
 
 /// Flags that take a value, and their short forms.
-const VALUED: &[(&str, &str)] = &[("project", "p"), ("file", "f"), ("model", "m"), ("effort", "e"), ("mode", ""), ("agent", ""), ("title", ""), ("draft", ""), ("rows", "n"), ("timeout", ""), ("request", "")];
+const VALUED: &[(&str, &str)] = &[("project", "p"), ("file", "f"), ("model", "m"), ("effort", "e"), ("mode", ""), ("agent", ""), ("title", ""), ("draft", ""), ("data", "d"), ("rows", "n"), ("timeout", ""), ("request", "")];
 const SWITCHES: &[(&str, &str)] = &[("json", ""), ("wait", "w"), ("follow", ""), ("now", ""), ("show", ""), ("all", "a"), ("no-launch", ""), ("help", "h"), ("version", "")];
 const MODES: &[&str] = &["auto", "ask", "acceptEdits", "plan", "bypass"];
 const EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
@@ -195,6 +197,7 @@ fn run(raw: Vec<String>) -> Result<(), Fail> {
         "unpin" => simple(&args, |id, t| FromApp::Pin { id, thread: t, on: false }),
         "settle" => simple(&args, |id, t| FromApp::Settle { id, thread: t, on: true }),
         "unsettle" => simple(&args, |id, t| FromApp::Settle { id, thread: t, on: false }),
+        "trigger" => trigger(&args),
         "status" => status(&args),
         "help" => {
             print!("{HELP}");
@@ -512,6 +515,40 @@ fn open(args: &Args) -> Result<(), Fail> {
     app.act(|id| FromApp::Show { id, thread: None, project: project.as_ref().map(|p| p.id.clone()), draft, files })?;
     if args.on("json") {
         println!("{}", json!({ "project": project.map(|p| json!({ "id": p.id, "name": p.name, "path": p.path })) }));
+    }
+    Ok(())
+}
+
+fn trigger(args: &Args) -> Result<(), Fail> {
+    let name = args.words.first().ok_or_else(|| usage("Which automation? yh trigger NAME [--data \"…\"] [-f FILE]"))?.clone();
+    let data = match args.value("data") {
+        Some("-") => Some(prompt(&["-".to_string()])?),
+        Some(v) => Some(v.to_string()),
+        None if args.words.len() > 1 => Some(args.words[1..].join(" ")),
+        None if !std::io::stdin().is_terminal() => {
+            let s = prompt(&[])?;
+            (!s.is_empty()).then_some(s)
+        }
+        None => None,
+    };
+    let files = files(args)?;
+    let timeout = args.timeout()?;
+    let mut app = connect(args, args.on("show"))?;
+    let (made, _) = app.act(|id| FromApp::TriggerAutomation { id, name: name.clone(), data, files })?;
+    let thread = made.ok_or("The app didn't say which thread it started.")?;
+    if args.on("show") {
+        app.act(|id| FromApp::Show { id, thread: Some(thread.clone()), project: None, draft: None, files: vec![] })?;
+    }
+    let head = json!({ "automation": name, "thread": thread });
+    if args.on("wait") || args.on("follow") {
+        let (_, rows, live) = app.subscribe(&thread, 200)?;
+        let turn = follow(&mut app, &thread, 0, rows, live, false, args.on("follow"), args.on("json"), timeout)?;
+        return finish(args, head, turn);
+    }
+    if args.on("json") {
+        println!("{head}");
+    } else {
+        println!("{thread}");
     }
     Ok(())
 }

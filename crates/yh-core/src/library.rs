@@ -159,6 +159,10 @@ pub struct ThreadMeta {
     pub parent_id: Option<String>,
     /// Its messages that thread's agent sent (`send_to_thread`), by message id: marked as such.
     pub agent_messages: Vec<String>,
+    /// The automation that started this thread (`automationID`), when any.
+    pub automation_id: Option<String>,
+    /// Per-thread permission mode override (`permissionMode`), overriding the project's mode.
+    pub permission_mode: Option<String>,
 }
 
 impl ThreadMeta {
@@ -186,6 +190,8 @@ impl ThreadMeta {
             context_window: None,
             parent_id: None,
             agent_messages: vec![],
+            automation_id: None,
+            permission_mode: None,
         }
     }
 
@@ -217,6 +223,8 @@ impl ThreadMeta {
             context_window: o.get("contextWindow").and_then(Value::as_u64),
             parent_id: s("parentThreadID"),
             agent_messages: list(o, "agentMessageIDs"),
+            automation_id: s("automationID").filter(|v| !v.is_empty()),
+            permission_mode: s("permissionMode").filter(|v| !v.is_empty()),
         }
     }
 }

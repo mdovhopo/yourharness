@@ -63,6 +63,11 @@ impl Workspace {
             return;
         }
         let id = t.id().strip_prefix(SIDE).unwrap_or(t.id()).to_string();
+        match self.notify_policy_for_thread(&id, cx) {
+            yh_core::automations::NotifyPolicy::Silent => return,
+            yh_core::automations::NotifyPolicy::NeedsAttention if kind == Kind::Finished => return,
+            _ => {}
+        }
         // Started by another thread whose turn runs: its agent follows this one and answers.
         if self.watched_by(&id, cx).is_some() {
             return;

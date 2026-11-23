@@ -90,6 +90,7 @@ fn main() {
             KeyBinding::new("ctrl-cmd-s", ui::root::ToggleSidebar, None),
             KeyBinding::new("shift-cmd-m", ui::root::OpenMemory, None),
             KeyBinding::new("shift-cmd-u", ui::root::ToggleUsage, None),
+            KeyBinding::new("shift-cmd-a", ui::root::ToggleAutomations, None),
             KeyBinding::new("cmd-s", crate::ui::memory::SaveMemory, Some("MemoryPage")),
             KeyBinding::new("cmd-,", OpenSettings, None),
             KeyBinding::new("cmd-k", OpenSpotlight, None),
@@ -115,6 +116,7 @@ fn main() {
             KeyBinding::new("cmd-m", ui::root::Minimize, None),
             KeyBinding::new("ctrl-cmd-f", ui::root::ToggleFullScreen, None),
             KeyBinding::new("escape", ui::usage::CloseUsage, Some("UsagePage")),
+            KeyBinding::new("escape", ui::automations::CloseAutomations, Some("AutomationsPage")),
         ]);
         // Asks first while background jobs run (`ui::jobs::guard_quit`).
         cx.on_action(|_: &Quit, cx| cx.defer(ui::jobs::quit));
@@ -1048,6 +1050,16 @@ fn main() {
             })
             .detach();
         }
+        // `YH_OPEN_AUTOMATIONS=1`: Automations page opened after `YH_DRAFT_DELAY`.
+        if env("YH_OPEN_AUTOMATIONS").as_deref() == Some("1") {
+            let delay: f64 = env("YH_DRAFT_DELAY").and_then(|v| v.parse().ok()).unwrap_or(1.0);
+            let workspace = workspace.clone();
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(Duration::from_secs_f64(delay)).await;
+                let _ = cx.update(|cx| workspace.update(cx, |ws, cx| ws.open_automations(None, cx)));
+            })
+            .detach();
+        }
         // `YH_OPEN_MCP=1`: the selected thread's `/mcp` sheet after `YH_DRAFT_DELAY`, its servers
         // printed. `YH_MCP_ADD_URL=<url>` or `YH_MCP_ADD_COMMAND=<command line>` fills Add Server
         // (`YH_MCP_ADD_SCOPE=local|project|user`), `YH_MCP_ADD_SUBMIT=1` adds it, `YH_MCP_REMOVE=<name>`
@@ -1262,6 +1274,7 @@ fn main() {
                         let open = match &ws.page {
                             Some(state::workspace::Page::Memory(p)) => format!("Memory of {}", ws.project(p).map(|p| p.name.clone()).unwrap_or_default()),
                             Some(state::workspace::Page::Project(p)) => format!("project page of {}", ws.project(p).map(|p| p.name.clone()).unwrap_or_default()),
+                            Some(state::workspace::Page::Automations) => "Automations".into(),
                             Some(state::workspace::Page::Usage) => "Usage".into(),
                             None => ws.selected_thread().map(|t| format!("“{}” in {}", t.read(cx).title, ws.project(&t.read(cx).meta.project_id).map(|p| p.name.clone()).unwrap_or_default())).unwrap_or_else(|| "nothing".into()),
                         };

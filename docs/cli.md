@@ -12,6 +12,7 @@ yh send last "now add a test" --wait
 yh threads                                    # ID, state (working, waiting, idle), project, title
 yh read 6e53 -n 20
 yh allow 6e53                                 # the first permission it waits on
+yh trigger "morning-briefing" --data "focus on CI" --wait
 yh open ~/dev/web --draft "look at the login page"   # a new thread there, nothing sent
 yh --help
 ```

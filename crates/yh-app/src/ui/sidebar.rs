@@ -611,6 +611,38 @@ impl Sidebar {
                             .on_click(|_, window, cx| window.dispatch_action(Box::new(crate::ui::root::OpenSpotlight), cx)),
                     ),
             )
+            .child({
+                let ws_r = self.workspace.read(cx);
+                let auto_open = ws_r.page == Some(Page::Automations);
+                let paused_all = ws_r.automations_paused();
+                let autos = ws_r.automations();
+                let active_n = autos.iter().filter(|a| a.enabled).count();
+                let any_error = !paused_all && autos.iter().any(|a| a.enabled && a.last_run().is_some_and(|r| r.effective_status() == yh_core::automations::RunStatus::Error));
+                let ws_auto = self.workspace.clone();
+                div()
+                    .id("nav-automations")
+                    .role(gpui_kit::Role::Button)
+                    .aria_label("Automations")
+                    .aria_keyshortcuts("⇧⌘A")
+                    .flex()
+                    .items_center()
+                    .gap(px(GAP))
+                    .h(px(ROW_HEIGHT))
+                    .px(px(ROW_INSET + 2.))
+                    .rounded(px(radius::MEDIUM))
+                    .cursor_pointer()
+                    .when(auto_open, |d| d.bg(theme.selected))
+                    .when(!auto_open, |d| d.hover(|s| s.bg(theme.hover)))
+                    .text_size(px(text::FOOTNOTE))
+                    .text_color(if auto_open { theme.text } else { theme.secondary })
+                    .child(icons::zap().size(px(ICON)).text_color(if paused_all { theme.warning } else if auto_open { theme.accent } else { theme.secondary }))
+                    .child(div().flex_1().min_w_0().truncate().font_weight(if auto_open { FontWeight::MEDIUM } else { FontWeight::NORMAL }).child("Automations"))
+                    .when(any_error, |d| d.child(div().flex_none().w(px(6.)).h(px(6.)).rounded_full().bg(theme.error)))
+                    .when(paused_all, |d| d.child(div().flex_none().text_size(px(10.)).text_color(theme.warning).child("Paused")))
+                    .when(!paused_all && active_n > 0, |d| d.child(div().flex_none().text_size(px(text::CAPTION)).text_color(theme.tertiary).child(active_n.to_string())))
+                    .tooltip(tooltip("Scheduled & Mac-event automations (⇧⌘A)"))
+                    .on_click(move |_, _, cx| ws_auto.update(cx, |ws, cx| ws.open_automations(None, cx)))
+            })
             .when(show_triage, |d| {
                 d.child(
                     div()
@@ -1171,6 +1203,9 @@ impl Sidebar {
                     .child(t.title.clone()),
             )
             .when(pinned, |d| d.child(icons::pin().size(px(10.)).text_color(theme.tertiary).rotate(gpui_kit::radians(0.7))))
+            .when(t.meta.automation_id.is_some(), |d| {
+                d.child(div().id(SharedString::from(format!("auto-badge-{id}"))).flex_none().child(icons::zap().size(px(10.5)).text_color(theme.tertiary)).tooltip(tooltip("Started by an automation")))
+            })
             .when_some(workflow, |d, name| {
                 d.child(div().id(SharedString::from(format!("workflow-{id}"))).flex_none().child(crate::ui::icons::workflow().size(px(11.)).text_color(theme.accent)).tooltip(tooltip(SharedString::from(format!("Workflow: {name}")))))
             })

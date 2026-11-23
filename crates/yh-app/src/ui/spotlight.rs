@@ -17,6 +17,7 @@ use std::collections::HashSet;
 pub enum Section {
     Recent,
     Threads,
+    Automations,
     Tasks,
     Memories,
     Projects,
@@ -29,6 +30,7 @@ impl Section {
         match self {
             Section::Recent => "Recent Threads",
             Section::Threads => "Threads",
+            Section::Automations => "Automations",
             Section::Tasks => "Tasks",
             Section::Memories => "Memories",
             Section::Projects => "Projects",
@@ -54,6 +56,8 @@ pub enum Action {
     Reconciler(String),
     AddProject,
     ResumeSession,
+    OpenAutomations,
+    RunAutomation(String),
     Settings,
 }
 
@@ -77,6 +81,7 @@ enum Glyph {
     Reconcile,
     AddProject,
     Resume,
+    Automation,
     Settings,
 }
 
@@ -248,6 +253,7 @@ impl Spotlight {
         };
         vec![
             hit("new-thread", Glyph::New, "New Thread", format!("In {name}"), Some("⌘N"), Action::NewThread(project.clone())),
+            hit("automations", Glyph::Automation, "Automations", "Scheduled & Mac-event prompts".into(), Some("⇧⌘A"), Action::OpenAutomations),
             hit("memory", Glyph::Brain, "Open Memory", name.clone(), Some("⇧⌘M"), Action::OpenMemory(project.clone())),
             hit("tasks", Glyph::Tasks, "Open Tasks", name.clone(), None, Action::OpenTasks(project.clone())),
             hit("import", Glyph::Import, "Import Memory…", format!("The Importer, for {name}"), None, Action::Importer(project.clone())),
@@ -280,6 +286,24 @@ impl Spotlight {
                     snippet: None,
                     shortcut: None,
                     action: Action::Project(p.id.clone()),
+                });
+            }
+            let now = yh_core::automations::now();
+            for a in ws.automations().into_iter().filter(|a| matches(&a.name, &words) || matches(&a.prompt, &words)).take(6) {
+                let scope = if a.scope().is_global() {
+                    "Global".to_string()
+                } else {
+                    ws.project(&a.project_id).map(|p| p.name.clone()).unwrap_or_else(|| "Workspace".into())
+                };
+                hits.push(Hit {
+                    id: format!("automation-{}", a.id),
+                    section: Section::Automations,
+                    glyph: Glyph::Automation,
+                    title: format!("Run “{}”", a.name),
+                    subtitle: format!("{scope} · {}", a.effective_trigger().describe(now)),
+                    snippet: None,
+                    shortcut: None,
+                    action: Action::RunAutomation(a.id),
                 });
             }
         }
@@ -464,6 +488,7 @@ fn glyph(g: Glyph, theme: &Theme) -> (Icon, Option<Hsla>) {
         Glyph::Reconcile => (Icon::new(IconName::Replace), None),
         Glyph::AddProject => (Icon::new(IconName::FolderOpen), None),
         Glyph::Resume => (Icon::new(IconName::Redo2), None),
+        Glyph::Automation => (icons::zap(), Some(theme.accent)),
         Glyph::Settings => (Icon::new(IconName::Settings), None),
     }
 }

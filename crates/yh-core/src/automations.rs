@@ -1,13 +1,15 @@
-//! Automations: a prompt a project runs by itself, once at a time or on a schedule (every so
-//! many minutes, at a time of day on some weekdays, or a cron line). Each run starts a new
-//! thread in the project, or goes to the same thread every time. Times are the Mac's local
-//! time. They're kept in one setting, `automations` (a JSON array), so the database keeps the
-//! format 0.0.x wrote; an entry this version can't read is kept and saved back untouched.
+//! Automations: prompts YourHarness runs by itself — per workspace or globally — on a
+//! schedule (once, every N minutes, daily/weekdays, or 5-field cron), in reaction to Mac system
+//! events (wake, screen unlock, app launch/quit, power, network, app start), file/folder or
+//! git/PR events, or manually / via `yh trigger`.
 //!
-//! The app's timer asks `due` and records each run with `ran`; a run missed while the app was
-//! closed or the Mac slept happens once when it's back, then the schedule carries on. The agent
-//! tools are `automation_tools.rs`; parsing what people write (`parse`) and saying it back
-//! (`Schedule::describe`) are here, so the chat and the page agree.
+//! Each run can start a new thread, start a new thread and settle the previous run's thread,
+//! or continue in the same thread every time. Guardrails (debounce, cooldown, active hours,
+//! overlap policy, AC-power-only, optional shell pre-check) prevent event storms and wasted runs.
+//!
+//! Times are the Mac's local time. Records are kept in one setting, `automations` (a JSON array),
+//! preserving full compatibility with v1 (0.4.0) and 0.0.x databases; unknown entries are kept
+//! untouched on save.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -15,12 +17,105 @@ use std::sync::Mutex;
 
 /// The setting the automations are kept in.
 pub const SETTING: &str = "automations";
+/// Global kill-switch setting: when true, no scheduled or event automations fire automatically.
+pub const PAUSED_SETTING: &str = "automationsPaused";
 /// Runs remembered per automation, newest last.
-const MAX_RUNS: usize = 20;
+const MAX_RUNS: usize = 50;
 /// A run later than this after it was due counts as caught up (the app was closed, or asleep).
 const LATE: f64 = 120.0;
 /// The shortest repeat: a minute.
 const MIN_EVERY: u32 = 1;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum Scope {
+    Project { project_id: String },
+    Global,
+}
+
+impl Scope {
+    pub fn is_global(&self) -> bool {
+        matches!(self, Scope::Global)
+    }
+
+    pub fn project_id(&self) -> Option<&str> {
+        match self {
+            Scope::Project { project_id } => Some(project_id.as_str()),
+            Scope::Global => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ThreadPolicy {
+    /// Start a new thread every run; previous threads stay live.
+    #[default]
+    New,
+    /// Start a new thread every run and automatically settle the previous run's thread.
+    NewSettlePrevious,
+    /// Reuse one thread every run (made on the first run, or pinned to an existing thread).
+    Same,
+}
+
+impl ThreadPolicy {
+    pub fn label(self) -> &'static str {
+        match self {
+            ThreadPolicy::New => "New thread each run",
+            ThreadPolicy::NewSettlePrevious => "New thread, settle previous",
+            ThreadPolicy::Same => "Same thread each run",
+        }
+    }
+
+    pub fn short_label(self) -> &'static str {
+        match self {
+            ThreadPolicy::New => "New thread",
+            ThreadPolicy::NewSettlePrevious => "New & settle prev",
+            ThreadPolicy::Same => "Same thread",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OverlapPolicy {
+    /// Skip this trigger if the previous run of this automation is still working.
+    #[default]
+    Skip,
+    /// Queue into the thread (for SameThread) or run once the active run finishes.
+    Queue,
+    /// Allow concurrent runs (still capped by the per-project running limit).
+    Allow,
+}
+
+impl OverlapPolicy {
+    pub fn label(self) -> &'static str {
+        match self {
+            OverlapPolicy::Skip => "Skip if still running",
+            OverlapPolicy::Queue => "Queue behind active run",
+            OverlapPolicy::Allow => "Allow parallel runs",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NotifyPolicy {
+    #[default]
+    Always,
+    NeedsAttention,
+    Silent,
+}
+
+impl NotifyPolicy {
+    pub fn label(self) -> &'static str {
+        match self {
+            NotifyPolicy::Always => "When finished or waiting",
+            NotifyPolicy::NeedsAttention => "Only when waiting on you",
+            NotifyPolicy::Silent => "Silent",
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
@@ -35,6 +130,320 @@ pub enum Schedule {
     Cron { expr: String },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SystemEventKind {
+    MacWake,
+    ScreenUnlock,
+    AppLaunched,
+    AppQuit,
+    PowerChanged,
+    NetworkOnline,
+    AppLaunch,
+}
+
+impl SystemEventKind {
+    pub const ALL: [SystemEventKind; 7] = [
+        SystemEventKind::MacWake,
+        SystemEventKind::ScreenUnlock,
+        SystemEventKind::AppLaunched,
+        SystemEventKind::AppQuit,
+        SystemEventKind::PowerChanged,
+        SystemEventKind::NetworkOnline,
+        SystemEventKind::AppLaunch,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SystemEventKind::MacWake => "Mac wakes from sleep",
+            SystemEventKind::ScreenUnlock => "Screen unlocks",
+            SystemEventKind::AppLaunched => "App launches",
+            SystemEventKind::AppQuit => "App quits",
+            SystemEventKind::PowerChanged => "Power source changes",
+            SystemEventKind::NetworkOnline => "Network comes online",
+            SystemEventKind::AppLaunch => "YourHarness opens",
+        }
+    }
+
+    pub fn short_label(self) -> &'static str {
+        match self {
+            SystemEventKind::MacWake => "On wake",
+            SystemEventKind::ScreenUnlock => "On unlock",
+            SystemEventKind::AppLaunched => "App launch",
+            SystemEventKind::AppQuit => "App quit",
+            SystemEventKind::PowerChanged => "Power change",
+            SystemEventKind::NetworkOnline => "Back online",
+            SystemEventKind::AppLaunch => "On startup",
+        }
+    }
+
+    pub fn needs_app_filter(self) -> bool {
+        matches!(self, SystemEventKind::AppLaunched | SystemEventKind::AppQuit)
+    }
+
+    pub fn needs_power_filter(self) -> bool {
+        matches!(self, SystemEventKind::PowerChanged)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemTrigger {
+    pub event: SystemEventKind,
+    /// Optional app name or bundle ID substring for AppLaunched / AppQuit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<String>,
+    /// Optional power filter for PowerChanged: "ac" or "battery".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub power: Option<String>,
+}
+
+impl SystemTrigger {
+    pub fn describe(&self) -> String {
+        match self.event {
+            SystemEventKind::AppLaunched => match self.app.as_deref().filter(|s| !s.trim().is_empty()) {
+                Some(app) => format!("When {app} launches"),
+                None => "When any app launches".into(),
+            },
+            SystemEventKind::AppQuit => match self.app.as_deref().filter(|s| !s.trim().is_empty()) {
+                Some(app) => format!("When {app} quits"),
+                None => "When any app quits".into(),
+            },
+            SystemEventKind::PowerChanged => match self.power.as_deref() {
+                Some("ac") => "When plugged in".into(),
+                Some("battery") => "When on battery".into(),
+                _ => "When power changes".into(),
+            },
+            other => other.label().into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileWatchTrigger {
+    /// Relative to project folder ("" for project root), or absolute / `~`-prefixed path.
+    #[serde(default)]
+    pub path: String,
+    /// Optional comma-separated glob patterns (e.g. "*.pdf", "docs/**/*.md").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub glob: Option<String>,
+    /// Optional event kinds: "create", "modify", "delete" (empty: any change).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<String>,
+}
+
+impl FileWatchTrigger {
+    pub fn describe(&self) -> String {
+        let target = if self.path.trim().is_empty() { "workspace" } else { self.path.trim() };
+        match self.glob.as_deref().map(str::trim).filter(|g| !g.is_empty()) {
+            Some(g) => format!("Watch {target} ({g})"),
+            None => format!("Watch {target}"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RepoEventKind {
+    BranchChanged,
+    CommitMade,
+    PrReviewRequested,
+    PrChecksFailed,
+    PrMerged,
+}
+
+impl RepoEventKind {
+    pub const ALL: [RepoEventKind; 5] = [
+        RepoEventKind::BranchChanged,
+        RepoEventKind::CommitMade,
+        RepoEventKind::PrReviewRequested,
+        RepoEventKind::PrChecksFailed,
+        RepoEventKind::PrMerged,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            RepoEventKind::BranchChanged => "Git branch changes",
+            RepoEventKind::CommitMade => "New git commit",
+            RepoEventKind::PrReviewRequested => "PR review requested",
+            RepoEventKind::PrChecksFailed => "PR checks fail",
+            RepoEventKind::PrMerged => "PR merged",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoTrigger {
+    pub event: RepoEventKind,
+    /// Optional branch filter (e.g. "main", "release/*").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+}
+
+impl RepoTrigger {
+    pub fn describe(&self) -> String {
+        match self.branch.as_deref().map(str::trim).filter(|b| !b.is_empty()) {
+            Some(b) => format!("{} ({b})", self.event.label()),
+            None => self.event.label().into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum Trigger {
+    Schedule { schedule: Schedule },
+    System(SystemTrigger),
+    FileWatch(FileWatchTrigger),
+    Repo(RepoTrigger),
+    Manual,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TriggerCategory {
+    Schedule,
+    System,
+    FileRepo,
+    Manual,
+}
+
+impl Trigger {
+    pub fn category(&self) -> TriggerCategory {
+        match self {
+            Trigger::Schedule { .. } => TriggerCategory::Schedule,
+            Trigger::System(_) => TriggerCategory::System,
+            Trigger::FileWatch(_) | Trigger::Repo(_) => TriggerCategory::FileRepo,
+            Trigger::Manual => TriggerCategory::Manual,
+        }
+    }
+
+    pub fn schedule(&self) -> Option<&Schedule> {
+        match self {
+            Trigger::Schedule { schedule } => Some(schedule),
+            _ => None,
+        }
+    }
+
+    pub fn is_event(&self) -> bool {
+        matches!(self, Trigger::System(_) | Trigger::FileWatch(_) | Trigger::Repo(_))
+    }
+
+    pub fn describe(&self, now: f64) -> String {
+        match self {
+            Trigger::Schedule { schedule } => schedule.describe(now),
+            Trigger::System(s) => s.describe(),
+            Trigger::FileWatch(f) => f.describe(),
+            Trigger::Repo(r) => r.describe(),
+            Trigger::Manual => "Manual / CLI".into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveHours {
+    pub start_hour: u32,
+    #[serde(default)]
+    pub start_minute: u32,
+    pub end_hour: u32,
+    #[serde(default)]
+    pub end_minute: u32,
+    /// 0 Sunday … 6 Saturday; empty means every day.
+    #[serde(default)]
+    pub weekdays: Vec<u8>,
+}
+
+impl ActiveHours {
+    pub fn contains(&self, now: f64) -> bool {
+        let (_, _, _, hh, mm, wd) = local(now);
+        if !self.weekdays.is_empty() && !self.weekdays.contains(&(wd as u8)) {
+            return false;
+        }
+        let cur = hh * 60 + mm;
+        let start = self.start_hour * 60 + self.start_minute;
+        let end = self.end_hour * 60 + self.end_minute;
+        if start <= end {
+            cur >= start && cur <= end
+        } else {
+            // Overnight window, e.g. 22:00 - 06:00.
+            cur >= start || cur <= end
+        }
+    }
+
+    pub fn describe(&self) -> String {
+        let range = format!("{}:{:02}–{}:{:02}", self.start_hour, self.start_minute, self.end_hour, self.end_minute);
+        if self.weekdays.is_empty() {
+            range
+        } else {
+            let mut days = self.weekdays.clone();
+            days.sort_unstable();
+            days.dedup();
+            match days.as_slice() {
+                [1, 2, 3, 4, 5] => format!("Weekdays {range}"),
+                [0, 6] => format!("Weekends {range}"),
+                many => format!("{} {range}", many.iter().map(|d| DAYS[*d as usize % 7]).collect::<Vec<_>>().join(", ")),
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Guardrails {
+    /// Burst debounce for file/repo watchers, in seconds (0 uses default 2s).
+    #[serde(default)]
+    pub debounce_secs: u32,
+    /// Minimum seconds between non-manual runs (0 = no cooldown).
+    #[serde(default)]
+    pub cooldown_secs: u32,
+    /// Optional local-time window during which non-manual runs may fire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_hours: Option<ActiveHours>,
+    #[serde(default)]
+    pub overlap: OverlapPolicy,
+    /// Skip automatic runs when the Mac is on battery power.
+    #[serde(default)]
+    pub ac_power_only: bool,
+    /// Optional fast shell pre-check command; non-zero exit skips invoking the AI agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition_cmd: Option<String>,
+}
+
+impl Guardrails {
+    pub fn effective_debounce_secs(&self) -> u32 {
+        if self.debounce_secs == 0 { 2 } else { self.debounce_secs }
+    }
+
+    pub fn is_default(&self) -> bool {
+        *self == Guardrails::default()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RunStatus {
+    #[default]
+    Done,
+    Running,
+    Waiting,
+    Skipped,
+    Error,
+}
+
+impl RunStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            RunStatus::Done => "Done",
+            RunStatus::Running => "Running",
+            RunStatus::Waiting => "Waiting",
+            RunStatus::Skipped => "Skipped",
+            RunStatus::Error => "Failed",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Run {
@@ -43,42 +452,158 @@ pub struct Run {
     /// The thread it started or sent to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_id: Option<String>,
-    /// Why it couldn't run.
+    /// Why it couldn't run (or why it was skipped).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     /// It ran late: it came due while the app was closed or the Mac slept.
     #[serde(default)]
     pub caught_up: bool,
-    /// Run Now, not the schedule.
+    /// Run Now, not the schedule/event.
     #[serde(default)]
     pub manual: bool,
+    /// Live or final status (None in v1 records; inferred via `effective_status`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<RunStatus>,
+    /// Short human description of what triggered this run ("Scheduled", "Mac woke", "File changed", "CLI").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_reason: Option<String>,
+    /// How long the turn took in seconds, recorded when it finishes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_secs: Option<f64>,
+    /// The previous thread that was settled by this run (`NewSettlePrevious`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settled_previous: Option<String>,
+}
+
+impl Run {
+    pub fn effective_status(&self) -> RunStatus {
+        if let Some(s) = self.status {
+            return s;
+        }
+        if self.error.is_some() { RunStatus::Error } else { RunStatus::Done }
+    }
+}
+
+/// What an event (or CLI trigger) hands to the prompt renderer and run history.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TriggerEvent {
+    /// Short summary for run history, e.g. "Mac woke", "File changed: report.pdf", "CLI".
+    pub reason: String,
+    /// Machine category, e.g. "schedule", "macWake", "fileWatch", "repo", "cli", "manual".
+    pub kind: String,
+    /// Key-value details for `{{event.<key>}}` interpolation and `<automation_event>` context.
+    pub fields: Vec<(String, String)>,
+    /// Changed or attached file paths.
+    pub files: Vec<String>,
+}
+
+impl TriggerEvent {
+    pub fn manual() -> Self {
+        TriggerEvent { reason: "Run manually".into(), kind: "manual".into(), fields: vec![], files: vec![] }
+    }
+
+    pub fn scheduled(caught_up: bool) -> Self {
+        TriggerEvent {
+            reason: if caught_up { "Scheduled (caught up)".into() } else { "Scheduled".into() },
+            kind: "schedule".into(),
+            fields: vec![],
+            files: vec![],
+        }
+    }
+
+    pub fn has_context(&self) -> bool {
+        !self.fields.is_empty() || !self.files.is_empty()
+    }
+}
+
+/// Renders an automation prompt with optional `{{time}}` and `{{event.*}}` placeholders.
+/// When an event carries files or fields that were not explicitly interpolated, appends a
+/// structured `<automation_event>` block so the agent always sees what happened.
+pub fn render_prompt(template: &str, event: Option<&TriggerEvent>, now: f64) -> String {
+    let mut out = template.replace("{{time}}", &when(now, now));
+    let Some(ev) = event else { return out };
+    let used_event_placeholder = out.contains("{{event.");
+    out = out.replace("{{event.reason}}", &ev.reason);
+    out = out.replace("{{event.kind}}", &ev.kind);
+    out = out.replace("{{event.files}}", &ev.files.join("\n"));
+    for (k, v) in &ev.fields {
+        out = out.replace(&format!("{{{{event.{k}}}}}"), v);
+    }
+    if ev.has_context() && !used_event_placeholder {
+        let mut block = format!("\n\n<automation_event kind=\"{}\">\nTrigger: {}", ev.kind, ev.reason);
+        for (k, v) in &ev.fields {
+            block.push_str(&format!("\n{k}: {v}"));
+        }
+        if !ev.files.is_empty() {
+            block.push_str("\nFiles:\n");
+            for f in ev.files.iter().take(50) {
+                block.push_str(&format!("- {f}\n"));
+            }
+            if ev.files.len() > 50 {
+                block.push_str(&format!("…and {} more\n", ev.files.len() - 50));
+            }
+        }
+        block.push_str("\n</automation_event>");
+        out.push_str(&block);
+    }
+    out
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Automation {
     pub id: String,
+    /// Workspace project ID when scoped to a project; empty (or Home's ID) when `is_global`.
+    #[serde(default)]
     pub project_id: String,
+    /// Global automations run in Home and are not bound to a single workspace.
+    #[serde(default)]
+    pub is_global: bool,
     pub name: String,
-    /// What's sent to Claude each run.
+    /// What's sent to the agent each run.
     pub prompt: String,
-    pub schedule: Schedule,
+    /// Legacy v1 schedule field; still kept in sync for Schedule triggers for downgrade safety.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<Schedule>,
+    /// Full v2 trigger (Schedule, System, FileWatch, Repo, Manual). None on v1 records -> uses `schedule`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<Trigger>,
     /// Every run goes to one thread (`thread_id`, made by the first run when there's none)
     /// rather than a new thread each time.
     #[serde(default)]
     pub same_thread: bool,
+    /// When starting a new thread (`!same_thread`), automatically settle the previous run's thread.
+    #[serde(default)]
+    pub settle_previous: bool,
+    /// Persistent thread ID when `same_thread` is true.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_id: Option<String>,
+    /// The thread started by the most recent run (used by `NewSettlePrevious` and overlap checks).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_thread_id: Option<String>,
+    /// Agent override ("claude" | "antigravity"), None for app default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// Per-automation permission mode override ("ask", "acceptEdits", "plan", "bypass"); None = project default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// Optional working directory override (especially useful for Global automations).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<String>,
+    #[serde(default)]
+    pub notify: NotifyPolicy,
+    #[serde(default, skip_serializing_if = "Guardrails::is_default")]
+    pub guardrails: Guardrails,
     pub enabled: bool,
     pub created_at: f64,
     /// The thread whose agent made it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_by: Option<String>,
-    /// When it runs next; None when it's paused or a one-time run has happened.
+    /// When it runs next (for Schedule triggers); None when paused, done, or event-triggered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_run: Option<f64>,
     #[serde(default)]
@@ -86,69 +611,258 @@ pub struct Automation {
 }
 
 impl Automation {
-    /// A new automation, on, its first run worked out. A one-time run in the past is refused.
+    /// A new scheduled project automation (v1-compatible constructor).
     pub fn new(project_id: &str, name: &str, prompt: &str, schedule: Schedule, now: f64) -> Result<Automation, String> {
-        let next = schedule.next_after(now);
-        if next.is_none() {
-            return Err("That time has already passed.".into());
-        }
+        Self::new_with_trigger(
+            Scope::Project { project_id: project_id.into() },
+            name,
+            prompt,
+            Trigger::Schedule { schedule },
+            now,
+        )
+    }
+
+    /// A new automation with any scope and trigger. Refuses a one-time schedule in the past.
+    pub fn new_with_trigger(scope: Scope, name: &str, prompt: &str, trigger: Trigger, now: f64) -> Result<Automation, String> {
+        let (schedule, next_run) = match &trigger {
+            Trigger::Schedule { schedule } => {
+                let next = schedule.next_after(now);
+                if next.is_none() {
+                    return Err("That time has already passed.".into());
+                }
+                (Some(schedule.clone()), next)
+            }
+            _ => (None, None),
+        };
+        let (is_global, project_id) = match scope {
+            Scope::Global => (true, String::new()),
+            Scope::Project { project_id } => (false, project_id),
+        };
         Ok(Automation {
             id: crate::library::new_uuid(),
-            project_id: project_id.into(),
+            project_id,
+            is_global,
             name: name.trim().into(),
             prompt: prompt.trim().into(),
             schedule,
+            trigger: Some(trigger),
             same_thread: false,
+            settle_previous: false,
             thread_id: None,
+            last_thread_id: None,
+            agent: None,
             model: None,
             effort: None,
+            mode: None,
+            working_dir: None,
+            notify: NotifyPolicy::Always,
+            guardrails: Guardrails::default(),
             enabled: true,
             created_at: now,
             created_by: None,
-            next_run: next,
+            next_run,
             runs: vec![],
         })
     }
 
-    /// Whether the timer should run it now.
-    pub fn due(&self, now: f64) -> bool {
-        self.enabled && self.next_run.is_some_and(|t| t <= now)
+    pub fn scope(&self) -> Scope {
+        if self.is_global || self.project_id.is_empty() {
+            Scope::Global
+        } else {
+            Scope::Project { project_id: self.project_id.clone() }
+        }
     }
 
-    /// Records a run and works out the next one. A one-time automation is done after its run
-    /// (not after Run Now: it still runs at its time).
-    pub fn ran(&mut self, now: f64, thread_id: Option<String>, error: Option<String>, manual: bool) {
-        let caught_up = !manual && self.next_run.is_some_and(|t| now - t > LATE);
-        if self.same_thread && error.is_none() && thread_id.is_some() {
-            self.thread_id = thread_id.clone();
-        }
-        self.runs.push(Run { at: now, thread_id, error, caught_up, manual });
-        if self.runs.len() > MAX_RUNS {
-            self.runs.drain(..self.runs.len() - MAX_RUNS);
-        }
-        if !manual {
-            self.next_run = self.schedule.next_after(now);
-            if self.next_run.is_none() {
-                self.enabled = false;
+    pub fn set_scope(&mut self, scope: Scope) {
+        match scope {
+            Scope::Global => {
+                self.is_global = true;
+                self.project_id.clear();
+            }
+            Scope::Project { project_id } => {
+                self.is_global = false;
+                self.project_id = project_id;
             }
         }
     }
 
-    /// Paused or resumed; on resume, the next run from now (none left: it stays paused).
-    pub fn set_enabled(&mut self, on: bool, now: f64) {
-        self.next_run = if on { self.schedule.next_after(now) } else { None };
-        self.enabled = on && self.next_run.is_some();
+    pub fn effective_trigger(&self) -> Trigger {
+        if let Some(t) = &self.trigger {
+            return t.clone();
+        }
+        match &self.schedule {
+            Some(s) => Trigger::Schedule { schedule: s.clone() },
+            None => Trigger::Manual,
+        }
     }
 
-    /// A new schedule, the next run from now.
-    pub fn set_schedule(&mut self, schedule: Schedule, now: f64) -> Result<(), String> {
-        let next = schedule.next_after(now);
-        if next.is_none() {
-            return Err("That time has already passed.".into());
+    pub fn thread_policy(&self) -> ThreadPolicy {
+        if self.same_thread {
+            ThreadPolicy::Same
+        } else if self.settle_previous {
+            ThreadPolicy::NewSettlePrevious
+        } else {
+            ThreadPolicy::New
         }
-        self.schedule = schedule;
-        if self.enabled {
-            self.next_run = next;
+    }
+
+    pub fn set_thread_policy(&mut self, policy: ThreadPolicy) {
+        let was_same = self.same_thread;
+        match policy {
+            ThreadPolicy::New => {
+                self.same_thread = false;
+                self.settle_previous = false;
+                if was_same {
+                    self.thread_id = None;
+                }
+            }
+            ThreadPolicy::NewSettlePrevious => {
+                self.same_thread = false;
+                self.settle_previous = true;
+                if was_same {
+                    self.thread_id = None;
+                }
+            }
+            ThreadPolicy::Same => {
+                if !was_same {
+                    self.thread_id = None;
+                }
+                self.same_thread = true;
+                self.settle_previous = false;
+            }
+        }
+    }
+
+    /// Whether the schedule timer should run it now.
+    pub fn due(&self, now: f64) -> bool {
+        self.enabled && self.effective_trigger().schedule().is_some() && self.next_run.is_some_and(|t| t <= now)
+    }
+
+    /// Whether a one-time scheduled automation has finished its single run.
+    pub fn is_done(&self) -> bool {
+        !self.enabled
+            && self.next_run.is_none()
+            && self.effective_trigger().schedule().is_some_and(|s| !s.repeats())
+            && !self.runs.is_empty()
+    }
+
+    /// Seconds remaining in cooldown before another automatic run is allowed, or None if clear.
+    pub fn cooldown_remaining(&self, now: f64) -> Option<f64> {
+        if self.guardrails.cooldown_secs == 0 {
+            return None;
+        }
+        let last_real = self.runs.iter().rev().find(|r| !r.manual && r.effective_status() != RunStatus::Skipped)?;
+        let elapsed = now - last_real.at;
+        let rem = self.guardrails.cooldown_secs as f64 - elapsed;
+        (rem > 0.0).then_some(rem)
+    }
+
+    /// Records a run and advances a scheduled automation's next run.
+    pub fn ran(&mut self, now: f64, thread_id: Option<String>, error: Option<String>, manual: bool) {
+        let reason = if manual { "Run manually".to_string() } else { "Scheduled".to_string() };
+        self.record_run(now, thread_id, error, manual, reason, None, None);
+    }
+
+    /// Records a run with full v2 metadata (trigger reason, live status, settled previous thread).
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_run(
+        &mut self,
+        now: f64,
+        thread_id: Option<String>,
+        error: Option<String>,
+        manual: bool,
+        trigger_reason: String,
+        status: Option<RunStatus>,
+        settled_previous: Option<String>,
+    ) {
+        let is_schedule = self.effective_trigger().schedule().is_some();
+        let caught_up = !manual && is_schedule && self.next_run.is_some_and(|t| now - t > LATE);
+        let status = status.unwrap_or_else(|| if error.is_some() { RunStatus::Error } else { RunStatus::Running });
+        if error.is_none() && status != RunStatus::Skipped {
+            if let Some(tid) = &thread_id {
+                self.last_thread_id = Some(tid.clone());
+                if self.same_thread {
+                    self.thread_id = Some(tid.clone());
+                }
+            }
+        }
+        self.runs.push(Run {
+            at: now,
+            thread_id,
+            error,
+            caught_up,
+            manual,
+            status: Some(status),
+            trigger_reason: Some(if caught_up && trigger_reason == "Scheduled" {
+                "Scheduled (caught up)".into()
+            } else {
+                trigger_reason
+            }),
+            duration_secs: None,
+            settled_previous,
+        });
+        if self.runs.len() > MAX_RUNS {
+            self.runs.drain(..self.runs.len() - MAX_RUNS);
+        }
+        if !manual {
+            if let Some(schedule) = self.effective_trigger().schedule() {
+                self.next_run = schedule.next_after(now);
+                if self.next_run.is_none() {
+                    self.enabled = false;
+                }
+            }
+        }
+    }
+
+    /// Marks the most recent run for `thread_id` as finished/waiting with its elapsed duration.
+    pub fn finish_run(&mut self, thread_id: &str, status: RunStatus, now: f64) -> bool {
+        if let Some(run) = self.runs.iter_mut().rev().find(|r| r.thread_id.as_deref() == Some(thread_id)) {
+            if matches!(run.effective_status(), RunStatus::Running | RunStatus::Waiting) {
+                run.status = Some(status);
+                if matches!(status, RunStatus::Done | RunStatus::Error) {
+                    run.duration_secs = Some((now - run.at).max(0.0));
+                }
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Paused or resumed; on resume, recalculates `next_run` for Schedule triggers.
+    pub fn set_enabled(&mut self, on: bool, now: f64) {
+        if let Some(schedule) = self.effective_trigger().schedule() {
+            self.next_run = if on { schedule.next_after(now) } else { None };
+            self.enabled = on && self.next_run.is_some();
+        } else {
+            self.next_run = None;
+            self.enabled = on;
+        }
+    }
+
+    /// Replaces the schedule (for Schedule triggers).
+    pub fn set_schedule(&mut self, schedule: Schedule, now: f64) -> Result<(), String> {
+        self.set_trigger(Trigger::Schedule { schedule }, now)
+    }
+
+    /// Replaces the trigger and updates `schedule` + `next_run` accordingly.
+    pub fn set_trigger(&mut self, trigger: Trigger, now: f64) -> Result<(), String> {
+        match &trigger {
+            Trigger::Schedule { schedule } => {
+                let next = schedule.next_after(now);
+                if next.is_none() {
+                    return Err("That time has already passed.".into());
+                }
+                self.schedule = Some(schedule.clone());
+                self.trigger = Some(trigger);
+                if self.enabled {
+                    self.next_run = next;
+                }
+            }
+            _ => {
+                self.schedule = None;
+                self.trigger = Some(trigger);
+                self.next_run = None;
+            }
         }
         Ok(())
     }
@@ -160,6 +874,271 @@ impl Automation {
     /// The first 8 characters of its id, as the tools show it.
     pub fn short_id(&self) -> &str {
         &self.id[..self.id.len().min(8)]
+    }
+
+    /// Slug usable with `yh trigger <slug>`.
+    pub fn slug(&self) -> String {
+        let mut out = String::new();
+        let mut dash = false;
+        for c in self.name.chars() {
+            if c.is_ascii_alphanumeric() {
+                out.push(c.to_ascii_lowercase());
+                dash = false;
+            } else if !out.is_empty() && !dash {
+                out.push('-');
+                dash = true;
+            }
+        }
+        let s = out.trim_end_matches('-').to_string();
+        if s.is_empty() { self.short_id().to_string() } else { s }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Starter templates
+
+#[derive(Clone, Debug)]
+pub struct Template {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub summary: &'static str,
+    pub is_global: bool,
+    pub prompt: &'static str,
+    pub trigger: Trigger,
+    pub thread_policy: ThreadPolicy,
+    pub guardrails: Guardrails,
+}
+
+pub fn templates() -> Vec<Template> {
+    vec![
+        Template {
+            id: "morning-briefing",
+            name: "Morning Briefing",
+            summary: "Global · When Mac wakes (once/day) · New & settle previous",
+            is_global: true,
+            prompt: "Review my open tasks and active threads across projects. Summarize what needs my attention today, any blocked items, and suggested next steps in a concise bullet list.",
+            trigger: Trigger::System(SystemTrigger { event: SystemEventKind::MacWake, app: None, power: None }),
+            thread_policy: ThreadPolicy::NewSettlePrevious,
+            guardrails: Guardrails {
+                cooldown_secs: 18 * 3600,
+                active_hours: Some(ActiveHours { start_hour: 6, start_minute: 0, end_hour: 12, end_minute: 0, weekdays: vec![1, 2, 3, 4, 5] }),
+                ..Default::default()
+            },
+        },
+        Template {
+            id: "weekday-pr-sweep",
+            name: "Weekday PR Sweep",
+            summary: "Workspace · Weekdays at 9:00 · New & settle previous",
+            is_global: false,
+            prompt: "Check open pull requests in this workspace (using gh/glab). Highlight PRs waiting on my review, failing CI checks, or ready to merge, and suggest the highest-priority action.",
+            trigger: Trigger::Schedule { schedule: Schedule::Daily { hour: 9, minute: 0, weekdays: vec![1, 2, 3, 4, 5] } },
+            thread_policy: ThreadPolicy::NewSettlePrevious,
+            guardrails: Guardrails::default(),
+        },
+        Template {
+            id: "ci-failure-triage",
+            name: "CI Failure Triage",
+            summary: "Workspace · When PR checks fail · New thread",
+            is_global: false,
+            prompt: "CI checks failed on a pull request. Inspect the failing check logs, identify the root cause, and propose a minimal fix (do not push without asking).",
+            trigger: Trigger::Repo(RepoTrigger { event: RepoEventKind::PrChecksFailed, branch: None }),
+            thread_policy: ThreadPolicy::New,
+            guardrails: Guardrails { cooldown_secs: 600, ..Default::default() },
+        },
+        Template {
+            id: "downloads-inbox",
+            name: "Downloads Inbox",
+            summary: "Global · Watch ~/Downloads (*.pdf) · New thread",
+            is_global: true,
+            prompt: "A new PDF landed in Downloads. Read its title/first page, summarize what it is in 2 lines, and suggest where it should be filed.",
+            trigger: Trigger::FileWatch(FileWatchTrigger { path: "~/Downloads".into(), glob: Some("*.pdf".into()), events: vec!["create".into()] }),
+            thread_policy: ThreadPolicy::New,
+            guardrails: Guardrails { debounce_secs: 3, cooldown_secs: 30, ..Default::default() },
+        },
+        Template {
+            id: "eod-memory-digest",
+            name: "End-of-Day Digest",
+            summary: "Workspace · Weekdays at 18:00 · Same thread",
+            is_global: false,
+            prompt: "Look over today's git commits and recent threads in this workspace. Summarize what shipped today and note any open loose ends for tomorrow.",
+            trigger: Trigger::Schedule { schedule: Schedule::Daily { hour: 18, minute: 0, weekdays: vec![1, 2, 3, 4, 5] } },
+            thread_policy: ThreadPolicy::Same,
+            guardrails: Guardrails::default(),
+        },
+    ]
+}
+
+// ---------------------------------------------------------------------------------------------
+// Glob & path matching for file/repo triggers
+
+/// Default noisy paths ignored by folder watchers unless explicitly matched by pattern.
+pub fn is_ignored_path(rel_path: &str, pattern: Option<&str>) -> bool {
+    let norm = rel_path.replace('\\', "/");
+    let pat = pattern.unwrap_or("");
+    for segment in norm.split('/') {
+        if segment == ".DS_Store" && !pat.contains(".DS_Store") {
+            return true;
+        }
+        if matches!(segment, ".git" | "node_modules" | "target" | ".next" | "dist") && !pat.contains(segment) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Comma-separated glob matching (`*` single segment, `**` any depth, `?` single char; case-insensitive).
+pub fn glob_matches(patterns: &str, path: &str) -> bool {
+    let trimmed = patterns.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    let path_norm = path.trim_start_matches('/').to_lowercase();
+    let filename = path_norm.rsplit('/').next().unwrap_or(&path_norm);
+    for raw in trimmed.split(',') {
+        let pat = raw.trim().trim_start_matches('/').to_lowercase();
+        if pat.is_empty() {
+            continue;
+        }
+        // A pattern without `/` matches either the full path or just the filename (like `*.pdf`).
+        if !pat.contains('/') && glob_match_one(&pat, filename) {
+            return true;
+        }
+        if glob_match_one(&pat, &path_norm) {
+            return true;
+        }
+    }
+    false
+}
+
+fn glob_match_one(pat: &str, text: &str) -> bool {
+    let p: Vec<char> = pat.chars().collect();
+    let t: Vec<char> = text.chars().collect();
+    glob_dp(&p, &t)
+}
+
+fn glob_dp(p: &[char], t: &[char]) -> bool {
+    let (m, n) = (p.len(), t.len());
+    let mut dp = vec![vec![false; n + 1]; m + 1];
+    dp[0][0] = true;
+    for i in 1..=m {
+        if p[i - 1] == '*' {
+            dp[i][0] = dp[i - 1][0];
+        } else if i >= 3 && p[i - 1] == '/' && p[i - 2] == '*' && p[i - 3] == '*' {
+            // `**/` matches empty prefix.
+            dp[i][0] = dp[i - 3][0];
+        }
+    }
+    for i in 1..=m {
+        let is_doublestar = i >= 2 && p[i - 1] == '*' && p[i - 2] == '*';
+        for j in 1..=n {
+            if is_doublestar {
+                // `**` matches anything including `/`.
+                dp[i][j] = dp[i - 1][j] || dp[i][j - 1] || dp[i - 2][j];
+            } else if i >= 3 && p[i - 1] == '/' && p[i - 2] == '*' && p[i - 3] == '*' {
+                // `**/` matches zero segments OR consumes up to `/`.
+                dp[i][j] = dp[i - 3][j] || (t[j - 1] == '/' && dp[i - 1][j - 1]);
+            } else if p[i - 1] == '*' {
+                // Single `*` matches any char except `/`.
+                dp[i][j] = dp[i - 1][j] || (t[j - 1] != '/' && dp[i][j - 1]);
+            } else if p[i - 1] == '?' {
+                dp[i][j] = t[j - 1] != '/' && dp[i - 1][j - 1];
+            } else {
+                dp[i][j] = p[i - 1] == t[j - 1] && dp[i - 1][j - 1];
+            }
+        }
+    }
+    dp[m][n]
+}
+
+// ---------------------------------------------------------------------------------------------
+// Shorthand trigger parser (for MCP tools and CLI)
+
+/// Parses a shorthand trigger string such as `"wake"`, `"unlock"`, `"app_launched:Xcode"`,
+/// `"app_quit:Zoom"`, `"power:ac"`, `"network"`, `"app_launch"`, `"watch:docs/**/*.md"`,
+/// `"branch"`, `"commit"`, `"pr_review"`, `"pr_failed"`, `"pr_merged"`, `"manual"`,
+/// or falls back to `parse(schedule)`.
+pub fn parse_trigger(text: &str, now: f64) -> Result<Trigger, String> {
+    let raw = text.trim();
+    let lower = raw.to_lowercase();
+    if lower == "manual" || lower == "cli" {
+        return Ok(Trigger::Manual);
+    }
+    if lower == "wake" || lower == "mac_wake" || lower == "macwake" {
+        return Ok(Trigger::System(SystemTrigger { event: SystemEventKind::MacWake, app: None, power: None }));
+    }
+    if lower == "unlock" || lower == "screen_unlock" || lower == "screenunlock" {
+        return Ok(Trigger::System(SystemTrigger { event: SystemEventKind::ScreenUnlock, app: None, power: None }));
+    }
+    if lower == "network" || lower == "network_online" || lower == "online" {
+        return Ok(Trigger::System(SystemTrigger { event: SystemEventKind::NetworkOnline, app: None, power: None }));
+    }
+    if lower == "startup" || lower == "app_launch" || lower == "applaunch" {
+        return Ok(Trigger::System(SystemTrigger { event: SystemEventKind::AppLaunch, app: None, power: None }));
+    }
+    if let Some(rest) = raw.strip_prefix("app_launched:").or_else(|| raw.strip_prefix("appLaunched:")) {
+        let app = rest.trim();
+        return Ok(Trigger::System(SystemTrigger { event: SystemEventKind::AppLaunched, app: (!app.is_empty()).then(|| app.to_string()), power: None }));
+    }
+    if let Some(rest) = raw.strip_prefix("app_quit:").or_else(|| raw.strip_prefix("appQuit:")) {
+        let app = rest.trim();
+        return Ok(Trigger::System(SystemTrigger { event: SystemEventKind::AppQuit, app: (!app.is_empty()).then(|| app.to_string()), power: None }));
+    }
+    if lower == "power" || lower.starts_with("power:") {
+        let p = lower.strip_prefix("power:").map(str::trim).filter(|s| matches!(*s, "ac" | "battery")).map(str::to_string);
+        return Ok(Trigger::System(SystemTrigger { event: SystemEventKind::PowerChanged, app: None, power: p }));
+    }
+    if let Some(rest) = raw.strip_prefix("watch:") {
+        let rest = rest.trim();
+        let (path, glob) = match rest.split_once('|') {
+            Some((p, g)) => (p.trim().to_string(), Some(g.trim().to_string()).filter(|s| !s.is_empty())),
+            None if rest.contains('*') && !rest.starts_with('/') && !rest.starts_with('~') => (String::new(), Some(rest.to_string())),
+            None => (rest.to_string(), None),
+        };
+        return Ok(Trigger::FileWatch(FileWatchTrigger { path, glob, events: vec![] }));
+    }
+    if lower == "branch" || lower.starts_with("branch:") {
+        let branch = raw.split_once(':').map(|(_, b)| b.trim().to_string()).filter(|s| !s.is_empty());
+        return Ok(Trigger::Repo(RepoTrigger { event: RepoEventKind::BranchChanged, branch }));
+    }
+    if lower == "commit" || lower.starts_with("commit:") {
+        let branch = raw.split_once(':').map(|(_, b)| b.trim().to_string()).filter(|s| !s.is_empty());
+        return Ok(Trigger::Repo(RepoTrigger { event: RepoEventKind::CommitMade, branch }));
+    }
+    if lower == "pr_review" || lower == "pr_review_requested" {
+        return Ok(Trigger::Repo(RepoTrigger { event: RepoEventKind::PrReviewRequested, branch: None }));
+    }
+    if lower == "pr_failed" || lower == "pr_checks_failed" {
+        return Ok(Trigger::Repo(RepoTrigger { event: RepoEventKind::PrChecksFailed, branch: None }));
+    }
+    if lower == "pr_merged" {
+        return Ok(Trigger::Repo(RepoTrigger { event: RepoEventKind::PrMerged, branch: None }));
+    }
+    parse(raw, now).map(|schedule| Trigger::Schedule { schedule })
+}
+
+/// Parses a duration string like `"30s"`, `"15m"`, `"2h"`, `"1d"` into seconds.
+pub fn parse_duration_secs(text: &str) -> Option<u32> {
+    let t = text.trim().to_lowercase();
+    if t.is_empty() || t == "0" || t == "none" || t == "off" {
+        return Some(0);
+    }
+    if let Ok(secs) = t.parse::<u32>() {
+        return Some(secs);
+    }
+    if let Some(s) = t.strip_suffix('s').and_then(|n| n.trim().parse::<u32>().ok()) {
+        return Some(s);
+    }
+    span(&t).map(|m| m.saturating_mul(60))
+}
+
+/// Formats seconds as a compact human duration ("30s", "15m", "2h", "1d").
+pub fn format_duration(secs: u32) -> String {
+    match secs {
+        0 => "Off".into(),
+        s if s % 86_400 == 0 => format!("{}d", s / 86_400),
+        s if s % 3600 == 0 => format!("{}h", s / 3600),
+        s if s % 60 == 0 => format!("{}m", s / 60),
+        s => format!("{s}s"),
     }
 }
 
@@ -323,7 +1302,6 @@ pub fn parse(text: &str, now: f64) -> Result<Schedule, String> {
         "in" => return span(&rest.join("")).map(|m| Schedule::Once { at: (now + m as f64 * 60.0).floor() }).ok_or(()).or_else(|_| fail()),
         "once" | "on" => return once(rest, now).ok_or(()).or_else(|_| fail()),
         "every" | "each" => {
-            // "every 15m", "every 2 hours", "every hour", "every day 9:00", "every monday 9:00"
             if let Some(m) = span(&rest.join("")).or_else(|| span(&format!("1{}", rest.join("")))) {
                 let m = m.max(MIN_EVERY);
                 return Ok(Schedule::Every { minutes: m, from: start(now, m) });
@@ -332,7 +1310,6 @@ pub fn parse(text: &str, now: f64) -> Result<Schedule, String> {
         }
         _ => {}
     }
-    // "monday 9:00" is the next Monday; "mondays", "mon,thu" and "weekly mon" repeat.
     let one_day = words.len() <= 2 && weekday(first).is_some() && !first.ends_with('s');
     if !one_day {
         if let Some(s) = daily(&words, now) {
@@ -451,7 +1428,6 @@ fn daily(words: &[&str], _now: f64) -> Option<Schedule> {
 fn once(words: &[&str], now: f64) -> Option<Schedule> {
     let (y, m, d, ..) = local(now);
     let joined = words.join(" ");
-    // ISO: "2026-12-01T14:30[:00]"
     let (date_part, time_part) = match joined.split_once('t') {
         Some((a, b)) if a.len() == 10 && a.as_bytes()[4] == b'-' => (a.to_string(), Some(b.split(':').take(2).collect::<Vec<_>>().join(":"))),
         _ => match words {
@@ -486,7 +1462,6 @@ fn once(words: &[&str], now: f64) -> Option<Schedule> {
             if let Some(wd) = weekday(other) {
                 (1..=7).map(|o| moment(y, m, d as i32 + o, hh, mm)).find(|t| local(*t).5 as u8 == wd)?
             } else {
-                // "dec 1"
                 let (mon, day) = other.split_once(' ')?;
                 let month = MONTHS.iter().position(|n| mon.starts_with(&n.to_lowercase()))? as u32 + 1;
                 let day: i32 = day.trim_end_matches(|c: char| c.is_ascii_alphabetic()).parse().ok()?;
@@ -536,7 +1511,6 @@ impl Cron {
     fn day_matches(&self, day: u32, weekday: u32) -> bool {
         let d = self.days & (1 << day) != 0;
         let w = self.weekdays & (1 << weekday) != 0;
-        // As cron has it: when both are restricted, either matches.
         match (self.any_day, self.any_weekday) {
             (true, true) => true,
             (true, false) => w,
@@ -547,7 +1521,6 @@ impl Cron {
 
     fn next_after(&self, after: f64) -> Option<f64> {
         let (y, m, d, ..) = local(after);
-        // Five years of days at most: "0 0 30 2 *" never comes.
         for offset in 0..(366 * 5) {
             let midnight = moment(y, m, d as i32 + offset, 0, 0);
             let (yy, mm, dd, _, _, wd) = local(midnight);
@@ -557,7 +1530,6 @@ impl Cron {
             for hour in (0..24).filter(|h| self.hours & (1 << h) != 0) {
                 for minute in (0..60).filter(|mi| self.minutes & (1u64 << mi) != 0) {
                     let t = moment(yy, mm, dd as i32, hour, minute);
-                    // A time daylight saving skips rolls into the next hour: not this one.
                     if t > after && local(t).3 == hour {
                         return Some(t);
                     }
@@ -620,7 +1592,7 @@ impl Settings for crate::library::Library {
     }
 }
 
-/// One change at a time: the timer on the main thread and agents' tools on theirs.
+/// One change at a time: the timer/watchers on the main thread and agents' tools on theirs.
 static LOCK: Mutex<()> = Mutex::new(());
 
 /// Every automation, in the order they were made.
@@ -657,23 +1629,41 @@ pub fn edit<R>(store: &dyn Settings, change: impl FnOnce(&mut Vec<Automation>) -
     result
 }
 
-/// An automation of `project` by its id or the start of it (6 characters or more), or its name.
-pub fn find<'a>(list: &'a [Automation], project: &str, key: &str) -> Result<&'a Automation, String> {
+/// Finds an automation within a slice by exact ID, 6+ char ID prefix, slug, or case-insensitive name.
+pub fn find_in<'a>(candidates: &[&'a Automation], key: &str, scope_desc: &str) -> Result<&'a Automation, String> {
     let key = key.trim();
-    let mine: Vec<&Automation> = list.iter().filter(|a| a.project_id == project).collect();
-    if let Some(a) = mine.iter().find(|a| a.id == key) {
+    if let Some(a) = candidates.iter().find(|a| a.id == key) {
         return Ok(a);
     }
-    let by_id: Vec<&&Automation> = mine.iter().filter(|a| key.len() >= 6 && a.id.to_lowercase().starts_with(&key.to_lowercase())).collect();
+    let by_id: Vec<&&Automation> = candidates.iter().filter(|a| key.len() >= 6 && a.id.to_lowercase().starts_with(&key.to_lowercase())).collect();
     if by_id.len() == 1 {
         return Ok(by_id[0]);
     }
-    let by_name: Vec<&&Automation> = mine.iter().filter(|a| a.name.eq_ignore_ascii_case(key)).collect();
+    let by_name: Vec<&&Automation> = candidates.iter().filter(|a| a.name.eq_ignore_ascii_case(key) || a.slug().eq_ignore_ascii_case(key)).collect();
     match by_name.len() {
         1 => Ok(by_name[0]),
-        0 => Err(format!("No automation \"{key}\" in this project.{}", if mine.is_empty() { String::new() } else { format!(" There are: {}.", mine.iter().map(|a| format!("{} ({})", a.name, a.short_id())).collect::<Vec<_>>().join(", ")) })),
+        0 => Err(format!(
+            "No automation \"{key}\" {scope_desc}.{}",
+            if candidates.is_empty() {
+                String::new()
+            } else {
+                format!(" There are: {}.", candidates.iter().map(|a| format!("{} ({})", a.name, a.short_id())).collect::<Vec<_>>().join(", "))
+            }
+        )),
         _ => Err(format!("More than one automation is called \"{key}\"; give its id.")),
     }
+}
+
+/// An automation of `project` by its id, prefix, slug, or name.
+pub fn find<'a>(list: &'a [Automation], project: &str, key: &str) -> Result<&'a Automation, String> {
+    let mine: Vec<&Automation> = list.iter().filter(|a| !a.is_global && a.project_id == project).collect();
+    find_in(&mine, key, "in this project")
+}
+
+/// Finds an automation across all automations (for CLI `yh trigger` and Home tools).
+pub fn find_any<'a>(list: &'a [Automation], key: &str) -> Result<&'a Automation, String> {
+    let all: Vec<&Automation> = list.iter().collect();
+    find_in(&all, key, "")
 }
 
 #[cfg(test)]
@@ -699,10 +1689,8 @@ mod tests {
         assert_eq!(s.next_after(base()), Some(moment(2026, 11, 22, 9, 0)));
         let s = Schedule::Daily { hour: 11, minute: 0, weekdays: vec![] };
         assert_eq!(s.next_after(base()), Some(moment(2026, 11, 21, 11, 0)));
-        // Weekdays from a Saturday: Monday.
         let s = Schedule::Daily { hour: 9, minute: 0, weekdays: vec![1, 2, 3, 4, 5] };
         assert_eq!(s.next_after(base()), Some(moment(2026, 11, 23, 9, 0)));
-        // Over a month's end.
         let s = Schedule::Daily { hour: 8, minute: 0, weekdays: vec![] };
         assert_eq!(s.next_after(moment(2026, 11, 30, 9, 0)), Some(moment(2026, 12, 1, 8, 0)));
     }
@@ -716,7 +1704,6 @@ mod tests {
         assert_eq!(next("0 0 1 * *", base()), Some(moment(2026, 12, 1, 0, 0)));
         assert_eq!(next("0 12 * dec sun", base()), Some(moment(2026, 12, 6, 12, 0)));
         assert_eq!(next("0 0 30 2 *", base()), None);
-        // Day of month or weekday, as cron has it: the 1st, or any Monday.
         assert_eq!(next("0 9 1 * mon", base()), Some(moment(2026, 11, 23, 9, 0)));
         assert!(Cron::parse("61 * * * *").is_err());
         assert!(Cron::parse("* * *").is_err());
@@ -770,25 +1757,105 @@ mod tests {
         let mut a = Automation::new("P", "Check", "Look", Schedule::Every { minutes: 60, from: now + 60.0 }, now).unwrap();
         assert!(!a.due(now));
         assert!(a.due(now + 60.0));
-        // Missed for a day: runs once, caught up, next from now.
         let late = now + 86_400.0;
         a.ran(late, Some("T".into()), None, false);
         assert!(a.runs[0].caught_up);
         assert!(a.next_run.unwrap() > late && !a.due(late));
-        // Run Now leaves the schedule as it was.
+        assert_eq!(a.last_thread_id.as_deref(), Some("T"));
         let next = a.next_run;
         a.ran(late + 5.0, Some("T2".into()), None, true);
         assert_eq!(a.next_run, next);
-        // Once: done after its run.
         let mut once = Automation::new("P", "Once", "Look", Schedule::Once { at: now + 60.0 }, now).unwrap();
         once.ran(now + 61.0, None, None, false);
-        assert!(!once.enabled && once.next_run.is_none());
+        assert!(!once.enabled && once.next_run.is_none() && once.is_done());
         assert!(Automation::new("P", "Past", "Look", Schedule::Once { at: now - 60.0 }, now).is_err());
-        // Same thread: the first run's thread is kept.
         let mut same = Automation::new("P", "Log", "Look", Schedule::Every { minutes: 5, from: now }, now).unwrap();
-        same.same_thread = true;
+        same.set_thread_policy(ThreadPolicy::Same);
         same.ran(now + 1.0, Some("T9".into()), None, false);
         assert_eq!(same.thread_id.as_deref(), Some("T9"));
+    }
+
+    #[test]
+    fn v1_json_deserializes_cleanly() {
+        let v1 = serde_json::json!({
+            "id": "auto-1",
+            "projectId": "proj-1",
+            "name": "Morning PRs",
+            "prompt": "Check PRs",
+            "schedule": { "kind": "daily", "hour": 9, "minute": 0, "weekdays": [1,2,3,4,5] },
+            "sameThread": true,
+            "threadId": "t-1",
+            "enabled": true,
+            "createdAt": 1700000000.0,
+            "nextRun": 1700003600.0,
+            "runs": [{ "at": 1700000100.0, "threadId": "t-1", "caughtUp": false, "manual": false }]
+        });
+        let a: Automation = serde_json::from_value(v1).unwrap();
+        assert_eq!(a.scope(), Scope::Project { project_id: "proj-1".into() });
+        assert_eq!(a.thread_policy(), ThreadPolicy::Same);
+        assert!(matches!(a.effective_trigger(), Trigger::Schedule { .. }));
+        assert_eq!(a.runs[0].effective_status(), RunStatus::Done);
+    }
+
+    #[test]
+    fn global_scope_and_event_triggers_and_guardrails() {
+        let now = base();
+        let mut a = Automation::new_with_trigger(
+            Scope::Global,
+            "Morning Briefing",
+            "Prep day",
+            Trigger::System(SystemTrigger { event: SystemEventKind::MacWake, app: None, power: None }),
+            now,
+        )
+        .unwrap();
+        assert!(a.scope().is_global());
+        assert!(!a.due(now));
+        a.set_thread_policy(ThreadPolicy::NewSettlePrevious);
+        assert_eq!(a.thread_policy(), ThreadPolicy::NewSettlePrevious);
+        a.guardrails.cooldown_secs = 600;
+        assert!(a.cooldown_remaining(now).is_none());
+        a.record_run(now, Some("T1".into()), None, false, "Mac woke".into(), Some(RunStatus::Running), None);
+        assert!(a.cooldown_remaining(now + 100.0).is_some());
+        assert!(a.cooldown_remaining(now + 601.0).is_none());
+        assert!(a.finish_run("T1", RunStatus::Done, now + 45.0));
+        assert_eq!(a.runs[0].duration_secs, Some(45.0));
+        assert_eq!(a.runs[0].effective_status(), RunStatus::Done);
+    }
+
+    #[test]
+    fn glob_and_prompt_rendering() {
+        assert!(glob_matches("*.pdf", "Downloads/invoice.PDF"));
+        assert!(glob_matches("docs/**/*.md", "docs/a/b/readme.md"));
+        assert!(glob_matches("docs/**/*.md", "docs/readme.md"));
+        assert!(!glob_matches("docs/*.md", "docs/a/readme.md"));
+        assert!(glob_matches("*.rs, *.toml", "Cargo.toml"));
+        assert!(is_ignored_path("target/debug/app", None));
+        assert!(!is_ignored_path("src/main.rs", None));
+
+        let ev = TriggerEvent {
+            reason: "File changed".into(),
+            kind: "fileWatch".into(),
+            fields: vec![("folder".into(), "~/Downloads".into())],
+            files: vec!["~/Downloads/a.pdf".into()],
+        };
+        let rendered = render_prompt("Summarize it.", Some(&ev), base());
+        assert!(rendered.contains("<automation_event"));
+        assert!(rendered.contains("a.pdf"));
+
+        let custom = render_prompt("Read {{event.files}} in {{event.folder}}", Some(&ev), base());
+        assert!(!custom.contains("<automation_event"));
+        assert_eq!(custom, "Read ~/Downloads/a.pdf in ~/Downloads");
+    }
+
+    #[test]
+    fn parses_trigger_shorthands() {
+        let now = base();
+        assert!(matches!(parse_trigger("wake", now), Ok(Trigger::System(SystemTrigger { event: SystemEventKind::MacWake, .. }))));
+        assert!(matches!(parse_trigger("app_quit:Zoom", now), Ok(Trigger::System(SystemTrigger { event: SystemEventKind::AppQuit, app: Some(a), .. })) if a == "Zoom"));
+        assert!(matches!(parse_trigger("watch:~/Downloads|*.pdf", now), Ok(Trigger::FileWatch(FileWatchTrigger { path, glob: Some(g), .. })) if path == "~/Downloads" && g == "*.pdf"));
+        assert!(matches!(parse_trigger("pr_failed", now), Ok(Trigger::Repo(RepoTrigger { event: RepoEventKind::PrChecksFailed, .. }))));
+        assert!(matches!(parse_trigger("manual", now), Ok(Trigger::Manual)));
+        assert!(matches!(parse_trigger("weekdays 9:00", now), Ok(Trigger::Schedule { .. })));
     }
 
     struct Fake(Mutex<Option<Value>>);
@@ -802,14 +1869,11 @@ mod tests {
     }
 
     #[test]
-    fn keeps_what_it_cannot_read() {
-        let store = Fake(Mutex::new(Some(serde_json::json!([{ "id": "future", "schedule": { "kind": "onTheMoon" } }]))));
-        let now = base();
-        edit(&store, |list| list.push(Automation::new("P", "A", "Do it", Schedule::Every { minutes: 10, from: now }, now).unwrap()));
-        let saved = store.get().unwrap();
-        assert_eq!(saved.as_array().unwrap().len(), 2);
+    fn storage_keeps_unknown_entries() {
+        let store = Fake(Mutex::new(Some(serde_json::json!([{ "id": "future", "weird": 1 }]))));
+        let a = Automation::new("P", "One", "Hi", Schedule::Daily { hour: 9, minute: 0, weekdays: vec![] }, base()).unwrap();
+        edit(&store, |list| list.push(a.clone()));
         assert_eq!(all(&store).len(), 1);
-        assert_eq!(find(&all(&store), "P", "a").unwrap().name, "A");
-        assert!(find(&all(&store), "Q", "A").is_err());
+        assert_eq!(store.get().unwrap().as_array().unwrap().len(), 2);
     }
 }

@@ -109,6 +109,8 @@ pub enum Action {
     /// The window brought forward, on a thread, or on a new thread in a project with a draft and
     /// files waiting in its composer (the command line's).
     Show { thread: Option<String>, project: Option<String>, draft: Option<String>, files: Vec<PathBuf> },
+    /// Trigger an automation by id, slug or name (the command line's `yh trigger`).
+    TriggerAutomation { name: String, data: Option<String>, files: Vec<String> },
     SetModel { thread: String, model: Option<String> },
     SetEffort { thread: String, effort: Option<String> },
     SetMode { thread: String, mode: String },
@@ -1426,6 +1428,10 @@ fn to_action(m: FromApp, local: bool) -> Result<Action, String> {
             only_local("The window can be shown")?;
             let files = files.into_iter().map(PathBuf::from).collect();
             Action::Show { thread, project, draft, files }
+        }
+        F::TriggerAutomation { name, data, files, .. } => {
+            only_local("Automations can be triggered")?;
+            Action::TriggerAutomation { name, data, files }
         }
         F::Stop { thread, .. } => Action::Stop { thread },
         F::Respond { thread, request_id, allow, .. } => Action::Respond { thread, request_id, allow },

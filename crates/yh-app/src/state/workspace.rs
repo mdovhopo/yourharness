@@ -85,6 +85,8 @@ pub enum Page {
     Memory(String),
     /// A project's pull requests and repos, by its id.
     Project(String),
+    /// Dedicated Automations section (global and per-workspace).
+    Automations,
     Usage,
 }
 
@@ -238,6 +240,10 @@ pub struct Workspace {
     pub memory_revision: u64,
     /// Goes up when the automations change (`state/automations.rs`).
     pub automations_revision: u64,
+    /// Optional scope filter applied when opening `Page::Automations` (None = All, Some("global"), or project ID).
+    pub automations_filter: Option<String>,
+    /// Active Mac/file/git/PR event watchers for Automations v2 (`state/event_triggers.rs`).
+    pub event_triggers: crate::state::event_triggers::EventTriggers,
     /// Each project's repos and worktrees with their status, read aside when one of its threads
     /// opens: which checkouts a thread works in, for the toolbar.
     pub scans: HashMap<String, yh_core::workspace::Workspace>,
@@ -425,6 +431,8 @@ impl Workspace {
             panel: Panel::SideChat,
             memory_revision: 0,
             automations_revision: 0,
+            automations_filter: None,
+            event_triggers: Default::default(),
             scans: HashMap::new(),
             scanning: Default::default(),
             scanned_at: HashMap::new(),
@@ -1590,7 +1598,9 @@ impl Workspace {
             }
             let _ = this.update(cx, |ws, cx| {
                 ws.scanning.remove(&project);
-                ws.scans.insert(project, done);
+                let scan_clone = done.clone();
+                ws.scans.insert(project.clone(), done);
+                ws.event_triggers_on_scan(&project, &scan_clone, cx);
                 cx.notify();
             });
         })
@@ -2166,16 +2176,19 @@ impl Workspace {
                 updates_title,
                 controls,
             }));
-            // Automations: prompts the project runs by itself, made and changed from the chat.
+            // Automations: prompts the workspace (or Mac globally) runs by itself, made and changed from the chat.
             if self.library.setting("agentAutomations").and_then(|v| v.as_bool()).unwrap_or(true) {
                 let name = if home { "Home".to_string() } else { project.name.clone() };
-                prompt.push(yh_core::automation_tools::instructions(&name));
+                prompt.push(yh_core::automation_tools::instructions(&name, home));
                 allowed.push("mcp__automations".to_string());
                 let (changed, run) = (self.tool_requests.clone(), self.tool_requests.clone());
+                let projects = self.projects.iter().map(|p| (p.id.clone(), p.name.clone())).collect();
                 servers.push(std::sync::Arc::new(yh_core::automation_tools::AutomationTools {
                     store: self.library.clone(),
                     project_id: project.id.clone(),
                     project_name: name,
+                    is_home: home,
+                    projects,
                     caller: t.id().to_string(),
                     on_change: Box::new(move || {
                         let _ = changed.send(ToolRequest::AutomationsChanged);
@@ -2244,12 +2257,13 @@ impl Workspace {
         if self.stacks_installed.unwrap_or_else(yh_core::github::stack_extension_on_disk) {
             prompt.push(STACKS_PROMPT.to_string());
         }
+        let effective_mode = t.meta.permission_mode.as_deref().or_else(|| project.as_ref().map(|p| p.mode.as_str())).unwrap_or("auto");
         let options = LaunchOptions {
             agent: self.agent_of(t),
             cwd,
             session_id: t.run.session_id.clone(),
             model: self.model_of(t),
-            mode: cli_mode(project.as_ref().map_or("auto", |p| p.mode.as_str())).map(str::to_string),
+            mode: cli_mode(effective_mode).map(str::to_string),
             effort: effort.clone(),
             add_dirs: vec![attachments.to_string_lossy().into_owned()],
             env,
@@ -2275,9 +2289,12 @@ impl Workspace {
         let waiting = self.threads.iter().filter(|t| t.read(cx).waiting_for_you()).count();
         crate::platform::set_badge(waiting);
         let t = thread.read(cx);
-        if t.waiting_for_you() || t.elicitation().is_some() {
+        let waiting_now = t.waiting_for_you() || t.elicitation().is_some();
+        let tid = t.id().to_string();
+        if waiting_now {
             let body = Self::describe_request(t);
             self.notify_about(crate::state::notify::Kind::NeedsYou, thread, body, cx);
+            self.note_automation_run_state(&tid, yh_core::automations::RunStatus::Waiting, cx);
         }
     }
 
@@ -2306,6 +2323,9 @@ impl Workspace {
         if !end.waiting_on_jobs && !stopped && !followed && !id.starts_with(SIDE) {
             let body = Self::last_reply(thread.read(cx));
             self.notify_about(crate::state::notify::Kind::Finished, thread, body, cx);
+        }
+        if !end.waiting_on_jobs && !followed && !id.starts_with(SIDE) {
+            self.note_automation_run_state(&id, yh_core::automations::RunStatus::Done, cx);
         }
         // A first title that was a guess: written again now the conversation says more.
         if thread.read(cx).title_needs_refinement && !stopped {
@@ -2875,6 +2895,25 @@ impl Workspace {
             self.page = None;
         } else {
             self.page = Some(Page::Usage);
+            cx.emit(WorkspaceEvent::PageOpened);
+        }
+        cx.notify();
+    }
+
+    /// Opens the dedicated Automations page, optionally filtered to `"global"` or a project ID.
+    pub fn open_automations(&mut self, filter: Option<String>, cx: &mut Context<Self>) {
+        self.automations_filter = filter;
+        self.page = Some(Page::Automations);
+        cx.emit(WorkspaceEvent::PageOpened);
+        cx.notify();
+    }
+
+    /// Opens Automations in place of the open thread, or closes it.
+    pub fn toggle_automations(&mut self, cx: &mut Context<Self>) {
+        if self.page == Some(Page::Automations) {
+            self.page = None;
+        } else {
+            self.page = Some(Page::Automations);
             cx.emit(WorkspaceEvent::PageOpened);
         }
         cx.notify();
@@ -4306,6 +4345,10 @@ impl Workspace {
                 self.show_from_cli(thread.as_deref(), project.as_deref(), draft, files, cx)?;
                 Ok(None)
             }
+            A::TriggerAutomation { name, data, files } => {
+                let id = self.trigger_automation_by_key(&name, data, files, cx)?;
+                Ok(Some(id))
+            }
             action => self.take_remote_on(action, cx),
         }
     }
@@ -4386,7 +4429,7 @@ impl Workspace {
         use yh_server::Action as A;
         let thread_id = match &action {
             A::Browser { thread, .. } | A::AskAside { thread, .. } | A::Send { thread, .. } | A::Stop { thread } | A::Respond { thread, .. } | A::Withdraw { thread, .. } | A::SendNow { thread, .. } | A::Answer { thread, .. } | A::SkipQuestion { thread, .. } | A::ApprovePlan { thread, .. } | A::KeepPlanning { thread, .. } | A::AnswerQuestion { thread, .. } | A::SetModel { thread, .. } | A::SetEffort { thread, .. } | A::SetMode { thread, .. } | A::Rename { thread, .. } | A::Pin { thread, .. } | A::Settle { thread, .. } | A::Delete { thread } => thread.clone(),
-            A::NewThread { .. } | A::AddProject { .. } | A::Show { .. } => unreachable!("taken above"),
+            A::NewThread { .. } | A::AddProject { .. } | A::Show { .. } | A::TriggerAutomation { .. } => unreachable!("taken above"),
         };
         let Some(thread) = self.thread(&thread_id) else { return Err("No such thread.".into()) };
         let request = |id: &str, cx: &App| thread.read(cx).run.permissions.iter().find(|p| p.id == id).cloned();
@@ -4456,7 +4499,7 @@ impl Workspace {
             A::Pin { on, .. } => self.set_pinned(&thread_id, on, cx),
             A::Settle { on, .. } => self.set_settled(&thread_id, on, cx),
             A::Delete { .. } => self.delete(&thread_id, cx),
-            A::NewThread { .. } | A::AddProject { .. } | A::Show { .. } | A::Browser { .. } => unreachable!("taken above"),
+            A::NewThread { .. } | A::AddProject { .. } | A::Show { .. } | A::TriggerAutomation { .. } | A::Browser { .. } => unreachable!("taken above"),
         }
         Ok(None)
     }

@@ -1,58 +1,109 @@
 # Automations
 
-An automation is a prompt a project runs by itself: once at a time, or on a schedule. Each run
-starts a new thread in the project with the prompt (titled with the automation's name, its
-record marked `automationID`), or, for one set to "same thread", sends the prompt to one thread
-every time (made by its first run; queued behind a turn that's going). Runs work in the
-project's permission mode, so in Ask mode a run waits on its cards like any thread.
+An automation is a prompt YourHarness runs by itself — **per workspace** or **globally** (in Home,
+reaching every workspace) — on a schedule, in reaction to a **Mac system event**, **file/folder**
+or **git/PR event**, or on demand from the UI, Spotlight (`⌘K`), or the command line (`yh trigger`).
 
-## Schedules
+## Where they live
 
-`yh-core/src/automations.rs` holds the model, the next-run math (in local time, through
-`localtime_r`/`mktime`, so daylight saving and month ends come out right) and the parser that
-both the chat and the page use:
+- **Automations page (`⇧⌘A`)**: top-level entry in the sidebar and `View → Automations`
+  (`yh-app/src/ui/automations.rs`). Master-detail view grouped by Global and workspace, with
+  scope filter, search, **Pause All** kill switch, starter templates, full configuration summary,
+  and run history (status, trigger reason, duration, and clickable thread links).
+- **Project page**: compact workspace summary linking directly into the Automations page filtered
+  to that workspace.
+- **Sidebar badges**: threads started by an automation carry a subtle bolt icon.
+
+## Scopes & Thread Policies
+
+- **Scope**:
+  - **Workspace**: runs in that project's folder with its git repos, memory, and default mode.
+  - **Global**: runs in Home (reaches all workspaces' threads via `mcp__threads`, with an optional
+    working directory override).
+- **Threads**:
+  - **New thread each run**: starts a fresh thread; previous threads stay live.
+  - **New thread, settle previous**: starts a fresh thread and settles the previous run's thread
+    automatically (when idle, unpinned, and not waiting for you; marks `auto_settle` if still
+    running).
+  - **Same thread each run**: sends to one persistent thread (created on first run, or `"this"`
+    from chat), unsettling it if needed and queuing behind an active turn.
+- **Agent & Permissions**: per-automation overrides for Agent (Claude Code / Antigravity), Model,
+  Effort, and Permission Mode (`Ask`, `Accept Edits`, `Plan`, `Bypass`, applied per-thread without
+  changing the project's mode).
+
+## Triggers
+
+### Schedules (`yh-core/src/automations.rs`)
+
+Next-run math runs in local time through `localtime_r`/`mktime` (handling DST and month ends):
 
 | Kind | Written as |
 |---|---|
-| Once | `in 30m`, `tomorrow 9:00`, `monday 9am` (the next one), `2026-12-01 14:30`, `dec 3 8:00`, `14:30` (today, or tomorrow when it's passed) |
+| Once | `in 30m`, `tomorrow 9:00`, `monday 9am` (the next one), `2026-12-01 14:30`, `dec 3 8:00`, `14:30` |
 | Every | `every 15m`, `every 2h`, `hourly`: the first run one period on, then every period |
 | Daily | `daily 9:00`, `weekdays 8:30`, `weekends 10am`, `mon,thu 18:00`, `mondays 9:00`, `every friday at 5pm` |
-| Cron | `cron 0 9 * * 1-5` (five fields, lists, ranges, steps, names; day of month or weekday as cron has it) |
+| Cron | `cron 0 9 * * 1-5` (five fields, lists, ranges, steps, names) |
 
-`Schedule::describe` says it back ("Weekdays at 9:00", "Every 2 hours", "Once, tomorrow at 9:00").
+### Mac System, File, Git/PR & CLI Events (`yh-app/src/state/event_triggers.rs`)
 
-## Running
+Event listeners mount **lazily** (zero background observers when no enabled automation uses them)
+and trigger **zero macOS privacy prompts**:
 
-The app's timer (`yh-app/src/state/automations.rs`) wakes when the next run is due (and every
-20 seconds at least, for ones made meanwhile), first 8 seconds after launch, and runs what's due. Each run moves the schedule on from now, so however many
-runs were missed while the app was closed or the Mac slept, one runs (marked late), then the
-schedule carries on. A one-time automation is done after its run. Run Now runs one without
-touching the schedule. A run is skipped (and says why in its history) when its project is gone
-or 8 threads are already working there. Each automation keeps its last 20 runs.
+- **Mac System** (`platform.rs::MacEventMonitor`):
+  - `MacWake` (`NSWorkspaceDidWakeNotification`)
+  - `ScreenUnlock` (`com.apple.screenIsUnlocked`)
+  - `AppLaunched` / `AppQuit` (`NSWorkspace` app notifications, optional app name / bundle ID filter)
+  - `PowerChanged` (`com.apple.system.powermanagement.poweradapter`, optional `ac` / `battery` filter)
+  - `NetworkOnline` (interface online transition)
+  - `AppLaunch` (once after YourHarness startup settles)
+- **File & Folder Watch** (`FolderWatch` / FSEvents): watches a workspace-relative or user-chosen
+  folder with optional glob filter (`*.pdf, docs/**/*.md`), default noise ignores (`.git`,
+  `node_modules`, `target`), and burst debounce.
+- **Git & Forge Events**: watches `.git/HEAD` & `.git/logs/HEAD` for `BranchChanged` /
+  `CommitMade`, and diffs existing `WorkspaceScan` snapshots for `PrReviewRequested`,
+  `PrChecksFailed`, and `PrMerged` (baseline seeded on first scan so launch never floods old PRs).
+- **Manual / CLI**: `yh trigger <name|slug|id> [--data TEXT] [-f FILE]... [--wait | --follow]`
+  over `yh.sock` (great for Apple Shortcuts, Raycast, and git hooks).
 
-The timer doesn't run in perf runs or with `YH_AUTOMATIONS=0`. Only one copy of the app may use
-a data folder at a time, so nothing runs twice.
+Event details are injected into the prompt via `{{event.reason}}`, `{{event.files}}`,
+`{{event.app}}`, `{{event.branch}}`, `{{event.payload}}` (or appended automatically in an
+`<automation_event>` block when no `{{event.*}}` placeholder is present).
+
+## Guardrails & Running
+
+The runtime (`yh-app/src/state/automations.rs`) enforces per-automation guardrails on automatic
+triggers:
+- **Global Pause All** (`automationsPaused` setting)
+- **Cooldown** (minimum seconds between automatic runs) & **Debounce** (for file bursts)
+- **Active hours** (local time window & optional weekdays-only)
+- **Overlap policy** (`Skip` if still running, `Queue`, or `Allow` parallel up to 8 running/project)
+- **AC power only** (via IOKit `IOPSGetProvidingPowerSourceType`)
+- **Shell pre-check command** (run off the main thread; non-zero exit skips invoking the AI agent)
+- **Notification policy** (`Always`, `NeedsAttention`, `Silent`)
+
+Schedules catch up once after sleep or app close (marked late). The timer and event watchers don't
+run in perf runs or with `YH_AUTOMATIONS=0`. Each automation keeps its last 50 runs.
 
 ## Storage
 
-All automations are one setting, `automations`: a JSON array of records (`id`, `projectId`,
-`name`, `prompt`, `schedule` tagged by `kind`, `sameThread`, `threadId`, `model`, `effort`,
-`enabled`, `createdAt`, `createdBy`, `nextRun`, `runs`). No schema step, so 0.0.x still opens
-the database; a record this version can't read is kept and saved back untouched. Export State
-carries them with the other settings.
+Stored in `settings["automations"]` as a JSON array with full backwards compatibility with v1
+records (0.4.0) and 0.0.x databases; unknown entries are preserved untouched. Export State carries
+them with the other settings.
 
 ## From the chat
 
-The `automations` tool server (`yh-core/src/automation_tools.rs`) gives every thread
-`list_automations`, `create_automation`, `update_automation` (and pause and resume with
-`enabled`), `run_automation` and `delete_automation`, scoped to its own project. `thread`
-picks where runs go: `new`, `same`, or `this` (the calling thread every time). The agent is
-told to make one only when asked, to write the prompt so it stands alone, and to say back the
-schedule and the next run. Settings → Automations (`agentAutomations`) turns the tools off.
+The `automations` tool server (`yh-core/src/automation_tools.rs`) gives threads
+`list_automations`, `create_automation`, `update_automation`, `run_automation`, and
+`delete_automation`. Supports `scope` (`project` / `global`; Home threads default to `global` and
+can target any project), `thread` (`new`, `new_settle_previous`, `same`, `this`), `trigger` /
+`schedule` (including event shorthands like `wake`, `app_quit:Zoom`, `watch:~/Downloads|*.pdf`,
+`pr_failed`, `manual`), `agent`, `model`, `effort`, `mode`, `cooldown`, and `condition_cmd`.
+Settings → Automations (`agentAutomations`) turns the tools off.
 
-## On the page
+## Testing flags
 
-The project page lists them under Automations (`yh-app/src/ui/automations.rs`): name,
-schedule, prompt, next and last run (the last run's thread opens on a click), Run Now, a switch
-to pause, and Edit and Delete. New Automation and Edit open a sheet that reads the schedule as
-it's typed and says when it first runs. `YH_AUTOMATION_FORM=new|edit` opens it for snapshots.
+- `YH_OPEN_AUTOMATIONS=1`: opens the Automations page after `YH_DRAFT_DELAY`.
+- `YH_AUTOMATION_FORM=new|edit`: opens the Create/Edit sheet for snapshots.
+- `YH_AUTOMATION_TEST_EVENT=wake|unlock|power:ac|power:battery|app_launched:<App>|app_quit:<App>`:
+  injects a synthetic Mac system event after launch.
+- `YH_AUTOMATION_LOG=1`: logs triggers, guardrails skips, watcher mounts, and runs.

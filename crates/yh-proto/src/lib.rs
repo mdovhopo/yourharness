@@ -876,6 +876,17 @@ pub enum FromApp {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         files: Vec<String>,
     },
+    /// Local command line only: trigger an automation by id, slug or name, with optional payload
+    /// text and file paths; `done.thread` returns the thread started or sent to.
+    TriggerAutomation {
+        #[serde(default)]
+        id: Option<String>,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        data: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        files: Vec<String>,
+    },
     SetModel { #[serde(default)] id: Option<String>, thread: String, #[serde(default)] model: Option<String> },
     SetEffort { #[serde(default)] id: Option<String>, thread: String, #[serde(default)] effort: Option<String> },
     /// The permission mode of the thread's project.
@@ -945,7 +956,7 @@ impl FromApp {
     pub fn action_id(&self) -> Option<&str> {
         use FromApp::*;
         match self {
-            Send { id, .. } | Stop { id, .. } | Respond { id, .. } | Withdraw { id, .. } | SendNow { id, .. } | AskAside { id, .. } | Answer { id, .. } | SkipQuestion { id, .. } | ApprovePlan { id, .. } | KeepPlanning { id, .. } | AnswerQuestion { id, .. } | NewThread { id, .. } | AddProject { id, .. } | Show { id, .. } | SetModel { id, .. } | SetEffort { id, .. } | SetMode { id, .. } | Rename { id, .. } | Pin { id, .. } | Settle { id, .. } | Delete { id, .. } | MergePull { id, .. } | BrowserInput { id, .. } => id.as_deref(),
+            Send { id, .. } | Stop { id, .. } | Respond { id, .. } | Withdraw { id, .. } | SendNow { id, .. } | AskAside { id, .. } | Answer { id, .. } | SkipQuestion { id, .. } | ApprovePlan { id, .. } | KeepPlanning { id, .. } | AnswerQuestion { id, .. } | NewThread { id, .. } | AddProject { id, .. } | Show { id, .. } | TriggerAutomation { id, .. } | SetModel { id, .. } | SetEffort { id, .. } | SetMode { id, .. } | Rename { id, .. } | Pin { id, .. } | Settle { id, .. } | Delete { id, .. } | MergePull { id, .. } | BrowserInput { id, .. } => id.as_deref(),
             _ => None,
         }
     }

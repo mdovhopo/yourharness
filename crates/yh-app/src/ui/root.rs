@@ -22,7 +22,7 @@ use yh_core::claude::Decision;
 actions!(
     harness,
     [
-        Stop, Allow, Deny, Quit, NewThread, Find, FindNext, FindPrevious, OpenSettings, OpenSpotlight, ToggleInspector, OpenMemory, ToggleUsage,
+        Stop, Allow, Deny, Quit, NewThread, Find, FindNext, FindPrevious, OpenSettings, OpenSpotlight, ToggleInspector, OpenMemory, ToggleUsage, ToggleAutomations,
         PreviousThread, NextThread, PreviousMessage, NextMessage, TopOfThread, EndOfThread, AddProject, ResumeSession, ExportState, ImportState,
         CheckForUpdates, UndoThreadAction, ToggleSidebar, About, HideApp, HideOthers, ShowAll, CloseWindow, ToggleFullScreen, Minimize, Zoom,
         BringAllToFront, OpenHelp, CaptureTranscriptState, ShowDataFolder, Dictate
@@ -96,6 +96,8 @@ pub struct RootView {
     project: Option<Entity<crate::ui::project::ProjectPage>>,
     /// Usage, made the first time it's opened.
     usage: Option<Entity<crate::ui::usage::UsagePage>>,
+    /// Dedicated Automations page, made the first time it's opened.
+    automations: Option<Entity<crate::ui::automations::AutomationsPage>>,
     /// The open thread's tasks from memory, for its header's chip and its popover.
     tasks: Vec<yh_core::memory::Memory>,
     tasks_for: Option<(String, u64)>,
@@ -230,7 +232,7 @@ impl RootView {
         let countdown = { let (u, ws) = (updater.clone(), workspace.clone()); cx.new(|cx| crate::ui::updates::RestartCountdown::new(u, ws, cx)) };
         let working = cx.new(|cx| crate::ui::working::WorkingTimer::new(workspace.clone(), cx));
         let inspector_was_open = workspace.read(cx).shows_inspector;
-        RootView { sidebar_hidden, sidebar_width, sidebar_folded: false, resizing_sidebar: false, inspector_width, resizing_inspector: false, widened: None, inspector_was_open, last_typed, save_frame: None, workspace, sidebar, composer, find, spotlight, resume, inspector, mcp, jobs, deck: vec![], memory: None, project: None, usage: None, tasks: vec![], tasks_for: None, focus: cx.focus_handle(), working, countdown, _subscriptions: subscriptions }
+        RootView { sidebar_hidden, sidebar_width, sidebar_folded: false, resizing_sidebar: false, inspector_width, resizing_inspector: false, widened: None, inspector_was_open, last_typed, save_frame: None, workspace, sidebar, composer, find, spotlight, resume, inspector, mcp, jobs, deck: vec![], memory: None, project: None, usage: None, automations: None, tasks: vec![], tasks_for: None, focus: cx.focus_handle(), working, countdown, _subscriptions: subscriptions }
     }
 
     fn show(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -294,6 +296,20 @@ impl RootView {
                 self.project = Some(cx.new(|cx| crate::ui::project::ProjectPage::new(ws, project, window, cx)));
             } else if let Some(p) = &self.project {
                 p.update(cx, |p, cx| p.refresh(false, cx));
+            }
+            cx.notify();
+            return;
+        }
+        if self.workspace.read(cx).page == Some(crate::state::workspace::Page::Automations) {
+            if self.automations.is_none() {
+                let ws = self.workspace.clone();
+                self.automations = Some(cx.new(|cx| crate::ui::automations::AutomationsPage::new(ws, window, cx)));
+            } else if let Some(a) = &self.automations {
+                a.update(cx, |a, cx| a.apply_workspace_filter(cx));
+            }
+            if let Some(a) = &self.automations {
+                let focus = a.read(cx).focus.clone();
+                window.focus(&focus, cx);
             }
             cx.notify();
             return;
@@ -771,6 +787,10 @@ impl RootView {
             Action::Reconciler(project) => ws.update(cx, |ws, cx| ws.open_memory_agent("reconciler", &project, vec![], None, cx)),
             Action::AddProject => self.sidebar.update(cx, |s, cx| s.add_project(cx)),
             Action::ResumeSession => self.resume.update(cx, |s, cx| s.show(window, cx)),
+            Action::OpenAutomations => ws.update(cx, |ws, cx| ws.open_automations(None, cx)),
+            Action::RunAutomation(id) => ws.update(cx, |ws, cx| {
+                let _ = ws.run_automation(&id, true, cx);
+            }),
             Action::Settings => crate::ui::settings::open(ws, window, cx),
         }
     }
@@ -857,9 +877,11 @@ impl Render for RootView {
             Some(crate::state::workspace::Page::Project(p)) => self.project.clone().filter(|e| e.read(cx).project == *p),
             _ => None,
         };
-        let page: Option<AnyView> = project_page.map(AnyView::from).or_else(|| self.memory_page(cx).map(AnyView::from)).or_else(|| {
-            (self.workspace.read(cx).page == Some(crate::state::workspace::Page::Usage)).then(|| self.usage.clone().map(AnyView::from)).flatten()
-        });
+        let page: Option<AnyView> = project_page
+            .map(AnyView::from)
+            .or_else(|| self.memory_page(cx).map(AnyView::from))
+            .or_else(|| (self.workspace.read(cx).page == Some(crate::state::workspace::Page::Automations)).then(|| self.automations.clone().map(AnyView::from)).flatten())
+            .or_else(|| (self.workspace.read(cx).page == Some(crate::state::workspace::Page::Usage)).then(|| self.usage.clone().map(AnyView::from)).flatten());
         let selected = if page.is_some() { None } else { self.workspace.read(cx).selected_thread() };
         let title = selected.as_ref().map(|t| t.read(cx).title.clone()).unwrap_or_else(|| "YourHarness".into());
         let project_crumb: Option<(String, String)> = selected.as_ref().and_then(|t| {
@@ -978,6 +1000,7 @@ impl Render for RootView {
                 }
             }))
             .on_action(cx.listener(|this, _: &ToggleUsage, _, cx| this.workspace.update(cx, |ws, cx| ws.toggle_usage(cx))))
+            .on_action(cx.listener(|this, _: &ToggleAutomations, _, cx| this.workspace.update(cx, |ws, cx| ws.toggle_automations(cx))))
             .on_action(cx.listener(|this, _: &OpenMemory, _, cx| {
                 if let Some(project) = this.current_project(cx) {
                     this.workspace.update(cx, |ws, cx| ws.open_memory(&project, cx));
