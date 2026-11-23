@@ -6,6 +6,13 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+### Added
+
+- **Automations v2**: a dedicated **Automations** section (`⇧⌘A`, top-level sidebar entry, `View → Automations`, and Spotlight `⌘K`) showing both **Global** (running in Home across workspaces) and per-workspace automations in a responsive master-detail view with scope filtering, search, a **Pause All** kill switch, starter templates, and full 50-run history with live status, trigger reason, duration, and clickable thread links.
+- **Thread policies & per-automation agent/mode**: choose between **New thread**, **New & settle previous** (automatically settles the previous run's thread when idle and unpinned), or **Same thread**, plus per-automation **Agent** (Claude Code / Antigravity), **Model**, **Effort**, **Permission Mode** (applied per-thread without changing the project's mode), and **Notification policy**.
+- **Native Mac, file, git/PR & CLI triggers with guardrails**: react to Mac wake, screen unlock, app launch/quit, power changes, network online, app startup, FSEvents folder watch (with globs and debounce), git branch/commit changes, PR review/check-failure/merge diffs, or `yh trigger <name|slug|id> [--data TEXT] [-f FILE]...` over `yh.sock`, guarded by cooldown, active hours, overlap policy, AC-power-only, and optional shell pre-check commands.
+- **Settings → Automations**: added **Do not show threads from automations** (off by default) to hide automation-created threads from the sidebar while keeping them reachable in Automations → Run History and surfacing any thread waiting on your approval.
+
 ## [0.7.0] - 2026-11-22
 
 ### Added
