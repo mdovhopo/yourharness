@@ -103,6 +103,156 @@ impl Workspace {
         self.automations_changed(cx);
     }
 
+    pub fn set_hide_automation_threads(&mut self, hide: bool, cx: &mut Context<Self>) {
+        self.library.set_setting(automations::HIDE_THREADS_SETTING, &Value::Bool(hide));
+        self.automations_changed(cx);
+    }
+
+    /// Creates or updates an automation from a remote client (`yh_server::wire::AutomationDraft`).
+    pub fn save_automation_draft(&mut self, draft: yh_server::wire::AutomationDraft, cx: &mut Context<Self>) -> Result<String, String> {
+        use yh_core::automations::{FileWatchTrigger, RepoEventKind, RepoTrigger, SystemEventKind, SystemTrigger, Trigger};
+        let now = automations::now();
+        let name = draft.name.trim().to_string();
+        if name.is_empty() {
+            return Err("Give the automation a name.".into());
+        }
+        let prompt = draft.prompt.trim().to_string();
+        if prompt.is_empty() {
+            return Err("Write a prompt for the automation.".into());
+        }
+        let scope = if draft.is_global {
+            Scope::Global
+        } else {
+            let project_id = draft.project_id.as_deref().map(str::trim).filter(|s| !s.is_empty()).ok_or("Pick a workspace or choose Global.")?;
+            if self.project(project_id).is_none() {
+                return Err("No such project.".into());
+            }
+            Scope::Project { project_id: project_id.to_string() }
+        };
+        let trigger = match draft.trigger_kind.as_str() {
+            "schedule" => {
+                let text = draft.schedule_text.as_deref().map(str::trim).unwrap_or("");
+                if text.is_empty() {
+                    return Err("Write a schedule (e.g. daily 9:00 or every 30m).".into());
+                }
+                Trigger::Schedule { schedule: automations::parse(text, now)? }
+            }
+            "system" => {
+                let event = match draft.system_event.as_deref().unwrap_or("macWake") {
+                    "macWake" => SystemEventKind::MacWake,
+                    "screenUnlock" => SystemEventKind::ScreenUnlock,
+                    "appLaunched" => SystemEventKind::AppLaunched,
+                    "appQuit" => SystemEventKind::AppQuit,
+                    "powerChanged" => SystemEventKind::PowerChanged,
+                    "networkOnline" => SystemEventKind::NetworkOnline,
+                    "appLaunch" => SystemEventKind::AppLaunch,
+                    other => return Err(format!("Unknown Mac event: {other}")),
+                };
+                let app = draft.system_app.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+                let power = draft.system_power.as_deref().map(str::trim).filter(|s| *s == "ac" || *s == "battery").map(str::to_string);
+                Trigger::System(SystemTrigger { event, app, power })
+            }
+            "file_watch" => Trigger::FileWatch(FileWatchTrigger {
+                path: draft.watch_path.as_deref().map(str::trim).unwrap_or("").to_string(),
+                glob: draft.watch_glob.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string),
+                events: vec![],
+            }),
+            "repo" => {
+                let event = match draft.repo_event.as_deref().unwrap_or("commitMade") {
+                    "branchChanged" => RepoEventKind::BranchChanged,
+                    "commitMade" => RepoEventKind::CommitMade,
+                    "prReviewRequested" => RepoEventKind::PrReviewRequested,
+                    "prChecksFailed" => RepoEventKind::PrChecksFailed,
+                    "prMerged" => RepoEventKind::PrMerged,
+                    other => return Err(format!("Unknown repo event: {other}")),
+                };
+                let branch = draft.repo_branch.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+                Trigger::Repo(RepoTrigger { event, branch })
+            }
+            "manual" => Trigger::Manual,
+            other => return Err(format!("Unknown trigger kind: {other}")),
+        };
+        let policy = match draft.thread_policy.as_str() {
+            "new_settle_previous" => ThreadPolicy::NewSettlePrevious,
+            "same" => ThreadPolicy::Same,
+            _ => ThreadPolicy::New,
+        };
+        let notify = match draft.notify.as_deref() {
+            Some("needs_attention") => NotifyPolicy::NeedsAttention,
+            Some("silent") => NotifyPolicy::Silent,
+            _ => NotifyPolicy::Always,
+        };
+        let overlap = match draft.overlap.as_deref() {
+            Some("queue") => OverlapPolicy::Queue,
+            Some("allow") => OverlapPolicy::Allow,
+            _ => OverlapPolicy::Skip,
+        };
+        let clean = |s: Option<String>| s.map(|v| v.trim().to_string()).filter(|v| !v.is_empty() && v != "default");
+        let agent = clean(draft.agent);
+        let model = clean(draft.model);
+        let effort = clean(draft.effort);
+        let mode = clean(draft.mode);
+        let working_dir = clean(draft.working_dir);
+        let cooldown_secs = draft.cooldown_secs;
+        let ac_power_only = draft.ac_power_only;
+        let enabled_opt = draft.enabled;
+
+        if let Some(edit_id) = draft.id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            let edit_id = edit_id.to_string();
+            let mut res: Result<(), String> = Err("No such automation.".into());
+            self.edit_automations(cx, |list| {
+                if let Some(a) = list.iter_mut().find(|a| a.id == edit_id) {
+                    let same_schedule = matches!(
+                        (&a.effective_trigger(), &trigger),
+                        (Trigger::Schedule { schedule: s1 }, Trigger::Schedule { schedule: s2 }) if s1.to_input_string() == s2.to_input_string()
+                    );
+                    if !same_schedule {
+                        if let Err(e) = a.set_trigger(trigger, now) {
+                            res = Err(e);
+                            return;
+                        }
+                    }
+                    a.name = name;
+                    a.prompt = prompt;
+                    a.set_scope(scope);
+                    a.set_thread_policy(policy);
+                    a.agent = agent;
+                    a.model = model;
+                    a.effort = effort;
+                    a.mode = mode;
+                    a.working_dir = working_dir;
+                    a.notify = notify;
+                    a.guardrails.cooldown_secs = cooldown_secs;
+                    a.guardrails.ac_power_only = ac_power_only;
+                    a.guardrails.overlap = overlap;
+                    if let Some(on) = enabled_opt {
+                        a.set_enabled(on, now);
+                    }
+                    res = Ok(());
+                }
+            });
+            res.map(|()| edit_id)
+        } else {
+            let mut auto = Automation::new_with_trigger(scope, &name, &prompt, trigger, now)?;
+            auto.set_thread_policy(policy);
+            auto.agent = agent;
+            auto.model = model;
+            auto.effort = effort;
+            auto.mode = mode;
+            auto.working_dir = working_dir;
+            auto.notify = notify;
+            auto.guardrails.cooldown_secs = cooldown_secs;
+            auto.guardrails.ac_power_only = ac_power_only;
+            auto.guardrails.overlap = overlap;
+            if let Some(on) = enabled_opt {
+                auto.set_enabled(on, now);
+            }
+            let new_id = auto.id.clone();
+            self.edit_automations(cx, |list| list.push(auto));
+            Ok(new_id)
+        }
+    }
+
     /// They changed (an agent's tools, the Automations page): pages re-read and watchers reconcile.
     pub fn automations_changed(&mut self, cx: &mut Context<Self>) {
         self.automations_revision += 1;

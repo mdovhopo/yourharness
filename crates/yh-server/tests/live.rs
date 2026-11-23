@@ -346,7 +346,7 @@ fn the_local_socket_takes_the_command_lines_actions() {
     std::thread::spawn(move || yh_server::serve_local(listener, data, yh_server::Options { name: "test".into(), version: Some("9.9.9".into()), ..Default::default() }, Some(links)).unwrap());
     let (mut ws, _) = tungstenite::client("ws://localhost/", UnixStream::connect(&socket).unwrap()).unwrap();
     ws.get_ref().set_read_timeout(Some(Duration::from_millis(100))).unwrap();
-    let mut expect = |ws: &mut WebSocket<UnixStream>, what: &str, want: &dyn Fn(&ToApp) -> bool| {
+    let expect = |ws: &mut WebSocket<UnixStream>, what: &str, want: &dyn Fn(&ToApp) -> bool| {
         let until = Instant::now() + Duration::from_secs(5);
         while Instant::now() < until {
             if let Ok(Message::Text(t)) = ws.read() {
@@ -410,7 +410,7 @@ fn antigravity_threads_models_and_limits_reach_the_phone() {
     db.flush();
     let url = start(&dir, None);
     let mut c = Client::connect(&url).unwrap();
-    c.expect("hello", |m| matches!(m, ToApp::Hello { protocol: 11, .. }));
+    c.expect("hello", |m| matches!(m, ToApp::Hello { protocol: yh_server::wire::PROTOCOL, .. }));
     c.send(FromApp::SubscribeApp);
     c.expect("the thread's agent", |m| matches!(m, ToApp::Threads { threads, .. } if threads[0].agent.as_deref() == Some("antigravity")));
     let m = c.expect("options", |m| matches!(m, ToApp::Options { .. }));
@@ -424,4 +424,81 @@ fn antigravity_threads_models_and_limits_reach_the_phone() {
     assert_eq!(agents[0].plan.as_deref(), Some("Google AI Pro"));
     let windows: Vec<(&str, f64)> = agents[0].groups[0].windows.iter().map(|w| (w.name.as_str(), w.used)).collect();
     assert_eq!(windows, [("five_hour", 0.25), ("seven_day", 0.5)]);
+}
+
+/// Protocol 12: automations, global pause/hide flags, and automation_id on threads reach the phone,
+/// and remote actions (run, toggle, pause_all, set_hide, save, delete) reach the app.
+#[test]
+fn automations_reach_the_phone_and_take_actions() {
+    let dir = temp_dir("automations");
+    let db = std::sync::Arc::new(Database::open(&dir).unwrap());
+    let mut s = state("Wake Check");
+    s.threads[0].json = br#"{"title":"Wake Check","createdAt":"2026-11-23T10:00:00Z","automationID":"auto-1"}"#.to_vec();
+    let autos = serde_json::json!([
+        {
+            "id": "auto-1",
+            "projectId": "",
+            "isGlobal": true,
+            "name": "Morning Brief",
+            "prompt": "Summarize today",
+            "trigger": { "type": "system", "event": "macWake" },
+            "sameThread": false,
+            "settlePrevious": true,
+            "enabled": true,
+            "createdAt": 1700000000.0,
+            "runs": [{ "at": 1700001000.0, "threadId": "t1", "status": "done", "triggerReason": "Mac woke" }]
+        }
+    ]);
+    s.values.insert("automations".into(), serde_json::to_vec(&autos).unwrap());
+    s.values.insert("automationsPaused".into(), b"false".to_vec());
+    s.values.insert("hideAutomationThreads".into(), b"true".to_vec());
+    db.save_state(s);
+    db.flush();
+    let engine = yh_engine::start(Some(db.clone()));
+    let (actions, asked) = flume::unbounded::<yh_server::Asked>();
+    let (seen, app) = flume::unbounded();
+    std::thread::spawn(move || {
+        for a in asked {
+            let made = matches!(a.action, yh_server::Action::RunAutomation { .. }).then(|| "t-auto".to_string());
+            seen.send(a.action).unwrap();
+            a.reply.send(Ok(made)).unwrap();
+        }
+    });
+    let url = start_with(&dir, None, Some(yh_server::Links { engine, actions, browser: None, voice: None }));
+    let mut c = Client::connect(&url).unwrap();
+    c.expect("hello", |m| matches!(m, ToApp::Hello { protocol: 12, .. }));
+    c.send(FromApp::SubscribeApp);
+    c.expect("thread automation_id", |m| matches!(m, ToApp::Threads { threads, .. } if threads[0].automation_id.as_deref() == Some("auto-1")));
+    let ToApp::Automations { paused_all, hide_threads, automations } = c.expect("automations", |m| matches!(m, ToApp::Automations { .. })) else { unreachable!() };
+    assert!(!paused_all);
+    assert!(hide_threads);
+    assert_eq!(automations.len(), 1);
+    assert_eq!((automations[0].name.as_str(), automations[0].is_global, automations[0].trigger_kind.as_str(), automations[0].thread_policy.as_str()), ("Morning Brief", true, "system", "new_settle_previous"));
+    assert_eq!(automations[0].runs.len(), 1);
+    assert_eq!(automations[0].runs[0].thread_id.as_deref(), Some("t1"));
+
+    c.send(FromApp::RunAutomation { id: Some("r1".into()), automation_id: "auto-1".into(), data: None });
+    c.expect("run done", |m| matches!(m, ToApp::Done { id, error: None, thread: Some(t), .. } if id == "r1" && t == "t-auto"));
+    assert_eq!(app.recv_timeout(Duration::from_secs(1)).unwrap(), yh_server::Action::RunAutomation { automation_id: "auto-1".into(), data: None });
+
+    c.send(FromApp::ToggleAutomation { id: Some("r2".into()), automation_id: "auto-1".into(), enabled: false });
+    c.expect("toggle done", |m| matches!(m, ToApp::Done { id, error: None, .. } if id == "r2"));
+    assert_eq!(app.recv_timeout(Duration::from_secs(1)).unwrap(), yh_server::Action::ToggleAutomation { automation_id: "auto-1".into(), enabled: false });
+
+    c.send(FromApp::PauseAllAutomations { id: Some("r3".into()), paused: true });
+    c.expect("pause done", |m| matches!(m, ToApp::Done { id, error: None, .. } if id == "r3"));
+    assert_eq!(app.recv_timeout(Duration::from_secs(1)).unwrap(), yh_server::Action::PauseAllAutomations { paused: true });
+
+    c.send(FromApp::SetHideAutomationThreads { id: Some("r4".into()), hide: false });
+    c.expect("hide done", |m| matches!(m, ToApp::Done { id, error: None, .. } if id == "r4"));
+    assert_eq!(app.recv_timeout(Duration::from_secs(1)).unwrap(), yh_server::Action::SetHideAutomationThreads { hide: false });
+
+    let draft = yh_server::wire::AutomationDraft { name: "Hourly".into(), prompt: "Check".into(), is_global: true, trigger_kind: "schedule".into(), schedule_text: Some("hourly".into()), thread_policy: "new_settle_previous".into(), ..Default::default() };
+    c.send(FromApp::SaveAutomation { id: Some("r5".into()), draft: draft.clone() });
+    c.expect("save done", |m| matches!(m, ToApp::Done { id, error: None, .. } if id == "r5"));
+    assert_eq!(app.recv_timeout(Duration::from_secs(1)).unwrap(), yh_server::Action::SaveAutomation { draft });
+
+    c.send(FromApp::DeleteAutomation { id: Some("r6".into()), automation_id: "auto-1".into() });
+    c.expect("delete done", |m| matches!(m, ToApp::Done { id, error: None, .. } if id == "r6"));
+    assert_eq!(app.recv_timeout(Duration::from_secs(1)).unwrap(), yh_server::Action::DeleteAutomation { automation_id: "auto-1".into() });
 }

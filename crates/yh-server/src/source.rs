@@ -7,7 +7,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde_json::{Map, Value};
 use yh_core::library::ThreadMeta;
 
-use yh_proto::{AgentLimits, AgentOption, INPUT_LIMIT, LimitGroup, LimitWindow, ModelOption, Project, RESULT_LIMIT, Row, SearchHit, SlashCommand, SubagentInfo, Thread, trim};
+use yh_proto::{AgentLimits, AgentOption, AutomationInfo, AutomationRunInfo, INPUT_LIMIT, LimitGroup, LimitWindow, ModelOption, Project, RESULT_LIMIT, Row, SearchHit, SlashCommand, SubagentInfo, Thread, trim};
 
 pub struct Source {
     c: Connection,
@@ -73,6 +73,7 @@ impl Source {
                     waiting: false,
                     jobs: 0,
                     agent: m.agent,
+                    automation_id: m.automation_id,
                 }
             })
         })
@@ -170,6 +171,158 @@ impl Source {
     pub fn subscription(&self) -> rusqlite::Result<Option<yh_proto::Subscription>> {
         let saved = self.setting("claudeSubscription")?.unwrap_or_default();
         Ok(yh_core::limits::Subscription::from_saved(&saved).map(|s| yh_proto::Subscription { plan: s.plan_name(), email: s.email, org: s.org }))
+    }
+
+    /// Every automation and the global Pause All / Hide Threads flags (protocol 12).
+    pub fn automations_state(&self) -> rusqlite::Result<(bool, bool, Vec<AutomationInfo>)> {
+        use yh_core::automations::{self, Automation, NotifyPolicy, OverlapPolicy, RepoEventKind, RunStatus, SystemEventKind, ThreadPolicy, Trigger};
+        let paused_all = self.setting(automations::PAUSED_SETTING)?.and_then(|v| v.as_bool()).unwrap_or(false);
+        let hide_threads = self.setting(automations::HIDE_THREADS_SETTING)?.and_then(|v| v.as_bool()).unwrap_or(false);
+        let raw = self.setting(automations::SETTING)?.unwrap_or_default();
+        let now = automations::now();
+        let list: Vec<Automation> = raw
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|v| serde_json::from_value::<Automation>(v.clone()).ok())
+            .collect();
+        let infos = list
+            .into_iter()
+            .map(|a| {
+                let trigger = a.effective_trigger();
+                let trigger_summary = trigger.describe(now);
+                let mut trigger_kind = "manual".to_string();
+                let mut schedule_text = None;
+                let mut system_event = None;
+                let mut system_app = None;
+                let mut system_power = None;
+                let mut watch_path = None;
+                let mut watch_glob = None;
+                let mut repo_event = None;
+                let mut repo_branch = None;
+                match &trigger {
+                    Trigger::Schedule { schedule } => {
+                        trigger_kind = "schedule".into();
+                        schedule_text = Some(schedule.to_input_string());
+                    }
+                    Trigger::System(s) => {
+                        trigger_kind = "system".into();
+                        system_event = Some(
+                            match s.event {
+                                SystemEventKind::MacWake => "macWake",
+                                SystemEventKind::ScreenUnlock => "screenUnlock",
+                                SystemEventKind::AppLaunched => "appLaunched",
+                                SystemEventKind::AppQuit => "appQuit",
+                                SystemEventKind::PowerChanged => "powerChanged",
+                                SystemEventKind::NetworkOnline => "networkOnline",
+                                SystemEventKind::AppLaunch => "appLaunch",
+                            }
+                            .into(),
+                        );
+                        system_app = s.app.clone();
+                        system_power = s.power.clone();
+                    }
+                    Trigger::FileWatch(f) => {
+                        trigger_kind = "file_watch".into();
+                        watch_path = Some(f.path.clone());
+                        watch_glob = f.glob.clone();
+                    }
+                    Trigger::Repo(r) => {
+                        trigger_kind = "repo".into();
+                        repo_event = Some(
+                            match r.event {
+                                RepoEventKind::BranchChanged => "branchChanged",
+                                RepoEventKind::CommitMade => "commitMade",
+                                RepoEventKind::PrReviewRequested => "prReviewRequested",
+                                RepoEventKind::PrChecksFailed => "prChecksFailed",
+                                RepoEventKind::PrMerged => "prMerged",
+                            }
+                            .into(),
+                        );
+                        repo_branch = r.branch.clone();
+                    }
+                    Trigger::Manual => {}
+                }
+                let thread_policy = match a.thread_policy() {
+                    ThreadPolicy::New => "new",
+                    ThreadPolicy::NewSettlePrevious => "new_settle_previous",
+                    ThreadPolicy::Same => "same",
+                }
+                .to_string();
+                let notify = match a.notify {
+                    NotifyPolicy::Always => "always",
+                    NotifyPolicy::NeedsAttention => "needs_attention",
+                    NotifyPolicy::Silent => "silent",
+                }
+                .to_string();
+                let overlap = match a.guardrails.overlap {
+                    OverlapPolicy::Skip => "skip",
+                    OverlapPolicy::Queue => "queue",
+                    OverlapPolicy::Allow => "allow",
+                }
+                .to_string();
+                let runs: Vec<AutomationRunInfo> = a
+                    .runs
+                    .iter()
+                    .rev()
+                    .take(25)
+                    .map(|r| AutomationRunInfo {
+                        at: r.at,
+                        thread_id: r.thread_id.clone(),
+                        error: r.error.clone(),
+                        caught_up: r.caught_up,
+                        manual: r.manual,
+                        status: match r.effective_status() {
+                            RunStatus::Done => "done",
+                            RunStatus::Running => "running",
+                            RunStatus::Waiting => "waiting",
+                            RunStatus::Skipped => "skipped",
+                            RunStatus::Error => "error",
+                        }
+                        .into(),
+                        trigger_reason: r.trigger_reason.clone(),
+                        duration_secs: r.duration_secs,
+                    })
+                    .collect();
+                let slug = a.slug();
+                let done = a.is_done();
+                AutomationInfo {
+                    id: a.id,
+                    name: a.name,
+                    prompt: a.prompt,
+                    is_global: a.is_global,
+                    project_id: (!a.is_global && !a.project_id.is_empty()).then_some(a.project_id),
+                    trigger_kind,
+                    trigger_summary,
+                    schedule_text,
+                    system_event,
+                    system_app,
+                    system_power,
+                    watch_path,
+                    watch_glob,
+                    repo_event,
+                    repo_branch,
+                    thread_policy,
+                    agent: a.agent,
+                    model: a.model,
+                    effort: a.effort,
+                    mode: a.mode,
+                    working_dir: a.working_dir,
+                    notify,
+                    cooldown_secs: a.guardrails.cooldown_secs,
+                    ac_power_only: a.guardrails.ac_power_only,
+                    overlap,
+                    enabled: a.enabled,
+                    done,
+                    next_run: a.next_run,
+                    thread_id: a.thread_id,
+                    last_thread_id: a.last_thread_id,
+                    slug: (!slug.is_empty()).then_some(slug),
+                    runs,
+                }
+            })
+            .collect();
+        Ok((paused_all, hide_threads, infos))
     }
 
     fn setting(&self, key: &str) -> rusqlite::Result<Option<Value>> {

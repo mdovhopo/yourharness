@@ -1267,6 +1267,32 @@ impl Schedule {
     pub fn repeats(&self) -> bool {
         !matches!(self, Schedule::Once { .. })
     }
+
+    /// Editable form `parse` reads back into the same schedule (e.g. `daily 9:00`, `every 2h`).
+    pub fn to_input_string(&self) -> String {
+        match self {
+            Schedule::Once { at } => {
+                let (year, month, day, hour, minute, _) = local(*at);
+                format!("{year:04}-{month:02}-{day:02} {hour}:{minute:02}")
+            }
+            Schedule::Every { minutes, .. } if minutes % 60 == 0 => format!("every {}h", minutes / 60),
+            Schedule::Every { minutes, .. } => format!("every {minutes}m"),
+            Schedule::Daily { hour, minute, weekdays } => {
+                let mut sorted = weekdays.clone();
+                sorted.sort_unstable();
+                sorted.dedup();
+                let days = match sorted.as_slice() {
+                    [] => "daily".to_string(),
+                    [1, 2, 3, 4, 5] => "weekdays".into(),
+                    [0, 6] => "weekends".into(),
+                    [one] => format!("{}s", ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"][*one as usize % 7]),
+                    many => many.iter().map(|d| ["sun", "mon", "tue", "wed", "thu", "fri", "sat"][*d as usize % 7]).collect::<Vec<_>>().join(","),
+                };
+                format!("{days} {hour}:{minute:02}")
+            }
+            Schedule::Cron { expr } => format!("cron {expr}"),
+        }
+    }
 }
 
 const DAY_NAMES: [&str; 7] = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];

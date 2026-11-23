@@ -48,6 +48,9 @@ struct RootView: View {
             }
             // Every Mac listed: what waits elsewhere is in the list already.
             .badge(fleet.mixesMacs ? 0 : fleet.waitingElsewhere)
+            Tab("Automations", systemImage: "bolt.fill", value: .automations) {
+                NavigationStack { AutomationsView() }.environment(store).id(store.id)
+            }
             Tab("Usage", systemImage: "gauge.with.dots.needle.33percent", value: .usage) {
                 NavigationStack { UsageView() }.environment(store).id(store.id)
             }
@@ -115,5 +118,5 @@ private struct ThreadsTab: View {
 }
 
 enum AppTab: String, Hashable {
-    case threads, usage, mac, search
+    case threads, automations, usage, mac, search
 }

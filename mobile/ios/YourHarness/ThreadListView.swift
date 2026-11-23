@@ -692,6 +692,10 @@ struct ThreadRow: View {
                         Image(systemName: "pin.fill").font(.system(size: 10)).foregroundStyle(.orange)
                             .accessibilityLabel("Pinned")
                     }
+                    if thread.isAutomationThread {
+                        Image(systemName: "bolt.fill").font(.system(size: 10)).foregroundStyle(Brand.teal)
+                            .accessibilityLabel("Automation")
+                    }
                     Text(thread.title)
                         .font(.subheadline.weight(.medium))
                         .lineLimit(1)

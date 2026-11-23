@@ -6,6 +6,10 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+### Added
+
+- **Phone: Automations (Protocol 12)**: dedicated **Automations** tab on iPhone showing Global and per-workspace automations from your Mac with scope filtering, **Pause All** banner, swipe actions (**Run Now**, **Pause/Resume**, **Delete**), starter templates, full detail view with copyable `yh trigger` command and clickable **Run History** (tapping a run opens its thread directly), and a native **Create / Edit** form for schedules, Mac system events, file watches, git/PR events, thread policies, runtime options, and guardrails. Automation-created threads carry a subtle bolt icon in the iPhone thread list and stay in sync with **Do not show threads from automations** (also toggleable from iPhone Settings and the Automations menu).
+
 ## [0.8.0] - 2026-11-23
 
 ### Added

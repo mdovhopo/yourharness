@@ -99,6 +99,13 @@ final class Store: Identifiable {
     /// Protocol 11: their usage limits.
     var agentLimits: [AgentLimits] = []
     var offersAgents: Bool { serverProtocol >= 11 }
+    /// Protocol 12: automations on this Mac.
+    var offersAutomations: Bool { serverProtocol >= 12 }
+    var automations: [AutomationInfo] = []
+    var automationsPaused = false
+    var hideAutomationThreads = false
+    /// Action IDs of `runAutomation` calls whose created thread should open automatically.
+    @ObservationIgnored private var openOnRunIDs: Set<String> = []
 
     /// The models a thread on `agent` can use (nil: Claude's).
     func models(for agent: String?) -> [ModelOption] {
@@ -236,9 +243,12 @@ final class Store: Identifiable {
     }
 
     /// As the Mac's sidebar has them: per project, pinned first, then newest made first; settled
-    /// ones on a shelf of their own.
+    /// ones on a shelf of their own. When "Do not show threads from automations" is on, automation
+    /// threads stay hidden unless they are waiting for approval or currently open.
     var sections: [Section] {
-        let all = order.compactMap { threads[$0] }
+        let all = order.compactMap { threads[$0] }.filter { t in
+            !hideAutomationThreads || !t.isAutomationThread || t.isWaiting || path.contains(t.id)
+        }
         return projects.compactMap { project in
             let mine = all.filter { $0.projectId == project.id }
             // A project with no threads yet still shows, as the Mac's sidebar has it: its header
@@ -806,6 +816,37 @@ final class Store: Identifiable {
         act(.askAside(id: Self.newID(), thread: thread, text: text))
     }
 
+    // MARK: Protocol 12: Automations
+
+    func runAutomation(_ automationID: String, data: String? = nil, openThread: Bool = true) {
+        guard canAct else { actionError = "Not connected to your Mac yet. Try again in a moment."; return }
+        let id = Self.newID()
+        if openThread { openOnRunIDs.insert(id) }
+        let action = FromApp.runAutomation(id: id, automationID: automationID, data: data)
+        pending[id] = action
+        connection.send(action)
+    }
+
+    func toggleAutomation(_ automationID: String, enabled: Bool) {
+        act(.toggleAutomation(id: Self.newID(), automationID: automationID, enabled: enabled))
+    }
+
+    func setAutomationsPaused(_ paused: Bool) {
+        act(.pauseAllAutomations(id: Self.newID(), paused: paused))
+    }
+
+    func setHideAutomationThreads(_ hide: Bool) {
+        act(.setHideAutomationThreads(id: Self.newID(), hide: hide))
+    }
+
+    func saveAutomation(_ draft: AutomationDraft) {
+        act(.saveAutomation(id: Self.newID(), draft: draft))
+    }
+
+    func deleteAutomation(_ automationID: String) {
+        act(.deleteAutomation(id: Self.newID(), automationID: automationID))
+    }
+
     // MARK: Messages
 
     private func apply(_ batch: [ToApp]) {
@@ -906,6 +947,14 @@ final class Store: Identifiable {
                     openWhenListed = made
                     if threads[made] != nil { path = [made]; openWhenListed = nil }
                 }
+                if case .runAutomation? = action {
+                    let shouldOpen = openOnRunIDs.remove(id) != nil
+                    if shouldOpen, let made, error == nil {
+                        onShow?()
+                        openWhenListed = made
+                        if threads[made] != nil { path = [made]; openWhenListed = nil }
+                    }
+                }
                 if let error {
                     actionError = error
                     if case .send(_, let thread, let text, _, _)? = action { returnedDraft = (thread, text) }
@@ -961,6 +1010,11 @@ final class Store: Identifiable {
             case .changePatch(let thread, let path, let lines, let error):
                 changePatches[Self.fileKey(thread, path)] = PatchPage(lines: lines, error: error)
                 Perf.shared.log("CHANGE patch \(path) \(lines?.count ?? 0) lines\(error.map { " ! " + $0 } ?? "")")
+            case .automations(let pausedAll, let hideThreads, let list):
+                if automationsPaused != pausedAll { automationsPaused = pausedAll }
+                if hideAutomationThreads != hideThreads { hideAutomationThreads = hideThreads }
+                if automations != list { automations = list }
+                Perf.shared.log("AUTOMATIONS \(list.count)\(pausedAll ? " paused" : "")\(hideThreads ? " hidden" : "")")
             case .unknown:
                 break
             }
@@ -983,6 +1037,9 @@ final class Store: Identifiable {
         var modes: [String]
         var commands: [String: [SlashCommand]]
         var agents: [AgentOption]?
+        var automations: [AutomationInfo]?
+        var automationsPaused: Bool?
+        var hideAutomationThreads: Bool?
     }
 
     /// Kept by the Mac's lasting ID and by its address (host and port, never the token): a Mac
@@ -1013,6 +1070,9 @@ final class Store: Identifiable {
         modes = c.modes
         commands = c.commands
         agents = c.agents ?? []
+        automations = c.automations ?? []
+        automationsPaused = c.automationsPaused ?? false
+        hideAutomationThreads = c.hideAutomationThreads ?? false
         Perf.shared.log("CACHE \(displayName): \(c.threads.count) threads")
         selectIfAsked()
     }
@@ -1026,7 +1086,8 @@ final class Store: Identifiable {
             try? await Task.sleep(for: .seconds(1))
             guard let self, !Task.isCancelled else { return }
             let c = Cached(serverProtocol: serverProtocol, serverName: serverName, projects: projects,
-                           threads: order.compactMap { self.threads[$0] }, models: models, modes: modes, commands: commands, agents: agents)
+                           threads: order.compactMap { self.threads[$0] }, models: models, modes: modes, commands: commands, agents: agents,
+                           automations: automations, automationsPaused: automationsPaused, hideAutomationThreads: hideAutomationThreads)
             Task.detached(priority: .utility) {
                 let e = JSONEncoder()
                 e.keyEncodingStrategy = .convertToSnakeCase

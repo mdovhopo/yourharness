@@ -81,10 +81,132 @@ struct ThreadInfo: Codable, Sendable, Hashable, Identifiable {
     let jobs: Int?
     /// Protocol 11: the agent it runs on (`antigravity`); nil is Claude.
     var agent: String? = nil
+    /// Protocol 12: the automation that created this thread, if any.
+    var automationId: String? = nil
 
     var isRunning: Bool { running ?? active }
     var isWaiting: Bool { waiting ?? false }
     var backgroundJobs: Int { jobs ?? 0 }
+    var isAutomationThread: Bool { automationId != nil }
+}
+
+/// Protocol 12: one run in an automation's history.
+struct AutomationRunInfo: Codable, Sendable, Hashable, Identifiable {
+    let at: Double
+    let threadId: String?
+    let error: String?
+    let caughtUp: Bool?
+    let manual: Bool?
+    /// `done`, `running`, `waiting`, `skipped`, `error`.
+    let status: String
+    let triggerReason: String?
+    let durationSecs: Double?
+
+    var id: String { "\(at)-\(threadId ?? status)" }
+}
+
+/// Protocol 12: an automation configured on the Mac.
+struct AutomationInfo: Codable, Sendable, Hashable, Identifiable {
+    let id: String
+    let name: String
+    let prompt: String
+    let isGlobal: Bool
+    let projectId: String?
+    /// `schedule`, `system`, `file_watch`, `repo`, `manual`.
+    let triggerKind: String
+    let triggerSummary: String
+    let scheduleText: String?
+    let systemEvent: String?
+    let systemApp: String?
+    let systemPower: String?
+    let watchPath: String?
+    let watchGlob: String?
+    let repoEvent: String?
+    let repoBranch: String?
+    /// `new`, `new_settle_previous`, `same`.
+    let threadPolicy: String
+    let agent: String?
+    let model: String?
+    let effort: String?
+    let mode: String?
+    let workingDir: String?
+    /// `always`, `needs_attention`, `silent`.
+    let notify: String
+    let cooldownSecs: Int?
+    let acPowerOnly: Bool?
+    /// `skip`, `queue`, `allow`.
+    let overlap: String
+    let enabled: Bool
+    let done: Bool?
+    let nextRun: Double?
+    let threadId: String?
+    let lastThreadId: String?
+    let slug: String?
+    let runs: [AutomationRunInfo]?
+
+    var recentRuns: [AutomationRunInfo] { runs ?? [] }
+    var isDone: Bool { done ?? false }
+    var latestThreadID: String? { recentRuns.first(where: { $0.threadId != nil })?.threadId ?? lastThreadId ?? threadId }
+}
+
+/// Protocol 12: draft payload sent from iPhone to create or update an automation.
+struct AutomationDraft: Sendable, Hashable {
+    var id: String?
+    var name: String
+    var prompt: String
+    var isGlobal: Bool
+    var projectId: String?
+    var triggerKind: String
+    var scheduleText: String?
+    var systemEvent: String?
+    var systemApp: String?
+    var systemPower: String?
+    var watchPath: String?
+    var watchGlob: String?
+    var repoEvent: String?
+    var repoBranch: String?
+    var threadPolicy: String
+    var agent: String?
+    var model: String?
+    var effort: String?
+    var mode: String?
+    var workingDir: String?
+    var notify: String?
+    var cooldownSecs: Int
+    var acPowerOnly: Bool
+    var overlap: String?
+    var enabled: Bool?
+
+    var object: [String: Any] {
+        var out: [String: Any] = [
+            "name": name,
+            "prompt": prompt,
+            "is_global": isGlobal,
+            "trigger_kind": triggerKind,
+            "thread_policy": threadPolicy,
+            "cooldown_secs": cooldownSecs,
+            "ac_power_only": acPowerOnly,
+        ]
+        if let id { out["id"] = id }
+        if let projectId { out["project_id"] = projectId }
+        if let scheduleText { out["schedule_text"] = scheduleText }
+        if let systemEvent { out["system_event"] = systemEvent }
+        if let systemApp { out["system_app"] = systemApp }
+        if let systemPower { out["system_power"] = systemPower }
+        if let watchPath { out["watch_path"] = watchPath }
+        if let watchGlob { out["watch_glob"] = watchGlob }
+        if let repoEvent { out["repo_event"] = repoEvent }
+        if let repoBranch { out["repo_branch"] = repoBranch }
+        if let agent { out["agent"] = agent }
+        if let model { out["model"] = model }
+        if let effort { out["effort"] = effort }
+        if let mode { out["mode"] = mode }
+        if let workingDir { out["working_dir"] = workingDir }
+        if let notify { out["notify"] = notify }
+        if let overlap { out["overlap"] = overlap }
+        if let enabled { out["enabled"] = enabled }
+        return out
+    }
 }
 
 /// A request waiting on you: a tool to allow, Claude's question (`AskUserQuestion`) or a plan
@@ -663,12 +785,14 @@ enum ToApp: Sendable {
     case changePatch(thread: String, path: String, lines: [DiffLine]?, error: String?)
     /// Protocol 9: what the Mac's voice model heard in a recording sent with `transcribe`.
     case transcript(key: String, text: String?, error: String?)
+    /// Protocol 12: automations on the Mac, plus global pause and hide-threads flags.
+    case automations(pausedAll: Bool, hideThreads: Bool, automations: [AutomationInfo])
     case unknown
 
     /// Changes what the phone keeps of this Mac between launches (`Store`'s cache).
     var changesCache: Bool {
         switch self {
-        case .hello, .threads, .threadUpserted, .threadRemoved, .options: true
+        case .hello, .threads, .threadUpserted, .threadRemoved, .options, .automations: true
         default: false
         }
     }
@@ -679,6 +803,7 @@ enum ToApp: Sendable {
     private struct Changes: Decodable { let thread: String; let files: [PullFile]?; let branch: String?; let error: String? }
     private struct ChangePatch: Decodable { let thread: String; let path: String; let patch: String?; let error: String? }
     private struct Transcript: Decodable { let key: String; let text: String?; let error: String? }
+    private struct AutomationsMessage: Decodable { let pausedAll: Bool; let hideThreads: Bool; let automations: [AutomationInfo] }
     private struct Pulls: Decodable { let project: String; let pulls: [PullInfo]; let errors: [String]?; let accounts: [String]? }
     private struct Paired: Decodable { let device: String; let token: String }
     private struct Pull: Decodable { let url: String; let pull: PullDetail?; let error: String? }
@@ -813,6 +938,9 @@ enum ToApp: Sendable {
             case "paired":
                 let m = try d.decode(Paired.self, from: data)
                 return .paired(device: m.device, token: m.token)
+            case "automations":
+                let m = try d.decode(AutomationsMessage.self, from: data)
+                return .automations(pausedAll: m.pausedAll, hideThreads: m.hideThreads, automations: m.automations)
             default: return .unknown
             }
         } catch {
@@ -880,13 +1008,21 @@ enum FromApp {
     case changePatch(thread: String, path: String)
     // Protocol 9: a recording (16 kHz mono 16-bit samples) for the Mac's voice model.
     case transcribe(key: String, thread: String?, audio: Data)
+    // Protocol 12: automations.
+    case runAutomation(id: String, automationID: String, data: String? = nil)
+    case toggleAutomation(id: String, automationID: String, enabled: Bool)
+    case pauseAllAutomations(id: String, paused: Bool)
+    case setHideAutomationThreads(id: String, hide: Bool)
+    case saveAutomation(id: String, draft: AutomationDraft)
+    case deleteAutomation(id: String, automationID: String)
 
     var actionID: String? {
         switch self {
         case .send(let id, _, _, _, _), .stop(let id, _), .respond(let id, _, _, _), .withdraw(let id, _, _), .sendNow(let id, _, _),
              .answer(let id, _, _, _), .skipQuestion(let id, _, _), .approvePlan(let id, _, _, _, _), .keepPlanning(let id, _, _, _),
              .answerQuestion(let id, _, _, _), .newThread(let id, _, _, _, _, _, _, _), .setModel(let id, _, _), .setEffort(let id, _, _),
-             .setMode(let id, _, _), .rename(let id, _, _), .pin(let id, _, _), .settle(let id, _, _), .delete(let id, _), .askAside(let id, _, _), .mergePull(let id, _, _, _), .browserInput(let id, _, _): id
+             .setMode(let id, _, _), .rename(let id, _, _), .pin(let id, _, _), .settle(let id, _, _), .delete(let id, _), .askAside(let id, _, _), .mergePull(let id, _, _, _), .browserInput(let id, _, _),
+             .runAutomation(let id, _, _), .toggleAutomation(let id, _, _), .pauseAllAutomations(let id, _), .setHideAutomationThreads(let id, _), .saveAutomation(let id, _), .deleteAutomation(let id, _): id
         default: nil
         }
     }
@@ -915,6 +1051,12 @@ enum FromApp {
         case .askAside(_, _, let text): "ask aside \(text.prefix(40))"
         case .mergePull(_, let url, let method, let auto): "merge \(url) \(method)\(auto ? " auto" : "")"
         case .browserInput(_, _, let input): "browser \(input)"
+        case .runAutomation(_, let autoID, _): "run automation \(autoID.prefix(8))"
+        case .toggleAutomation(_, let autoID, let on): "\(on ? "enable" : "pause") automation \(autoID.prefix(8))"
+        case .pauseAllAutomations(_, let paused): paused ? "pause all automations" : "resume all automations"
+        case .setHideAutomationThreads(_, let hide): hide ? "hide automation threads" : "show automation threads"
+        case .saveAutomation(_, let draft): "save automation \(draft.name)"
+        case .deleteAutomation(_, let autoID): "delete automation \(autoID.prefix(8))"
         default: "\(self)"
         }
     }
@@ -973,6 +1115,18 @@ enum FromApp {
         case .unwatchBrowser: ["type": "unwatch_browser"]
         case .browserAck(let seq): ["type": "browser_ack", "seq": seq]
         case .browserInput(let id, let t, let input): ["type": "browser_input", "id": id, "thread": t, "input": input.object]
+        case .runAutomation(let id, let automationID, let data):
+            ["type": "run_automation", "id": id, "automation_id": automationID, "data": data.map { $0 as Any } ?? NSNull()]
+        case .toggleAutomation(let id, let automationID, let enabled):
+            ["type": "toggle_automation", "id": id, "automation_id": automationID, "enabled": enabled]
+        case .pauseAllAutomations(let id, let paused):
+            ["type": "pause_all_automations", "id": id, "paused": paused]
+        case .setHideAutomationThreads(let id, let hide):
+            ["type": "set_hide_automation_threads", "id": id, "hide": hide]
+        case .saveAutomation(let id, let draft):
+            ["type": "save_automation", "id": id, "draft": draft.object]
+        case .deleteAutomation(let id, let automationID):
+            ["type": "delete_automation", "id": id, "automation_id": automationID]
         }
         let data = try! JSONSerialization.data(withJSONObject: object)
         return String(decoding: data, as: UTF8.self)

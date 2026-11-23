@@ -30,7 +30,10 @@ use serde::{Deserialize, Serialize};
 /// `version` in `hello`.
 /// 11: other agents (Antigravity): a thread's `agent`, each agent's models in `options`
 /// (`agents`) and its limits in `limits`, and `new_thread` on an agent, with pictures.
-pub const PROTOCOL: u32 = 11;
+/// 12: automations on the phone: `automation_id` on threads, `automations` pushed with global
+/// pause and hide-threads flags, and remote `run_automation`, `toggle_automation`,
+/// `pause_all_automations`, `set_hide_automation_threads`, `save_automation`, `delete_automation`.
+pub const PROTOCOL: u32 = 12;
 
 /// Where the app listens for the command line (`yh`): `yh.sock` in its data folder, or, when
 /// that path is too long for a socket, one in the temporary folder named after it.
@@ -282,6 +285,147 @@ pub struct Thread {
     /// Protocol 11: the agent it runs on (`antigravity`); none is Claude.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
+    /// Protocol 12: the automation that created this thread, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automation_id: Option<String>,
+}
+
+/// One run in an automation's history (protocol 12).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AutomationRunInfo {
+    /// Seconds since 1970.
+    pub at: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub caught_up: bool,
+    #[serde(default)]
+    pub manual: bool,
+    /// `done`, `running`, `waiting`, `skipped`, `error`.
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_secs: Option<f64>,
+}
+
+/// One automation as the phone lists, inspects and edits it (protocol 12).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AutomationInfo {
+    pub id: String,
+    pub name: String,
+    pub prompt: String,
+    pub is_global: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    /// `schedule`, `system`, `file_watch`, `repo`, `manual`.
+    pub trigger_kind: String,
+    /// Human-readable trigger summary ("Every hour", "Mac wakes from sleep", "Manual / CLI").
+    pub trigger_summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_event: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_app: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_power: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watch_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watch_glob: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_event: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_branch: Option<String>,
+    /// `new`, `new_settle_previous`, or `same`.
+    pub thread_policy: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<String>,
+    /// `always`, `needs_attention`, `silent`.
+    pub notify: String,
+    #[serde(default)]
+    pub cooldown_secs: u32,
+    #[serde(default)]
+    pub ac_power_only: bool,
+    /// `skip`, `queue`, `allow`.
+    pub overlap: String,
+    pub enabled: bool,
+    #[serde(default)]
+    pub done: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_run: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slug: Option<String>,
+    /// Recent runs, newest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<AutomationRunInfo>,
+}
+
+/// Payload sent by the phone to create (`id` is None) or update an automation (protocol 12).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AutomationDraft {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub name: String,
+    pub prompt: String,
+    pub is_global: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    /// `schedule`, `system`, `file_watch`, `repo`, `manual`.
+    pub trigger_kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_event: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_app: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_power: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watch_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watch_glob: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_event: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_branch: Option<String>,
+    /// `new`, `new_settle_previous`, or `same`.
+    pub thread_policy: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify: Option<String>,
+    #[serde(default)]
+    pub cooldown_secs: u32,
+    #[serde(default)]
+    pub ac_power_only: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overlap: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -794,6 +938,8 @@ pub enum ToApp {
     Changes { thread: String, #[serde(default)] files: Vec<PullFile>, #[serde(default, skip_serializing_if = "Option::is_none")] branch: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] error: Option<String> },
     /// Protocol 8: one changed file's diff (its hunks), asked for with `change_patch`.
     ChangePatch { thread: String, path: String, #[serde(default, skip_serializing_if = "Option::is_none")] patch: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] error: Option<String> },
+    /// Protocol 12: every automation on the Mac, plus global Pause All and Hide Automation Threads.
+    Automations { paused_all: bool, hide_threads: bool, automations: Vec<AutomationInfo> },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -876,8 +1022,8 @@ pub enum FromApp {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         files: Vec<String>,
     },
-    /// Local command line only: trigger an automation by id, slug or name, with optional payload
-    /// text and file paths; `done.thread` returns the thread started or sent to.
+    /// Trigger an automation by id, slug or name, with optional payload text and file paths
+    /// (`files` local CLI only); `done.thread` returns the thread started or sent to.
     TriggerAutomation {
         #[serde(default)]
         id: Option<String>,
@@ -886,6 +1032,45 @@ pub enum FromApp {
         data: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         files: Vec<String>,
+    },
+    /// Protocol 12: run an automation right now by ID; `done.thread` returns the thread started.
+    RunAutomation {
+        #[serde(default)]
+        id: Option<String>,
+        automation_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        data: Option<String>,
+    },
+    /// Protocol 12: enable or pause one automation.
+    ToggleAutomation {
+        #[serde(default)]
+        id: Option<String>,
+        automation_id: String,
+        enabled: bool,
+    },
+    /// Protocol 12: global Pause All kill-switch for automations.
+    PauseAllAutomations {
+        #[serde(default)]
+        id: Option<String>,
+        paused: bool,
+    },
+    /// Protocol 12: toggle "Do not show threads from automations" setting on the Mac.
+    SetHideAutomationThreads {
+        #[serde(default)]
+        id: Option<String>,
+        hide: bool,
+    },
+    /// Protocol 12: create (`draft.id` is None) or update an automation on the Mac.
+    SaveAutomation {
+        #[serde(default)]
+        id: Option<String>,
+        draft: AutomationDraft,
+    },
+    /// Protocol 12: delete an automation on the Mac.
+    DeleteAutomation {
+        #[serde(default)]
+        id: Option<String>,
+        automation_id: String,
     },
     SetModel { #[serde(default)] id: Option<String>, thread: String, #[serde(default)] model: Option<String> },
     SetEffort { #[serde(default)] id: Option<String>, thread: String, #[serde(default)] effort: Option<String> },
@@ -956,7 +1141,7 @@ impl FromApp {
     pub fn action_id(&self) -> Option<&str> {
         use FromApp::*;
         match self {
-            Send { id, .. } | Stop { id, .. } | Respond { id, .. } | Withdraw { id, .. } | SendNow { id, .. } | AskAside { id, .. } | Answer { id, .. } | SkipQuestion { id, .. } | ApprovePlan { id, .. } | KeepPlanning { id, .. } | AnswerQuestion { id, .. } | NewThread { id, .. } | AddProject { id, .. } | Show { id, .. } | TriggerAutomation { id, .. } | SetModel { id, .. } | SetEffort { id, .. } | SetMode { id, .. } | Rename { id, .. } | Pin { id, .. } | Settle { id, .. } | Delete { id, .. } | MergePull { id, .. } | BrowserInput { id, .. } => id.as_deref(),
+            Send { id, .. } | Stop { id, .. } | Respond { id, .. } | Withdraw { id, .. } | SendNow { id, .. } | AskAside { id, .. } | Answer { id, .. } | SkipQuestion { id, .. } | ApprovePlan { id, .. } | KeepPlanning { id, .. } | AnswerQuestion { id, .. } | NewThread { id, .. } | AddProject { id, .. } | Show { id, .. } | TriggerAutomation { id, .. } | RunAutomation { id, .. } | ToggleAutomation { id, .. } | PauseAllAutomations { id, .. } | SetHideAutomationThreads { id, .. } | SaveAutomation { id, .. } | DeleteAutomation { id, .. } | SetModel { id, .. } | SetEffort { id, .. } | SetMode { id, .. } | Rename { id, .. } | Pin { id, .. } | Settle { id, .. } | Delete { id, .. } | MergePull { id, .. } | BrowserInput { id, .. } => id.as_deref(),
             _ => None,
         }
     }

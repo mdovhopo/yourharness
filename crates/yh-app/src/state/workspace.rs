@@ -4355,6 +4355,52 @@ impl Workspace {
                 let id = self.trigger_automation_by_key(&name, data, files, cx)?;
                 Ok(Some(id))
             }
+            A::RunAutomation { automation_id, data } => {
+                let id = if data.as_deref().is_some_and(|d| !d.trim().is_empty()) {
+                    self.trigger_automation_by_key(&automation_id, data, vec![], cx)?
+                } else {
+                    self.run_automation(&automation_id, true, cx)?
+                };
+                Ok(Some(id))
+            }
+            A::ToggleAutomation { automation_id, enabled } => {
+                let now = yh_core::automations::now();
+                let mut found = false;
+                self.edit_automations(cx, |list| {
+                    if let Some(a) = list.iter_mut().find(|a| a.id == automation_id) {
+                        a.set_enabled(enabled, now);
+                        found = true;
+                    }
+                });
+                if !found {
+                    return Err("No such automation.".into());
+                }
+                Ok(None)
+            }
+            A::PauseAllAutomations { paused } => {
+                self.set_automations_paused(paused, cx);
+                Ok(None)
+            }
+            A::SetHideAutomationThreads { hide } => {
+                self.set_hide_automation_threads(hide, cx);
+                Ok(None)
+            }
+            A::SaveAutomation { draft } => {
+                self.save_automation_draft(draft, cx)?;
+                Ok(None)
+            }
+            A::DeleteAutomation { automation_id } => {
+                let mut removed = false;
+                self.edit_automations(cx, |list| {
+                    let before = list.len();
+                    list.retain(|a| a.id != automation_id);
+                    removed = list.len() != before;
+                });
+                if !removed {
+                    return Err("No such automation.".into());
+                }
+                Ok(None)
+            }
             action => self.take_remote_on(action, cx),
         }
     }
@@ -4435,7 +4481,16 @@ impl Workspace {
         use yh_server::Action as A;
         let thread_id = match &action {
             A::Browser { thread, .. } | A::AskAside { thread, .. } | A::Send { thread, .. } | A::Stop { thread } | A::Respond { thread, .. } | A::Withdraw { thread, .. } | A::SendNow { thread, .. } | A::Answer { thread, .. } | A::SkipQuestion { thread, .. } | A::ApprovePlan { thread, .. } | A::KeepPlanning { thread, .. } | A::AnswerQuestion { thread, .. } | A::SetModel { thread, .. } | A::SetEffort { thread, .. } | A::SetMode { thread, .. } | A::Rename { thread, .. } | A::Pin { thread, .. } | A::Settle { thread, .. } | A::Delete { thread } => thread.clone(),
-            A::NewThread { .. } | A::AddProject { .. } | A::Show { .. } | A::TriggerAutomation { .. } => unreachable!("taken above"),
+            A::NewThread { .. }
+            | A::AddProject { .. }
+            | A::Show { .. }
+            | A::TriggerAutomation { .. }
+            | A::RunAutomation { .. }
+            | A::ToggleAutomation { .. }
+            | A::PauseAllAutomations { .. }
+            | A::SetHideAutomationThreads { .. }
+            | A::SaveAutomation { .. }
+            | A::DeleteAutomation { .. } => unreachable!("taken above"),
         };
         let Some(thread) = self.thread(&thread_id) else { return Err("No such thread.".into()) };
         let request = |id: &str, cx: &App| thread.read(cx).run.permissions.iter().find(|p| p.id == id).cloned();
@@ -4505,7 +4560,17 @@ impl Workspace {
             A::Pin { on, .. } => self.set_pinned(&thread_id, on, cx),
             A::Settle { on, .. } => self.set_settled(&thread_id, on, cx),
             A::Delete { .. } => self.delete(&thread_id, cx),
-            A::NewThread { .. } | A::AddProject { .. } | A::Show { .. } | A::TriggerAutomation { .. } | A::Browser { .. } => unreachable!("taken above"),
+            A::NewThread { .. }
+            | A::AddProject { .. }
+            | A::Show { .. }
+            | A::TriggerAutomation { .. }
+            | A::RunAutomation { .. }
+            | A::ToggleAutomation { .. }
+            | A::PauseAllAutomations { .. }
+            | A::SetHideAutomationThreads { .. }
+            | A::SaveAutomation { .. }
+            | A::DeleteAutomation { .. }
+            | A::Browser { .. } => unreachable!("taken above"),
         }
         Ok(None)
     }

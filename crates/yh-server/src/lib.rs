@@ -109,8 +109,20 @@ pub enum Action {
     /// The window brought forward, on a thread, or on a new thread in a project with a draft and
     /// files waiting in its composer (the command line's).
     Show { thread: Option<String>, project: Option<String>, draft: Option<String>, files: Vec<PathBuf> },
-    /// Trigger an automation by id, slug or name (the command line's `yh trigger`).
+    /// Trigger an automation by id, slug or name (`files` local CLI only).
     TriggerAutomation { name: String, data: Option<String>, files: Vec<String> },
+    /// Protocol 12: run an automation right now by ID.
+    RunAutomation { automation_id: String, data: Option<String> },
+    /// Protocol 12: enable or pause one automation.
+    ToggleAutomation { automation_id: String, enabled: bool },
+    /// Protocol 12: toggle global Pause All for automations.
+    PauseAllAutomations { paused: bool },
+    /// Protocol 12: toggle "Do not show threads from automations".
+    SetHideAutomationThreads { hide: bool },
+    /// Protocol 12: create or update an automation from the phone.
+    SaveAutomation { draft: wire::AutomationDraft },
+    /// Protocol 12: delete an automation from the phone.
+    DeleteAutomation { automation_id: String },
     SetModel { thread: String, model: Option<String> },
     SetEffort { thread: String, effort: Option<String> },
     SetMode { thread: String, mode: String },
@@ -144,6 +156,11 @@ impl Shared {
 
     fn options(&self) -> ToApp {
         ToApp::Options { models: self.models.lock().unwrap().clone(), modes: MODES.iter().map(|m| m.to_string()).collect(), commands: self.commands.lock().unwrap().clone(), agents: self.agents.lock().unwrap().clone() }
+    }
+
+    fn automations(&self) -> ToApp {
+        let (paused_all, hide_threads, automations) = self.automations.lock().unwrap().clone();
+        ToApp::Automations { paused_all, hide_threads, automations }
     }
 }
 
@@ -355,6 +372,8 @@ struct Shared {
     subscription: Mutex<Option<wire::Subscription>>,
     /// The Mac's battery as last read (every 30 seconds); `None` without one.
     power: Mutex<Option<wire::Power>>,
+    /// Automations and their global pause / hide-threads flags (protocol 12).
+    automations: Mutex<(bool, bool, Vec<wire::AutomationInfo>)>,
     /// Thread folders' files (for `@`, Go to File and links in replies), kept 30 seconds.
     folders: Arc<files::Folders>,
     /// The last files the phone read, for paging through them.
@@ -864,6 +883,16 @@ fn refresh_listing(source: &Source, shared: &Shared, changed_at: &HashMap<String
     if options_changed && !first {
         shared.send(&shared.options(), |c| c.app);
     }
+    if let Ok(state) = source.automations_state() {
+        let mut held = shared.automations.lock().unwrap();
+        if *held != state {
+            *held = state;
+            drop(held);
+            if !first {
+                shared.send(&shared.automations(), |c| c.app);
+            }
+        }
+    }
     // Saved limits, until the engine says newer; all of them again when the Mac signs in to
     // another subscription (it drops the last one's reading).
     if let (Ok(limits), Ok(subscription)) = (source.limits(), source.subscription()) {
@@ -1041,7 +1070,7 @@ fn answer(id: u64, message: FromApp, shared: &Arc<Shared>, source: &Source, loca
             }
             set(&|c| c.app = true);
             let (projects, threads) = shared.listing.lock().unwrap().clone();
-            let mut first = vec![ToApp::Threads { projects, threads }, shared.options(), shared.limits()];
+            let mut first = vec![ToApp::Threads { projects, threads }, shared.options(), shared.limits(), shared.automations()];
             first.extend(shared.power.lock().unwrap().clone().map(|power| ToApp::Power { power }));
             first
         }
@@ -1430,9 +1459,17 @@ fn to_action(m: FromApp, local: bool) -> Result<Action, String> {
             Action::Show { thread, project, draft, files }
         }
         F::TriggerAutomation { name, data, files, .. } => {
-            only_local("Automations can be triggered")?;
+            if !files.is_empty() {
+                only_local("Files on the Mac can be passed to automations")?;
+            }
             Action::TriggerAutomation { name, data, files }
         }
+        F::RunAutomation { automation_id, data, .. } => Action::RunAutomation { automation_id, data },
+        F::ToggleAutomation { automation_id, enabled, .. } => Action::ToggleAutomation { automation_id, enabled },
+        F::PauseAllAutomations { paused, .. } => Action::PauseAllAutomations { paused },
+        F::SetHideAutomationThreads { hide, .. } => Action::SetHideAutomationThreads { hide },
+        F::SaveAutomation { draft, .. } => Action::SaveAutomation { draft },
+        F::DeleteAutomation { automation_id, .. } => Action::DeleteAutomation { automation_id },
         F::Stop { thread, .. } => Action::Stop { thread },
         F::Respond { thread, request_id, allow, .. } => Action::Respond { thread, request_id, allow },
         F::Withdraw { thread, message, .. } => Action::Withdraw { thread, message },

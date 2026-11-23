@@ -19,11 +19,21 @@ struct SettingsSheet: View {
                 Section {
                     Toggle("Show All Macs Together", isOn: $fleet.showsAllMacs)
                         .disabled(fleet.stores.count < 2)
+                    if fleet.current.offersAutomations {
+                        Toggle(
+                            "Do Not Show Threads From Automations",
+                            isOn: Binding(
+                                get: { fleet.current.hideAutomationThreads },
+                                set: { fleet.current.setHideAutomationThreads($0) }
+                            )
+                        )
+                        .disabled(!fleet.current.canAct)
+                    }
                 } header: {
                     Text("Threads")
                 } footer: {
                     Text(fleet.stores.count < 2
-                        ? "With more than one Mac, list every Mac’s threads in one list."
+                        ? "Hidden automation threads still open from Automations → Run History, and appear if they need approval."
                         : "Every Mac’s projects in one list, a project on several Macs once, each thread saying its Mac. Opening a thread shows its Mac.")
                 }
                 Section {

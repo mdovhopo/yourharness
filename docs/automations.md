@@ -103,10 +103,18 @@ can target any project), `thread` (`new`, `new_settle_previous`, `same`, `this`)
 `pr_failed`, `manual`), `agent`, `model`, `effort`, `mode`, `cooldown`, and `condition_cmd`.
 Settings → Automations (`agentAutomations`) turns the tools off.
 
-## Testing flags
+- **Testing flags**
+  - `YH_OPEN_AUTOMATIONS=1`: opens the Automations page after `YH_DRAFT_DELAY`.
+  - `YH_AUTOMATION_FORM=new|edit`: opens the Create/Edit sheet for snapshots.
+  - `YH_AUTOMATION_TEST_EVENT=wake|unlock|power:ac|power:battery|app_launched:<App>|app_quit:<App>`:
+    injects a synthetic Mac system event after launch.
+  - `YH_AUTOMATION_LOG=1`: logs triggers, guardrails skips, watcher mounts, and runs.
 
-- `YH_OPEN_AUTOMATIONS=1`: opens the Automations page after `YH_DRAFT_DELAY`.
-- `YH_AUTOMATION_FORM=new|edit`: opens the Create/Edit sheet for snapshots.
-- `YH_AUTOMATION_TEST_EVENT=wake|unlock|power:ac|power:battery|app_launched:<App>|app_quit:<App>`:
-  injects a synthetic Mac system event after launch.
-- `YH_AUTOMATION_LOG=1`: logs triggers, guardrails skips, watcher mounts, and runs.
+## iPhone & Protocol 12
+
+Protocol 12 (`crates/yh-proto/src/lib.rs`, `crates/yh-server/src/source.rs`, `mobile/ios/YourHarness/AutomationsView.swift`) brings Automations to the iOS app:
+- `Thread.automation_id`: automation threads show a subtle bolt icon in the iPhone thread list and follow the Mac's **Do not show threads from automations** setting (while still surfacing any thread waiting on approval).
+- `ToApp::Automations { paused_all, hide_threads, automations }`: pushed on connect (`subscribe_app`) and live whenever automations or flags change on the Mac.
+- Remote actions (`FromApp`): `run_automation`, `toggle_automation`, `pause_all_automations`, `set_hide_automation_threads`, `save_automation`, and `delete_automation`.
+- Dedicated **Automations** tab in iOS (`AppTab.automations`) with Global + per-workspace grouping, scope filter, Pause All banner, starter templates, swipe actions (Run Now, Pause/Resume, Delete), detail view with clickable Run History opening threads directly, and a native Create/Edit form.
+- iPhone testing flags: `YH_PHONE_TAB=automations`, `YH_PHONE_AUTO_SELECT=<name>`, `YH_PHONE_AUTO_NEW=1`, `YH_PHONE_AUTO_RUN=<name>`.
