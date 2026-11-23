@@ -6,6 +6,8 @@ Add notes under **Unreleased** as features land; `scripts/release.sh <version>` 
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-23
+
 ### Added
 
 - **Automations v2**: a dedicated **Automations** section (`⇧⌘A`, top-level sidebar entry, `View → Automations`, and Spotlight `⌘K`) showing both **Global** (running in Home across workspaces) and per-workspace automations in a responsive master-detail view with scope filtering, search, a **Pause All** kill switch, starter templates, and full 50-run history with live status, trigger reason, duration, and clickable thread links.
